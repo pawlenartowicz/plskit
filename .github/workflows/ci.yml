@@ -81,6 +81,8 @@ jobs:
           allow-prereleases: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ matrix.python == '3.10' }}
       - name: Install Python deps
         run: pip install pytest numpy
       - name: Build & install plskit
