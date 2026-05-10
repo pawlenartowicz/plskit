@@ -1,0 +1,22 @@
+[package]
+name = "plskit-r"
+version = "0.0.1"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "plskit_r"
+crate-type = ["staticlib"]
+
+# This is the extendr-side Rust manifest, NOT part of the cargo workspace
+# (R's build pipeline invokes cargo here independently). Two consequences:
+#  1. The `plskit` dep below resolves from crates.io once `plskit` is
+#     published. Until then, the R wrapper is a build-skeleton; flip on a
+#     [patch.crates-io] block pointing at `../../../plskit-rs` when you
+#     want to test the R wrapper against unpublished changes.
+#  2. The version pin must equal RELEASED `plskit` on crates.io and
+#     lock-step with the monorepo workspace.package.version.
+[dependencies]
+extendr-api = "0.9"
+plskit = "0.1.0"

@@ -1,0 +1,14 @@
+name = "plskit"
+uuid = "b88181ae-ea14-454d-86f5-551fa9bf344b"
+authors = ["Paweł Lenartowicz <6quarg@gmail.com>"]
+version = "0.0.1"
+[deps]
+
+[compat]
+julia = "1.9"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

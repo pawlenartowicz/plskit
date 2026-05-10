@@ -1,0 +1,15 @@
+# Cargo only. github-actions and pip ecosystems were dropped — actions bump
+# infrequently enough to handle manually, and the pyproject specs are loose
+# enough that pip dependabot has nothing to propose until numpy 3.x ships.
+# Security advisories still fire via Dependabot alerts independently of this.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      faer:
+        patterns:
+          - "faer*"

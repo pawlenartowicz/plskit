@@ -1,0 +1,49 @@
+# This pyproject.toml lives at the workspace root (not next to plskit-py/Cargo.toml)
+# because cibuildwheel copies only `package_dir` into its manylinux container, and
+# the Python wrapper depends on workspace inheritance from the root Cargo.toml.
+# `tool.maturin.manifest-path` points the build at the actual crate.
+# The R / Julia wrappers are unaffected — they have their own toolchains.
+
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "plskit"
+# Version is read from plskit-py/Cargo.toml [package].version. The Python
+# wrapper version is independent of the Rust workspace version (RULE 7);
+# it may lag the engine when the Python surface hasn't caught up yet.
+dynamic = ["version"]
+description = "PLS regression with modern inference (Python wrapper for plskit)."
+readme = "plskit-py/README.md"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "Paweł Lenartowicz" }]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.23"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+Homepage = "https://github.com/pawlenartowicz/plskit"
+Repository = "https://github.com/pawlenartowicz/plskit"
+Issues = "https://github.com/pawlenartowicz/plskit/issues"
+
+[tool.maturin]
+manifest-path = "plskit-py/Cargo.toml"
+python-source = "plskit-py/python"
+module-name = "plskit._plskit"
+features = ["pyo3/extension-module"]
+# Default to optimized builds. Numerical kernels (NIPALS) run 50–200× slower
+# under cargo's `dev` profile (no autovectorization, no inlining, live bounds
+# checks). Override with `--profile dev` for debugger sessions.
+profile = "release"
+editable-profile = "release"
+# LICENSE lives at the workspace root, one level above plskit-py/Cargo.toml.
+# cargo's sdist file selection only reaches files under the crate dir, so
+# without this maturin emits `License-File: LICENSE` metadata pointing at a
+# file the sdist doesn't ship, and PyPI's PEP 639 check rejects the upload.
+include = [{ path = "LICENSE", format = "sdist" }]

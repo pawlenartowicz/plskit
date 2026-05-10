@@ -1,0 +1,18 @@
+Package: plskit
+Type: Package
+Title: PLS Regression with Modern Inference
+Version: 0.0.1
+Authors@R: person("Paweł", "Lenartowicz", role = c("aut", "cre"),
+                  email = "6quarg@gmail.com")
+Description: PLS regression with modern inference: canonical
+    percentile confidence intervals, calibrated permutation, and
+    null-Bayesian split-half tests, alongside legacy outputs (BSR,
+    VIP, jackknife) for compatibility with established workflows.
+    R wrapper around the Rust 'plskit' engine via 'extendr'.
+License: GPL (>= 3)
+Encoding: UTF-8
+SystemRequirements: Cargo (>= 1.74)
+URL: https://github.com/pawlenartowicz/plskit
+BugReports: https://github.com/pawlenartowicz/plskit/issues
+RoxygenNote: 7.3.1
+Config/rextendr/version: 0.3.1

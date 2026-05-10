@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "plskit testdata manifest (v2)",
+  "description": "String-valued fields inside per-case .npz outputs are stored as 1-D uint8 byte buffers (UTF-8 encoded). The npz writer convention is implemented in plskit-testdata-gen/src/npz.rs::add_string; consumers must dtype-and-ndim-sniff (uint8, ndim==1) and decode via tobytes().decode(\"utf-8\").",
+  "type": "object",
+  "required": ["schema_version", "producing_version", "cases"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "producing_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$" },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "function", "inputs", "outputs", "kwargs", "hashes"],
+        "properties": {
+          "name":     { "type": "string" },
+          "function": { "type": "string" },
+          "inputs":   { "type": "string", "pattern": "^inputs/[A-Za-z0-9_.-]+\\.npz$" },
+          "outputs":  { "type": "string", "pattern": "^outputs/[A-Za-z0-9_]+/[A-Za-z0-9_.-]+\\.npz$" },
+          "kwargs":   { "type": "object" },
+          "hashes": {
+            "type": "object",
+            "required": ["inputs_sha256", "outputs_sha256"],
+            "properties": {
+              "inputs_sha256":  { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "outputs_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            }
+          },
+          "tolerance": { "type": "object", "additionalProperties": { "type": "number", "minimum": 0 } }
+        }
+      }
+    }
+  }
+}

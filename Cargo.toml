@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "plskit-rs",
+    "plskit-py",
+    "plskit-testdata-gen",
+]
+
+[workspace.package]
+# Single source of truth for the workspace version. Every crate uses
+# `version.workspace = true`; DESCRIPTION / Project.toml / testdata pick
+# up the same number, and CI enforces lock-step on `v*` tags.
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/pawlenartowicz/plskit"
+authors = ["Paweł Lenartowicz"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+# version pin re-added when publishing to crates.io (must equal plskit-rs/Cargo.toml version).
+plskit = { path = "plskit-rs" }
+procrustes = "0.1.0"
+faer = "0.24"                   # caret within 0.24.x; faer minor bump = plskit major bump
+rand = "0.10"
+rand_chacha = "0.10"
+getrandom = "0.4"
+rayon = "1.8"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"           # promoted to deny on plskit-rs via lib.rs (Step 6)
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "warn"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1               # determinism: single codegen unit (bit-near contract, not bit-exact)
+lto = "thin"                    # cross-crate inlining
+panic = "unwind"                # default; pinned for determinism
+# target-cpu intentionally unset — wheels run on any compatible CPU
+# -ffast-math intentionally off — IEEE 754 determinism

@@ -1,0 +1,32 @@
+[package]
+name = "plskit-testdata-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false                     # internal dev tool, never to crates.io
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "plskit-testdata-gen"
+path = "src/main.rs"
+
+[dependencies]
+plskit = { workspace = true }
+ndarray = "0.17"
+ndarray-npy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+anyhow = "1"
+rand = "0.10"
+rand_chacha = "0.10"
+rand_distr = "0.6"
+faer = "0.24"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

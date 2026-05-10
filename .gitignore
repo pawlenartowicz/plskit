@@ -1,0 +1,44 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+.venv/
+venv/
+.env
+
+# R
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rcheck/
+*.tar.gz
+src/*.o
+src/*.dll
+
+# Julia
+Manifest.toml
+deps/build.log
+*.cov
+
+# IDEs / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

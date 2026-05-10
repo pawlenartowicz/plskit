@@ -1,0 +1,24 @@
+[package]
+name = "plskit-py"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "PyO3 wrapper for plskit."
+publish = false
+
+[lib]
+name = "_plskit"
+crate-type = ["cdylib"]
+
+[dependencies]
+plskit = { workspace = true }
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"] }
+numpy = "0.28"
+ndarray = "0.17"                # short-lived views in the numpy↔faer bridge only; must match numpy crate
+faer = { workspace = true }     # for FromPyObject round-trip → faer::Mat / Col
+
+[lints]
+workspace = true

@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust-tests:
+    name: Rust tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test --doc (FAER_CONVENTIONS.md §5 doctests)
+        run: cargo test --workspace --release --doc
+      - name: cargo test (workspace)
+        run: cargo test --workspace --release
+      - name: byte-parity test
+        run: cargo test -p plskit --release --test byte_parity
+      - name: Verify testdata content hashes
+        run: python3 scripts/check_corpus_hash.py
+
+  # MSRV + beta tripwire — ubuntu-only, narrower test set than rust-tests.
+  # Catches MSRV drift (1.85 row) and upcoming-rustc regressions (beta row).
+  # Beta is informational; an upstream regression shouldn't gate merges.
+  rust-versions:
+    name: Rust ${{ matrix.rust }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.rust == 'beta' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [beta, "1.85"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test (workspace)
+        run: cargo test --workspace --release
+
+  # plskit-py builds against Python's stable ABI (abi3-py310 in plskit-py/Cargo.toml),
+  # so one wheel works on 3.10+. We still smoke-test on each supported Python to
+  # catch interpreter-side regressions (numpy ↔ cpython behavior, alpha CPythons).
+  python-tests:
+    name: Python tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    needs: rust-tests
+    continue-on-error: ${{ matrix.python == '3.15' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - os: ubuntu-latest
+            python: "3.15"
+          - os: macos-latest
+            python: "3.15"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Python deps
+        run: pip install pytest numpy
+      - name: Build & install plskit
+        run: pip install . -v
+      - name: Run pytest
+        run: |
+          cd plskit-py
+          pytest -v --tb=short

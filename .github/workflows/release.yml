@@ -1,0 +1,190 @@
+name: Release
+
+# Tag scheme (RULES.md RULE 7):
+#   vX.Y.Z       → cargo publish (engine);  workspace version must equal X.Y.Z.
+#   vX.Y.Z-py    → PyPI publish (Python);   plskit-py version must equal X.Y.Z.
+#   vX.Y.Z-r     → R tarball;               plskit-r DESCRIPTION:Version must equal X.Y.Z.
+#                  CRAN submit is manual via the CRAN web form (no API).
+#   vX.Y.Z-jl    → Julia register hint;     plskit-jl Project.toml version must equal X.Y.Z.
+#                  Registrator runs as a bot comment on the release commit (no API).
+#
+# Each tag publishes exactly one artifact. Wrapper tags require X.Y.Z ≤ workspace
+# version, which follows from list-versions.py enforcement (RULE 7).
+#
+# Required repo secrets:
+#   CARGO_REGISTRY_TOKEN — for vX.Y.Z   (engine)
+#
+# PyPI Trusted Publishing (OIDC) is used for vX.Y.Z-py — no long-lived token.
+# One-time setup required: configure Trusted Publishing on PyPI's project
+# settings page (https://pypi.org/manage/project/plskit/settings/publishing/)
+# with this repo and the publish-py job name before the first release.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ─── vX.Y.Z (engine) ────────────────────────────────────────────────
+  rust-publish:
+    name: cargo publish (plskit)
+    if: >-
+      ${{ !endsWith(github.ref_name, '-py')
+       && !endsWith(github.ref_name, '-r')
+       && !endsWith(github.ref_name, '-jl') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify tag = workspace version
+        run: |
+          set -euo pipefail
+          # awk skips comment/blank lines between [workspace.package] and `version`.
+          WS=$(awk '/^\[workspace\.package\]/{p=1} p && /^version[[:space:]]*=/{gsub(/[",]/,""); print $3; exit}' Cargo.toml)
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          echo "tag=$TAG_VER  workspace=$WS"
+          if [ -z "$WS" ]; then
+            echo "::error::could not extract [workspace.package].version from Cargo.toml"
+            exit 1
+          fi
+          if [ "$WS" != "$TAG_VER" ]; then
+            echo "::error::tag $TAG_VER != workspace $WS"
+            exit 1
+          fi
+      - run: cargo publish -p plskit --locked --dry-run
+      - run: cargo publish -p plskit --locked --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+
+  # ─── vX.Y.Z-py (Python) ─────────────────────────────────────────────
+  build-py-wheels:
+    name: Build Python wheels (${{ matrix.os }})
+    if: endsWith(github.ref_name, '-py')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.10" }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify tag-version = plskit-py version
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY=$(awk '/^\[package\]/{p=1} p && /^version[[:space:]]*=/{gsub(/[",]/,""); print $3; exit}' plskit-py/Cargo.toml)
+          TAG="${GITHUB_REF_NAME#v}"
+          TAG_VER="${TAG%-py}"
+          echo "tag-version=$TAG_VER  plskit-py=$PY"
+          if [ "$PY" != "$TAG_VER" ]; then
+            echo "::error::tag $TAG_VER != plskit-py $PY"
+            exit 1
+          fi
+      - run: pip install cibuildwheel==2.21.3
+      - name: Build wheels
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+          # Skip musllinux (Alpine) and 32-bit targets (i686 Linux, win32):
+          # rustup has no i386 target, and plskit is 64-bit only.
+          CIBW_SKIP: "*-musllinux_* *_i686 *-win32"
+          CIBW_BEFORE_BUILD: "pip install maturin"
+          CIBW_BUILD_VERBOSITY: 1
+        run: python -m cibuildwheel --output-dir wheelhouse
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  build-py-sdist:
+    name: Build Python sdist
+    if: endsWith(github.ref_name, '-py')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.10" }
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pip install maturin
+      - run: maturin sdist --out sdist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: sdist/*.tar.gz
+
+  publish-py:
+    name: Publish Python (PyPI + GH Release)
+    needs: [build-py-wheels, build-py-sdist]
+    if: endsWith(github.ref_name, '-py')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.10" }
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  # ─── vX.Y.Z-r (R) ───────────────────────────────────────────────────
+  publish-r:
+    name: Publish R (build tarball; CRAN submit manual)
+    if: endsWith(github.ref_name, '-r')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: r-lib/actions/setup-r@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify tag-version = plskit-r version
+        run: |
+          set -euo pipefail
+          R=$(grep '^Version:' plskit-r/DESCRIPTION | awk '{print $2}')
+          TAG="${GITHUB_REF_NAME#v}"
+          TAG_VER="${TAG%-r}"
+          echo "tag-version=$TAG_VER  plskit-r=$R"
+          if [ "$R" != "$TAG_VER" ]; then
+            echo "::error::tag $TAG_VER != plskit-r $R"
+            exit 1
+          fi
+      - run: |
+          R CMD build plskit-r
+          mkdir -p r-tarball
+          mv plskit_*.tar.gz r-tarball/
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: r-tarball/*.tar.gz
+      - run: echo "::notice::R tarball attached to release. CRAN submit is manual via the CRAN web form."
+
+  # ─── vX.Y.Z-jl (Julia) ──────────────────────────────────────────────
+  publish-jl:
+    name: Publish Julia (Registrator manual)
+    if: endsWith(github.ref_name, '-jl')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify tag-version = plskit-jl version
+        run: |
+          set -euo pipefail
+          JL=$(grep '^version' plskit-jl/Project.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          TAG="${GITHUB_REF_NAME#v}"
+          TAG_VER="${TAG%-jl}"
+          echo "tag-version=$TAG_VER  plskit-jl=$JL"
+          if [ "$JL" != "$TAG_VER" ]; then
+            echo "::error::tag $TAG_VER != plskit-jl $JL"
+            exit 1
+          fi
+      - run: |
+          echo "::notice::Julia: comment '@JuliaRegistrator register subdir=\"plskit-jl\"' on the release commit."

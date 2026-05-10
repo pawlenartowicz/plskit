@@ -1,0 +1,144 @@
+name: TestPyPI dry-run
+
+# Manual dry-run that exercises the same wheel/sdist pipeline as release.yml
+# (vX.Y.Z-py path) but uploads to TestPyPI instead of PyPI.
+#
+# Trigger: Actions → "TestPyPI dry-run" → Run workflow.
+#
+# The plskit-py version literal in plskit-py/Cargo.toml is rewritten to
+# `<base>-dev.<run-number>` (semver) before building; maturin maps this to
+# PEP 440 `<base>.dev<run-number>` for the wheel and TestPyPI metadata, so
+# every workflow run produces a unique version. The on-disk Cargo.toml
+# rewrite happens in a fresh checkout each job and is never pushed back.
+#
+# Authentication: TestPyPI Trusted Publishing (OIDC) — no long-lived token.
+# One-time setup: https://test.pypi.org/manage/account/publishing/ → add a
+# pending publisher (workflow: testpypi.yml, environment: blank, repo:
+# pawlenartowicz/plskit, project name: plskit) before the first run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_full_matrix:
+        description: 'Build wheels for all 3 OSes (vs. ubuntu-only)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testpypi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compute-version:
+    name: Compute dev-suffixed version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      pep440: ${{ steps.bump.outputs.pep440 }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: bump
+        name: Read plskit-py base version, append -dev.<run>
+        run: |
+          set -euo pipefail
+          # Cargo `X.Y.Z-dev.N` is valid semver; maturin maps it to PEP 440 `X.Y.Z.devN`.
+          BASE=$(awk '/^\[package\]/{p=1} p && /^version[[:space:]]*=/{gsub(/[",]/,""); print $3; exit}' plskit-py/Cargo.toml)
+          CARGO="${BASE}-dev.${GITHUB_RUN_NUMBER}"
+          PEP440="${BASE}.dev${GITHUB_RUN_NUMBER}"
+          echo "base=$BASE  cargo=$CARGO  pep440=$PEP440"
+          echo "version=$CARGO" >> "$GITHUB_OUTPUT"
+          echo "pep440=$PEP440" >> "$GITHUB_OUTPUT"
+
+  build-wheels:
+    name: Build wheels (${{ matrix.os }})
+    needs: compute-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.build_full_matrix && '["ubuntu-latest","macos-latest","windows-latest"]' || '["ubuntu-latest"]') }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.10" }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rewrite plskit-py version to ${{ needs.compute-version.outputs.version }}
+        shell: python
+        env:
+          NEW_VERSION: ${{ needs.compute-version.outputs.version }}
+        run: |
+          import os, pathlib, re
+          new = os.environ["NEW_VERSION"]
+          p = pathlib.Path("plskit-py/Cargo.toml")
+          text = p.read_text()
+          text = re.sub(r'(?m)^(version\s*=\s*")([^"]+)(")', rf'\g<1>{new}\g<3>', text, count=1)
+          p.write_text(text)
+          print(f"plskit-py/Cargo.toml version -> {new}")
+      - run: pip install cibuildwheel==2.21.3
+      - name: Build wheels
+        env:
+          # abi3-py310 produces one wheel that runs on 3.10+, but we still
+          # build cp310-cp312 to exercise the same matrix shape as release.yml.
+          CIBW_BUILD: "cp310-* cp311-* cp312-*"
+          # Skip musllinux (Alpine) and 32-bit targets (i686 Linux, win32):
+          # rustup has no i386 target, and plskit is 64-bit only.
+          CIBW_SKIP: "*-musllinux_* *_i686 *-win32"
+          CIBW_BEFORE_BUILD: "pip install maturin"
+          CIBW_BUILD_VERBOSITY: 1
+        run: python -m cibuildwheel --output-dir wheelhouse
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  build-sdist:
+    name: Build sdist
+    needs: compute-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: "3.10" }
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Rewrite plskit-py version to ${{ needs.compute-version.outputs.version }}
+        shell: python
+        env:
+          NEW_VERSION: ${{ needs.compute-version.outputs.version }}
+        run: |
+          import os, pathlib, re
+          new = os.environ["NEW_VERSION"]
+          p = pathlib.Path("plskit-py/Cargo.toml")
+          text = p.read_text()
+          text = re.sub(r'(?m)^(version\s*=\s*")([^"]+)(")', rf'\g<1>{new}\g<3>', text, count=1)
+          p.write_text(text)
+      - run: pip install maturin
+      - run: maturin sdist --out sdist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: sdist/*.tar.gz
+
+  upload-testpypi:
+    name: Upload to TestPyPI
+    needs: [compute-version, build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+          skip-existing: true
+      - run: |
+          echo "::notice::Uploaded plskit==${{ needs.compute-version.outputs.pep440 }} to TestPyPI"
+          echo "::notice::Install with: pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ plskit==${{ needs.compute-version.outputs.pep440 }}"
