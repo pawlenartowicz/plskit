@@ -20,7 +20,7 @@ pub fn col_row_subset(y: ColRef<'_, f64>, idx: &[usize]) -> Col<f64> {
 }
 
 /// Column-wise z-score. Returns (`X_standardized`, mean, scale).
-/// Zero-variance columns get scale=1.
+/// Columns with std ≤ `1e-12` are treated as zero-variance and get scale=1 (avoids divide-by-near-zero).
 /// `ddof = 0` (population std, like numpy default).
 ///
 /// # Shapes
@@ -230,14 +230,14 @@ fn betainc(a: f64, b: f64, x: f64) -> f64 {
     front * h
 }
 
-/// Stable log-gamma via Lanczos coefficients.
+/// Stable log-gamma via Lanczos coefficients (g = 7).
 pub(crate) fn lgamma(x: f64) -> f64 {
-    libm_lgamma(x)
+    lanczos_lgamma(x)
 }
 
 #[allow(clippy::many_single_char_names)]
-fn libm_lgamma(x: f64) -> f64 {
-    // Stirling-with-correction; accurate to ~1e-13 over x > 0.
+fn lanczos_lgamma(x: f64) -> f64 {
+    // Lanczos approximation, g = 7 (the standard 9-coefficient set below); accurate to ~1e-13 over x > 0.
     let g = 7.0;
     let p: [f64; 9] = [
         0.999_999_999_999_809_9,
@@ -253,7 +253,7 @@ fn libm_lgamma(x: f64) -> f64 {
     if x < 0.5 {
         // Reflection: lgamma(x) = ln(pi / sin(pi x)) - lgamma(1 - x)
         return (std::f64::consts::PI / (std::f64::consts::PI * x).sin()).ln()
-            - libm_lgamma(1.0 - x);
+            - lanczos_lgamma(1.0 - x);
     }
     let x_minus_one = x - 1.0;
     let mut a = p[0];
@@ -288,19 +288,19 @@ pub(crate) fn leverage_diag(w: faer::MatRef<'_, f64>) -> Vec<f64> {
     let lu = PartialPivLu::new(wtw.as_ref());
     let mut m = Mat::<f64>::identity(k, k);
     lu.solve_in_place(m.as_mut());
-    (0..n)
-        .map(|i| {
-            let mut tmp = vec![0.0_f64; k];
-            for jj in 0..k {
-                let mut s = 0.0;
-                for kk in 0..k {
-                    s += m[(jj, kk)] * w[(i, kk)];
-                }
-                tmp[jj] = s;
+    let mut tmp = vec![0.0_f64; k];
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        for jj in 0..k {
+            let mut s = 0.0;
+            for kk in 0..k {
+                s += m[(jj, kk)] * w[(i, kk)];
             }
-            (0..k).map(|jj| w[(i, jj)] * tmp[jj]).sum()
-        })
-        .collect()
+            tmp[jj] = s;
+        }
+        out.push((0..k).map(|jj| w[(i, jj)] * tmp[jj]).sum());
+    }
+    out
 }
 
 /// Survival function P(T > t) for Student's t-distribution with `df`.
@@ -535,7 +535,12 @@ mod leverage_diag_tests {
     }
 }
 
-/// R type-7 / numpy-default linear-interpolation quantile.
+/// R type-7 / numpy-default linear-interpolation quantile
+/// (Hyndman & Fan 1996, "Sample Quantiles in Statistical Packages",
+/// The American Statistician 50(4), definition 7).
+///
+/// Serves the Politis–Romano centered-scaled subsampling CIs in
+/// `subsample` and the percentile bootstrap CIs in `rotation_stability`.
 ///
 /// Caller is responsible for sorting `sorted` ascending before calling.
 /// Empty slice ⇒ `f64::NAN`. `q` is clamped to `[0, 1]`.

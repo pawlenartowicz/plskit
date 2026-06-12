@@ -3,27 +3,32 @@
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
+use crate::error::{PlsKitError, PlsKitResult};
+
 /// Type alias for the canonical RNG used throughout plskit.
 pub type Rng = ChaCha8Rng;
 
 /// Resolve `Option<u64>` to a concrete seed; on None, draw 64 bits from OS entropy.
 /// Returns `(seed_used, rng_seeded_from_it)`.
-#[must_use]
-pub fn resolve_seed(seed: Option<u64>) -> (u64, Rng) {
-    let s = seed.unwrap_or_else(draw_os_seed);
-    (s, ChaCha8Rng::seed_from_u64(s))
+///
+/// # Errors
+///
+/// Returns `PlsKitError::Internal` if the OS cannot provide entropy (getrandom failure —
+/// extremely rare; indicates a severely misconfigured or sandboxed environment).
+pub(crate) fn resolve_seed(seed: Option<u64>) -> PlsKitResult<(u64, Rng)> {
+    let s = match seed {
+        Some(v) => v,
+        None => draw_os_seed()?,
+    };
+    Ok((s, ChaCha8Rng::seed_from_u64(s)))
 }
 
 /// Draw 64 bits of OS entropy via getrandom. Used when caller passes seed=None.
-///
-/// # Panics
-///
-/// Panics if the OS cannot provide entropy (getrandom failure — extremely rare).
-#[must_use]
-pub fn draw_os_seed() -> u64 {
+fn draw_os_seed() -> PlsKitResult<u64> {
     let mut buf = [0u8; 8];
-    getrandom::fill(&mut buf).expect("getrandom failed");
-    u64::from_le_bytes(buf)
+    getrandom::fill(&mut buf)
+        .map_err(|e| PlsKitError::Internal(format!("OS entropy unavailable: {e}")))?;
+    Ok(u64::from_le_bytes(buf))
 }
 
 /// Pre-compute `n_iterations` child seeds sequentially from `parent`.
@@ -48,8 +53,8 @@ mod tests {
 
     #[test]
     fn child_seeds_are_deterministic_for_fixed_parent_seed() {
-        let (_, mut rng_a) = resolve_seed(Some(42));
-        let (_, mut rng_b) = resolve_seed(Some(42));
+        let (_, mut rng_a) = resolve_seed(Some(42)).unwrap();
+        let (_, mut rng_b) = resolve_seed(Some(42)).unwrap();
         let a = child_seeds(&mut rng_a, 100);
         let b = child_seeds(&mut rng_b, 100);
         assert_eq!(a, b);
@@ -57,13 +62,13 @@ mod tests {
 
     #[test]
     fn resolve_seed_passes_through_caller_value() {
-        let (s, _) = resolve_seed(Some(12345));
+        let (s, _) = resolve_seed(Some(12345)).unwrap();
         assert_eq!(s, 12345);
     }
 
     #[test]
     fn resolve_seed_none_returns_nonzero_seed() {
-        let (s, _) = resolve_seed(None);
+        let (s, _) = resolve_seed(None).unwrap();
         // Probability of OS entropy returning exactly 0 is 2^-64; flag if it happens.
         assert_ne!(s, 0);
     }

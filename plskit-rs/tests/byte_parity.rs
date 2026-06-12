@@ -6,9 +6,10 @@
 
 use faer::{Col, Mat};
 use plskit::{
-    pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, ConfirmatoryArgs,
-    ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts, FindKOptimalOpts,
-    FindKSequenceOpts, Selector,
+    pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, pls1_perm_null,
+    pls1_rotation_stability, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput,
+    ConfirmatoryTestOpts, FindKOptimalOpts, FindKSequenceOpts, PermNullOpts,
+    RotationStabilityMethod, RotationStabilityOpts, Selector, VarimaxArgs,
 };
 
 fn synth(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
@@ -210,4 +211,170 @@ fn confirmatory_split_nb_byte_parity() {
     )
     .unwrap();
     assert_confirmatory_byte_eq(&serial, &par, "confirmatory_split_nb");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn rotation_stability_byte_parity() {
+    // Serial vs parallel bootstrap stream must be bit-identical after the
+    // paired-bootstrap re-derivation (boot_seed drawn post-subsample from
+    // the same parent RNG state in both paths).
+    let (x, y) = synth(80, 6, 3.0, 1);
+    let opts = |dp: bool| RotationStabilityOpts {
+        n_boot: 200,
+        m_rate: 0.7,
+        level: 0.95,
+        seed: Some(29),
+        disable_parallelism: dp,
+        ..Default::default()
+    };
+    let serial = pls1_rotation_stability(
+        x.as_ref(),
+        y.as_ref(),
+        2,
+        RotationStabilityMethod::Varimax(VarimaxArgs::default()),
+        None,
+        None,
+        opts(true),
+    )
+    .unwrap();
+    let par = pls1_rotation_stability(
+        x.as_ref(),
+        y.as_ref(),
+        2,
+        RotationStabilityMethod::Varimax(VarimaxArgs::default()),
+        None,
+        None,
+        opts(false),
+    )
+    .unwrap();
+
+    // Aggregate ratio CI (point, lower, upper, sd).
+    assert_eq!(
+        serial.variance_ratio.point.to_bits(),
+        par.variance_ratio.point.to_bits(),
+        "variance_ratio.point"
+    );
+    assert_eq!(
+        serial.variance_ratio.lower.to_bits(),
+        par.variance_ratio.lower.to_bits(),
+        "variance_ratio.lower"
+    );
+    assert_eq!(
+        serial.variance_ratio.upper.to_bits(),
+        par.variance_ratio.upper.to_bits(),
+        "variance_ratio.upper"
+    );
+    assert_eq!(
+        serial.variance_ratio.sd.to_bits(),
+        par.variance_ratio.sd.to_bits(),
+        "variance_ratio.sd"
+    );
+
+    // Per-axis ratio CIs.
+    assert_eq!(
+        serial.variance_ratio_per_axis.len(),
+        par.variance_ratio_per_axis.len(),
+        "variance_ratio_per_axis length"
+    );
+    for (k, (s, p)) in serial
+        .variance_ratio_per_axis
+        .iter()
+        .zip(par.variance_ratio_per_axis.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            s.point.to_bits(),
+            p.point.to_bits(),
+            "variance_ratio_per_axis[{k}].point"
+        );
+        assert_eq!(
+            s.lower.to_bits(),
+            p.lower.to_bits(),
+            "variance_ratio_per_axis[{k}].lower"
+        );
+        assert_eq!(
+            s.upper.to_bits(),
+            p.upper.to_bits(),
+            "variance_ratio_per_axis[{k}].upper"
+        );
+        assert_eq!(
+            s.sd.to_bits(),
+            p.sd.to_bits(),
+            "variance_ratio_per_axis[{k}].sd"
+        );
+    }
+
+    // Aggregate variance components.
+    assert_eq!(
+        serial.variance_unrot.to_bits(),
+        par.variance_unrot.to_bits(),
+        "variance_unrot"
+    );
+    assert_eq!(
+        serial.variance_rot.to_bits(),
+        par.variance_rot.to_bits(),
+        "variance_rot"
+    );
+
+    // Per-axis variance components.
+    assert_eq!(
+        serial.variance_unrot_per_axis.len(),
+        par.variance_unrot_per_axis.len(),
+        "variance_unrot_per_axis length"
+    );
+    for (k, (sv, pv)) in serial
+        .variance_unrot_per_axis
+        .iter()
+        .zip(par.variance_unrot_per_axis.iter())
+        .enumerate()
+    {
+        assert_eq!(sv.to_bits(), pv.to_bits(), "variance_unrot_per_axis[{k}]");
+    }
+    assert_eq!(
+        serial.variance_rot_per_axis.len(),
+        par.variance_rot_per_axis.len(),
+        "variance_rot_per_axis length"
+    );
+    for (k, (sv, pv)) in serial
+        .variance_rot_per_axis
+        .iter()
+        .zip(par.variance_rot_per_axis.iter())
+        .enumerate()
+    {
+        assert_eq!(sv.to_bits(), pv.to_bits(), "variance_rot_per_axis[{k}]");
+    }
+
+    // Scalar metadata.
+    assert_eq!(serial.seed, par.seed, "seed");
+    assert_eq!(serial.n_boot_finite, par.n_boot_finite, "n_boot_finite");
+    assert_eq!(serial.n_eff.to_bits(), par.n_eff.to_bits(), "n_eff");
+}
+
+#[test]
+fn perm_null_byte_parity() {
+    let (x, y) = synth(60, 5, 1.0, 41);
+    let opts = |dp: bool| PermNullOpts {
+        n_perm: 200,
+        return_perm_matrix: false,
+        pre_standardized: false,
+        disable_parallelism: dp,
+        verbose: false,
+    };
+    let r1 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts(true), Some(2026)).unwrap();
+    let r2 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts(false), Some(2026)).unwrap();
+    assert_eq!(r1.beta_ref, r2.beta_ref, "beta_ref");
+    assert_eq!(r1.beta_perm_mean, r2.beta_perm_mean, "beta_perm_mean");
+    assert_eq!(r1.beta_perm_sd, r2.beta_perm_sd, "beta_perm_sd");
+    assert_eq!(r1.beta_perm_z, r2.beta_perm_z, "beta_perm_z");
+    assert_eq!(r1.seed, r2.seed, "seed");
+
+    // Retained-matrix path.
+    let opts_m = |dp: bool| PermNullOpts {
+        return_perm_matrix: true,
+        ..opts(dp)
+    };
+    let m1 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts_m(true), Some(2027)).unwrap();
+    let m2 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts_m(false), Some(2027)).unwrap();
+    assert_eq!(m1.beta_perm_matrix, m2.beta_perm_matrix, "beta_perm_matrix");
 }

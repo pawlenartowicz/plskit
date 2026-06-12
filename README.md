@@ -35,19 +35,12 @@ sig.pvalue, sig.statistic
 ## Why plskit?
 
 - **Modern inference is canonical.** Procrustes-aligned percentile CIs,
-  `split_perm`, and `split_nb` are the default. Legacy outputs (BSR,
-  VIP, jackknife) are planned for a future release.
+  `split_perm`, and `split_nb` are the default.
 - **One Rust engine, identical results across wrappers.** All
   numerical computation lives in `plskit-rs`. Python (and the
   forthcoming R and Julia wrappers) call into it via FFI, so a fixed
   `(version, seed, X, y)` reproduces within a bit-near tolerance on
   every supported platform.
-- **Honest K-selection.** Confirmatory tests at a pre-specified `K`
-  are separate from exploratory K-selection. Closed-testing sequences
-  (`pls1_find_k_sequence`) carry exact FWER control; the optional
-  same-sample diagnostic on `pls1_find_k_optimal(diagnostic=...)` is
-  reported as `pvalues` / `diagnostic` and is not honest inference
-  (selection and test reuse the same data).
 
 ## Repository layout
 
@@ -78,8 +71,7 @@ may shift outputs between releases.
 
 ## Citation
 
-Lenartowicz, P., Plisiecki, H. (2026). *Cheap Per-Component Testing for
-PLS, Stable Under Rotation* (Under Review).
+Lenartowicz, P., Plisiecki, H. (2026). (Under Review).
 
 ## License
 

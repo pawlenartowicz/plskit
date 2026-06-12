@@ -20,11 +20,6 @@ use crate::subsample::CIScalar;
 /// already bounded by `1/B`, not `1/B'`.
 const N_BOOT_PAIRED: usize = 1000;
 
-/// RNG seed offset for the secondary paired-bootstrap stream. Any non-zero
-/// constant works; documented here so the full pipeline is deterministic
-/// under fixed `seed` without colliding with subsample-draw RNG sequences.
-const BOOT_SEED_OFFSET: u64 = 0xB007_u64;
-
 /// Threshold on the bootstrap-iteration skip rate that flips
 /// `degenerate_baseline` to `true` (secondary trigger).
 const DEGENERATE_BOOTSTRAP_SKIP_THRESHOLD: f64 = 0.05;
@@ -191,13 +186,16 @@ pub fn pls1_rotation_stability(
         max_skip_rate: 1.0,
     };
     sub_opts.validate()?;
+    crate::fit::check_finite_mat(x)?;
+    crate::fit::check_finite_col(y)?;
 
     // ── Validate + normalize weights ──
     let (w_norm, n_eff_val, _all_uniform) =
         crate::fit::validate_and_normalize_weights(weights, n, k)?;
+    crate::fit::check_n_eff_for_k(n_eff_val, k, weights.is_some())?;
 
     // ── Resolve seed + reference fit + reference rotation ──
-    let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed);
+    let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
 
     let fit_ref = {
         use crate::fit::{pls1_fit, FitOpts, KSpec};
@@ -224,6 +222,14 @@ pub fn pls1_rotation_stability(
 
     // ── Resolve m and parallel-loop ──
     let m = crate::subsample::resolve_m(n, opts.m_rate);
+    // m == n collapses every subsample to the full sample → zero between-resample
+    // variance, degenerate baseline flag, and no stability signal. Reject early.
+    if m >= n {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "resolved m = {m} (from n={n}, m_rate={}) equals n; need m < n",
+            opts.m_rate
+        )));
+    }
     if m < k + 2 {
         return Err(PlsKitError::InvalidArgument(format!(
             "resolved m = {m} (from n={n}, m_rate={}) is too small for k={k}; need m ≥ k+2",
@@ -250,9 +256,22 @@ pub fn pls1_rotation_stability(
                 w_norm.as_ref().map(faer::Col::as_ref),
                 child,
             )
+            // All worker errors (numerical failure and weight-validation skip
+            // alike) collapse to one NaN row counted by a single skip counter.
+            // Deliberate: this diagnostic only gates on the aggregate skip rate.
+            // The confirmatory path (subsample.rs WorkerOutcome) is the granular
+            // one that splits Skipped vs Failed; replicating it here would add
+            // surface this diagnostic does not need.
             .unwrap_or_else(|_| RotationStabilityWorkerRow::nan(k))
         },
     );
+
+    // ── Derive a second child seed for the paired bootstrap; nested from the
+    // post-subsample parent state to avoid any overlap with subsample-draw seeds.
+    let boot_seed = {
+        use rand::Rng;
+        rng.next_u64()
+    };
 
     // ── Reduce ──
     reduce_variance_ratio(
@@ -263,6 +282,7 @@ pub fn pls1_rotation_stability(
         opts.m_rate,
         opts.level,
         seed_used,
+        boot_seed,
         n_eff_val,
         opts.max_skip_rate,
     )
@@ -350,6 +370,8 @@ fn run_one_rotation_stability(
         w_sub_norm.as_ref().map(Col::as_ref),
         FitOpts {
             pre_standardized: true,
+            // Seq inside the per-resample worker — outer Rayon owns the threadpool.
+            par: crate::fit::ParChoice::Seq,
             ..FitOpts::default()
         },
     )?;
@@ -359,8 +381,9 @@ fn run_one_rotation_stability(
     // Per-axis squared residual is read directly from the alignment payload
     // (no need to materialize an aligned matrix); see the cost
     // identity on `SignedPermutationAlignment.residual_frobenius`.
-    let aln_unrot = procrustes::signed_permutation(w_b.as_ref(), w_unrot_ref, false)
-        .expect("procrustes invariants pre-validated by plskit");
+    // `?` so that a truncated `w_b` (NIPALS short-circuit, k_used < k)
+    // propagates as Err to the outer worker, which maps it to a NaN row.
+    let aln_unrot = procrustes::signed_permutation(w_b.as_ref(), w_unrot_ref, false)?;
     let sq_unrot_per_axis: Vec<f64> = (0..k)
         .map(|kk| {
             let src = aln_unrot.assigned[kk];
@@ -377,9 +400,7 @@ fn run_one_rotation_stability(
     // Continuous-orthogonal alignment is scaffolding — puts W_b into the
     // same orthogonal frame as the reference so varimax converges to a
     // comparable simple-structure target. Residual is discarded.
-    let r_orth = procrustes::orthogonal(w_b.as_ref(), w_unrot_ref, false)
-        .expect("procrustes invariants pre-validated by plskit")
-        .rotation;
+    let r_orth = procrustes::orthogonal(w_b.as_ref(), w_unrot_ref, false)?.rotation;
     let mut w_b_rot_input = Mat::<f64>::zeros(d, k);
     faer::linalg::matmul::matmul(
         w_b_rot_input.as_mut(),
@@ -398,8 +419,7 @@ fn run_one_rotation_stability(
     let w_b_rot = rot_b.w_rot;
 
     // Rotated alignment — signed-permutation against the rotated ref.
-    let aln_rot = procrustes::signed_permutation(w_b_rot.as_ref(), w_rot_ref, false)
-        .expect("procrustes invariants pre-validated by plskit");
+    let aln_rot = procrustes::signed_permutation(w_b_rot.as_ref(), w_rot_ref, false)?;
     let sq_rot_per_axis: Vec<f64> = (0..k)
         .map(|kk| {
             let src = aln_rot.assigned[kk];
@@ -431,6 +451,7 @@ fn reduce_variance_ratio(
     m_rate: f64,
     level: f64,
     seed: u64,
+    boot_seed: u64,
     n_eff: f64,
     max_skip_rate: f64,
 ) -> PlsKitResult<RotationStabilityOutput> {
@@ -453,6 +474,19 @@ fn reduce_variance_ratio(
     }
 
     let b = n_boot_finite;
+    if b == 0 {
+        // Every resample failed but the skip-rate gate let it through (e.g.
+        // max_skip_rate=1.0). With no finite rows the V's are all NaN and the
+        // degenerate_baseline flag (NaN == 0.0 → false) would mislabel an
+        // all-NaN result as healthy. Fail loudly instead.
+        #[allow(clippy::cast_precision_loss)]
+        return Err(PlsKitError::ResamplingDegenerate {
+            skipped,
+            total,
+            skip_rate: skipped as f64 / total.max(1) as f64,
+            threshold: max_skip_rate,
+        });
+    }
     #[allow(clippy::cast_precision_loss)]
     let b_f = b as f64;
 
@@ -494,7 +528,7 @@ fn reduce_variance_ratio(
     // Paired percentile bootstrap on the per-resample paired vector.
     // Skipped iterations (V_unrot* = 0) propagate to the
     // bootstrap_skip counter and degenerate-baseline flag.
-    let mut boot_rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed.wrapping_add(BOOT_SEED_OFFSET));
+    let mut boot_rng = rand_chacha::ChaCha8Rng::seed_from_u64(boot_seed);
     let mut rho_star: Vec<f64> = Vec::with_capacity(N_BOOT_PAIRED);
     let mut rho_per_axis_star: Vec<Vec<f64>> = vec![Vec::with_capacity(N_BOOT_PAIRED); k];
     let mut bootstrap_skipped = 0usize;

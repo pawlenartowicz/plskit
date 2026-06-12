@@ -41,34 +41,54 @@ pub struct PreprocessResult {
 ///
 /// # Errors
 ///
-/// Returns [`PlsKitError::DimensionMismatch`] if X, y, and weights have inconsistent lengths.
-/// Returns [`PlsKitError::NonFiniteInput`] if any weight is NaN or infinite.
-/// Returns [`PlsKitError::InvalidWeights`] if any weight is negative or all weights are zero.
+/// - [`PlsKitError::DimensionMismatch`] if X and y have inconsistent row counts.
+/// - [`PlsKitError::InvalidWeights`]`{ reason: "length_mismatch" }` if weights length disagrees with X or y.
+/// - [`PlsKitError::NonFiniteInput`] if X, y, or any weight contains NaN or infinity.
+/// - [`PlsKitError::InvalidWeights`] if any weight is negative or all weights are zero.
 pub fn preprocess(input: PreprocessInput<'_>) -> PlsKitResult<PreprocessResult> {
     // Determine n from whichever of X / y is provided; weights consistency-check.
     let n_from_x = input.x.map(|x| x.nrows());
     let n_from_y = input.y.map(|y| y.nrows());
     let n_from_w = input.weights.map(|w| w.nrows());
 
-    if let (Some(nx), Some(ny)) = (n_from_x, n_from_y) {
-        if nx != ny {
-            return Err(PlsKitError::DimensionMismatch { x: (nx, 0), y: ny });
+    if let (Some(x), Some(ny)) = (input.x, n_from_y) {
+        if x.nrows() != ny {
+            return Err(PlsKitError::DimensionMismatch {
+                x: (x.nrows(), x.ncols()),
+                y: ny,
+            });
         }
     }
     if let Some(nw) = n_from_w {
         if let Some(nx) = n_from_x {
             if nx != nw {
-                return Err(PlsKitError::DimensionMismatch { x: (nx, 0), y: nw });
+                return Err(PlsKitError::InvalidWeights {
+                    reason: "length_mismatch",
+                });
             }
         }
         if let Some(ny) = n_from_y {
             if ny != nw {
-                return Err(PlsKitError::DimensionMismatch { x: (nw, 0), y: ny });
+                return Err(PlsKitError::InvalidWeights {
+                    reason: "length_mismatch",
+                });
             }
         }
     }
 
+    // Top-level boundary contract: X / y finiteness. Mirrors pls1_fit's
+    // check_finite_mat / check_finite_col entry sequence (fit.rs).
+    if let Some(x) = input.x {
+        crate::fit::check_finite_mat(x)?;
+    }
+    if let Some(y) = input.y {
+        crate::fit::check_finite_col(y)?;
+    }
+
     // Validate and normalize weights.
+    // Mirrors fit.rs validate_and_normalize_weights (finite / non-negative / Σ>0 loop) — change
+    // together. preprocess keeps its own copy because it has no `n` or `k` to feed that helper
+    // and does not need its `all_uniform` flag.
     let (w_norm, n_eff_val) = match input.weights {
         None => (None, None),
         Some(w) => {

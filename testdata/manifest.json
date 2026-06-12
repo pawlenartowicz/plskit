@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "producing_version": "0.1.0",
+  "producing_version": "0.2.0",
   "cases": [
     {
       "name": "pls1_fit_small_n50_d10_k1",
@@ -105,6 +105,25 @@
       "hashes": {
         "inputs_sha256": "a6f29c05468a719845fd8a91503f9059d91f79022e1efd53fff67b4816227ee7",
         "outputs_sha256": "828e4d58e1a357876cb7c07cfda31833968d9f806731df64c13a77224826def8"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12
+      }
+    },
+    {
+      "name": "pls1_fit_weighted_n50_d10_k2",
+      "function": "pls1_fit",
+      "inputs": "inputs/pls1_fit_weighted_n50_d10_k2.npz",
+      "outputs": "outputs/pls1_fit/pls1_fit_weighted_n50_d10_k2.npz",
+      "kwargs": {
+        "k": 2,
+        "seed": 99,
+        "weights": "nonuniform"
+      },
+      "hashes": {
+        "inputs_sha256": "6792208dad2a31fa034711859616fc33b71db99af4a9ffdff65b784a1ad9e874",
+        "outputs_sha256": "84f141bcabc9ccea337b873d7d33bd19fb2f0131f61b59713cbd6391e6674b7f"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -278,7 +297,7 @@
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "73b2c2ad0f6dc3f6be1b3921297dc284fbf02dabb1817ccc014698b870295bc6"
+        "outputs_sha256": "01cfd4dad10026fefefe1a2bbf9b1f71ae196eb168dfb4ec498459c0da13d525"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -366,7 +385,7 @@
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "642376f00127717058eb2a1d2f38c2ad4984acbf54df8e9b74b1536213f93cc6"
+        "outputs_sha256": "14f6b387e9a8db8555a8b4aaba332a5d8fb86fae881f5a96bac3dd7d510c528b"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -386,7 +405,7 @@
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "7a9612f486d61849997ad2d6274e1558821cc1358b9a0bdcf403d4fbc17e7b43"
+        "outputs_sha256": "bde75dd56606066a729909b0e4b1d236a99cb4d19f56e00a59e1d43f21df1e7a"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -414,7 +433,120 @@
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "c512a5cc8fd9219164b7e1a885141dddae19d80f1f201ab59bf749378917d886"
+        "outputs_sha256": "5158085d354403080ac1b31843fc06bcc694dcb5bfd96539faa846a48baa4077"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12
+      }
+    },
+    {
+      "name": "pls1_confirmatory_weighted_raw_perm",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_weighted_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_weighted_raw_perm.npz",
+      "kwargs": {
+        "args": {
+          "n_folds": 5,
+          "n_perm": 200
+        },
+        "k": 1,
+        "method": "raw_perm",
+        "seed": 42,
+        "weights": "nonuniform"
+      },
+      "hashes": {
+        "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
+        "outputs_sha256": "382ac68383a90b1f3d99125880e79dd45903daa565f9be527d4e34f5dff1c3ac"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12
+      }
+    },
+    {
+      "name": "pls1_confirmatory_weighted_split_nb",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_weighted_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_weighted_split_nb.npz",
+      "kwargs": {
+        "args": {
+          "n_splits": 50
+        },
+        "k": 1,
+        "method": "split_nb",
+        "seed": 42,
+        "weights": "nonuniform"
+      },
+      "hashes": {
+        "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
+        "outputs_sha256": "6ad7e823a48c5528a6d609c7e34d26d5b90ed80bce5a8da4398428db89fda292"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12
+      }
+    },
+    {
+      "name": "pls1_confirmatory_weighted_split_perm",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_weighted_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_weighted_split_perm.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 200,
+          "n_splits": 50
+        },
+        "k": 1,
+        "method": "split_perm",
+        "seed": 42,
+        "weights": "nonuniform"
+      },
+      "hashes": {
+        "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
+        "outputs_sha256": "6f8d53763de7f22c98094acacca3a971539ef8ef1b9036123f57c2b93d9d34a9"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12
+      }
+    },
+    {
+      "name": "pls1_confirmatory_weighted_score",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_weighted_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_weighted_score.npz",
+      "kwargs": {
+        "args": {},
+        "k": 1,
+        "method": "score",
+        "seed": 42,
+        "weights": "nonuniform"
+      },
+      "hashes": {
+        "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
+        "outputs_sha256": "71f1eac75c3be540b0167923367795b03e1e066d35ead9cffafa35ba14a4bd8d"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12
+      }
+    },
+    {
+      "name": "pls1_confirmatory_weighted_e",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_weighted_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_weighted_e.npz",
+      "kwargs": {
+        "args": {},
+        "k": 1,
+        "method": "e",
+        "seed": 42,
+        "weights": "nonuniform"
+      },
+      "hashes": {
+        "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
+        "outputs_sha256": "9396801e52e71df3f7eb28cda098a7631a136cb762f36442defbe540cbd62230"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -457,7 +589,7 @@
       },
       "hashes": {
         "inputs_sha256": "c5d7e79ddee59cf21ec1c9afb9929f956eb06d3daa90dfe77811e6028b1141e6",
-        "outputs_sha256": "643ddec416936b97b6b6433218f26766fb8092b06eea7fe73e6356ec9df1881f"
+        "outputs_sha256": "bf64858cb4044632dfae10b861756b6c7d01b234f25d99a0e73481ddc187ed2f"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -523,7 +655,109 @@
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "18e742a7eb27063b96cadb15d9b75ce6ce6af9defd51bc7d48baa1ce9732ed86"
+        "outputs_sha256": "7311453df241af983ac06e507e2914d2df65eecf0fbbe456c99a8b33617d4b3f"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12
+      }
+    },
+    {
+      "name": "spls1_fit_wide_n30_d100_k2_keep8",
+      "function": "spls1_fit",
+      "inputs": "inputs/spls1_fit_wide_n30_d100_k2_keep8.npz",
+      "outputs": "outputs/spls1_fit/spls1_fit_wide_n30_d100_k2_keep8.npz",
+      "kwargs": {
+        "k": 2,
+        "keep": 8,
+        "seed": 42
+      },
+      "hashes": {
+        "inputs_sha256": "b2ea41452732cd5404968d89b03cb1473d32b9e50a901b769008138529252c2f",
+        "outputs_sha256": "3ccbf98306a35efcaaa0c869a5542c05764934cfdbc75252c392b6c928003ef2"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12
+      }
+    },
+    {
+      "name": "spls1_fit_small_n50_d10_k2_keep3",
+      "function": "spls1_fit",
+      "inputs": "inputs/spls1_fit_small_n50_d10_k2_keep3.npz",
+      "outputs": "outputs/spls1_fit/spls1_fit_small_n50_d10_k2_keep3.npz",
+      "kwargs": {
+        "k": 2,
+        "keep": 3,
+        "seed": 42
+      },
+      "hashes": {
+        "inputs_sha256": "42ee224728483bbfb63f1d9c1d1d92d939b71298268b06e0bdba8b4660a3e948",
+        "outputs_sha256": "f53510552161984bdeef0ad4bbc2bca148fbed3ce3fc5256c21a5bc255244b45"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12
+      }
+    },
+    {
+      "name": "spls1_find_keep_optimal_k1",
+      "function": "spls1_find_keep_optimal",
+      "inputs": "inputs/spls1_find_keep_optimal_k1.npz",
+      "outputs": "outputs/spls1_find_keep_optimal/spls1_find_keep_optimal_k1.npz",
+      "kwargs": {
+        "k": 1,
+        "seed": 42
+      },
+      "hashes": {
+        "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
+        "outputs_sha256": "30b6c22c0e2d93bc6819dacd0076856ca058992d4e17a5f9698fd0ef59bbaa50"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12
+      }
+    },
+    {
+      "name": "spls1_find_k_optimal_r2_se_keep3",
+      "function": "spls1_find_k_optimal",
+      "inputs": "inputs/spls1_find_k_optimal_inputs.npz",
+      "outputs": "outputs/spls1_find_k_optimal/spls1_find_k_optimal_r2_se_keep3.npz",
+      "kwargs": {
+        "args": {
+          "n_folds": 5
+        },
+        "k_max": 4,
+        "keep": 3,
+        "seed": 42,
+        "selector": "r2_se"
+      },
+      "hashes": {
+        "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
+        "outputs_sha256": "1824fb322c3aa84c244d1ddde257f8dd4ebb2d3d253fc006834fe8095ac319fe"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12
+      }
+    },
+    {
+      "name": "spls1_find_k_sequence_split_nb_keep3",
+      "function": "spls1_find_k_sequence",
+      "inputs": "inputs/spls1_find_k_sequence_inputs.npz",
+      "outputs": "outputs/spls1_find_k_sequence/spls1_find_k_sequence_split_nb_keep3.npz",
+      "kwargs": {
+        "args": {
+          "n_splits": 20
+        },
+        "k_max": 4,
+        "keep": 3,
+        "seed": 42,
+        "test_method": "split_nb"
+      },
+      "hashes": {
+        "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
+        "outputs_sha256": "ca1cffa08d60f4b5fdefbb7c0e9e084d3a61c3bbb5fac3a22805ddd463ed1593"
       },
       "tolerance": {
         "atol_array": 1e-10,

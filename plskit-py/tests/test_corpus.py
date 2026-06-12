@@ -65,6 +65,20 @@ def assert_close(actual, expected, name: str, atol_scalar=1e-12, atol_array=1e-1
                                    err_msg=name)
 
 
+def _resolve_corpus_weights(case, kw, inputs):
+    """`weights` in manifest kwargs is the descriptor string "nonuniform" (the
+    only descriptor in use); the actual array lives in the NPZ. Both directions
+    of mismatch are bugs: assert they agree, then substitute when present."""
+    has_descriptor = kw.get("weights") == "nonuniform"
+    has_array = "weights" in inputs
+    assert has_descriptor == has_array, (
+        f"{case['name']}: manifest weights descriptor and NPZ weights array disagree"
+    )
+    if has_array:
+        kw["weights"] = inputs["weights"]
+    return kw
+
+
 @pytest.mark.parametrize("case", load_manifest(), ids=lambda c: c["name"])
 def test_corpus_case(case):
     fn = case["function"]
@@ -78,7 +92,8 @@ def test_corpus_case(case):
         # `seed` is no longer accepted on pls1_fit (deterministic kernel — see
         # 2026-04-30 remediation E3); strip it from corpus kwargs and skip the
         # `seed` field check on the fixture.
-        fit_kwargs = {k: v for k, v in kwargs.items() if k != "seed"}
+        fit_kwargs = {k: v for k, v in kwargs.items() if k not in ("seed",)}
+        fit_kwargs = _resolve_corpus_weights(case, fit_kwargs, inputs)
         try:
             r = plskit.pls1_fit(X, y, **fit_kwargs)
         except plskit.PlsKitError as exc:
@@ -98,6 +113,7 @@ def test_corpus_case(case):
                 assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
     elif fn == "pls1_confirmatory_test":
         kw = dict(kwargs); k = kw.pop("k")
+        kw = _resolve_corpus_weights(case, kw, inputs)
         r = plskit.pls1_confirmatory_test(X, y, k, **kw)
         for field in ["pvalue", "statistic", "method", "k", "n_perm", "n_splits", "seed"]:
             if field in expected:
@@ -250,5 +266,62 @@ def test_corpus_case(case):
         if "degenerate_baseline" in expected:
             assert bool(r.degenerate_baseline) == bool(int(expected["degenerate_baseline"])), \
                 f"{case['name']}.degenerate_baseline mismatch"
+    elif fn == "spls1_fit":
+        # `seed` is not a spls1_fit parameter (deterministic kernel); strip it.
+        kw = {k: v for k, v in kwargs.items() if k not in ("seed",)}
+        kw = _resolve_corpus_weights(case, kw, inputs)
+        k_int = int(kw.pop("k"))
+        keep = int(kw.pop("keep"))
+        r = plskit.spls1_fit(X, y, k_int, keep, **kw)
+        for field in ["coef", "beta", "intercept", "k_used", "keep"]:
+            if field in expected:
+                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+    elif fn == "spls1_find_keep_optimal":
+        kw = _resolve_corpus_weights(case, dict(kwargs), inputs)
+        k_int = int(kw.pop("k"))
+        r = plskit.spls1_find_keep_optimal(X, y, k_int, **kw)
+        for field in ["keep_star", "k", "seed"]:
+            if field in expected:
+                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+        if "keep_grid" in expected:
+            assert r.keep_grid == [int(v) for v in expected["keep_grid"].tolist()], \
+                f"{case['name']}.keep_grid"
+        for d_field in ("cv_scores", "cv_scores_se"):
+            keys_k = f"{d_field}__keys"
+            if keys_k in expected:
+                ks = expected[keys_k]
+                vs = expected[f"{d_field}__values"]
+                actual_dict = getattr(r, d_field)
+                for k_int2, v_exp in zip(ks.tolist(), vs.tolist()):
+                    np.testing.assert_allclose(actual_dict[int(k_int2)], v_exp,
+                                               atol=1e-10,
+                                               err_msg=f"{case['name']}.{d_field}[{k_int2}]")
+    elif fn == "spls1_find_k_optimal":
+        kw = _resolve_corpus_weights(case, dict(kwargs), inputs)
+        k_max = kw.pop("k_max")
+        keep = int(kw.pop("keep"))
+        r = plskit.spls1_find_k_optimal(X, y, k_max, keep, **kw)
+        for field in ["k_star", "selector", "pvalues", "diagnostic", "seed"]:
+            if field in expected:
+                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+        for d_field in ("cv_scores", "cv_scores_se", "bic_scores"):
+            keys_k = f"{d_field}__keys"
+            if keys_k in expected:
+                ks = expected[keys_k]
+                vs = expected[f"{d_field}__values"]
+                actual_dict = getattr(r, d_field)
+                assert actual_dict is not None, f"{case['name']}.{d_field}"
+                for k_int2, v_exp in zip(ks.tolist(), vs.tolist()):
+                    np.testing.assert_allclose(actual_dict[int(k_int2)], v_exp,
+                                               atol=1e-10,
+                                               err_msg=f"{case['name']}.{d_field}[{k_int2}]")
+    elif fn == "spls1_find_k_sequence":
+        kw = _resolve_corpus_weights(case, dict(kwargs), inputs)
+        k_max = kw.pop("k_max")
+        keep = int(kw.pop("keep"))
+        r = plskit.spls1_find_k_sequence(X, y, k_max, keep, **kw)
+        for field in ["k_star", "pvalues", "test_method", "alpha", "seed"]:
+            if field in expected:
+                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
     else:
         pytest.skip(f"unknown function {fn}")

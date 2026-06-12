@@ -17,6 +17,10 @@ from plskit._api import (
     pls1_rotation_stability,
     preprocess,
     rotate,
+    spls1_fit,
+    spls1_find_keep_optimal,
+    spls1_find_k_optimal,
+    spls1_find_k_sequence,
 )
 from plskit._errors import PlsKitError, PlsKitInvalidWeights, PlsKitResamplingDegenerate
 from plskit._results import (
@@ -24,6 +28,7 @@ from plskit._results import (
     ConfirmatoryCI,
     ConfirmatoryTestResult,
     FindKOptimalResult,
+    FindKeepOptimalResult,
     FindKSequenceResult,
     PermNullResult,
     PLS1Result,
@@ -41,6 +46,9 @@ __all__ = [
     "pls1_find_k_optimal", "pls1_find_k_sequence",
     "pls1_perm_null",
     "pls1_rotation_stability",
+    "spls1_fit",
+    "spls1_find_keep_optimal",
+    "spls1_find_k_optimal", "spls1_find_k_sequence",
     "rotate",
     "PlsKitError",
     "PlsKitInvalidWeights",
@@ -49,6 +57,7 @@ __all__ = [
     "PLS1Result",
     "ConfirmatoryTestResult",
     "FindKOptimalResult", "FindKSequenceResult",
+    "FindKeepOptimalResult",
     "PermNullResult",
     "RotateResult", "RotationSpec",
     "CIScalar", "ConfirmatoryCI", "RotationStabilityResult",

@@ -43,17 +43,42 @@ def test_fit_dimension_mismatch_raises():
 
 
 def test_fit_k_optimal_dispatches_to_find_k_optimal():
+    # Mirrors _api.py pls1_fit dispatch for k="optimal": pls1_find_k_optimal(X, y,
+    # k_max, pre_standardized=False, seed=seed, weights=None, **fk_args) — no
+    # selector/diagnostic/args — so the direct call here uses the same effective
+    # defaults. Update both if the dispatch in _api.py changes.
     X, y = _data()
+    r = plskit.pls1_find_k_optimal(X, y, k_max=4, seed=7)
     m = plskit.pls1_fit(X, y, k="optimal", k_max=4, seed=7)
-    assert isinstance(m, plskit.PLS1Result)
-    assert 1 <= m.k_used <= 4
+    # k_star must be stable (> 1) with _data()'s snr=4 signal, so a wrong-k bug
+    # would move k_used away from 2 and break the equality below.
+    assert m.k_used == r.k_star
+    m_fixed = plskit.pls1_fit(X, y, k=r.k_star)
+    # Post-resolution both paths call the identical Fixed-k code, so the fit
+    # is bit-identical.
+    assert np.array_equal(m.coef, m_fixed.coef)
+    assert np.array_equal(m.beta, m_fixed.beta)
+    assert m.intercept == m_fixed.intercept
+    assert m.k_used == m_fixed.k_used
 
 
 def test_fit_k_sequence_dispatches_to_find_k_sequence():
+    # Mirrors _api.py pls1_fit dispatch for k="sequence": pls1_find_k_sequence(X, y,
+    # k_max, pre_standardized=False, seed=seed, weights=None, **fk_args) — no
+    # test_method/alpha/args overrides — so the direct call here uses the same
+    # effective defaults (test_method="split_nb", alpha=0.05). Update both if the
+    # dispatch in _api.py changes.
     X, y = _data()
+    r = plskit.pls1_find_k_sequence(X, y, k_max=4, seed=7)
     m = plskit.pls1_fit(X, y, k="sequence", k_max=4, seed=7)
-    assert isinstance(m, plskit.PLS1Result)
-    assert 1 <= m.k_used <= 4
+    assert m.k_used == r.k_star
+    m_fixed = plskit.pls1_fit(X, y, k=r.k_star)
+    # Post-resolution both paths call the identical Fixed-k code, so the fit
+    # is bit-identical.
+    assert np.array_equal(m.coef, m_fixed.coef)
+    assert np.array_equal(m.beta, m_fixed.beta)
+    assert m.intercept == m_fixed.intercept
+    assert m.k_used == m_fixed.k_used
 
 
 def test_fit_string_mode_requires_k_max():

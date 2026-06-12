@@ -1,6 +1,8 @@
-//! Politis–Romano subsampling engine for PLS1 inference. Internal: callers
-//! are `signal_test::pls1_confirmatory_test(CI=Some)` and
-//! `rotation_stability::pls1_rotation_stability`.
+//! Politis–Romano subsampling engine for PLS1 inference. The engine entry
+//! points are internal (`pub(crate)`): callers are
+//! `signal_test::pls1_confirmatory_test(CI=Some)` and
+//! `rotation_stability::pls1_rotation_stability`. Only the result types
+//! `CIScalar` and `ConfirmatoryCI` are public, re-exported from `lib.rs`.
 //!
 //! Reduction formulas are documented inline on `reduce_centered_scaled`
 //! (centered-scaled CI; Politis–Romano 1999 Ch. 3) and `reduce_holdout_corr`
@@ -132,7 +134,7 @@ mod tests_indices {
 
     #[test]
     fn subsample_indices_partitions_range() {
-        let (_, mut rng) = resolve_seed(Some(7));
+        let (_, mut rng) = resolve_seed(Some(7)).unwrap();
         let (s, h) = subsample_indices(100, 26, &mut rng);
         assert_eq!(s.len(), 26);
         assert_eq!(h.len(), 74);
@@ -157,7 +159,9 @@ use crate::linalg::{col_row_subset, row_subset, standardize_apply};
 /// independent — no shared counters across threads).
 #[derive(Debug)]
 pub(crate) struct ConfirmatoryWorkerRow {
-    /// Per-variable subspace leverage on aligned `W_b`. Length D.
+    /// Per-variable subspace leverage on `W_b`. Invariant under right-orthogonal
+    /// rotation of W (leverage = diag(W(WᵀW)⁻¹Wᵀ); W → W·R leaves the hat matrix
+    /// fixed), so computed on the unaligned `W_b` — no procrustes alignment needed. Length D.
     pub leverage: Vec<f64>,
     /// `corr(X[holdout] · β_b, y[holdout])`. NaN if undefined (e.g. constant holdout y).
     pub holdout_corr: f64,
@@ -184,7 +188,7 @@ fn run_one_confirmatory(
     y: ColRef<'_, f64>,
     k: usize,
     m: usize,
-    w_ref: MatRef<'_, f64>,
+    _w_ref: MatRef<'_, f64>, // retained for call-site shape parity; leverage no longer uses it
     pre_standardized_x: bool,
     weights: Option<ColRef<'_, f64>>,
     rng: &mut crate::rng::Rng,
@@ -239,6 +243,8 @@ fn run_one_confirmatory(
         w_sub_norm.as_ref().map(faer::Col::as_ref),
         FitOpts {
             pre_standardized: true,
+            // Seq inside the per-resample worker — outer Rayon owns the threadpool.
+            par: crate::fit::ParChoice::Seq,
             ..FitOpts::default()
         },
     )?;
@@ -246,22 +252,23 @@ fn run_one_confirmatory(
     let w_b = fit_b.w_star;
     let beta_b = fit_b.beta;
 
-    // 3. Procrustes alignment
-    let r_b = procrustes::orthogonal(w_b.as_ref(), w_ref, false)
-        .expect("procrustes invariants pre-validated by plskit")
-        .rotation;
-    let mut w_b_aligned = Mat::<f64>::zeros(d, k);
-    faer::linalg::matmul::matmul(
-        w_b_aligned.as_mut(),
-        faer::Accum::Replace,
-        w_b.as_ref(),
-        r_b.as_ref(),
-        1.0,
-        faer::Par::Seq,
-    );
+    // 3. Leverage is invariant under right-orthogonal rotation (leverage =
+    // diag(W(WᵀW)⁻¹Wᵀ); W → W·R leaves the hat matrix fixed), so no procrustes
+    // alignment is needed — compute it on `w_b` directly.
+    //
+    // Guard the NIPALS short-circuit that procrustes' `?` used to catch: a
+    // truncated `w_b` (k_used < k) must still fail the resample (→
+    // WorkerOutcome::Failed via the outer driver), not silently produce a
+    // short leverage vector against a length-D reference.
+    if w_b.ncols() != k {
+        return Err(PlsKitError::Internal(format!(
+            "subsample fit truncated to {} of {k} components",
+            w_b.ncols()
+        )));
+    }
 
-    // 5. Per-variable leverage
-    let leverage = crate::linalg::leverage_diag(w_b_aligned.as_ref());
+    // 5. Per-variable leverage on the unaligned W_b.
+    let leverage = crate::linalg::leverage_diag(w_b.as_ref());
 
     // 6. beta-sign tally
     let mut beta_sign = vec![0_i8; d];
@@ -362,7 +369,7 @@ mod tests_worker {
         .unwrap();
         let w_ref = m_ref_fit.w_star.clone();
 
-        let (_, mut rng) = resolve_seed(Some(2));
+        let (_, mut rng) = resolve_seed(Some(2)).unwrap();
         let row = run_one_confirmatory(
             x.as_ref(),
             y.as_ref(),
@@ -384,6 +391,41 @@ mod tests_worker {
         }
         assert!(row.holdout_corr.is_finite() || row.holdout_corr.is_nan());
         assert_eq!(row.beta_sign.len(), 6);
+    }
+
+    /// Regression for review-finding R4 (ticket #1, 2026-05-10): a
+    /// subsample whose NIPALS fit short-circuits with `k_used < k`
+    /// produces a truncated `w_b`; procrustes returns `DimensionMismatch`.
+    /// The pre-fix `.expect(...)` in `run_one_confirmatory` panicked the
+    /// Rayon worker; the post-fix `?` propagates as `Err`, which the
+    /// outer driver maps to `WorkerOutcome::Failed`.
+    ///
+    /// Trigger: tiny y values + `pre_standardized=true` so plskit skips
+    /// re-standardization. NIPALS sees `‖X'y‖ ≪ 1e-14` at component 0
+    /// and short-circuits, yielding `w_b` with zero columns even though
+    /// `w_ref` has `k=2`. Caller must not panic.
+    #[test]
+    fn worker_propagates_err_on_truncated_w_b() {
+        let n = 40;
+        let d = 4;
+        let k = 2;
+        let mut rng_data = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        let x = Mat::<f64>::from_fn(n, d, |_, _| rng_data.random_range(-1.0..1.0));
+        let y_tiny = Col::<f64>::from_fn(n, |_| rng_data.random_range(-1e-20..1e-20));
+        let w_ref = Mat::<f64>::from_fn(d, k, |i, j| if i == j { 1.0 } else { 0.0 });
+
+        let (_, mut rng) = resolve_seed(Some(11)).unwrap();
+        let res = run_one_confirmatory(
+            x.as_ref(),
+            y_tiny.as_ref(),
+            k,
+            resolve_m(n, 0.7),
+            w_ref.as_ref(),
+            true,
+            None,
+            &mut rng,
+        );
+        assert!(res.is_err(), "expected Err from truncated-w_b path, got Ok");
     }
 }
 
@@ -1147,6 +1189,14 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
     opts.validate()?;
     let n = x.nrows();
     let m = resolve_m(n, opts.m_rate);
+    // Empty holdout (m == n) → NaN holdout_corr on every resample →
+    // ResampleFailureRateExceeded before any useful output. Reject early.
+    if m >= n {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "resolved m = {m} (from n={n}, m_rate={}) leaves no holdout; need m < n",
+            opts.m_rate
+        )));
+    }
     if m < k + 2 {
         return Err(PlsKitError::InvalidArgument(format!(
             "resolved m = {m} (from n={n}, m_rate={}) is too small for k={k}; need m ≥ k+2",
@@ -1244,7 +1294,7 @@ mod tests_engine {
             max_failure_rate: 0.0,
             max_skip_rate: 1.0,
         };
-        let (_, mut rng) = resolve_seed(Some(2026));
+        let (_, mut rng) = resolve_seed(Some(2026)).unwrap();
         let ci = pls1_subsample_inference_confirmatory(
             x.as_ref(),
             y.as_ref(),
@@ -1290,7 +1340,7 @@ mod tests_engine {
             max_failure_rate: 0.0,
             max_skip_rate: 1.0,
         };
-        let (_, mut rng) = resolve_seed(Some(2026));
+        let (_, mut rng) = resolve_seed(Some(2026)).unwrap();
         let ci = pls1_subsample_inference_confirmatory(
             x.as_ref(),
             y.as_ref(),
@@ -1397,7 +1447,7 @@ mod tests_engine {
             max_failure_rate: 0.0,
             max_skip_rate: 1.0,
         };
-        let (_, mut rng) = resolve_seed(Some(2026));
+        let (_, mut rng) = resolve_seed(Some(2026)).unwrap();
         let ci = pls1_subsample_inference_confirmatory(
             x.as_ref(),
             y.as_ref(),

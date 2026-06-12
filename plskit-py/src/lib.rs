@@ -18,9 +18,12 @@ use plskit::{
     pls1_find_k_optimal as core_pls1_find_k_optimal,
     pls1_find_k_sequence as core_pls1_find_k_sequence, pls1_fit as core_pls1_fit,
     pls1_predict as core_pls1_predict, pls1_rotation_stability as core_pls1_rotation_stability,
-    rotate as core_rotate, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput,
-    ConfirmatoryTestOpts, FindKOptimalOpts, FindKOptimalOutput, FindKSequenceOpts,
-    FindKSequenceOutput, FitOpts, KSpec, Pls1Model, RotateOutput, RotationMethod, Selector,
+    rotate as core_rotate, spls1_find_k_optimal as core_spls1_find_k_optimal,
+    spls1_find_k_sequence as core_spls1_find_k_sequence,
+    spls1_find_keep_optimal as core_spls1_find_keep_optimal, spls1_fit as core_spls1_fit,
+    ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
+    FindKOptimalOpts, FindKOptimalOutput, FindKSequenceOpts, FindKSequenceOutput,
+    FindKeepOptimalOpts, FitOpts, KSpec, Pls1Model, RotateOutput, RotationMethod, Selector,
     VarimaxArgs,
 };
 use plskit::{pls1_perm_null as core_pls1_perm_null, PermNullOpts, PermNullOutput};
@@ -133,6 +136,7 @@ fn pls1_model_to_dict(py: Python<'_>, m: Pls1Model) -> Bound<'_, PyDict> {
     d.set_item("n_eff", m.n_eff).unwrap();
     d.set_item("weights", m.weights.map(|c| faer_col_to_np(py, c)))
         .unwrap();
+    d.set_item("keep", m.keep).unwrap();
     d
 }
 
@@ -400,8 +404,7 @@ fn parse_rotation_method(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y, k, *, pre_standardized=false, tol=1e-9, max_iter=500, weights=None))]
-#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (x, y, k, *, pre_standardized=false, weights=None))]
 #[allow(clippy::needless_pass_by_value)]
 fn pls1_fit<'py>(
     py: Python<'py>,
@@ -409,16 +412,12 @@ fn pls1_fit<'py>(
     y: PyReadonlyArray1<'_, f64>,
     k: usize,
     pre_standardized: bool,
-    tol: f64,
-    max_iter: usize,
     weights: Option<PyReadonlyArray1<'_, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let kspec = KSpec::Fixed(k);
     let opts = FitOpts {
         pre_standardized,
-        tol,
-        max_iter,
-        check_n_eff: true,
+        ..FitOpts::default()
     };
     // Bridge numpy → faer at the entry seam.
     let xf = np_mat_to_faer(x);
@@ -426,6 +425,37 @@ fn pls1_fit<'py>(
     let wf = weights.map(np_col_to_faer);
     let wref = wf.as_ref().map(Col::as_ref);
     let m = map_res(core_pls1_fit(xf.as_ref(), yf.as_ref(), kspec, wref, opts))?;
+    Ok(pls1_model_to_dict(py, m))
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, y, k, keep, *, pre_standardized=false, weights=None))]
+#[allow(clippy::needless_pass_by_value)]
+fn spls1_fit<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray1<'_, f64>,
+    k: usize,
+    keep: usize,
+    pre_standardized: bool,
+    weights: Option<PyReadonlyArray1<'_, f64>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let opts = FitOpts {
+        pre_standardized,
+        ..FitOpts::default()
+    };
+    let xf = np_mat_to_faer(x);
+    let yf = np_col_to_faer(y);
+    let wf = weights.map(np_col_to_faer);
+    let wref = wf.as_ref().map(Col::as_ref);
+    let m = map_res(core_spls1_fit(
+        xf.as_ref(),
+        yf.as_ref(),
+        KSpec::Fixed(k),
+        keep,
+        wref,
+        opts,
+    ))?;
     Ok(pls1_model_to_dict(py, m))
 }
 
@@ -481,6 +511,12 @@ fn pls1_model_from_dict(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Pls1M
         }
         _ => None,
     };
+    // "keep" — present in dicts written by the spls1 family; default None
+    // for back-compat with dicts from older fits.
+    let keep: Option<usize> = match d.get_item("keep")? {
+        Some(v) if !v.is_none() => Some(v.extract()?),
+        _ => None,
+    };
     let _ = py;
     Ok(Pls1Model {
         // Dict keys are short (Python-facing); Rust fields are long snake_case.
@@ -495,6 +531,7 @@ fn pls1_model_from_dict(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Pls1M
         pre_standardized,
         weights,
         n_eff,
+        keep,
     })
 }
 
@@ -570,6 +607,8 @@ fn pls1_confirmatory_test_raw<'py>(
         verbose,
         ci: ci_opts,
         max_skip_rate,
+        // Dense wrapper surface — `keep` is reserved for the spls1 family.
+        keep: None,
     };
     let xf = np_mat_to_faer(x);
     let yf = np_col_to_faer(y);
@@ -708,21 +747,16 @@ fn pls1_rotation_stability_raw<'py>(
     Ok(rotation_stability_to_dict(py, out))
 }
 
-#[pyfunction]
-#[pyo3(signature = (x, y, k_max, *, selector="r2_se", diagnostic=None,
-                    args=None,
-                    pre_standardized=false, seed=None,
-                    disable_parallelism=false, verbose=false,
-                    weights=None))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::fn_params_excessive_bools)]
-fn pls1_find_k_optimal<'py>(
+#[allow(clippy::needless_pass_by_value)]
+fn run_find_k_optimal<'py>(
     py: Python<'py>,
     x: PyReadonlyArray2<'_, f64>,
     y: PyReadonlyArray1<'_, f64>,
     k_max: usize,
+    keep: Option<usize>,
     selector: &str,
     diagnostic: Option<&str>,
     args: Option<Bound<'_, PyDict>>,
@@ -818,13 +852,23 @@ fn pls1_find_k_optimal<'py>(
     let yf = np_col_to_faer(y);
     let wf = weights.map(np_col_to_faer);
     let wref = wf.as_ref().map(Col::as_ref);
-    let r: FindKOptimalOutput = map_res(core_pls1_find_k_optimal(
-        xf.as_ref(),
-        yf.as_ref(),
-        k_max,
-        wref,
-        opts,
-    ))?;
+    let r: FindKOptimalOutput = match keep {
+        None => map_res(core_pls1_find_k_optimal(
+            xf.as_ref(),
+            yf.as_ref(),
+            k_max,
+            wref,
+            opts,
+        ))?,
+        Some(kp) => map_res(core_spls1_find_k_optimal(
+            xf.as_ref(),
+            yf.as_ref(),
+            k_max,
+            kp,
+            wref,
+            opts,
+        ))?,
+    };
     let d = PyDict::new(py);
     d.set_item("k_star", r.k_star)?;
     d.set_item("selector", r.selector)?;
@@ -848,7 +892,7 @@ fn pls1_find_k_optimal<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y, k_max, *, test_method="split_nb", alpha=0.05,
+#[pyo3(signature = (x, y, k_max, *, selector="r2_se", diagnostic=None,
                     args=None,
                     pre_standardized=false, seed=None,
                     disable_parallelism=false, verbose=false,
@@ -856,11 +900,87 @@ fn pls1_find_k_optimal<'py>(
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::fn_params_excessive_bools)]
-fn pls1_find_k_sequence<'py>(
+fn pls1_find_k_optimal<'py>(
     py: Python<'py>,
     x: PyReadonlyArray2<'_, f64>,
     y: PyReadonlyArray1<'_, f64>,
     k_max: usize,
+    selector: &str,
+    diagnostic: Option<&str>,
+    args: Option<Bound<'_, PyDict>>,
+    pre_standardized: bool,
+    seed: Option<u64>,
+    disable_parallelism: bool,
+    verbose: bool,
+    weights: Option<PyReadonlyArray1<'_, f64>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    run_find_k_optimal(
+        py,
+        x,
+        y,
+        k_max,
+        None,
+        selector,
+        diagnostic,
+        args,
+        pre_standardized,
+        seed,
+        disable_parallelism,
+        verbose,
+        weights,
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, y, k_max, keep, *, selector="r2_se", diagnostic=None,
+                    args=None,
+                    pre_standardized=false, seed=None,
+                    disable_parallelism=false, verbose=false,
+                    weights=None))]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::fn_params_excessive_bools)]
+fn spls1_find_k_optimal<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray1<'_, f64>,
+    k_max: usize,
+    keep: usize,
+    selector: &str,
+    diagnostic: Option<&str>,
+    args: Option<Bound<'_, PyDict>>,
+    pre_standardized: bool,
+    seed: Option<u64>,
+    disable_parallelism: bool,
+    verbose: bool,
+    weights: Option<PyReadonlyArray1<'_, f64>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    run_find_k_optimal(
+        py,
+        x,
+        y,
+        k_max,
+        Some(keep),
+        selector,
+        diagnostic,
+        args,
+        pre_standardized,
+        seed,
+        disable_parallelism,
+        verbose,
+        weights,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::needless_pass_by_value)]
+fn run_find_k_sequence<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray1<'_, f64>,
+    k_max: usize,
+    keep: Option<usize>,
     test_method: &str,
     alpha: f64,
     args: Option<Bound<'_, PyDict>>,
@@ -913,13 +1033,23 @@ fn pls1_find_k_sequence<'py>(
     let yf = np_col_to_faer(y);
     let wf = weights.map(np_col_to_faer);
     let wref = wf.as_ref().map(Col::as_ref);
-    let r: FindKSequenceOutput = map_res(core_pls1_find_k_sequence(
-        xf.as_ref(),
-        yf.as_ref(),
-        k_max,
-        wref,
-        opts,
-    ))?;
+    let r: FindKSequenceOutput = match keep {
+        None => map_res(core_pls1_find_k_sequence(
+            xf.as_ref(),
+            yf.as_ref(),
+            k_max,
+            wref,
+            opts,
+        ))?,
+        Some(kp) => map_res(core_spls1_find_k_sequence(
+            xf.as_ref(),
+            yf.as_ref(),
+            k_max,
+            kp,
+            wref,
+            opts,
+        ))?,
+    };
     let d = PyDict::new(py);
     d.set_item("k_star", r.k_star)?;
     d.set_item("pvalues", faer_col_to_np(py, r.pvalues))?;
@@ -928,6 +1058,87 @@ fn pls1_find_k_sequence<'py>(
     d.set_item("seed", r.seed)?;
     d.set_item("n_eff", r.n_eff)?;
     Ok(d)
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, y, k_max, *, test_method="split_nb", alpha=0.05,
+                    args=None,
+                    pre_standardized=false, seed=None,
+                    disable_parallelism=false, verbose=false,
+                    weights=None))]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::fn_params_excessive_bools)]
+fn pls1_find_k_sequence<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray1<'_, f64>,
+    k_max: usize,
+    test_method: &str,
+    alpha: f64,
+    args: Option<Bound<'_, PyDict>>,
+    pre_standardized: bool,
+    seed: Option<u64>,
+    disable_parallelism: bool,
+    verbose: bool,
+    weights: Option<PyReadonlyArray1<'_, f64>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    run_find_k_sequence(
+        py,
+        x,
+        y,
+        k_max,
+        None,
+        test_method,
+        alpha,
+        args,
+        pre_standardized,
+        seed,
+        disable_parallelism,
+        verbose,
+        weights,
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, y, k_max, keep, *, test_method="split_nb", alpha=0.05,
+                    args=None,
+                    pre_standardized=false, seed=None,
+                    disable_parallelism=false, verbose=false,
+                    weights=None))]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::fn_params_excessive_bools)]
+fn spls1_find_k_sequence<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray1<'_, f64>,
+    k_max: usize,
+    keep: usize,
+    test_method: &str,
+    alpha: f64,
+    args: Option<Bound<'_, PyDict>>,
+    pre_standardized: bool,
+    seed: Option<u64>,
+    disable_parallelism: bool,
+    verbose: bool,
+    weights: Option<PyReadonlyArray1<'_, f64>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    run_find_k_sequence(
+        py,
+        x,
+        y,
+        k_max,
+        Some(keep),
+        test_method,
+        alpha,
+        args,
+        pre_standardized,
+        seed,
+        disable_parallelism,
+        verbose,
+        weights,
+    )
 }
 
 #[pyfunction]
@@ -1107,6 +1318,62 @@ fn preprocess<'py>(
     Ok(d)
 }
 
+#[pyfunction]
+#[pyo3(signature = (x, y, k, *, args=None, seed=None,
+                    disable_parallelism=false, verbose=false, weights=None))]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::many_single_char_names)]
+fn spls1_find_keep_optimal<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray1<'_, f64>,
+    k: usize,
+    args: Option<Bound<'_, PyDict>>,
+    seed: Option<u64>,
+    disable_parallelism: bool,
+    verbose: bool,
+    weights: Option<PyReadonlyArray1<'_, f64>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let allowed: &[&str] = &["n_folds"];
+    if let Some(a) = args.as_ref() {
+        validate_keys("keep_optimal", a, allowed)?;
+    }
+    let n_folds = match args
+        .as_ref()
+        .and_then(|a| a.get_item("n_folds").ok().flatten())
+    {
+        Some(v) => v.extract::<usize>()?,
+        None => 5,
+    };
+    let opts = FindKeepOptimalOpts {
+        n_folds,
+        seed,
+        disable_parallelism,
+        verbose,
+    };
+    let xf = np_mat_to_faer(x);
+    let yf = np_col_to_faer(y);
+    let wf = weights.map(np_col_to_faer);
+    let wref = wf.as_ref().map(Col::as_ref);
+    let r = map_res(core_spls1_find_keep_optimal(
+        xf.as_ref(),
+        yf.as_ref(),
+        k,
+        wref,
+        opts,
+    ))?;
+    let d = PyDict::new(py);
+    d.set_item("keep_star", r.keep_star)?;
+    d.set_item("k", r.k)?;
+    d.set_item("cv_scores", btreemap_to_dict(py, &r.cv_scores))?;
+    d.set_item("cv_scores_se", btreemap_to_dict(py, &r.cv_scores_se))?;
+    d.set_item("keep_grid", r.keep_grid)?;
+    d.set_item("seed", r.seed)?;
+    d.set_item("n_eff", r.n_eff)?;
+    Ok(d)
+}
+
 #[pymodule]
 fn _plskit(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PlsKitException", py.get_type::<PlsKitException>())?;
@@ -1119,5 +1386,9 @@ fn _plskit(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pls1_find_k_sequence, m)?)?;
     m.add_function(wrap_pyfunction!(pls1_perm_null_raw, m)?)?;
     m.add_function(wrap_pyfunction!(rotate, m)?)?;
+    m.add_function(wrap_pyfunction!(spls1_fit, m)?)?;
+    m.add_function(wrap_pyfunction!(spls1_find_keep_optimal, m)?)?;
+    m.add_function(wrap_pyfunction!(spls1_find_k_optimal, m)?)?;
+    m.add_function(wrap_pyfunction!(spls1_find_k_sequence, m)?)?;
     Ok(())
 }

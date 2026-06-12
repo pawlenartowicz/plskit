@@ -1,7 +1,9 @@
 //! `pls1_confirmatory_test` fixture cases (Family D of Task 5).
 //!
-//! Six cases share one inputs file (`inputs/pls1_confirmatory_inputs.npz`):
+//! Six unweighted cases share one inputs file (`inputs/pls1_confirmatory_inputs.npz`):
 //! five base-method cases (no CI) and one CI-bundle variant.
+//! Five weighted cases share a separate inputs file
+//! (`inputs/pls1_confirmatory_weighted_inputs.npz`) that also carries `weights`.
 
 use std::path::Path;
 
@@ -25,13 +27,8 @@ const SYNTH_N: usize = 80;
 const SYNTH_D: usize = 6;
 const SYNTH_K_SIGNAL: usize = 2;
 const SYNTH_SNR: f64 = 4.0;
-const SYNTH_SEED: u64 = 42;
-/// Shared `k` for all `pls1_confirmatory_test` cases.
-const K: usize = 2;
 /// Shared RNG seed for all cases.
 const CASE_SEED: u64 = 42;
-/// Shared inputs filename stem (legacy name — no `_test_` in middle).
-const INPUTS_NAME: &str = "pls1_confirmatory_inputs";
 /// Function name for the manifest.
 const FUNCTION: &str = "pls1_confirmatory_test";
 
@@ -42,6 +39,12 @@ struct ConfirmatoryCase {
     ci: Option<CIOpts>,
     disable_parallelism: bool,
     kwargs: serde_json::Value,
+    /// Inputs file stem and synth seed; set to the weighted variants for weighted cases.
+    inputs_name: &'static str,
+    synth_seed: u64,
+    k: usize,
+    /// Non-uniform weights array (first 40 obs get 2.0, rest 1.0); `None` for unweighted cases.
+    weights: Option<ndarray::Array1<f64>>,
 }
 
 /// Write the `ConfirmatoryCI` bundle fields into `w`.
@@ -79,16 +82,17 @@ fn write_ci_fields(w: &mut NpzWriter, ci: &ConfirmatoryCI) -> Result<()> {
     Ok(())
 }
 
-/// Generic runner shared by all six `pls1_confirmatory_test` cases.
+/// Generic runner shared by all eleven `pls1_confirmatory_test` cases (unweighted + weighted).
 ///
 /// Writes the shared inputs file (idempotent — same bytes every call) and the
 /// case-specific outputs file, then returns the manifest `Case`.
+/// Weighted cases set `c.weights = Some(...)` and use distinct `c.inputs_name`/`c.synth_seed`/`c.k`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
 #[allow(clippy::many_single_char_names)]
 fn run_confirmatory_case(root: &Path, c: &ConfirmatoryCase) -> Result<Case> {
-    let rel_inputs = format!("inputs/{INPUTS_NAME}.npz");
+    let rel_inputs = format!("inputs/{}.npz", c.inputs_name);
     let rel_outputs = format!("outputs/{FUNCTION}/{}.npz", c.name);
     let abs_inputs = root.join(&rel_inputs);
     let abs_outputs = root.join(&rel_outputs);
@@ -100,24 +104,28 @@ fn run_confirmatory_case(root: &Path, c: &ConfirmatoryCase) -> Result<Case> {
         std::fs::create_dir_all(p)?;
     }
 
-    let (x, y) = synth_data(SYNTH_N, SYNTH_D, SYNTH_K_SIGNAL, SYNTH_SNR, SYNTH_SEED);
+    let (x, y) = synth_data(SYNTH_N, SYNTH_D, SYNTH_K_SIGNAL, SYNTH_SNR, c.synth_seed);
 
     // Write shared inputs (idempotent — same bytes every call).
     {
         let mut w = NpzWriter::create(&abs_inputs)?;
         w.add_f64("X", &x.clone().into_dyn())?;
         w.add_f64("y", &y.clone().into_dyn())?;
+        if let Some(ref wt) = c.weights {
+            w.add_f64("weights", &wt.clone().into_dyn())?;
+        }
         w.finish()?;
     }
 
     let x_faer = ndarray_to_faer_mat(&x);
     let y_faer = ndarray_to_faer_col(&y);
+    let weights_faer = c.weights.as_ref().map(ndarray_to_faer_col);
     let r = pls1_confirmatory_test(
         ConfirmatoryTestInput::Raw {
             x: x_faer.as_ref(),
             y: y_faer.as_ref(),
-            k: K,
-            weights: None,
+            k: c.k,
+            weights: weights_faer.as_ref().map(faer::Col::as_ref),
         },
         ConfirmatoryTestOpts {
             args: c.args,
@@ -127,6 +135,7 @@ fn run_confirmatory_case(root: &Path, c: &ConfirmatoryCase) -> Result<Case> {
             verbose: false,
             ci: c.ci,
             max_skip_rate: 0.01,
+            keep: None,
         },
     )?;
 
@@ -184,6 +193,10 @@ pub fn raw_perm(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 200, "n_folds": 5},
                 "seed": 42
             }),
+            inputs_name: "pls1_confirmatory_inputs",
+            synth_seed: 42,
+            k: 2,
+            weights: None,
         },
     )
 }
@@ -206,6 +219,10 @@ pub fn split_nb(root: &Path) -> Result<Case> {
                 "args": {"n_splits": 30},
                 "seed": 42
             }),
+            inputs_name: "pls1_confirmatory_inputs",
+            synth_seed: 42,
+            k: 2,
+            weights: None,
         },
     )
 }
@@ -231,6 +248,10 @@ pub fn split_perm(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 200, "n_splits": 30},
                 "seed": 42
             }),
+            inputs_name: "pls1_confirmatory_inputs",
+            synth_seed: 42,
+            k: 2,
+            weights: None,
         },
     )
 }
@@ -255,6 +276,10 @@ pub fn score(root: &Path) -> Result<Case> {
                 "args": {},
                 "seed": 42
             }),
+            inputs_name: "pls1_confirmatory_inputs",
+            synth_seed: 42,
+            k: 2,
+            weights: None,
         },
     )
 }
@@ -279,6 +304,10 @@ pub fn e(root: &Path) -> Result<Case> {
                 "args": {},
                 "seed": 42
             }),
+            inputs_name: "pls1_confirmatory_inputs",
+            synth_seed: 42,
+            k: 2,
+            weights: None,
         },
     )
 }
@@ -315,6 +344,156 @@ pub fn split_nb_ci(root: &Path) -> Result<Case> {
                 "disable_parallelism": true,
                 "max_failure_rate": 0.0
             }),
+            inputs_name: "pls1_confirmatory_inputs",
+            synth_seed: 42,
+            k: 2,
+            weights: None,
+        },
+    )
+}
+
+/// Non-uniform weights for weighted confirmatory cases: first 40 of 80 obs get 2.0, rest 1.0.
+fn weighted_confirmatory_weights() -> ndarray::Array1<f64> {
+    ndarray::Array1::from_shape_fn(SYNTH_N, |i| if i < 40 { 2.0_f64 } else { 1.0_f64 })
+}
+
+/// Case: weighted `pls1_confirmatory_test` with `method=raw_perm`, `n_perm=200`, `n_folds=5`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn weighted_raw_perm(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_weighted_raw_perm",
+            args: ConfirmatoryArgs::RawPerm {
+                n_perm: 200,
+                n_folds: 5,
+            },
+            ci: None,
+            disable_parallelism: false,
+            kwargs: serde_json::json!({
+                "k": 1,
+                "method": "raw_perm",
+                "args": {"n_perm": 200, "n_folds": 5},
+                "seed": 42,
+                "weights": "nonuniform"
+            }),
+            inputs_name: "pls1_confirmatory_weighted_inputs",
+            synth_seed: 77,
+            k: 1,
+            weights: Some(weighted_confirmatory_weights()),
+        },
+    )
+}
+
+/// Case: weighted `pls1_confirmatory_test` with `method=split_nb`, `n_splits=50`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn weighted_split_nb(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_weighted_split_nb",
+            args: ConfirmatoryArgs::SplitNb { n_splits: 50 },
+            ci: None,
+            disable_parallelism: false,
+            kwargs: serde_json::json!({
+                "k": 1,
+                "method": "split_nb",
+                "args": {"n_splits": 50},
+                "seed": 42,
+                "weights": "nonuniform"
+            }),
+            inputs_name: "pls1_confirmatory_weighted_inputs",
+            synth_seed: 77,
+            k: 1,
+            weights: Some(weighted_confirmatory_weights()),
+        },
+    )
+}
+
+/// Case: weighted `pls1_confirmatory_test` with `method=split_perm`, `n_perm=200`, `n_splits=50`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn weighted_split_perm(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_weighted_split_perm",
+            args: ConfirmatoryArgs::SplitPerm {
+                n_perm: 200,
+                n_splits: 50,
+            },
+            ci: None,
+            disable_parallelism: false,
+            kwargs: serde_json::json!({
+                "k": 1,
+                "method": "split_perm",
+                "args": {"n_perm": 200, "n_splits": 50},
+                "seed": 42,
+                "weights": "nonuniform"
+            }),
+            inputs_name: "pls1_confirmatory_weighted_inputs",
+            synth_seed: 77,
+            k: 1,
+            weights: Some(weighted_confirmatory_weights()),
+        },
+    )
+}
+
+/// Case: weighted `pls1_confirmatory_test` with `method=score`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn weighted_score(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_weighted_score",
+            args: ConfirmatoryArgs::Score,
+            ci: None,
+            disable_parallelism: false,
+            kwargs: serde_json::json!({
+                "k": 1,
+                "method": "score",
+                "args": {},
+                "seed": 42,
+                "weights": "nonuniform"
+            }),
+            inputs_name: "pls1_confirmatory_weighted_inputs",
+            synth_seed: 77,
+            k: 1,
+            weights: Some(weighted_confirmatory_weights()),
+        },
+    )
+}
+
+/// Case: weighted `pls1_confirmatory_test` with `method=e`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn weighted_e(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_weighted_e",
+            args: ConfirmatoryArgs::E,
+            ci: None,
+            disable_parallelism: false,
+            kwargs: serde_json::json!({
+                "k": 1,
+                "method": "e",
+                "args": {},
+                "seed": 42,
+                "weights": "nonuniform"
+            }),
+            inputs_name: "pls1_confirmatory_weighted_inputs",
+            synth_seed: 77,
+            k: 1,
+            weights: Some(weighted_confirmatory_weights()),
         },
     )
 }

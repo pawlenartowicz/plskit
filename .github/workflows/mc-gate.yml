@@ -1,0 +1,31 @@
+name: MC calibration gate
+
+# Runs the #[ignore]d Monte-Carlo calibration tests on a weekly schedule
+# and on demand. Kept out of ci.yml so the schedule trigger does not fire
+# the full per-push CI suite.
+#
+# What runs: `cargo test -p plskit --release -- --ignored --nocapture`
+# `--ignored` runs ONLY ignored tests across every test target of the package
+# (today: coverage_mc's CI-coverage grid; picks up any future #[ignore]d
+# MC tests automatically without editing this file). `--nocapture` surfaces
+# the per-cell calibration numbers in the log even on a passing run.
+#
+# Runtime is substantial (36-cell grid × 200 datasets × 300 boots).
+# ubuntu-only is sufficient for a statistical gate.
+
+on:
+  schedule:
+    - cron: '0 4 * * 0'   # weekly, Sunday 04:00 UTC
+  workflow_dispatch:        # manual trigger — run on demand before releases
+
+jobs:
+  mc-calibration:
+    name: MC calibration (ignored tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run ignored MC calibration tests
+        run: cargo test -p plskit --release -- --ignored --nocapture

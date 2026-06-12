@@ -41,7 +41,7 @@ struct OptimalCase {
 ///
 /// Keys are written to `<key_field>` (1-D i64) and values to `<value_field>` (1-D f64).
 /// `BTreeMap` iteration is sorted by key, which is exactly the required order.
-fn write_btreemap(
+pub(crate) fn write_btreemap(
     w: &mut NpzWriter,
     key_field: &str,
     value_field: &str,

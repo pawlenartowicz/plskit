@@ -17,8 +17,11 @@ use crate::error::{PlsKitError, PlsKitResult};
 pub struct PermNullOpts {
     /// Number of permutations. Must be ≥ 100 (per-voxel-z noise floor).
     pub n_perm: usize,
-    /// If true, retain and return the full `(n_perm, D)` β-matrix.
-    /// If false, fold into a Welford accumulator and discard per-row data.
+    /// Whether to return the full `(n_perm, D)` β-matrix on the output.
+    /// The b×d buffer is always materialized — the two-pass reduction over it
+    /// is the byte-exact reduction path (pinned by `streaming_matches_retained_byte_exact`),
+    /// so no true single-pass Welford accumulator exists; this flag only
+    /// controls whether that buffer is handed back to the caller.
     pub return_perm_matrix: bool,
     /// Caller asserts X is already column-standardized; skips centering/scaling.
     pub pre_standardized: bool,
@@ -101,7 +104,7 @@ pub fn pls1_perm_null(
     seed: Option<u64>,
 ) -> PlsKitResult<PermNullOutput> {
     use crate::fit::{pls1_fit, validate_and_normalize_weights, FitOpts, KSpec};
-    use crate::linalg::{standardize, standardize1};
+    use crate::linalg::{standardize, standardize1, standardize1_weighted, standardize_weighted};
     use faer::{Col, Mat};
 
     opts.validate(k)?;
@@ -117,18 +120,37 @@ pub fn pls1_perm_null(
     if k > d {
         return Err(PlsKitError::KExceedsMax { k, k_max: d });
     }
+    crate::fit::check_finite_mat(x)?;
+    crate::fit::check_finite_col(y)?;
 
     let (w_norm, n_eff_val, _all_uniform) = validate_and_normalize_weights(weights, n, k)?;
+    crate::fit::check_n_eff_for_k(n_eff_val, k, weights.is_some())?;
     let wref = w_norm.as_ref().map(Col::as_ref);
 
     // Standardize once. Subsequent permutations operate on standardized arrays
     // — permuting y after standardization is equivalent to permuting raw y and
     // re-standardizing because mean/scale are permutation-invariant.
+    //
+    // Convention: weighted moments when weights are present, matching pls1_fit's
+    // own path (standardize_weighted, fit.rs). beta_ref is taken from a reference
+    // fit run on these pre-standardized arrays, so it equals the standardized-scale
+    // coefficient (Pls1Model.coef) of a direct weighted pls1_fit on the same input
+    // — verified to f64 epsilon. (Not the raw-scale Pls1Model.beta, which fit
+    // back-projects by x_scale/y_scale; beta_ref stays on the standardized scale,
+    // which is the scale the per-voxel z statistic is defined on.) The
+    // y-permutation argument still holds: the weighted moments depend on w, and w
+    // is NOT permuted (it stays tied to row i), so the transform applied to
+    // observed and permuted y is identical and the null is internally consistent.
     let (xs_owned, ys_owned) = if opts.pre_standardized {
         (
             Mat::<f64>::from_fn(n, d, |i, j| x[(i, j)]),
             Col::<f64>::from_fn(n, |i| y[i]),
         )
+    } else if wref.is_some() {
+        // wref are the same mean-1 normalized weights pls1_fit standardizes with.
+        let (xs, _, _) = standardize_weighted(x, wref);
+        let (ys, _, _) = standardize1_weighted(y, wref);
+        (xs, ys)
     } else {
         let (xs, _, _) = standardize(x);
         let (ys, _, _) = standardize1(y);
@@ -145,28 +167,28 @@ pub fn pls1_perm_null(
         wref,
         FitOpts {
             pre_standardized: true,
+            // check_n_eff: false — n_eff was already validated at the top-level
+            // entry; truncation here just yields β at k_used (fit at what exists).
+            check_n_eff: false,
             ..FitOpts::default()
         },
     )?;
     let beta_ref: Vec<f64> = (0..d).map(|j| fit_ref.beta[j]).collect();
 
-    let (seed_used, mut rng) = crate::rng::resolve_seed(seed);
+    let (seed_used, mut rng) = crate::rng::resolve_seed(seed)?;
 
-    if opts.return_perm_matrix {
-        run_engine_retained(
-            xs, ys, k, wref, beta_ref, n_eff_val, opts, seed_used, &mut rng,
-        )
-    } else {
-        run_engine_streaming(
-            xs, ys, k, wref, beta_ref, n_eff_val, opts, seed_used, &mut rng,
-        )
-    }
+    run_engine(
+        xs, ys, k, wref, beta_ref, n_eff_val, opts, seed_used, &mut rng,
+    )
 }
 
-// Returns Result for symmetry with run_engine_streaming and to leave room for
-// per-permutation hard failures in future revisions.
+// Single permutation engine. The full b×d β buffer is always materialized; the
+// two-pass reduction over it is the byte-exact reduction (no single-pass Welford
+// path exists — `streaming_matches_retained_byte_exact` pins the two outputs
+// equal). `opts.return_perm_matrix` only decides whether that buffer is returned.
+// Returns Result to leave room for per-permutation hard failures in future revisions.
 #[allow(clippy::too_many_arguments, clippy::unnecessary_wraps)]
-fn run_engine_retained(
+fn run_engine(
     xs: MatRef<'_, f64>,
     ys: ColRef<'_, f64>,
     k: usize,
@@ -186,7 +208,11 @@ fn run_engine_retained(
             run_one_perm(xs, ys, k, wref, child).unwrap_or_else(|_| vec![f64::NAN; d])
         });
 
-    // Flatten into row-major (B, D) buffer.
+    // Flatten into row-major (B, D) buffer for deterministic two-pass reduce,
+    // byte-exact regardless of Rayon scheduling. This B×D f64 buffer (plus the
+    // per-row Vecs above, ~2× transiently) is the dominant allocation: ~0.8–8 GB
+    // at D = 1e5–1e6, B ≥ 1e3 (the UC3/UC4 fMRI target scale). Deliberate
+    // determinism-over-memory trade — no streaming Welford accumulator exists.
     let mut flat = vec![0.0_f64; b * d];
     for (bi, row) in beta_rows.iter().enumerate() {
         let off = bi * d;
@@ -206,52 +232,11 @@ fn run_engine_retained(
         beta_perm_mean,
         beta_perm_sd,
         beta_perm_z,
-        beta_perm_matrix: Some(flat),
-    })
-}
-
-#[allow(clippy::too_many_arguments, clippy::unnecessary_wraps)]
-fn run_engine_streaming(
-    xs: MatRef<'_, f64>,
-    ys: ColRef<'_, f64>,
-    k: usize,
-    wref: Option<faer::ColRef<'_, f64>>,
-    beta_ref: Vec<f64>,
-    n_eff_val: f64,
-    opts: PermNullOpts,
-    seed_used: u64,
-    rng: &mut crate::rng::Rng,
-) -> PlsKitResult<PermNullOutput> {
-    let d = xs.ncols();
-    let b = opts.n_perm;
-
-    // Per-permutation worker collects β vectors. NaN row on failure (fail-soft).
-    let beta_rows: Vec<Vec<f64>> =
-        crate::resample::parallel_for_each_seeded(rng, b, opts.disable_parallelism, |_, child| {
-            run_one_perm(xs, ys, k, wref, child).unwrap_or_else(|_| vec![f64::NAN; d])
-        });
-
-    // Flatten ~n_perm·d f64s for deterministic two-pass reduce; trivial memory at typical sizes.
-    let mut flat = vec![0.0_f64; b * d];
-    for (bi, row) in beta_rows.iter().enumerate() {
-        let off = bi * d;
-        flat[off..off + d].copy_from_slice(row);
-    }
-
-    // Two-pass per-column reduction — byte-exact regardless of Rayon scheduling.
-    let (beta_perm_mean, beta_perm_sd) = reduce_two_pass(&flat, b, d);
-    let beta_perm_z = signed_z(&beta_ref, &beta_perm_sd);
-
-    Ok(PermNullOutput {
-        n_perm: b,
-        k,
-        seed: seed_used,
-        n_eff: n_eff_val,
-        beta_ref,
-        beta_perm_mean,
-        beta_perm_sd,
-        beta_perm_z,
-        beta_perm_matrix: None,
+        beta_perm_matrix: if opts.return_perm_matrix {
+            Some(flat)
+        } else {
+            None
+        },
     })
 }
 
@@ -332,6 +317,11 @@ fn run_one_perm(
         wref,
         FitOpts {
             pre_standardized: true,
+            // check_n_eff: false — per-permutation refit; the NaN-row fail-soft
+            // handler upstream absorbs degeneracy, and n_eff was validated at entry.
+            check_n_eff: false,
+            // Seq inside the per-permutation worker — outer Rayon owns the threadpool.
+            par: crate::fit::ParChoice::Seq,
             ..FitOpts::default()
         },
     )?;
@@ -389,7 +379,7 @@ mod tests_worker {
     #[test]
     fn worker_returns_finite_beta_with_correct_length() {
         let (x, y) = synth(80, 5, 4.0, 1);
-        let (_, mut rng) = crate::rng::resolve_seed(Some(11));
+        let (_, mut rng) = crate::rng::resolve_seed(Some(11)).unwrap();
         let beta = run_one_perm_for_test(x.as_ref(), y.as_ref(), 2, false, &mut rng).unwrap();
         assert_eq!(beta.len(), 5);
         for v in &beta {
@@ -669,66 +659,6 @@ mod tests_calibration {
             "|z[0]|={} not larger than max |z[1..]|={}",
             abs_z[0],
             max_other,
-        );
-    }
-
-    #[test]
-    fn parallelism_determinism_disable_vs_enable() {
-        // Same seed, opposite disable_parallelism — both streaming and retained paths now
-        // use parallel_for_each_seeded + two-pass reduce, so output is byte-exact.
-        let (x, y) = synth_h0(60, 5, 41);
-        let opts_serial = PermNullOpts {
-            n_perm: 200,
-            return_perm_matrix: false,
-            pre_standardized: false,
-            disable_parallelism: true,
-            verbose: false,
-        };
-        let opts_parallel = PermNullOpts {
-            disable_parallelism: false,
-            ..opts_serial
-        };
-        let r1 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts_serial, Some(2026)).unwrap();
-        let r2 =
-            pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts_parallel, Some(2026)).unwrap();
-        assert_eq!(
-            r1.beta_perm_mean, r2.beta_perm_mean,
-            "beta_perm_mean must be byte-exact across serial/parallel"
-        );
-        assert_eq!(
-            r1.beta_perm_sd, r2.beta_perm_sd,
-            "beta_perm_sd must be byte-exact across serial/parallel"
-        );
-        assert_eq!(
-            r1.beta_perm_z, r2.beta_perm_z,
-            "beta_perm_z must be byte-exact across serial/parallel"
-        );
-    }
-
-    #[test]
-    fn parallelism_determinism_retained_matrix_byte_exact() {
-        // Retained path uses parallel_for_each_seeded which is byte-exact across
-        // serial / parallel modes (confirmed in resample::tests).
-        let (x, y) = synth_h0(60, 5, 41);
-        let opts_serial = PermNullOpts {
-            n_perm: 200,
-            return_perm_matrix: true,
-            pre_standardized: false,
-            disable_parallelism: true,
-            verbose: false,
-        };
-        let opts_parallel = PermNullOpts {
-            disable_parallelism: false,
-            ..opts_serial
-        };
-        let r1 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts_serial, Some(2026)).unwrap();
-        let r2 =
-            pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts_parallel, Some(2026)).unwrap();
-        let m1 = r1.beta_perm_matrix.as_ref().unwrap();
-        let m2 = r2.beta_perm_matrix.as_ref().unwrap();
-        assert_eq!(
-            m1, m2,
-            "retained matrices diverge between serial and parallel"
         );
     }
 }

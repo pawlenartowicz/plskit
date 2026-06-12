@@ -128,8 +128,8 @@ fn varimax_rotate(
     // K=1 no-op short-circuit: rotation of a 1-D subspace is
     // identity. v_converged uses the chosen target (L if provided, else W).
     if k == 1 {
-        let r = identity(1);
-        let w_rot = mat_clone(w);
+        let r = Mat::<f64>::identity(1, 1);
+        let w_rot = w.to_owned();
         let target = l.unwrap_or(w);
         let v_converged = sum_var_squared_columns(target);
         return Ok(RotateOutput {
@@ -142,15 +142,14 @@ fn varimax_rotate(
 
     // Step 1: build T_simp (the simple-structure target).
     let basis = l.unwrap_or(w);
-    let n_rows = basis.nrows();
     let mut t_simp: Mat<f64> = if args.kaiser_normalize {
         row_normalize(basis)
     } else {
-        mat_clone(basis)
+        basis.to_owned()
     };
 
     // Step 2: R = I_k.
-    let mut r = identity(k);
+    let mut r = Mat::<f64>::identity(k, k);
 
     // Step 3: pairwise Kaiser sweeps.
     let mut v_prev = sum_var_squared_columns(t_simp.as_ref());
@@ -159,15 +158,8 @@ fn varimax_rotate(
         sweeps_done = sweep;
         for p in 0..(k - 1) {
             for q in (p + 1)..k {
-                // Closed-form 2D angle on columns (p, q) of T_simp.
-                let pair = Mat::<f64>::from_fn(n_rows, 2, |i, j| {
-                    if j == 0 {
-                        t_simp[(i, p)]
-                    } else {
-                        t_simp[(i, q)]
-                    }
-                });
-                let theta = varimax_angle_2d(pair.as_ref());
+                // Closed-form 2D angle on columns (p, q) of T_simp — read in place; no per-pair (n,2) copy.
+                let theta = varimax_angle_2d(t_simp.as_ref(), p, q);
                 let c = theta.cos();
                 let s = theta.sin();
                 // Apply 2D rotation to columns (p, q) of T_simp and R.
@@ -192,7 +184,18 @@ fn varimax_rotate(
     // *original* L (not row-normalized) at the end — i.e. row magnitudes
     // are restored. We do the analogous thing for W: w_rot = w @ r is
     // computed from the original w, regardless of kaiser_normalize.
-    let w_rot = matmul(w, r.as_ref());
+    // Par::Seq: rotate runs inside rotation_stability's rayon workers, so the
+    // D×K GEMM must not dispatch to the global pool. (The SSD parity test pins
+    // R and the sweep count, not w_rot — the kernel choice here is free.)
+    let mut w_rot = Mat::<f64>::zeros(w.nrows(), r.ncols());
+    faer::linalg::matmul::matmul(
+        w_rot.as_mut(),
+        faer::Accum::Replace,
+        w,
+        r.as_ref(),
+        1.0,
+        faer::Par::Seq,
+    );
     Ok(RotateOutput {
         w_rot,
         r,
@@ -203,6 +206,7 @@ fn varimax_rotate(
 
 // ── small helpers ────────────────────────────────────────────────
 
+// Column-major traversal; mirrors `fit::check_finite_mat` (Result variant).
 fn mat_is_finite(m: MatRef<'_, f64>) -> bool {
     for j in 0..m.ncols() {
         for i in 0..m.nrows() {
@@ -214,10 +218,7 @@ fn mat_is_finite(m: MatRef<'_, f64>) -> bool {
     true
 }
 
-fn mat_clone(m: MatRef<'_, f64>) -> Mat<f64> {
-    Mat::<f64>::from_fn(m.nrows(), m.ncols(), |i, j| m[(i, j)])
-}
-
+#[cfg(test)]
 fn identity(k: usize) -> Mat<f64> {
     Mat::<f64>::from_fn(k, k, |i, j| if i == j { 1.0 } else { 0.0 })
 }
@@ -273,24 +274,12 @@ fn rotate_columns_inplace(m: &mut Mat<f64>, p: usize, q: usize, c: f64, s: f64) 
     }
 }
 
-fn matmul(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
-    debug_assert_eq!(a.ncols(), b.nrows());
-    Mat::<f64>::from_fn(a.nrows(), b.ncols(), |i, j| {
-        let mut s = 0.0_f64;
-        for k in 0..a.ncols() {
-            s += a[(i, k)] * b[(k, j)];
-        }
-        s
-    })
-}
-
-/// Closed-form Kaiser 2D varimax rotation angle for a `(n, 2)` loadings
-/// slice. Maximizes `Σ_j Var(L_rot[:, j]²)` over rotations.
+/// Closed-form Kaiser 2D varimax rotation angle for columns `p` and `q` of
+/// loadings matrix `l`. Maximizes `Σ_j Var(L_rot[:, j]²)` over rotations.
 ///
 /// Reference: SSDLite `varimax_angle_2d` (multipls.py:20-44).
 #[allow(clippy::many_single_char_names)]
-fn varimax_angle_2d(l: MatRef<'_, f64>) -> f64 {
-    debug_assert_eq!(l.ncols(), 2, "varimax_angle_2d requires exactly 2 columns");
+fn varimax_angle_2d(l: MatRef<'_, f64>, p: usize, q: usize) -> f64 {
     let n = l.nrows();
     let n_f = n as f64;
 
@@ -300,8 +289,8 @@ fn varimax_angle_2d(l: MatRef<'_, f64>) -> f64 {
     let mut vv = 0.0_f64;
     let mut uv = 0.0_f64;
     for i in 0..n {
-        let a = l[(i, 0)];
-        let b = l[(i, 1)];
+        let a = l[(i, p)];
+        let b = l[(i, q)];
         let u = a * a - b * b;
         let v = 2.0 * a * b;
         u_sum += u;
@@ -325,7 +314,7 @@ mod tests {
         // A target with one all-positive column and one all-zero
         // column already has perfect simple structure — angle is 0.
         let l = Mat::<f64>::from_fn(5, 2, |i, j| if j == 0 { (i + 1) as f64 } else { 0.0 });
-        let theta = varimax_angle_2d(l.as_ref());
+        let theta = varimax_angle_2d(l.as_ref(), 0, 1);
         assert!(theta.abs() < 1e-12, "expected ~0, got {theta}");
     }
 
@@ -344,7 +333,7 @@ mod tests {
             (4, 0) => 1.0,
             _ => 0.0,
         });
-        let theta = varimax_angle_2d(l.as_ref());
+        let theta = varimax_angle_2d(l.as_ref(), 0, 1);
         // Reference Python output: theta ≈ π/4 ≈ 0.7853981633974483.
         // Verified against SSDLite varimax_angle_2d on this exact input (2026-04-27).
         let expected = std::f64::consts::PI / 4.0;
@@ -364,6 +353,21 @@ mod tests {
             // Map to roughly U(-1, 1).
             (f64::from((s >> 33) as u32) / f64::from(u32::MAX)) * 2.0 - 1.0
         })
+    }
+
+    // Same faer kernel + Par::Seq as production w_rot, so the 1e-15
+    // w_rot == W·R assertion compares bit-identical computations.
+    fn matmul(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
+        let mut out = Mat::<f64>::zeros(a.nrows(), b.ncols());
+        faer::linalg::matmul::matmul(
+            out.as_mut(),
+            faer::Accum::Replace,
+            a,
+            b,
+            1.0,
+            faer::Par::Seq,
+        );
+        out
     }
 
     fn approx_eq_mat(a: MatRef<'_, f64>, b: MatRef<'_, f64>, tol: f64) -> bool {

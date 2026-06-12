@@ -15,6 +15,7 @@ from plskit._results import (
     ConfirmatoryCI,
     ConfirmatoryTestResult,
     FindKOptimalResult,
+    FindKeepOptimalResult,
     FindKSequenceResult,
     PermNullResult,
     PLS1Result,
@@ -139,8 +140,6 @@ def pls1_fit(
     k_max: int | None = None,
     find_k_args: dict | None = None,
     pre_standardized: bool = False,
-    tol: float = 1e-9,
-    max_iter: int = 500,
     seed: int | None = None,
     weights: np.ndarray | None = None,
 ) -> PLS1Result:
@@ -167,10 +166,6 @@ def pls1_fit(
         If True, skip standardization — X and y are assumed already zero-mean,
         unit-variance. See spec §3.5 readings table and the preprocessing guide
         (``plskit.preprocess``) for the cache pattern.
-    tol : float, default 1e-9
-        NIPALS convergence tolerance.
-    max_iter : int, default 500
-        Maximum NIPALS iterations.
     seed : int | None
         RNG seed forwarded to ``pls1_find_k_optimal`` / ``pls1_find_k_sequence``
         when ``k`` is a string.
@@ -232,8 +227,6 @@ def pls1_fit(
     raw = _plskit.pls1_fit(
         X, y, k_int,
         pre_standardized=pre_standardized,
-        tol=tol,
-        max_iter=max_iter,
         weights=weights,
     )
     return PLS1Result(**raw, selection_result=_sel)
@@ -251,6 +244,7 @@ def pls1_predict(model: PLS1Result, X_new: np.ndarray) -> np.ndarray:
         "beta": np.ascontiguousarray(model.beta, dtype=np.float64),
         "intercept": float(model.intercept),
         "k_used": int(model.k_used),
+        "keep": (int(model.keep) if model.keep is not None else None),
         "pre_standardized": bool(model.pre_standardized),
         "weights": (np.ascontiguousarray(model.weights, dtype=np.float64) if model.weights is not None else None),
         "n_eff": float(model.n_eff),
@@ -452,6 +446,184 @@ def pls1_find_k_sequence(
         weights = _ensure_array(weights, "weights", 1)
     raw = _plskit.pls1_find_k_sequence(
         X, y, k_max,
+        test_method=test_method,
+        alpha=alpha,
+        args=args,
+        pre_standardized=pre_standardized,
+        seed=seed,
+        disable_parallelism=disable_parallelism,
+        verbose=verbose,
+        weights=weights,
+    )
+    return FindKSequenceResult(**raw)
+
+
+@_convert_errors
+def spls1_fit(
+    X: np.ndarray,
+    y: np.ndarray,
+    k: int,
+    keep: int,
+    *,
+    pre_standardized: bool = False,
+    weights: np.ndarray | None = None,
+) -> PLS1Result:
+    """Fit a sparse PLS1 model (hard keep-count selection on the weight vector).
+
+    Each latent direction loads on exactly ``keep`` X variables (Chun & Keleş
+    2010 lineage, keep-count formulation). ``keep = n_features`` reproduces
+    ``pls1_fit`` bit-exactly. Tune ``keep`` with ``spls1_find_keep_optimal``;
+    tune ``k`` at fixed ``keep`` with ``spls1_find_k_optimal`` /
+    ``spls1_find_k_sequence`` — one axis is always fixed (no joint search).
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (n, d)
+        Predictor matrix. Standardized internally unless `pre_standardized=True`.
+    y : np.ndarray, shape (n,)
+        Response vector.
+    k : int
+        Number of PLS components (no ``'optimal'``/``'sequence'`` string modes —
+        use the ``spls1_find_*`` entry points directly).
+    keep : int
+        Keep-count in ``[1, n_features]``; scalar, broadcast to all components.
+    pre_standardized : bool, default False
+        If True, skip standardization.
+    weights : np.ndarray | None, shape (n,), default None
+        Non-negative observation weights; ``None`` means uniform.
+
+    Returns
+    -------
+    PLS1Result
+        With ``keep`` set; exactly ``keep`` nonzeros per ``W`` column.
+        Per-coordinate β CIs are NOT offered under selection (post-selection
+        inference) — see the spls1 spec.
+    """
+    X = _ensure_array(X, "X", 2)
+    y = _ensure_array(y, "y", 1)
+    if weights is not None:
+        weights = _ensure_array(weights, "weights", 1)
+    raw = _plskit.spls1_fit(
+        X, y, int(k), int(keep),
+        pre_standardized=pre_standardized,
+        weights=weights,
+    )
+    return PLS1Result(**raw)
+
+
+@_convert_errors
+def spls1_find_keep_optimal(
+    X: np.ndarray,
+    y: np.ndarray,
+    k: int,
+    *,
+    args: dict | None = None,
+    seed: int | None = None,
+    disable_parallelism: bool = False,
+    verbose: bool = False,
+    weights: np.ndarray | None = None,
+) -> FindKeepOptimalResult:
+    """Tune the spls1 keep-count at fixed ``k`` (CV R² with the 1-SE rule).
+
+    Sweeps a logged geometric keep grid over ``[1, n_features]`` (powers of
+    two, endpoints always included) and returns the SPARSEST keep whose mean
+    CV R² is within 1 SE of the best. The swept grid is reported on
+    ``result.keep_grid``. Sparsity is tuned inside the training split, never
+    on test data.
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (n, d)
+    y : np.ndarray, shape (n,)
+    k : int
+        Fixed component count for every fit in the sweep.
+    args : dict | None
+        ``{'n_folds': int}`` (default 5).
+    seed, disable_parallelism, verbose, weights
+        As on ``pls1_find_k_optimal``.
+
+    Returns
+    -------
+    FindKeepOptimalResult
+    """
+    X = _ensure_array(X, "X", 2)
+    y = _ensure_array(y, "y", 1)
+    if weights is not None:
+        weights = _ensure_array(weights, "weights", 1)
+    raw = _plskit.spls1_find_keep_optimal(
+        X, y, int(k),
+        args=args,
+        seed=seed,
+        disable_parallelism=disable_parallelism,
+        verbose=verbose,
+        weights=weights,
+    )
+    return FindKeepOptimalResult(**raw)
+
+
+@_convert_errors
+def spls1_find_k_optimal(
+    X: np.ndarray, y: np.ndarray, k_max: int, keep: int,
+    *,
+    selector: Literal["r2_se", "r2_max", "bic"] = "r2_se",
+    diagnostic: Literal["raw_perm", "split_nb", "split_perm", "e"] | None = None,
+    args: dict | None = None,
+    pre_standardized: bool = False,
+    seed: int | None = None,
+    disable_parallelism: bool = False,
+    verbose: bool = False,
+    weights: np.ndarray | None = None,
+) -> FindKOptimalResult:
+    """`pls1_find_k_optimal` with the inner fitter swapped to the sparse fit
+    at the caller's fixed ``keep``. Same selectors, diagnostic, and result
+    shape. ``keep = n_features`` reproduces the dense function exactly.
+
+    Note: ``selector='bic'`` reuses the dense complexity penalty (not a
+    keep-aware sparse BIC) — it under-penalizes added components and biases
+    the selected k upward under sparsity. Deliberate v1 simplification.
+    """
+    X = _ensure_array(X, "X", 2)
+    y = _ensure_array(y, "y", 1)
+    if weights is not None:
+        weights = _ensure_array(weights, "weights", 1)
+    raw = _plskit.spls1_find_k_optimal(
+        X, y, k_max, int(keep),
+        selector=selector,
+        diagnostic=diagnostic,
+        args=args,
+        pre_standardized=pre_standardized,
+        seed=seed,
+        disable_parallelism=disable_parallelism,
+        verbose=verbose,
+        weights=weights,
+    )
+    return FindKOptimalResult(**raw)
+
+
+@_convert_errors
+def spls1_find_k_sequence(
+    X: np.ndarray, y: np.ndarray, k_max: int, keep: int,
+    *,
+    test_method: Literal["raw_perm", "split_nb", "split_perm", "e"] = "split_nb",
+    alpha: float = 0.05,
+    args: dict | None = None,
+    pre_standardized: bool = False,
+    seed: int | None = None,
+    disable_parallelism: bool = False,
+    verbose: bool = False,
+    weights: np.ndarray | None = None,
+) -> FindKSequenceResult:
+    """`pls1_find_k_sequence` with the inner fitter swapped to the sparse fit
+    at the caller's fixed ``keep``: each step deflates on the sparse residual
+    AND tests the sparse marginal component (coherent sequential test).
+    ``keep = n_features`` reproduces the dense function exactly.
+    """
+    X = _ensure_array(X, "X", 2)
+    y = _ensure_array(y, "y", 1)
+    if weights is not None:
+        weights = _ensure_array(weights, "weights", 1)
+    raw = _plskit.spls1_find_k_sequence(
+        X, y, k_max, int(keep),
         test_method=test_method,
         alpha=alpha,
         args=args,
@@ -700,6 +872,10 @@ __all__ = [
     "pls1_confirmatory_test",
     "pls1_find_k_optimal",
     "pls1_find_k_sequence",
+    "spls1_fit",
+    "spls1_find_keep_optimal",
+    "spls1_find_k_optimal",
+    "spls1_find_k_sequence",
     "pls1_perm_null",
     "pls1_rotation_stability",
     "rotate",

@@ -14,6 +14,10 @@ pub mod pls1_predict;
 pub mod pls1_rotation_stability;
 pub mod preprocess;
 pub mod rotate;
+pub mod spls1_find_k_optimal;
+pub mod spls1_find_k_sequence;
+pub mod spls1_find_keep_optimal;
+pub mod spls1_fit;
 
 /// Resolved relative and absolute paths for a fixture case's input/output files.
 ///
@@ -140,6 +144,7 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_fit::wide_n30_d100_k1(root)?);
     cases.push(pls1_fit::wide_n30_d100_k3(root)?);
     cases.push(pls1_fit::skinny_n200_d5_k1(root)?);
+    cases.push(pls1_fit::weighted_n50_d10_k2(root)?);
 
     cases.push(pls1_find_k_optimal::r2_se(root)?);
     cases.push(pls1_find_k_optimal::r2_max(root)?);
@@ -157,12 +162,23 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_confirmatory_test::score(root)?);
     cases.push(pls1_confirmatory_test::e(root)?);
     cases.push(pls1_confirmatory_test::split_nb_ci(root)?);
+    cases.push(pls1_confirmatory_test::weighted_raw_perm(root)?);
+    cases.push(pls1_confirmatory_test::weighted_split_nb(root)?);
+    cases.push(pls1_confirmatory_test::weighted_split_perm(root)?);
+    cases.push(pls1_confirmatory_test::weighted_score(root)?);
+    cases.push(pls1_confirmatory_test::weighted_e(root)?);
 
     cases.push(pls1_predict::basic_n80_d6_k2(root)?);
     cases.push(rotate::varimax_d6_k2(root)?);
     cases.push(preprocess::n50_d10_with_weights(root)?);
     cases.push(pls1_perm_null::basic_n80_d6_k2(root)?);
     cases.push(pls1_rotation_stability::n80_d6_k2(root)?);
+
+    cases.push(spls1_fit::wide_n30_d100_k2_keep8(root)?);
+    cases.push(spls1_fit::small_n50_d10_k2_keep3(root)?);
+    cases.push(spls1_find_keep_optimal::k1(root)?);
+    cases.push(spls1_find_k_optimal::r2_se_keep3(root)?);
+    cases.push(spls1_find_k_sequence::split_nb_keep3(root)?);
 
     Ok(cases)
 }

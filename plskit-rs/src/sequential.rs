@@ -94,6 +94,10 @@ pub(crate) struct IncrementalSequenceOpts {
     pub(crate) disable_parallelism: bool,
     /// Print progress to stderr (reserved for future verbose mode).
     pub(crate) verbose: bool,
+    /// Sparse keep-count plumbing (spls1 family): threads into BOTH fit
+    /// sites per step — the deflation `pls1_fit` and the per-component
+    /// confirmatory test — so the test is coherent with the sparse residual.
+    pub(crate) keep: Option<usize>,
 }
 
 /// Result of [`run_incremental_sequence`].
@@ -133,7 +137,7 @@ pub(crate) fn run_incremental_sequence(
             k_max: max_allowed,
         });
     }
-    let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed);
+    let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
     let mut pvalues_vec: Vec<f64> = vec![f64::NAN; k_max];
     let mut last_sig: Option<usize> = None;
 
@@ -189,6 +193,7 @@ fn p_for_confirmatory_at_k(
             // TODO: forward `max_skip_rate` from IncrementalSequenceOpts when Task 10/11
             //       wires that knob through. Currently `ci: None` makes this field dead.
             max_skip_rate: 0.01,
+            keep: opts.keep,
         },
     )?;
     Ok(r.pvalue)
@@ -203,29 +208,77 @@ fn p_for_incremental(
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<f64> {
     use crate::fit::{pls1_fit, FitOpts, KSpec};
-    use crate::linalg::{standardize, standardize1};
-    let (xs_full, _, _) = standardize(x);
-    let (ys_full, _, _) = standardize1(y);
+    use crate::linalg::{standardize, standardize1, standardize1_weighted, standardize_weighted};
+
+    // Standardize the same way the per-step fit will: weighted moments when
+    // weights are present, and skip standardization entirely when the caller
+    // asserts pre-standardized inputs (IncrementalSequenceOpts.pre_standardized
+    // contract). The weights=None, pre_standardized=false path must stay
+    // bit-identical — it resolves to the plain standardize/standardize1 calls.
+    let (xs_full, ys_full) = if opts.pre_standardized {
+        (
+            Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| x[(i, j)]),
+            Col::<f64>::from_fn(y.nrows(), |i| y[i]),
+        )
+    } else if weights.is_some() {
+        let (xs, _, _) = standardize_weighted(x, weights);
+        let (ys, _, _) = standardize1_weighted(y, weights);
+        (xs, ys)
+    } else {
+        let (xs, _, _) = standardize(x);
+        let (ys, _, _) = standardize1(y);
+        (xs, ys)
+    };
 
     let (xs_def, ys_def) = if h == 1 {
         (xs_full, ys_full)
     } else {
+        // Deflation components are fit with the same weights as the per-step
+        // test so that the deflated residual matches the weighted model.
         let prev = pls1_fit(
             xs_full.as_ref(),
             ys_full.as_ref(),
             KSpec::Fixed(h - 1),
-            None,
+            weights,
             FitOpts {
                 pre_standardized: true,
+                // check_n_eff: false — internal deflation refit; n_eff was
+                // already validated at the top-level entry, and truncation is
+                // tolerated by design (deflate by whatever was extracted).
+                check_n_eff: false,
+                keep: opts.keep,
                 ..FitOpts::default()
             },
         )?;
         let tp: Mat<f64> = prev.t_scores.as_ref() * prev.p_loadings.transpose();
-        let xs_d = Mat::<f64>::from_fn(xs_full.nrows(), xs_full.ncols(), |i, j| {
-            xs_full[(i, j)] - tp[(i, j)]
-        });
         let tq: Col<f64> = prev.t_scores.as_ref() * prev.q_loadings.as_ref();
-        let ys_d = Col::<f64>::from_fn(ys_full.nrows(), |i| ys_full[i] - tq[i]);
+        // T, P′, q live on the √w′-row-scaled problem (fit.rs spec §4.2:
+        // row-scaling runs even at pre_standardized=true), so T·P′ ≈ √W·Xs.
+        // Deflate the UNscaled standardized data: Xs_d = Xs − √W⁻¹·T·P′ (same
+        // for y). prev.weights holds the exact normalized weights the fit
+        // row-scaled with (None when absent or uniform — that branch must stay
+        // bit-identical to the historical unweighted path). A zero weight
+        // zeroes the score row (t = √w·xs·w_vec), so its deflation
+        // contribution is 0, not 0·∞.
+        let (xs_d, ys_d) = match prev.weights.as_ref() {
+            None => (
+                Mat::<f64>::from_fn(xs_full.nrows(), xs_full.ncols(), |i, j| {
+                    xs_full[(i, j)] - tp[(i, j)]
+                }),
+                Col::<f64>::from_fn(ys_full.nrows(), |i| ys_full[i] - tq[i]),
+            ),
+            Some(w) => {
+                let inv_sqw: Vec<f64> = (0..xs_full.nrows())
+                    .map(|i| if w[i] > 0.0 { 1.0 / w[i].sqrt() } else { 0.0 })
+                    .collect();
+                (
+                    Mat::<f64>::from_fn(xs_full.nrows(), xs_full.ncols(), |i, j| {
+                        xs_full[(i, j)] - inv_sqw[i] * tp[(i, j)]
+                    }),
+                    Col::<f64>::from_fn(ys_full.nrows(), |i| ys_full[i] - inv_sqw[i] * tq[i]),
+                )
+            }
+        };
         (xs_d, ys_d)
     };
     let mut sub_opts = *opts;
@@ -276,6 +329,7 @@ mod tests {
                 seed: Some(11),
                 disable_parallelism: false,
                 verbose: false,
+                keep: None,
             },
         )
         .unwrap();
@@ -306,6 +360,7 @@ mod tests {
                 seed: Some(7),
                 disable_parallelism: false,
                 verbose: false,
+                keep: None,
             },
         )
         .unwrap();

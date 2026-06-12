@@ -31,6 +31,10 @@ pub enum PlsKitError {
     NonFiniteInput,
 
     /// NIPALS loop did not converge within the iteration budget.
+    ///
+    /// Reserved — never emitted by any current production path. Kept so
+    /// wrapper error-code enumerations stay stable if a strict-convergence
+    /// mode lands later.
     #[error("NIPALS did not converge after {iter} iterations (tol={tol})")]
     ConvergenceFailure {
         /// Number of iterations attempted.
@@ -133,6 +137,37 @@ pub enum PlsKitError {
         /// Total resamples attempted (== `SubsampleOpts.n_boot`).
         n_boot: usize,
     },
+
+    /// More than half the permutation null fits failed, so the NaN-as-exceedance
+    /// fail-soft rule (`raw_perm`) would saturate p toward 1 instead of measuring
+    /// anything. Distinct from `ResamplingDegenerate`, whose message diagnoses
+    /// weighted-subsample skips.
+    #[error(
+        "permutation null degenerate: {failed}/{total} null fits failed (NaN). \
+         The p-value would be dominated by the conservative NaN-as-exceedance \
+         rule rather than the data. Likely causes: `k` too large for `n`, or a \
+         pathological weight vector. Lower `k` or check the inputs."
+    )]
+    PermNullDegenerate {
+        /// Number of permutation null fits that returned NaN.
+        failed: usize,
+        /// Total permutations attempted (== `n_perm`).
+        total: usize,
+    },
+}
+
+impl From<procrustes::ProcrustesError> for PlsKitError {
+    /// Caught one frame up by the resampling workers (Rayon handler maps
+    /// `Err → NaN row / Failed`), so this conversion is in practice not
+    /// user-visible. The mapping preserves the procrustes message for the
+    /// rare cases where it does surface (e.g. direct callers of internal
+    /// alignment paths).
+    fn from(e: procrustes::ProcrustesError) -> Self {
+        match e {
+            procrustes::ProcrustesError::NonFinite => Self::NonFiniteInput,
+            other => Self::Internal(format!("procrustes alignment failed: {other}")),
+        }
+    }
 }
 
 impl PlsKitError {
@@ -155,6 +190,7 @@ impl PlsKitError {
             Self::InvalidWeights { .. } => "invalid_weights",
             Self::ResamplingDegenerate { .. } => "resampling_degenerate",
             Self::ResampleFailureRateExceeded { .. } => "resample_failure_rate_exceeded",
+            Self::PermNullDegenerate { .. } => "perm_null_degenerate",
         }
     }
 }
@@ -210,6 +246,20 @@ mod tests {
     fn already_rotated_code() {
         let e = PlsKitError::AlreadyRotated;
         assert_eq!(e.code(), "already_rotated");
+    }
+
+    #[test]
+    fn procrustes_dimension_mismatch_converts_to_internal() {
+        // Regression for review-finding R4 (ticket #1, 2026-05-10):
+        // procrustes returns DimensionMismatch when a NIPALS short-circuit
+        // truncates `w_b`; the From impl must convert (so `?` works at the
+        // call sites in subsample.rs / rotation_stability.rs).
+        let a = faer::Mat::<f64>::zeros(6, 1);
+        let r = faer::Mat::<f64>::from_fn(6, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let pe: PlsKitError = procrustes::orthogonal(a.as_ref(), r.as_ref(), false)
+            .unwrap_err()
+            .into();
+        assert!(matches!(pe, PlsKitError::Internal(_)));
     }
 
     #[test]

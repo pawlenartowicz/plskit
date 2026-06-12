@@ -7,6 +7,13 @@ use crate::rng::{child_rng, child_seeds, Rng};
 
 /// Compute `(n_train, n_test)` for a 50/50 split-half given `(n, k)`.
 /// Split fraction is hardcoded — NB calibration assumes balanced halves.
+///
+/// Precondition (caller's responsibility): `n ≥ k + 5`. The clamp
+/// `n_train = min(max(n/2, k+2), n−3)` can produce `n_train < k+2`
+/// when `n−3 < k+2` (i.e. `n < k+5`, e.g. `n=7, k=4 → n_train=4 < 6`).
+/// Below that threshold the per-half fit degrades to a silent r=0.
+/// `split_half_correlations` and `run_e` enforce this floor; subsamplers
+/// enforce a stronger `m ≥ k+2` check after resolving `m`.
 #[allow(dead_code)]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(crate) fn split_sizes(n: usize, k: usize) -> (usize, usize) {
@@ -29,7 +36,8 @@ pub(crate) fn one_split(n: usize, n_train: usize, rng: &mut Rng) -> (Vec<usize>,
     (train, test)
 }
 
-/// Permute y in place via a child RNG.
+/// Return a random permutation of `0..n` via a child RNG. The caller applies it
+/// to reorder y rows; this function mutates nothing.
 #[allow(dead_code)]
 pub(crate) fn permute_indices(n: usize, rng: &mut Rng) -> Vec<usize> {
     let mut perm: Vec<usize> = (0..n).collect();
@@ -95,7 +103,7 @@ mod tests {
 
     #[test]
     fn one_split_partitions_indices() {
-        let (_, mut rng) = resolve_seed(Some(11));
+        let (_, mut rng) = resolve_seed(Some(11)).unwrap();
         let (tr, te) = one_split(10, 7, &mut rng);
         assert_eq!(tr.len(), 7);
         assert_eq!(te.len(), 3);
@@ -108,8 +116,8 @@ mod tests {
     fn parallel_for_each_seeded_is_byte_exact_vs_serial() {
         // Same parent seed → same child seeds → same per-iter outputs in
         // the same order, regardless of Rayon scheduling.
-        let (_, mut a) = resolve_seed(Some(99));
-        let (_, mut b) = resolve_seed(Some(99));
+        let (_, mut a) = resolve_seed(Some(99)).unwrap();
+        let (_, mut b) = resolve_seed(Some(99)).unwrap();
         let par = parallel_for_each_seeded(&mut a, 64, false, |i, rng| {
             use rand::Rng;
             (i, rng.next_u64())
@@ -130,8 +138,8 @@ mod tests {
 
     #[test]
     fn parallel_for_each_seeded_disable_parallelism_byte_exact() {
-        let (_, mut a) = resolve_seed(Some(99));
-        let (_, mut b) = resolve_seed(Some(99));
+        let (_, mut a) = resolve_seed(Some(99)).unwrap();
+        let (_, mut b) = resolve_seed(Some(99)).unwrap();
         let par = parallel_for_each_seeded(&mut a, 64, false, |i, rng| {
             use rand::Rng;
             (i, rng.next_u64())
@@ -145,7 +153,7 @@ mod tests {
 
     #[test]
     fn permute_indices_returns_permutation() {
-        let (_, mut rng) = resolve_seed(Some(3));
+        let (_, mut rng) = resolve_seed(Some(3)).unwrap();
         let p = permute_indices(20, &mut rng);
         let mut sorted = p.clone();
         sorted.sort_unstable();

@@ -1,4 +1,12 @@
-//! Apply a fitted PLS1 model to new X → ŷ in raw scale.
+//! Apply a fitted PLS1 model to new X.
+//!
+//! Default path (`pre_standardized=false`): returns ŷ in raw scale with the
+//! intercept restored (`ŷ = X_new · β + intercept`).
+//!
+//! Pre-standardized path (`pre_standardized=true`): returns ŷ in standardized
+//! scale; `model.intercept` is 0.0 (set by `pls1_fit`), so the formula reduces to
+//! `ŷ = X_new · β`. The caller must pre-standardize `X_new` with the same mean
+//! and scale used during fit — this module does not re-apply those transforms.
 
 use faer::{Col, MatRef};
 
@@ -13,6 +21,7 @@ use crate::fit::Pls1Model;
 ///
 /// # Errors
 /// - `PlsKitError::DimensionMismatch` when `x_new.ncols() != model.beta.nrows()`
+/// - `PlsKitError::NonFiniteInput` when `x_new` contains NaN/inf
 ///
 /// # Panics
 /// Never (shape validated at entry).
@@ -24,13 +33,23 @@ pub fn pls1_predict(model: &Pls1Model, x_new: MatRef<'_, f64>) -> PlsKitResult<C
             y: d,
         });
     }
-    let raw: Col<f64> = x_new * &model.beta;
-    let intercept = if model.pre_standardized {
-        0.0
-    } else {
-        model.intercept
-    };
-    Ok(Col::<f64>::from_fn(raw.nrows(), |i| raw[i] + intercept))
+    crate::fit::check_finite_mat(x_new)?;
+    // model.intercept is already 0.0 for pre_standardized models (set in
+    // pls1_fit), so no re-check needed here.
+    // Par::Seq: predict is reachable from inside resampler Rayon workers
+    // (holdout scoring), so it must not dispatch to the global pool.
+    let mut raw = Col::<f64>::zeros(x_new.nrows());
+    faer::linalg::matmul::matmul(
+        raw.as_mut().as_mat_mut(),
+        faer::Accum::Replace,
+        x_new,
+        model.beta.as_ref().as_mat(),
+        1.0,
+        faer::Par::Seq,
+    );
+    Ok(Col::<f64>::from_fn(raw.nrows(), |i| {
+        raw[i] + model.intercept
+    }))
 }
 
 #[cfg(test)]

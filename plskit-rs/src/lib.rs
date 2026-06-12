@@ -42,12 +42,25 @@ pub mod signal_test;
 /// but the engine entry points themselves are not on the public surface.
 pub(crate) mod subsample;
 
+/// Re-export of faer's owned and borrowed matrix/column types.
+///
+/// `Pls1Model`, `FindKOptimalOutput`, and `FindKSequenceOutput` expose
+/// `Mat<f64>` / `Col<f64>` fields directly — keeping the canonical faer
+/// representation avoids round-trip allocations for Rust callers, who
+/// typically want to pass these straight back into linear-algebra code.
+/// Downstream users can `use plskit::{Mat, Col}` instead of adding faer
+/// to their `Cargo.toml`. The R, Python, and Julia wrappers translate
+/// these types to their host array representations at the FFI seam — see
+/// `_docs/internals/api-contract.md`.
+pub use faer::{Col, ColRef, Mat, MatRef};
+
 pub use error::{PlsKitError, PlsKitResult};
 pub use find_k::{
-    pls1_find_k_optimal, pls1_find_k_sequence, FindKOptimalOpts, FindKOptimalOutput,
-    FindKSequenceOpts, FindKSequenceOutput, Selector,
+    pls1_find_k_optimal, pls1_find_k_sequence, spls1_find_k_optimal, spls1_find_k_sequence,
+    spls1_find_keep_optimal, FindKOptimalOpts, FindKOptimalOutput, FindKSequenceOpts,
+    FindKSequenceOutput, FindKeepOptimalOpts, FindKeepOptimalOutput, Selector,
 };
-pub use fit::{pls1_fit, FitOpts, KSpec, Pls1Model};
+pub use fit::{pls1_fit, spls1_fit, FitOpts, KSpec, ParChoice, Pls1Model};
 pub use perm_null::{pls1_perm_null, PermNullOpts, PermNullOutput};
 pub use predict::pls1_predict;
 pub use preprocess::{preprocess, PreprocessInput, PreprocessResult};
@@ -60,6 +73,8 @@ pub use signal_test::{
     pls1_confirmatory_test, CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput,
     ConfirmatoryTestOpts, ConfirmatoryTestOutput,
 };
+// subsample is pub(crate) — only these two result types are on the public surface.
+// See subsample.rs module header for the full engine contract.
 pub use subsample::{CIScalar, ConfirmatoryCI};
 
 /// Returns the `CARGO_PKG_VERSION` string (e.g. `"0.0.1"`).

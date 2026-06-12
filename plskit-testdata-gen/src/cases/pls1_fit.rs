@@ -264,3 +264,60 @@ pub fn skinny_n200_d5_k1(root: &Path) -> Result<Case> {
         },
     )
 }
+
+/// Case: small (n=50, d=10), `k_signal=2`, fixed k=2, seed=99, non-uniform weights.
+///
+/// Weights: `2.0` for observations 0..25, `1.0` for 25..50.
+/// Exercises the weighted preprocessing + NIPALS path.
+/// Legacy field set: `coef`, `beta`, `intercept`, `k_used`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_fit` fails.
+pub fn weighted_n50_d10_k2(root: &Path) -> Result<Case> {
+    let name = "pls1_fit_weighted_n50_d10_k2";
+    let function = "pls1_fit";
+    let paths = CasePaths::build(root, function, name)?;
+    let (x, y) = synth_data(50, 10, 2, 4.0, 99);
+    let weights_nd = ndarray::Array1::from_shape_fn(50, |i| if i < 25 { 2.0_f64 } else { 1.0_f64 });
+    let weights_faer = ndarray_to_faer_col(&weights_nd);
+
+    {
+        let mut w = NpzWriter::create(&paths.abs_inputs)?;
+        w.add_f64("X", &x.clone().into_dyn())?;
+        w.add_f64("y", &y.clone().into_dyn())?;
+        w.add_f64("weights", &weights_nd.clone().into_dyn())?;
+        w.finish()?;
+    }
+
+    let x_faer = ndarray_to_faer_mat(&x);
+    let y_faer = ndarray_to_faer_col(&y);
+    let model = pls1_fit(
+        x_faer.as_ref(),
+        y_faer.as_ref(),
+        KSpec::Fixed(2),
+        Some(weights_faer.as_ref()),
+        FitOpts::default(),
+    )?;
+
+    {
+        let mut w = NpzWriter::create(&paths.abs_outputs)?;
+        w.add_f64("coef", &faer_col_to_array(&model.coef))?;
+        w.add_f64("beta", &faer_col_to_array(&model.beta))?;
+        w.add_f64("intercept", &scalar_f64(model.intercept))?;
+        w.add_i64("k_used", &scalar_i64(i64::try_from(model.k_used)?))?;
+        w.finish()?;
+    }
+
+    Ok(Case {
+        name: name.to_string(),
+        function: function.into(),
+        inputs: paths.rel_inputs,
+        outputs: paths.rel_outputs,
+        kwargs: serde_json::json!({"k": 2, "seed": 99, "weights": "nonuniform"}),
+        hashes: Hashes {
+            inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
+            outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
+        },
+        tolerance: Some(default_tolerance()),
+    })
+}

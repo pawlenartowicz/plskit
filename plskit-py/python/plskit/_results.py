@@ -41,6 +41,7 @@ class PLS1Result:
     n_eff: float
     rotation_spec: RotationSpec | None = None
     selection_result: FindKOptimalResult | FindKSequenceResult | None = None
+    keep: int | None = None          # spls1 keep-count; None for dense pls1_fit
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,18 @@ class FindKSequenceResult:
     pvalues: np.ndarray
     test_method: str
     alpha: float
+    seed: int
+    n_eff: float = float("nan")
+
+
+@dataclass(frozen=True)
+class FindKeepOptimalResult:
+    """Output of `spls1_find_keep_optimal` (keep-count tuning at fixed k)."""
+    keep_star: int            # sparsest keep within 1 SE of the best mean CV R²
+    k: int                    # the fixed component count the sweep ran at
+    cv_scores: dict[int, float]      # keep → mean CV R²
+    cv_scores_se: dict[int, float]   # keep → SE of CV R²
+    keep_grid: list[int]      # the grid actually swept (geometric, endpoints 1 and n_features)
     seed: int
     n_eff: float = float("nan")
 

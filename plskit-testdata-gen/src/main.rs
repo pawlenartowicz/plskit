@@ -1,5 +1,6 @@
 //! Regenerator binary for `plskit/testdata/`. Calls `cases::all_cases` and
-//! materializes 25 input/output NPZ files plus a v2 `manifest.json`.
+//! materializes the full corpus plus a v2 `manifest.json` (case count
+//! pinned in `tests/all_cases_smoke.rs`).
 
 use anyhow::{anyhow, Result};
 use plskit_testdata_gen::cases::all_cases;
