@@ -26,7 +26,7 @@ proptest = "1"                  # property tests; first one lands in B3
 serde_json = "1"                # corpus test reader (T14)
 ndarray = "0.17"                # test-only: corpus reader feeds ndarray-npy
 ndarray-npy = "0.10"            # test-only: load .npz fixtures (T14)
-zip = "6"                       # test-only: match ZipError::FileNotFound in corpus reader
+zip = "8"                       # test-only: match ZipError::FileNotFound in corpus reader
 
 [lints]
 workspace = true
