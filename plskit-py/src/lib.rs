@@ -265,6 +265,7 @@ fn parse_confirmatory_method(s: &str) -> PyResult<ConfirmatoryMethod> {
     match s {
         "raw_perm" => Ok(ConfirmatoryMethod::RawPerm),
         "split_nb" => Ok(ConfirmatoryMethod::SplitNb),
+        "split_perm_nr" => Ok(ConfirmatoryMethod::SplitPermNr),
         "split_perm" => Ok(ConfirmatoryMethod::SplitPerm),
         "score" => Ok(ConfirmatoryMethod::Score),
         "e" => Ok(ConfirmatoryMethod::E),
@@ -302,6 +303,21 @@ fn parse_confirmatory_args(
                 None => 50,
             };
             Ok(ConfirmatoryArgs::SplitNb { n_splits })
+        }
+        "split_perm_nr" => {
+            let allowed: &[&str] = &["n_perm", "n_splits"];
+            if let Some(a) = args {
+                validate_keys("split_perm_nr", a, allowed)?;
+            }
+            let n_perm = match args.and_then(|a| a.get_item("n_perm").ok().flatten()) {
+                Some(v) => v.extract::<usize>()?,
+                None => 1000,
+            };
+            let n_splits = match args.and_then(|a| a.get_item("n_splits").ok().flatten()) {
+                Some(v) => v.extract::<usize>()?,
+                None => 50,
+            };
+            Ok(ConfirmatoryArgs::SplitPermNr { n_perm, n_splits })
         }
         "split_perm" => {
             let allowed: &[&str] = &["n_perm", "n_splits"];
@@ -632,6 +648,7 @@ fn pls1_confirmatory_test_raw<'py>(
     d.set_item("n_splits", r.n_splits)?;
     d.set_item("seed", r.seed)?;
     d.set_item("n_eff", r.n_eff)?;
+    d.set_item("rho_hat", r.rho_hat)?;
     let ci_py: Option<Bound<'_, PyDict>> = r.ci.map(|c| confirmatory_ci_to_dict(py, c));
     d.set_item("ci", ci_py)?;
     Ok(d)
@@ -996,10 +1013,14 @@ fn run_find_k_sequence<'py>(
         ConfirmatoryMethod::SplitNb => &["n_splits"],
         ConfirmatoryMethod::SplitPerm => &["n_perm", "n_splits"],
         ConfirmatoryMethod::E => &[],
-        ConfirmatoryMethod::Score => {
-            return Err(invalid_args_err(
-                "test_method='score' has no sequential variant",
-            ));
+        // split_perm_nr has no sequential variant (same as score) — reachable
+        // now that parse_confirmatory_method accepts the tag, so this rejects at
+        // runtime rather than being dead code.
+        ConfirmatoryMethod::Score | ConfirmatoryMethod::SplitPermNr => {
+            return Err(invalid_args_err(&format!(
+                "test_method='{}' has no sequential variant",
+                tm.as_str()
+            )));
         }
     };
     if let Some(a) = args.as_ref() {

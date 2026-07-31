@@ -129,11 +129,17 @@ class RotationStabilityResult:
 class ConfirmatoryTestResult:
     pvalue: float
     statistic: float
-    method: str               # "raw_perm" | "split_nb" | "split_perm" | "score" | "e"
+    method: str               # "raw_perm" | "split_nb" | "split_perm_nr" | "split_perm" | "score" | "e"
     k: int                    # the K tested
     n_perm: int | None
     n_splits: int | None
     seed: int
+    # Populated (non-None) for method="split_nb" only, when unweighted and
+    # the test half has at least 4 rows. None for every other method
+    # (including "split_perm_nr", which has no z-scatter interpretation to
+    # offer), and None for "split_nb" itself when weighted or the test half
+    # is too small.
+    rho_hat: float | None = None
     n_eff: float = float("nan")
     ci: ConfirmatoryCI | None = None
 

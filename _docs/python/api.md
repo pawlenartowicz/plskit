@@ -199,8 +199,11 @@ test. `keep = n_features` reproduces the dense function bit-exactly.
 
 ### 3.1 Confirmatory omnibus test
 
-**Five test methods.** `raw_perm` / `split_nb` / `split_perm` are the
-predictive-validity split-resampling family (the methods paper's core);
+**Six test methods.** `raw_perm` / `split_nb` / `split_perm_nr` /
+`split_perm` are the predictive-validity split-resampling family (the
+methods paper's core; `split_perm_nr` is `split_nb`'s statistic with a
+permutation reference instead of the t approximation, K = 1 and
+unweighted only);
 `score` is closed-form on `T = ‖X′y‖²` (generalized χ² under Gaussian
 y, anisotropy-aware by construction, K-free); `e` is universal
 inference (split-LR e-value, calibration-free, non-asymptotic α bound
@@ -217,8 +220,8 @@ rotation-invariant CIs.
 **arguments:** `X`, `y`, `k` (default `1`)
 **options:**
 
-- `method` (`"raw_perm"` | `"split_nb"` | `"split_perm"` | `"score"` |
-  `"e"`)
+- `method` (`"raw_perm"` | `"split_nb"` | `"split_perm_nr"` |
+  `"split_perm"` | `"score"` | `"e"`)
 - `args` (dict of method-specific kwargs)
 - `ci` (bool, default `False`) — when `True`, runs an independent
   subsample pass after the headline test and populates `result.ci`.
@@ -233,6 +236,7 @@ rotation-invariant CIs.
 
 - `"raw_perm"` — `n_perm`, `n_folds`
 - `"split_nb"` — `n_splits`
+- `"split_perm_nr"` — `n_perm`, `n_splits`
 - `"split_perm"` — `n_perm`, `n_splits`
 - `"score"` — none (anisotropy handled internally by Welch–Satterthwaite)
 - `"e"` — none

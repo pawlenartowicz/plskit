@@ -256,7 +256,7 @@ def pls1_predict(model: PLS1Result, X_new: np.ndarray) -> np.ndarray:
 def pls1_confirmatory_test(
     X: np.ndarray, y: np.ndarray, k: int = 1,
     *,
-    method: Literal["raw_perm", "split_nb", "split_perm", "score", "e"],
+    method: Literal["raw_perm", "split_nb", "split_perm_nr", "split_perm", "score", "e"],
     args: dict | None = None,
     ci: bool = False,
     n_boot: int = 1000,
@@ -281,8 +281,17 @@ def pls1_confirmatory_test(
     k : int, default 1
         Number of components to test.
     method : str
-        Test method: ``'raw_perm'``, ``'split_nb'``, ``'split_perm'``,
-        ``'score'``, or ``'e'``.
+        Test method: ``'raw_perm'``, ``'split_nb'``, ``'split_perm_nr'``,
+        ``'split_perm'``, ``'score'``, or ``'e'``. ``'split_perm_nr'`` uses
+        the same statistic as ``'split_nb'`` (mean Fisher-z of held-out
+        correlations, reported as ``tanh(z̄)``), compared against a
+        permutation reference instead of the t approximation. It supports
+        K = 1 and unweighted input only; it raises rather than degrading on
+        ineligible input (use ``'split_perm'`` for K > 1 or weighted data).
+        ``rho_hat`` is populated for ``'split_nb'`` only; ``None`` for every
+        other method, including ``'split_perm_nr'``, and ``None`` for
+        ``'split_nb'`` itself when the input is weighted or the test half
+        is too small.
     args : dict | None
         Method-specific kwargs (e.g. ``{'n_perm': 500}`` for ``raw_perm``).
     weights : np.ndarray | None, shape (n,), default None

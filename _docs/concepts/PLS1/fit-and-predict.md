@@ -111,7 +111,7 @@ was zero (treated as constant; their coefficient is exactly zero).
 
 After fitting at a chosen `k`, the natural next question is: **is this
 model statistically supported, or could the apparent fit be noise?**
-`pls1_confirmatory_test` provides five methods. The honest split rule
+`pls1_confirmatory_test` provides six methods. The honest split rule
 applies (see [Find K](find-k.md)): if `k` was chosen on the same data,
 the inference is exploratory, not confirmatory.
 
@@ -119,6 +119,7 @@ the inference is exploratory, not confirmatory.
 |---|---|---|
 | `split_nb` | **Default.** Calibrated split test on Fisher-z of held-out correlation. Robust to non-Gaussian `y` and to non-iid `X`. | `O(n_splits)` fits |
 | `split_perm` | More robust variant of the split test — exact calibration via permutation rather than Fisher-z asymptotics. Slower than `split_nb`; pick when you do not want to rely on the Gaussian approximation in the calibration step. | `O(n_splits × n_perm)` |
+| `split_perm_nr` | Same statistic as `split_nb`, calibrated by permutation instead of the Fisher-z t approximation, and with no inner refits — at K = 1 the fitted direction is a fixed linear map of `y`, so every permutation reuses it. Much cheaper than `split_perm`. **K = 1 and unweighted input only**; errors on anything else. | `O(n_splits)` GEMM pairs of width `n_perm`, no fits |
 | `score` | Fast pre-fit screening test on `‖X′ y‖²`. **Detects signal in `span(X)`; does not validate the PLS fit at your chosen `k`.** Faster and more powerful than the split tests when its assumptions hold, but sensitive to heavy tails / outliers in `y`. Use as a cheap omnibus check, not as a fit-validation test. | One matvec + one eigendecomp |
 | `e` | Universal-inference e-value. Run only when you specifically need an **e-value** — for anytime-valid sequential testing, optional-stopping inference, or composition with other e-processes. Substantially less powerful than `split_nb` for the omnibus K-fixed test. | One PLS fit |
 | `raw_perm` | **Legacy. Do not use for new analyses.** Implemented for compatibility with the chemometrics permutation-Q² convention; included so users porting workflows from older tools can reproduce historical numbers. Power and calibration are uniformly worse than `split_nb`. | `O(n_perm)` fits |

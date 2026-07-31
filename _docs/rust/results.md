@@ -96,11 +96,12 @@ field semantics are identical to the Python counterpart; see
 |---|---|---|
 | `pvalue` | `f64` | always |
 | `statistic` | `f64` | always |
-| `method` | `String` | one of `"raw_perm"` / `"split_nb"` / `"split_perm"` / `"score"` / `"e"` |
+| `method` | `String` | one of `"raw_perm"` / `"split_nb"` / `"split_perm_nr"` / `"split_perm"` / `"score"` / `"e"` |
 | `k` | `usize` | the K tested (echoed from the input) |
 | `n_perm` | `Option<usize>` | `Some` for resampling-family methods, `None` for `score` / `e` |
 | `n_splits` | `Option<usize>` | `Some` for `split_*` methods, `None` for `raw_perm` / `score` / `e` |
 | `seed` | `u64` | always |
+| `rho_hat` | `Option<f64>` | `Some` for `split_nb` only, and only when unweighted with a test half of at least 4 rows; `None` for every other method |
 | `ci` | `Option<ConfirmatoryCI>` | `Some` when called with `ci=true`; carries the rotation-invariant subsample CIs |
 
 ## `CIScalar` — scalar subsample CI

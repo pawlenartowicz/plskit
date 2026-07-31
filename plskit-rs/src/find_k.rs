@@ -241,7 +241,7 @@ fn find_k_optimal_impl(
     let (pvalues, diagnostic_str) = if let Some(method) = opts.diagnostic {
         // stop_early_override=true so we collect the full p-value vector up to K*.
         let seq_args = SequentialArgs::defaults_for(method).ok_or_else(|| {
-            PlsKitError::InvalidArgument("score has no sequential variant".into())
+            PlsKitError::InvalidArgument(format!("{} has no sequential variant", method.as_str()))
         })?;
         let seq_args = match seq_args {
             SequentialArgs::RawPerm { .. } => SequentialArgs::RawPerm {
@@ -420,7 +420,10 @@ fn find_k_sequence_impl(
     crate::fit::check_n_eff_for_k(n_eff_val, k_max, weights.is_some())?;
 
     let seq_args = SequentialArgs::defaults_for(opts.test_method).ok_or_else(|| {
-        PlsKitError::InvalidArgument("test_method='score' has no sequential variant".into())
+        PlsKitError::InvalidArgument(format!(
+            "test_method='{}' has no sequential variant",
+            opts.test_method.as_str()
+        ))
     })?;
     let seq_args = match seq_args {
         SequentialArgs::RawPerm { .. } => SequentialArgs::RawPerm {

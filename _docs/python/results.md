@@ -83,11 +83,12 @@ candidates were evaluated.
 |---|---|---|
 | `pvalue` | `float` | always |
 | `statistic` | `float` | always |
-| `method` | `str` | one of `"raw_perm"` / `"split_nb"` / `"split_perm"` / `"score"` / `"e"` |
+| `method` | `str` | one of `"raw_perm"` / `"split_nb"` / `"split_perm_nr"` / `"split_perm"` / `"score"` / `"e"` |
 | `k` | `int` | the K tested (echoed from the input) |
 | `n_perm` | `int \| None` | not None for resampling-family methods, None for `score` / `e` |
 | `n_splits` | `int \| None` | not None for `split_*` methods, None for `raw_perm` / `score` / `e` |
 | `seed` | `int` | always |
+| `rho_hat` | `float \| None` | `split_nb` only, and only when unweighted with a test half of at least 4 rows; `None` for every other method |
 | `ci` | `ConfirmatoryCI \| None` | not None when called with `ci=True`; carries the rotation-invariant subsample CIs |
 
 There is no `at` field (legacy concept dropped). There is no

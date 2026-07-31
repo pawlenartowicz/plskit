@@ -18,7 +18,7 @@ Python wrapper:
 
 - **Core fit / predict** — `pls1_fit`, `pls1_predict`, `preprocess`. K-selection lives in `pls1_find_k_optimal` and `pls1_find_k_sequence`.
 - **Sparse PLS1** — `spls1_fit`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`. `keep ∈ [1, n_features]`; `keep = n_features` reproduces the dense functions bit-exactly. One axis is always fixed: no joint `(k, keep)` 2-D search. Prediction uses `pls1_predict` on the `Pls1Model` returned by `spls1_fit` — no separate `spls1_predict`. Per-coordinate β CIs are not offered under selection (post-selection inference, deferred to a separate spec).
-- **Inference** — `pls1_confirmatory_test` (with the five methods `raw_perm` / `split_nb` / `split_perm` / `score` / `e`), `pls1_perm_null`. CIs ride on `pls1_confirmatory_test(ci=true)` plus the standalone `pls1_rotation_stability`.
+- **Inference** — `pls1_confirmatory_test` (with the six methods `raw_perm` / `split_nb` / `split_perm_nr` / `split_perm` / `score` / `e`), `pls1_perm_null`. CIs ride on `pls1_confirmatory_test(ci=true)` plus the standalone `pls1_rotation_stability`.
 - **Interpretive** — `rotate` with pluggable `L` and method-axis `(method, args)` dispatch.
 
 ### Planned — not yet implemented

@@ -55,7 +55,7 @@ impl SequentialArgs {
                 n_splits: 50,
             },
             ConfirmatoryMethod::E => SequentialArgs::E,
-            ConfirmatoryMethod::Score => return None,
+            ConfirmatoryMethod::Score | ConfirmatoryMethod::SplitPermNr => return None,
         })
     }
 
