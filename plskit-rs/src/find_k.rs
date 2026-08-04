@@ -1189,8 +1189,7 @@ mod tests {
             seed: Some(7),
             ..Default::default()
         };
-        let rerouted =
-            pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, opts(false)).unwrap();
+        let rerouted = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, opts(false)).unwrap();
         assert_eq!(rerouted.test_method, "split_exact");
         let forced = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, opts(true)).unwrap();
         assert_eq!(forced.test_method, "split_nb");

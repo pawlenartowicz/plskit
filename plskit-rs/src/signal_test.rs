@@ -2113,8 +2113,7 @@ mod tests {
             .unwrap()
         };
         let run_route = |k: usize, weights: Option<ColRef<'_, f64>>, keep, refit: bool| {
-            let (w_norm, _, _) =
-                crate::fit::validate_and_normalize_weights(weights, n, k).unwrap();
+            let (w_norm, _, _) = crate::fit::validate_and_normalize_weights(weights, n, k).unwrap();
             let (_, mut rng) = crate::rng::resolve_seed(Some(2)).unwrap();
             let opts = ConfirmatoryTestOpts {
                 keep,
@@ -2669,8 +2668,8 @@ mod tests {
             keep: Some(2),
             ..Default::default()
         };
-        let e = run_split_perm_nr(x.as_ref(), y.as_ref(), 1, 49, 5, None, &opts, &mut rng)
-            .unwrap_err();
+        let e =
+            run_split_perm_nr(x.as_ref(), y.as_ref(), 1, 49, 5, None, &opts, &mut rng).unwrap_err();
         assert_eq!(e.code(), "invalid_argument");
         assert!(e.to_string().contains("split_exact"), "msg={e}");
     }
@@ -3019,8 +3018,16 @@ mod tests {
     #[allow(clippy::float_cmp)] // same rule on the same standardized X — bit-exact or it's a bug
     fn public_gate_answers_what_the_embedded_gate_decided() {
         for (x, y, expect_fires) in [
-            (synth_one_factor(40, 5, 6).0, synth_one_factor(40, 5, 6).1, true),
-            (synth_no_signal(60, 10, 7).0, synth_no_signal(60, 10, 7).1, false),
+            (
+                synth_one_factor(40, 5, 6).0,
+                synth_one_factor(40, 5, 6).1,
+                true,
+            ),
+            (
+                synth_no_signal(60, 10, 7).0,
+                synth_no_signal(60, 10, 7).1,
+                false,
+            ),
         ] {
             let embedded = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
             let q = split_nb_gate(x.as_ref(), None).unwrap();

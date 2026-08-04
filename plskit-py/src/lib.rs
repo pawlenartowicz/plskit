@@ -866,7 +866,10 @@ fn run_find_k_optimal<'py>(
         }
         None => 50,
     };
-    let force = match args.as_ref().and_then(|a| a.get_item("force").ok().flatten()) {
+    let force = match args
+        .as_ref()
+        .and_then(|a| a.get_item("force").ok().flatten())
+    {
         Some(v) => {
             let Some(dm) = diag_method else {
                 return Err(invalid_args_err(
@@ -1071,7 +1074,10 @@ fn run_find_k_sequence<'py>(
         Some(v) => v.extract::<usize>()?,
         None => 50,
     };
-    let force = match args.as_ref().and_then(|a| a.get_item("force").ok().flatten()) {
+    let force = match args
+        .as_ref()
+        .and_then(|a| a.get_item("force").ok().flatten())
+    {
         Some(v) => v.extract::<bool>().map_err(|_| {
             invalid_args_err("args['force'] for test_method='split_nb' must be a bool")
         })?,
