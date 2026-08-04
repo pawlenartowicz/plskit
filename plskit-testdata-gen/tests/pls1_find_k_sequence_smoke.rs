@@ -1,6 +1,6 @@
 //! Smoke tests for `find_k_sequence` cases.
 
-use plskit_testdata_gen::cases::pls1_find_k_sequence::{e, raw_perm, split_nb, split_perm};
+use plskit_testdata_gen::cases::pls1_find_k_sequence::{e, raw_perm, split_exact, split_nb};
 use tempfile::tempdir;
 
 fn check_basic(
@@ -39,11 +39,11 @@ fn split_nb_emits_files() {
 }
 
 #[test]
-fn split_perm_emits_files() {
+fn split_exact_emits_files() {
     check_basic(
-        split_perm,
-        "pls1_find_k_sequence_split_perm",
-        "outputs/pls1_find_k_sequence/pls1_find_k_sequence_split_perm.npz",
+        split_exact,
+        "pls1_find_k_sequence_split_exact",
+        "outputs/pls1_find_k_sequence/pls1_find_k_sequence_split_exact.npz",
     );
 }
 

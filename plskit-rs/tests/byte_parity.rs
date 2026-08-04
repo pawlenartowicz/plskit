@@ -75,10 +75,11 @@ fn confirmatory_raw_perm_byte_parity() {
 }
 
 #[test]
-fn confirmatory_split_perm_byte_parity() {
+fn confirmatory_split_exact_byte_parity() {
+    // k = 2, dense (no `keep`): takes the refit route.
     let (x, y) = synth(40, 5, 3.0, 1);
     let opts = |dp: bool| ConfirmatoryTestOpts {
-        args: ConfirmatoryArgs::SplitPerm {
+        args: ConfirmatoryArgs::SplitExact {
             n_perm: 50,
             n_splits: 20,
         },
@@ -106,7 +107,44 @@ fn confirmatory_split_perm_byte_parity() {
         opts(false),
     )
     .unwrap();
-    assert_confirmatory_byte_eq(&serial, &par, "confirmatory_split_perm");
+    assert_confirmatory_byte_eq(&serial, &par, "confirmatory_split_exact");
+}
+
+#[test]
+fn confirmatory_split_exact_no_refit_byte_parity() {
+    // k = 1, dense (no `keep`): takes the no-refit route (see signal_test.rs
+    // for the K = 1 linear-map identity that makes this an exact shortcut).
+    let (x, y) = synth(40, 5, 3.0, 1);
+    let opts = |dp: bool| ConfirmatoryTestOpts {
+        args: ConfirmatoryArgs::SplitExact {
+            n_perm: 50,
+            n_splits: 20,
+        },
+        seed: Some(12),
+        disable_parallelism: dp,
+        ..Default::default()
+    };
+    let serial = pls1_confirmatory_test(
+        ConfirmatoryTestInput::Raw {
+            x: x.as_ref(),
+            y: y.as_ref(),
+            k: 1,
+            weights: None,
+        },
+        opts(true),
+    )
+    .unwrap();
+    let par = pls1_confirmatory_test(
+        ConfirmatoryTestInput::Raw {
+            x: x.as_ref(),
+            y: y.as_ref(),
+            k: 1,
+            weights: None,
+        },
+        opts(false),
+    )
+    .unwrap();
+    assert_confirmatory_byte_eq(&serial, &par, "confirmatory_split_exact_no_refit");
 }
 
 #[test]
@@ -185,7 +223,10 @@ fn confirmatory_split_nb_byte_parity() {
     // gated by disable_parallelism; this test pins the equivalence.
     let (x, y) = synth(60, 5, 3.0, 1);
     let opts = |dp: bool| ConfirmatoryTestOpts {
-        args: ConfirmatoryArgs::SplitNb { n_splits: 40 },
+        args: ConfirmatoryArgs::SplitNb {
+            n_splits: 40,
+            force: false,
+        },
         seed: Some(23),
         disable_parallelism: dp,
         ..Default::default()

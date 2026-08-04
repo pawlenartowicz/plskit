@@ -12,14 +12,12 @@ pub enum ConfirmatoryMethod {
     RawPerm,
     /// Split-half NB test with Fisher-z correction (`split_nb`).
     SplitNb,
-    /// Split-half permutation test, no refits (`split_perm_nr`). Same splits
-    /// and statistic as `split_nb` (`tanh(z̄)`), calibrated against a fixed-split
-    /// permutation reference instead of a t distribution. K = 1 and unweighted
-    /// only — see `run_split_perm_nr`. Confirmatory-only in this release — no
-    /// sequential variant, no default.
-    SplitPermNr,
-    /// Permutation-calibrated split-half test (`split_perm`).
-    SplitPerm,
+    /// Permutation-calibrated split-half test (`split_exact`). One test with
+    /// two internal routes — a no-refit batched route at K = 1 and an honest
+    /// per-permutation refit route otherwise — chosen by the engine from the
+    /// input, never by the caller. Both routes report `tanh(z̄)` against a
+    /// fixed-split permutation reference.
+    SplitExact,
     /// Score test (closed-form, Welch-Satterthwaite χ² approximation).
     Score,
     /// Universal-inference split-LR e-value.
@@ -33,8 +31,7 @@ impl ConfirmatoryMethod {
         match self {
             ConfirmatoryMethod::RawPerm => "raw_perm",
             ConfirmatoryMethod::SplitNb => "split_nb",
-            ConfirmatoryMethod::SplitPermNr => "split_perm_nr",
-            ConfirmatoryMethod::SplitPerm => "split_perm",
+            ConfirmatoryMethod::SplitExact => "split_exact",
             ConfirmatoryMethod::Score => "score",
             ConfirmatoryMethod::E => "e",
         }
@@ -80,19 +77,18 @@ pub enum ConfirmatoryArgs {
     SplitNb {
         /// Number of split-half repetitions.
         n_splits: usize,
+        /// Run NB even on a design the auto-gate flags (see
+        /// `SPLIT_NB_GATE_MIN_N_EFF`). Default `false`: a flagged design is
+        /// rerouted to `split_exact` and the result reports that method.
+        force: bool,
     },
-    /// Split-half permutation test, no refits. K = 1 and unweighted only.
-    SplitPermNr {
+    /// Permutation-calibrated split-half test. The engine picks the no-refit
+    /// or refit route from `(k, keep)`; there is no route knob.
+    SplitExact {
         /// Number of permutations.
         n_perm: usize,
-        /// Number of split-half repetitions.
-        n_splits: usize,
-    },
-    /// Permutation-calibrated split-half test.
-    SplitPerm {
-        /// Number of permutations.
-        n_perm: usize,
-        /// Number of split-half repetitions per permutation.
+        /// Number of split-half repetitions, drawn once and held fixed across
+        /// all permutations.
         n_splits: usize,
     },
     /// Closed-form score test (Welch-Satterthwaite generalized χ²).
@@ -108,8 +104,7 @@ impl ConfirmatoryArgs {
         match self {
             ConfirmatoryArgs::RawPerm { .. } => ConfirmatoryMethod::RawPerm,
             ConfirmatoryArgs::SplitNb { .. } => ConfirmatoryMethod::SplitNb,
-            ConfirmatoryArgs::SplitPermNr { .. } => ConfirmatoryMethod::SplitPermNr,
-            ConfirmatoryArgs::SplitPerm { .. } => ConfirmatoryMethod::SplitPerm,
+            ConfirmatoryArgs::SplitExact { .. } => ConfirmatoryMethod::SplitExact,
             ConfirmatoryArgs::Score => ConfirmatoryMethod::Score,
             ConfirmatoryArgs::E => ConfirmatoryMethod::E,
         }
@@ -124,12 +119,11 @@ impl ConfirmatoryArgs {
                 n_perm: 1000,
                 n_folds: 5,
             },
-            ConfirmatoryMethod::SplitNb => ConfirmatoryArgs::SplitNb { n_splits: 50 },
-            ConfirmatoryMethod::SplitPermNr => ConfirmatoryArgs::SplitPermNr {
-                n_perm: 1000,
+            ConfirmatoryMethod::SplitNb => ConfirmatoryArgs::SplitNb {
                 n_splits: 50,
+                force: false,
             },
-            ConfirmatoryMethod::SplitPerm => ConfirmatoryArgs::SplitPerm {
+            ConfirmatoryMethod::SplitExact => ConfirmatoryArgs::SplitExact {
                 n_perm: 1000,
                 n_splits: 50,
             },
@@ -137,6 +131,108 @@ impl ConfirmatoryArgs {
             ConfirmatoryMethod::E => ConfirmatoryArgs::E,
         }
     }
+}
+
+/// Sample-size floor of the `split_nb` auto-gate: a design with fewer
+/// effective observations than this is rerouted to `split_exact`.
+///
+/// This and [`SPLIT_NB_GATE_MIN_STABLE_RANK`] are calibrated constants, not
+/// round numbers picked by taste: 5,000 null replicates per cell across iid
+/// Gaussian, decaying-spectrum, single-factor, NIR gasoline and GloVe-300
+/// designs. The NB correction is exact at ρ = ½ and loses its level when the
+/// sample is small or X's spectrum is concentrated on few directions; the
+/// pair of thresholds is the smallest rule separating the level-holding cells
+/// from the rest, and it deliberately errs toward flagging.
+const SPLIT_NB_GATE_MIN_N_EFF: f64 = 25.0;
+
+/// Spectrum floor of the `split_nb` auto-gate, on `linalg::stable_rank` of the
+/// standardized X. See [`SPLIT_NB_GATE_MIN_N_EFF`] for the shared provenance.
+const SPLIT_NB_GATE_MIN_STABLE_RANK: f64 = 3.0;
+
+/// Column-count precheck of the same gate, derived from
+/// [`SPLIT_NB_GATE_MIN_STABLE_RANK`] rather than tuned separately.
+/// `stable_rank(A) ≤ A.ncols()` always, so a design with exactly
+/// `SPLIT_NB_GATE_MIN_STABLE_RANK` columns can only land ON the floor or
+/// under it — the computed value carries no information there — and one
+/// column above that it is close to a coin flip on real data. At or below
+/// this many columns we stop trusting the computed rank and always reroute.
+/// Hence `= SPLIT_NB_GATE_MIN_STABLE_RANK + 1`.
+// The cast is exact and const-evaluated: the floor is a small positive whole
+// number written as f64 because `stable_rank` returns f64.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+const SPLIT_NB_GATE_MAX_COLS_PRECHECK: usize = SPLIT_NB_GATE_MIN_STABLE_RANK as usize + 1;
+
+/// The `split_nb` auto-gate rule, in the one place it is written. Returns
+/// `(fires, stable_rank)`; `fires` means the design is flagged and the caller
+/// should reroute to `split_exact`.
+///
+/// `xs` must ALREADY be standardized (weighted moments when weights are in
+/// play) — standardization policy is the caller's. All three call sites
+/// standardize unconditionally before calling this: `pls1_confirmatory_test`
+/// always standardizes a fresh copy, `sequential::run_incremental_sequence`
+/// does too (ignoring its `pre_standardized` flag, so the two can't disagree
+/// under weighted input), and the public [`split_nb_gate`] query standardizes
+/// whatever it is handed. `n_gate` is Kish `n_eff` under weights and the raw
+/// row count without.
+pub(crate) fn split_nb_gate_rule(xs: MatRef<'_, f64>, n_gate: f64) -> (bool, f64) {
+    // `sr` is computed unconditionally even when the column precheck already
+    // decided: it is reported as the gate's `stable_rank` diagnostic either way.
+    let sr = crate::linalg::stable_rank(xs);
+    let narrow = xs.ncols() <= SPLIT_NB_GATE_MAX_COLS_PRECHECK;
+    (
+        narrow || n_gate < SPLIT_NB_GATE_MIN_N_EFF || sr < SPLIT_NB_GATE_MIN_STABLE_RANK,
+        sr,
+    )
+}
+
+/// What the `split_nb` auto-gate sees on a design. Returned by
+/// [`split_nb_gate`].
+#[derive(Debug, Clone, Copy)]
+pub struct SplitNbGateOutput {
+    /// `true` when the design is flagged: a `split_nb` request on it reroutes
+    /// to `split_exact` unless the caller forces it.
+    pub fires: bool,
+    /// Stable rank of the standardized X.
+    pub stable_rank: f64,
+    /// Kish's effective sample size. Equals `n_samples` for uniform/absent weights.
+    pub n_eff: f64,
+}
+
+/// Ask whether the `split_nb` auto-gate flags a design, without running a test.
+///
+/// Reports the same decision `pls1_confirmatory_test` and the `find_k`
+/// entry points make internally — this evaluates the one rule, it does not
+/// restate it. Standardizes its own copy of `x` (weighted moments when
+/// `weights` is given), exactly as the embedded gates do.
+///
+/// # Errors
+/// - `PlsKitError::NonFiniteInput` when X or weights contain NaN/inf
+/// - `PlsKitError::InvalidWeights` for length-mismatched, negative, or all-zero weights
+///
+/// # Panics
+/// Never — the finiteness check runs ahead of the SVD in
+/// `linalg::stable_rank`, which is the only fallible step.
+pub fn split_nb_gate(
+    x: MatRef<'_, f64>,
+    weights: Option<ColRef<'_, f64>>,
+) -> PlsKitResult<SplitNbGateOutput> {
+    // Entry-point validation is repeated here rather than inherited: this
+    // function runs ahead of any dispatch, and `linalg::stable_rank` expects
+    // its SVD to converge. A NaN reaching it either panics or yields a NaN
+    // rank that loses the threshold comparison silently — either way the
+    // caller would lose the clean `NonFiniteInput`.
+    crate::fit::check_finite_mat(x)?;
+    // k_requested is only used for a check this function doesn't make (there
+    // is no component count in play), so any value passes; 0 is the honest one.
+    let (w_norm, n_eff, _all_uniform) =
+        crate::fit::validate_and_normalize_weights(weights, x.nrows(), 0)?;
+    let (xs, _, _) = crate::linalg::standardize_weighted(x, w_norm.as_ref().map(Col::as_ref));
+    let (fires, stable_rank) = split_nb_gate_rule(xs.as_ref(), n_eff);
+    Ok(SplitNbGateOutput {
+        fires,
+        stable_rank,
+        n_eff,
+    })
 }
 
 /// Knobs for the optional CI branch on `pls1_confirmatory_test`. When
@@ -189,12 +285,16 @@ pub struct ConfirmatoryTestOpts {
     /// if `skipped/total > max_skip_rate`.
     pub max_skip_rate: f64,
     /// Sparse keep-count plumbing for the `spls1` family: every inner fit
-    /// (CV folds for `raw_perm`, split halves for `split_nb`/`split_perm`,
+    /// (CV folds for `raw_perm`, split halves for `split_nb`/`split_exact`,
     /// the train half for `e`) runs sparse at this keep. `Score` ignores it —
-    /// the score statistic `T = ‖X'y‖²` is fit-free. `split_perm_nr` also
-    /// ignores it — it performs no inner fits at all (see "Why no refits"),
-    /// and errors rather than silently running dense if `keep` is set (guard,
-    /// not fallback). `None` (default) = dense. Wrapper surfaces do not
+    /// the score statistic `T = ‖X'y‖²` is fit-free. `split_exact`'s no-refit
+    /// route also ignores it — it performs no inner fits at all (see "Why no
+    /// refits" on `split_perm_nr_zbars`); the route function itself still
+    /// guards and errors rather than silently running dense, but a set `keep`
+    /// always sends `split_exact`'s dispatch to the refit route instead, so a
+    /// caller never observes that guard. `split_exact`'s refit route needs no
+    /// such guard: a set `keep` simply routes it to `run_split_perm`, which
+    /// honors the keep. `None` (default) = dense. Wrapper surfaces do not
     /// expose this; it exists for `spls1_find_k_sequence`'s per-component
     /// tests (and Rust-level use).
     pub keep: Option<usize>,
@@ -220,15 +320,16 @@ impl Default for ConfirmatoryTestOpts {
 pub struct ConfirmatoryTestOutput {
     /// p-value (or `min(1, 1/e)` for the `e` method).
     pub pvalue: f64,
-    /// Observed test statistic (CV R² for `raw_perm`; mean Fisher-z back-transformed for `split_nb`
-    /// and `split_perm_nr` (same statistic, `tanh(z̄)`, generally different splits); mean split-r
-    /// for `split_perm`; `||X'y||²` for `score`; log-e for `e`).
+    /// Observed test statistic (CV R² for `raw_perm`; mean Fisher-z back-transformed
+    /// (`tanh(z̄)`) for `split_exact` and `split_nb` — one statistic across
+    /// both, generally different splits; `||X'y||²` for `score`; log-e for
+    /// `e`).
     pub statistic: f64,
     /// Method name as a lowercase string (e.g. `"raw_perm"`, `"split_nb"`, `"e"`).
     pub method: String,
     /// Resolved number of components actually tested.
     pub k: usize,
-    /// Number of `raw_perm` / `split_perm` / `split_perm_nr` iterations used. `None` when the method has no permutation count.
+    /// Number of `raw_perm` / `split_exact` iterations used. `None` when the method has no permutation count.
     pub n_perm: Option<usize>,
     /// Number of split-half repetitions used. `None` when the method has no split count.
     pub n_splits: Option<usize>,
@@ -240,10 +341,16 @@ pub struct ConfirmatoryTestOutput {
     pub n_eff: f64,
     /// Estimated split correlation ρ̂, `Some` only on `split_nb` when its ruler
     /// is valid (unweighted, `n_test >= 4`); `None` for every other method,
-    /// including `split_perm_nr` (no z-scatter interpretation to offer), and
+    /// including `split_exact` (no z-scatter interpretation to offer), and
     /// `None` on `split_nb` itself when weighted or `n_test < 4`. Unrelated to
     /// `n_eff` (that field is the weights effective-n).
     pub rho_hat: Option<f64>,
+    /// Stable rank `‖X_std‖²_F / ‖X_std‖²₂` of the standardized X, as seen by
+    /// the `split_nb` auto-gate. `Some` whenever `split_nb` was the requested
+    /// method — whether the gate fired or not, and also under `force` (the
+    /// point of the field is to show what the gate saw); `None` for every
+    /// other requested method, which never evaluates the gate.
+    pub stable_rank: Option<f64>,
 }
 
 /// Confirmatory PLS1 omnibus test at fixed K.
@@ -260,11 +367,33 @@ pub struct ConfirmatoryTestOutput {
 ///
 /// # Panics
 /// Never (all internal indexing guarded by validated shapes).
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::needless_pass_by_value)] // ConfirmatoryTestInput wraps non-Copy Pls1Model ref
 pub fn pls1_confirmatory_test(
     input: ConfirmatoryTestInput<'_>,
     opts: ConfirmatoryTestOpts,
+) -> PlsKitResult<ConfirmatoryTestOutput> {
+    confirmatory_test_impl(input, opts, GateMode::Owned)
+}
+
+/// Who owns the `split_nb` auto-gate decision for one confirmatory call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GateMode {
+    /// This call evaluates the rule and reroutes if it fires. Every public
+    /// caller owns the decision.
+    Owned,
+    /// The caller already decided, on the undeflated X. Run the requested
+    /// method as-is. Only `sequential::run_incremental_sequence` passes this:
+    /// a step sees the deflated residual, whose spectrum is not X's, so
+    /// re-evaluating there could flip methods mid-chain — which closed testing
+    /// cannot use.
+    Decided,
+}
+
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::needless_pass_by_value)] // ConfirmatoryTestInput wraps non-Copy Pls1Model ref
+pub(crate) fn confirmatory_test_impl(
+    input: ConfirmatoryTestInput<'_>,
+    opts: ConfirmatoryTestOpts,
+    gate: GateMode,
 ) -> PlsKitResult<ConfirmatoryTestOutput> {
     let (x_ref, y_ref, k_resolved, weights_in) = match &input {
         ConfirmatoryTestInput::Raw { x, y, k, weights } => (*x, *y, *k, *weights),
@@ -301,15 +430,14 @@ pub fn pls1_confirmatory_test(
                 )));
             }
         }
-        ConfirmatoryArgs::SplitNb { n_splits } => {
+        ConfirmatoryArgs::SplitNb { n_splits, .. } => {
             if n_splits < 2 {
                 return Err(PlsKitError::InvalidArgument(format!(
                     "n_splits must be ≥ 2, got {n_splits}"
                 )));
             }
         }
-        ConfirmatoryArgs::SplitPerm { n_perm, n_splits }
-        | ConfirmatoryArgs::SplitPermNr { n_perm, n_splits } => {
+        ConfirmatoryArgs::SplitExact { n_perm, n_splits } => {
             if n_splits < 2 {
                 return Err(PlsKitError::InvalidArgument(format!(
                     "n_splits must be ≥ 2, got {n_splits}"
@@ -348,9 +476,50 @@ pub fn pls1_confirmatory_test(
         }
     }
 
+    // ── `split_nb` auto-gate ────────────────────────────────────────────────
+    // NB's Fisher-z correction is exact at ρ = ½ and drifts off level when the
+    // sample is small or X's spectrum is concentrated on few directions. Those
+    // designs get rerouted to `split_exact`, which calibrates by permutation
+    // and holds its level either way.
+    //
+    // Resolution happens here, BEFORE dispatch, not inside it: `method`,
+    // `n_perm` and `n_splits` on the output are read off `args_resolved`, so
+    // rewriting the args is exactly what makes `result.method` say
+    // `"split_exact"` when the gate fired.
+    //
+    // Under `GateMode::Decided` the whole block is skipped: the caller settled
+    // the method already and would only be re-paying for a standardize plus a
+    // full SVD (`linalg::stable_rank`) whose answer it discards.
+    let mut args_resolved = opts.args;
+    let mut stable_rank_out = None;
+    if let (GateMode::Owned, ConfirmatoryArgs::SplitNb { n_splits, force }) = (gate, opts.args) {
+        // The gate standardizes its own copy of X, unconditionally — including
+        // under `pre_standardized`. Re-standardizing an already-standardized
+        // matrix is the identity up to fp rounding, and stable rank is
+        // scale-invariant on top of that, so the extra pass cannot move the
+        // decision; skipping it would only save one O(n·d) sweep.
+        let (xs, _, _) =
+            crate::linalg::standardize_weighted(x_ref, w_norm.as_ref().map(Col::as_ref));
+        // `n_eff_val` is Kish `n_eff` under weights and exactly `n` when
+        // weights are absent, so it feeds `split_nb_gate`'s `n_gate` directly.
+        let (fires, sr) = split_nb_gate_rule(xs.as_ref(), n_eff_val);
+        stable_rank_out = Some(sr);
+        if !force && fires {
+            // `n_perm` is split_exact's own default; the requested `n_splits`
+            // carries over untouched. Mirrored by the hoisted sequence-level
+            // reroute in `sequential::run_incremental_sequence` and by
+            // `_REROUTE_FALLBACK_N_PERM` in plskit-py/python/plskit/_api.py —
+            // all three change together.
+            args_resolved = ConfirmatoryArgs::SplitExact {
+                n_perm: 1000,
+                n_splits,
+            };
+        }
+    }
+
     let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
 
-    let (result, n_perm_out, n_splits_out) = match opts.args {
+    let (result, n_perm_out, n_splits_out) = match args_resolved {
         ConfirmatoryArgs::RawPerm { n_perm, n_folds } => (
             run_raw_perm(
                 x_ref,
@@ -365,7 +534,7 @@ pub fn pls1_confirmatory_test(
             Some(n_perm),
             None,
         ),
-        ConfirmatoryArgs::SplitNb { n_splits } => (
+        ConfirmatoryArgs::SplitNb { n_splits, .. } => (
             run_split_nb(
                 x_ref,
                 y_ref,
@@ -378,34 +547,40 @@ pub fn pls1_confirmatory_test(
             None,
             Some(n_splits),
         ),
-        ConfirmatoryArgs::SplitPermNr { n_perm, n_splits } => (
-            run_split_perm_nr(
-                x_ref,
-                y_ref,
-                k_resolved,
-                n_perm,
-                n_splits,
-                w_norm.as_ref().map(Col::as_ref),
-                &opts,
-                &mut rng,
-            )?,
-            Some(n_perm),
-            Some(n_splits),
-        ),
-        ConfirmatoryArgs::SplitPerm { n_perm, n_splits } => (
-            run_split_perm(
-                x_ref,
-                y_ref,
-                k_resolved,
-                n_perm,
-                n_splits,
-                w_norm.as_ref().map(Col::as_ref),
-                &opts,
-                &mut rng,
-            )?,
-            Some(n_perm),
-            Some(n_splits),
-        ),
+        ConfirmatoryArgs::SplitExact { n_perm, n_splits } => {
+            // One test, two internal routes; the caller never picks. The
+            // no-refit route is an exact shortcut only under the K = 1
+            // identity: `pls1_fit` returns `w ∝ +X̃_tr'y_tr` with `p'w = 1`, so
+            // the test-half score is a fixed linear map of y determined by X
+            // and the split alone, and permuting y only re-feeds that map.
+            // K ≥ 2 deflation breaks it (component 2's weights depend on
+            // component 1's y-dependent scores), and sparse `keep` breaks it
+            // even at K = 1 (the selected column set moves with every
+            // permutation). Weights do not break it: under Convention A the
+            // map just carries a `diag(√w_tr)` inside it and stays fixed and
+            // linear in y, so weighted K = 1 dense input takes the no-refit
+            // route too (see `split_perm_nr_zbars`, "Under weights").
+            let no_refit = k_resolved == 1 && opts.keep.is_none();
+            let run = if no_refit {
+                run_split_perm_nr
+            } else {
+                run_split_perm
+            };
+            (
+                run(
+                    x_ref,
+                    y_ref,
+                    k_resolved,
+                    n_perm,
+                    n_splits,
+                    w_norm.as_ref().map(Col::as_ref),
+                    &opts,
+                    &mut rng,
+                )?,
+                Some(n_perm),
+                Some(n_splits),
+            )
+        }
         ConfirmatoryArgs::Score => (
             run_score(x_ref, y_ref, w_norm.as_ref().map(Col::as_ref), &opts)?,
             None,
@@ -480,7 +655,7 @@ pub fn pls1_confirmatory_test(
     Ok(ConfirmatoryTestOutput {
         pvalue: result.pvalue,
         statistic: result.statistic,
-        method: opts.args.method().as_str().to_owned(),
+        method: args_resolved.method().as_str().to_owned(),
         k: k_resolved,
         n_perm: n_perm_out,
         n_splits: n_splits_out,
@@ -488,6 +663,7 @@ pub fn pls1_confirmatory_test(
         ci: ci_payload,
         n_eff: n_eff_val,
         rho_hat: result.rho_hat,
+        stable_rank: stable_rank_out,
     })
 }
 
@@ -495,6 +671,10 @@ pub fn pls1_confirmatory_test(
 // Internal result carrier (not pub)
 // ──────────────────────────────────────────────────────────────────────────────
 
+// Debug is only needed so test-code assert_...!/unwrap_err() calls on
+// PlsKitResult<RunResult> can format the Ok side; production code never
+// prints a RunResult.
+#[derive(Debug)]
 struct RunResult {
     pvalue: f64,
     statistic: f64,
@@ -670,13 +850,64 @@ fn pls1_cv_r2(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Step 5: `split_nb` and `split_perm` split-half tests
+// Step 5: `split_nb` and `split_exact`'s refit route (`run_split_perm`)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Compute J split-half Pearson r values. Port of `_tests.py:161-186`.
+/// One split-half partition of the row indices `0..n`.
+struct SplitIdx {
+    tr: Vec<usize>,
+    te: Vec<usize>,
+}
+
+/// Draw the J split-half partitions used by `split_nb` and by `split_exact`'s
+/// refit route.
 ///
-/// Split fraction is hardcoded 50/50: NB calibration assumes balanced
-/// halves and there is no scientific reason to vary it.
+/// Split fraction is hardcoded 50/50: NB calibration assumes balanced halves
+/// and there is no scientific reason to vary it.
+///
+/// Drawn through `parallel_for_each_seeded` rather than a plain sequential loop
+/// because that is exactly how `split_half_correlations` used to draw them from
+/// inside its per-split worker: same parent state in, same J child seeds, and
+/// `one_split` is still the first draw off each child. So lifting the draw out
+/// to this function leaves `split_nb` seed-for-seed identical.
+fn draw_splits(
+    n: usize,
+    k: usize,
+    n_splits: usize,
+    disable_parallelism: bool,
+    rng: &mut crate::rng::Rng,
+) -> PlsKitResult<Vec<SplitIdx>> {
+    use crate::resample::{one_split, split_sizes};
+
+    // n-3 test-floor in split_sizes can drop n_train below k+2; below that the
+    // per-half fit degrades to a silent r=0. Reject up front. See split_sizes.
+    // Mirrored in split_perm_nr_zbars and run_e — change together.
+    if n < k + 5 {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "n={n} too small for k={k} under split methods (need n ≥ k+5)"
+        )));
+    }
+    let (n_train, _) = split_sizes(n, k);
+
+    Ok(crate::resample::parallel_for_each_seeded(
+        rng,
+        n_splits,
+        disable_parallelism,
+        |_, child| {
+            let (tr, te) = one_split(n, n_train, child);
+            SplitIdx { tr, te }
+        },
+    ))
+}
+
+/// Compute the split-half Pearson r on each supplied split. Port of
+/// `_tests.py:161-186`.
+///
+/// Takes the splits rather than drawing them so a caller can hold one set of
+/// splits fixed across many outcome vectors — what `split_exact`'s permutation
+/// loop needs. Nothing here consumes randomness: given `(x, y, split)` the fit
+/// and the r are deterministic, so the J splits map in parallel directly
+/// instead of through `parallel_for_each_seeded`.
 ///
 /// `x`/`y` are the **raw** (un-√w-scaled) inputs; `w_norm` carries the
 /// mean-1-normalized weights when present. Each half is standardized with
@@ -691,141 +922,132 @@ fn pls1_cv_r2(
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::unnecessary_wraps)] // signature must match callers that use ?
 fn split_half_correlations(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
     k: usize,
-    n_splits: usize,
+    splits: &[SplitIdx],
     w_norm: Option<ColRef<'_, f64>>,
     disable_parallelism: bool,
     keep: Option<usize>,
-    rng: &mut crate::rng::Rng,
-) -> PlsKitResult<Col<f64>> {
+) -> Col<f64> {
     use crate::fit::{pls1_fit, FitOpts, KSpec};
     use crate::linalg::{
         col_row_subset, normalize_weights, row_subset, standardize, standardize1,
         standardize1_weighted, standardize_apply, standardize_weighted,
     };
-    use crate::resample::{one_split, split_sizes};
 
-    let n = x.nrows();
-    // n-3 test-floor in split_sizes can drop n_train below k+2; below that the
-    // per-half fit degrades to a silent r=0. Reject up front. See split_sizes.
-    if n < k + 5 {
-        return Err(PlsKitError::InvalidArgument(format!(
-            "n={n} too small for k={k} under split methods (need n ≥ k+5)"
-        )));
-    }
-    let (n_train, _) = split_sizes(n, k);
+    let per_split = |sp: &SplitIdx| -> f64 {
+        let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
+        let x_tr = row_subset(x, tr);
+        let y_tr = col_row_subset(y, tr);
+        let x_te = row_subset(x, te);
+        let y_te = col_row_subset(y, te);
 
-    let r_vec = crate::resample::parallel_for_each_seeded(
-        rng,
-        n_splits,
-        disable_parallelism,
-        |_, child| {
-            let (tr, te) = one_split(n, n_train, child);
-            let x_tr = row_subset(x, &tr);
-            let y_tr = col_row_subset(y, &tr);
-            let x_te = row_subset(x, &te);
-            let y_te = col_row_subset(y, &te);
+        // Per-half weights, re-normalized to mean 1 within the half (mirrors
+        // pls1_cv_r2's per-fold renormalization). √w of each half is applied
+        // *after* weighted standardization so the per-half fit matches what
+        // pls1_fit would compute on that half's (X, y, w).
+        let w_tr: Option<Col<f64>> = w_norm.map(|w| {
+            let s = col_row_subset(w, tr);
+            normalize_weights(s.as_ref()).unwrap_or_else(|| Col::from_fn(tr.len(), |_| 1.0))
+        });
+        let w_te: Option<Col<f64>> = w_norm.map(|w| {
+            let s = col_row_subset(w, te);
+            normalize_weights(s.as_ref()).unwrap_or_else(|| Col::from_fn(te.len(), |_| 1.0))
+        });
+        let w_tr_ref = w_tr.as_ref().map(Col::as_ref);
 
-            // Per-half weights, re-normalized to mean 1 within the half (mirrors
-            // pls1_cv_r2's per-fold renormalization). √w of each half is applied
-            // *after* weighted standardization so the per-half fit matches what
-            // pls1_fit would compute on that half's (X, y, w).
-            let w_tr: Option<Col<f64>> = w_norm.map(|w| {
-                let s = col_row_subset(w, &tr);
-                normalize_weights(s.as_ref()).unwrap_or_else(|| Col::from_fn(tr.len(), |_| 1.0))
-            });
-            let w_te: Option<Col<f64>> = w_norm.map(|w| {
-                let s = col_row_subset(w, &te);
-                normalize_weights(s.as_ref()).unwrap_or_else(|| Col::from_fn(te.len(), |_| 1.0))
-            });
-            let w_tr_ref = w_tr.as_ref().map(Col::as_ref);
+        let (xs_tr, x_mean, x_scale) = if let Some(w) = w_tr_ref {
+            standardize_weighted(x_tr.as_ref(), Some(w))
+        } else {
+            standardize(x_tr.as_ref())
+        };
+        let xs_te = standardize_apply(x_te.as_ref(), x_mean.as_ref(), x_scale.as_ref());
+        let (ys_tr, _, _) = if let Some(w) = w_tr_ref {
+            standardize1_weighted(y_tr.as_ref(), Some(w))
+        } else {
+            standardize1(y_tr.as_ref())
+        };
 
-            let (xs_tr, x_mean, x_scale) = if let Some(w) = w_tr_ref {
-                standardize_weighted(x_tr.as_ref(), Some(w))
-            } else {
-                standardize(x_tr.as_ref())
-            };
-            let xs_te = standardize_apply(x_te.as_ref(), x_mean.as_ref(), x_scale.as_ref());
-            let (ys_tr, _, _) = if let Some(w) = w_tr_ref {
-                standardize1_weighted(y_tr.as_ref(), Some(w))
-            } else {
-                standardize1(y_tr.as_ref())
-            };
-
-            // √w' row-scaling on top of weighted standardization (Convention A).
-            let (xs_tr, ys_tr) = match w_tr_ref {
-                Some(w) => (
-                    Mat::<f64>::from_fn(xs_tr.nrows(), xs_tr.ncols(), |i, j| {
-                        xs_tr[(i, j)] * w[i].sqrt()
-                    }),
-                    Col::<f64>::from_fn(ys_tr.nrows(), |i| ys_tr[i] * w[i].sqrt()),
-                ),
-                None => (xs_tr, ys_tr),
-            };
-            let xs_te = match w_te.as_ref() {
-                Some(w) => Mat::<f64>::from_fn(xs_te.nrows(), xs_te.ncols(), |i, j| {
-                    xs_te[(i, j)] * w[i].sqrt()
+        // √w' row-scaling on top of weighted standardization (Convention A).
+        let (xs_tr, ys_tr) = match w_tr_ref {
+            Some(w) => (
+                Mat::<f64>::from_fn(xs_tr.nrows(), xs_tr.ncols(), |i, j| {
+                    xs_tr[(i, j)] * w[i].sqrt()
                 }),
-                None => xs_te,
-            };
+                Col::<f64>::from_fn(ys_tr.nrows(), |i| ys_tr[i] * w[i].sqrt()),
+            ),
+            None => (xs_tr, ys_tr),
+        };
+        let xs_te = match w_te.as_ref() {
+            Some(w) => Mat::<f64>::from_fn(xs_te.nrows(), xs_te.ncols(), |i, j| {
+                xs_te[(i, j)] * w[i].sqrt()
+            }),
+            None => xs_te,
+        };
 
-            let Ok(m) = pls1_fit(
-                xs_tr.as_ref(),
-                ys_tr.as_ref(),
-                KSpec::Fixed(k),
-                None,
-                FitOpts {
-                    pre_standardized: true,
-                    // check_n_eff: false — per-half fit may truncate (small half,
-                    // sparse keep); a truncated model still yields a valid r at
-                    // k_used, which beats silently recording r=0 via the Err arm.
-                    check_n_eff: false,
-                    // Seq inside the per-half worker — outer Rayon owns the threadpool.
-                    par: crate::fit::ParChoice::Seq,
-                    keep,
-                },
-            ) else {
-                return 0.0;
-            };
+        let Ok(m) = pls1_fit(
+            xs_tr.as_ref(),
+            ys_tr.as_ref(),
+            KSpec::Fixed(k),
+            None,
+            FitOpts {
+                pre_standardized: true,
+                // check_n_eff: false — per-half fit may truncate (small half,
+                // sparse keep); a truncated model still yields a valid r at
+                // k_used, which beats silently recording r=0 via the Err arm.
+                check_n_eff: false,
+                // Seq inside the per-half worker — outer Rayon owns the threadpool.
+                par: crate::fit::ParChoice::Seq,
+                keep,
+            },
+        ) else {
+            return 0.0;
+        };
 
-            // scores on test half = X_te * coef. Both scores (via √w-scaled
-            // xs_te) and y_te carry √w' so the Pearson r is taken on √w-scaled
-            // data, matching Convention A.
-            let scores_te: Col<f64> = &xs_te * &m.coef;
-            let n_te = scores_te.nrows();
-            let y_te: Col<f64> = match w_te.as_ref() {
-                Some(w) => Col::<f64>::from_fn(n_te, |i| y_te[i] * w[i].sqrt()),
-                None => y_te,
-            };
+        // scores on test half = X_te * coef. Both scores (via √w-scaled
+        // xs_te) and y_te carry √w' so the Pearson r is taken on √w-scaled
+        // data, matching Convention A.
+        let scores_te: Col<f64> = &xs_te * &m.coef;
+        let n_te = scores_te.nrows();
+        let y_te: Col<f64> = match w_te.as_ref() {
+            Some(w) => Col::<f64>::from_fn(n_te, |i| y_te[i] * w[i].sqrt()),
+            None => y_te,
+        };
 
-            let s_mean: f64 = (0..n_te).map(|i| scores_te[i]).sum::<f64>() / n_te as f64;
-            let y_mean: f64 = (0..n_te).map(|i| y_te[i]).sum::<f64>() / n_te as f64;
+        let s_mean: f64 = (0..n_te).map(|i| scores_te[i]).sum::<f64>() / n_te as f64;
+        let y_mean: f64 = (0..n_te).map(|i| y_te[i]).sum::<f64>() / n_te as f64;
 
-            let scores_c = Col::<f64>::from_fn(n_te, |i| scores_te[i] - s_mean);
-            let y_c = Col::<f64>::from_fn(n_te, |i| y_te[i] - y_mean);
+        let scores_c = Col::<f64>::from_fn(n_te, |i| scores_te[i] - s_mean);
+        let y_c = Col::<f64>::from_fn(n_te, |i| y_te[i] - y_mean);
 
-            let ss_s: f64 = (0..n_te).map(|i| scores_c[i] * scores_c[i]).sum();
-            let ss_y: f64 = (0..n_te).map(|i| y_c[i] * y_c[i]).sum();
+        let ss_s: f64 = (0..n_te).map(|i| scores_c[i] * scores_c[i]).sum();
+        let ss_y: f64 = (0..n_te).map(|i| y_c[i] * y_c[i]).sum();
 
-            // Mirrored in split_perm_nr_zbars — change together; the mirror
-            // explanation lives there (split_perm_nr duplicates this
-            // arithmetic deliberately, since it removes the fit this
-            // function performs above).
-            if ss_s < 1e-15 || ss_y < 1e-15 {
-                return 0.0;
-            }
+        // Mirrored in split_perm_nr_zbars — change together; the mirror
+        // explanation lives there (split_perm_nr duplicates this
+        // arithmetic deliberately, since it removes the fit this
+        // function performs above).
+        if ss_s < 1e-15 || ss_y < 1e-15 {
+            return 0.0;
+        }
 
-            let cross: f64 = (0..n_te).map(|i| scores_c[i] * y_c[i]).sum();
-            let r = cross / (ss_s * ss_y).sqrt();
-            r.clamp(-1.0, 1.0)
-        },
-    );
+        let cross: f64 = (0..n_te).map(|i| scores_c[i] * y_c[i]).sum();
+        let r = cross / (ss_s * ss_y).sqrt();
+        r.clamp(-1.0, 1.0)
+    };
 
-    Ok(Col::<f64>::from_fn(r_vec.len(), |i| r_vec[i]))
+    // Same shape as split_perm_nr_zbars' per-split dispatch: collect preserves
+    // split order in both arms, so serial and parallel results are byte-equal.
+    let r_vec: Vec<f64> = if disable_parallelism {
+        splits.iter().map(per_split).collect()
+    } else {
+        use rayon::prelude::*;
+        splits.par_iter().map(per_split).collect()
+    };
+
+    Col::<f64>::from_fn(r_vec.len(), |i| r_vec[i])
 }
 
 #[allow(clippy::many_single_char_names)]
@@ -845,16 +1067,16 @@ fn run_split_nb(
 
     // Raw (X, y) and weights flow into split_half_correlations, which does the
     // per-half weighted-standardize-then-√w (Convention A) internally.
+    let splits = draw_splits(n, k, n_splits, opts.disable_parallelism, rng)?;
     let r_splits = split_half_correlations(
         x,
         y,
         k,
-        n_splits,
+        &splits,
         w_norm,
         opts.disable_parallelism,
         opts.keep,
-        rng,
-    )?;
+    );
     let (p, mean_r, _t_stat, _df) = nb_test(&r_splits, n_train, n_test);
 
     // ρ̂ carve-out (spec "Salvage from the working tree" — moved here from the
@@ -893,9 +1115,9 @@ fn run_split_nb(
 fn nb_test(stats: &Col<f64>, n_train: usize, n_test: usize) -> (f64, f64, f64, f64) {
     let j = stats.nrows() as f64;
     // Fisher-z transform. The ±0.9999 pre-atanh clamp is mirrored in
-    // split_perm_nr_zbars and in run_split_nb's rho_hat block below —
-    // change together; this site owns the explanation (keeps z̄ finite at
-    // |r| = 1).
+    // split_perm_nr_zbars, in mean_fisher_z, and in run_split_nb's rho_hat
+    // block below — change together; this site owns the explanation (keeps z̄
+    // finite at |r| = 1).
     let z_vec: Vec<f64> = (0..stats.nrows())
         .map(|i| stats[i].clamp(-0.9999, 0.9999).atanh())
         .collect();
@@ -925,6 +1147,14 @@ fn run_split_perm(
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<RunResult> {
     let n = x.nrows();
+    // The J splits are drawn once and held fixed across all B permutation
+    // replicates. Redrawing them per replicate (what this function used to do)
+    // folds split-to-split scatter into the null, so the reference
+    // distribution stops isolating the y–X association the observed statistic
+    // measures. split_perm_nr_zbars has always worked this way; this is the
+    // route that had to move.
+    let splits = draw_splits(n, k, n_splits, opts.disable_parallelism, rng)?;
+
     // Raw (X, y, weights) flow into split_half_correlations (Convention A
     // weighted-standardize-then-√w internally); the permutation loop reuses the
     // raw x and permutes raw y rows.
@@ -932,20 +1162,14 @@ fn run_split_perm(
         x,
         y,
         k,
-        n_splits,
+        &splits,
         w_norm,
         opts.disable_parallelism,
         opts.keep,
-        rng,
-    )?;
-    let j = r_obs.nrows();
-    let mean_obs: f64 = if j > 0 {
-        (0..j).map(|i| r_obs[i]).sum::<f64>() / j as f64
-    } else {
-        0.0
-    };
+    );
+    let z_bar_obs = mean_fisher_z(&r_obs);
 
-    let null_means_vec = crate::resample::parallel_for_each_seeded(
+    let null_zbars = crate::resample::parallel_for_each_seeded(
         rng,
         n_perm,
         opts.disable_parallelism,
@@ -954,48 +1178,56 @@ fn run_split_perm(
             // Permute raw y rows; weights stay tied to row positions (w_norm is
             // passed unpermuted), so w[i] always pairs with destination row i.
             let y_perm = Col::<f64>::from_fn(n, |i| y[perm[i]]);
-            match split_half_correlations(
+            let r_null = split_half_correlations(
                 x,
                 y_perm.as_ref(),
                 k,
-                n_splits,
+                &splits,
                 w_norm,
                 opts.disable_parallelism,
                 opts.keep,
-                outer_rng,
-            ) {
-                Ok(r_null) => {
-                    let jn = r_null.nrows();
-                    if jn > 0 {
-                        (0..jn).map(|i| r_null[i]).sum::<f64>() / jn as f64
-                    } else {
-                        0.0
-                    }
-                }
-                // A failed null replicate counts as an exceedance so it biases
-                // p upward, never downward (mirrors run_raw_perm — change
-                // together). Effectively unreachable: the observed call above
-                // already failed identically behind the n < k+5 guard.
-                Err(_) => f64::NAN,
-            }
+            );
+            mean_fisher_z(&r_null)
         },
     );
 
-    let exceedances = null_means_vec
+    // A non-finite null statistic counts as an exceedance so it biases p
+    // upward, never downward (mirrors run_raw_perm and run_split_perm_nr —
+    // change together). A failed per-half fit already degrades to r = 0 inside
+    // split_half_correlations rather than surfacing here.
+    let exceedances = null_zbars
         .iter()
-        .filter(|v| v.is_nan() || **v >= mean_obs)
+        .filter(|v| !v.is_finite() || **v >= z_bar_obs)
         .count();
     let p = (exceedances as f64 + 1.0) / (n_perm as f64 + 1.0);
 
     Ok(RunResult {
         pvalue: p,
-        statistic: mean_obs,
+        statistic: z_bar_obs.tanh(),
         rho_hat: None,
     })
 }
 
+/// `z̄`: the mean Fisher-z of a vector of split-half correlations. `tanh` of
+/// this is the statistic `split_nb` and `split_exact` both report, and on the
+/// permutation routes it is also the scale the null comparison happens on —
+/// mean-of-z is not a monotone function of mean-of-r, so comparing on one
+/// scale and reporting the other would give a p-value for a different test.
+fn mean_fisher_z(r: &Col<f64>) -> f64 {
+    let j = r.nrows();
+    if j == 0 {
+        return 0.0;
+    }
+    // ±0.9999 pre-atanh clamp mirrored from nb_test (change together) —
+    // nb_test owns the explanation.
+    (0..j)
+        .map(|i| r[i].clamp(-0.9999, 0.9999).atanh())
+        .sum::<f64>()
+        / j as f64
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
-// Step 5b: `split_perm_nr` — split-half permutation test, no refits
+// Step 5b: `split_exact`'s no-refit route (`run_split_perm_nr` / `split_perm_nr_zbars`)
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Per-column z̄ values for `split_perm_nr` (length `n_perm + 1`; column 0 is
@@ -1017,10 +1249,37 @@ fn run_split_perm(
 /// the map is applied to, and no per-column fit is needed. K ≥ 2 breaks this
 /// (deflation makes component 2 depend on component 1's y-dependent scores),
 /// which is why this method is K = 1 only.
+///
+/// # Under weights
+/// The identity survives Convention A intact, but the map is not the same
+/// map. `X̃_tr` is now `diag(√w_tr)·X_std,tr` with `X_std,tr` standardized on
+/// *weighted* train-half moments, and the train y that `pls1_fit` sees is
+/// `diag(√w_tr)·y_std,tr`. So the fixed map carries a second `diag(√w_tr)`
+/// *inside* it — `X̃_tr'·diag(√w_tr)·y_tr` — which, unlike the y scale, is
+/// not a positive scalar and cannot be pulled out front. It is still linear
+/// in y and still independent of y, which is all the batching needs.
+///
+/// Centering of y still dies, for the weighted reason: the columns of
+/// `X_std,tr` are weighted-mean-zero, so the centering term is
+/// `Σᵢ wᵢ (xᵢⱼ − mean_w,ⱼ)/scaleⱼ = (Σw·mean_w,ⱼ − mean_w,ⱼ·Σw)/scaleⱼ = 0`
+/// straight from `mean_w,ⱼ = Σᵢ wᵢ xᵢⱼ / Σᵢ wᵢ` — exactly the annihilation
+/// the unweighted argument uses. Note this needs only that the same `w`
+/// defines the mean and weights the sum; the mean-1 renormalization cancels
+/// out and is not load-bearing here (it matters for matching `pls1_fit`'s
+/// scale, not for this identity).
+///
+/// The test half gets its OWN renormalized weights: both `X_std,te` (train
+/// moments, as always) and the raw test y are `√w_te`-scaled, so the Pearson
+/// r is taken on `√w_te`-scaled data. That is what `split_half_correlations`
+/// reports, and matching it is the point — a `√w_tr`-only implementation
+/// would compute a correlation no other method in the crate reports.
+/// Weights stay tied to their row positions and are never permuted, so the
+/// permutation reference is unaffected.
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::items_after_statements)]
 #[allow(clippy::similar_names)]
+#[allow(clippy::too_many_lines)] // per-half Convention A setup inflates the per-split closure
 fn split_perm_nr_zbars(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -1031,31 +1290,33 @@ fn split_perm_nr_zbars(
     opts: &ConfirmatoryTestOpts,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<Vec<f64>> {
-    use crate::linalg::{row_subset, standardize, standardize_apply};
+    use crate::linalg::{
+        col_row_subset, normalize_weights, row_subset, standardize, standardize_apply,
+        standardize_weighted,
+    };
     use crate::resample::{one_split, permute_indices, split_sizes};
 
-    // Scope limits, checked here (the method's own runner), never in
-    // split_half_correlations — that function is shared with split_perm and
+    // Scope limits, checked here (this route's own runner), never in
+    // split_half_correlations — that function is shared with run_split_perm and
     // knows nothing of this formula. Guard, not fallback: ineligible input
-    // errors rather than silently running split_perm.
+    // errors rather than silently running the run_split_perm route. Weights
+    // are *not* a scope limit: see "Under weights" above.
     if k != 1 {
         return Err(PlsKitError::InvalidArgument(format!(
-            "split_perm_nr requires k = 1 (got k={k}); use split_perm for k > 1"
+            "run_split_perm_nr requires k = 1 (got k={k}); use run_split_perm \
+             (split_exact's refit route) for k > 1"
         )));
-    }
-    if w_norm.is_some() {
-        return Err(PlsKitError::InvalidArgument(
-            "split_perm_nr does not support weighted input; use split_perm instead".into(),
-        ));
     }
     if opts.keep.is_some() {
         return Err(PlsKitError::InvalidArgument(
-            "split_perm_nr does not support sparse keep; use split_perm instead".into(),
+            "run_split_perm_nr does not support sparse keep; use run_split_perm \
+             (split_exact's refit route) instead"
+                .into(),
         ));
     }
 
     let n = x.nrows();
-    // Mirror of split_half_correlations' n ≥ k+5 guard — change together.
+    // Mirror of draw_splits' n ≥ k+5 guard — change together.
     if n < k + 5 {
         return Err(PlsKitError::InvalidArgument(format!(
             "n={n} too small for k={k} under split methods (need n ≥ k+5)"
@@ -1065,20 +1326,18 @@ fn split_perm_nr_zbars(
     let p_features = x.ncols();
     let n_cols = n_perm + 1;
 
-    // Draw the J splits once, fixed across all B permutation draws — the one
-    // behavioral difference from split_perm, and the load-bearing one (spec
-    // "The algorithm", step 1). Only the (tr, te) index pairs are drawn here
-    // (RNG-sequential); standardization is deferred to per_split_z below so
+    // Draw the J splits once, fixed across all B permutation draws (spec "The
+    // algorithm", step 1). Drawn sequentially off the parent RNG here rather
+    // than through draw_splits' parallel_for_each_seeded — the two split_exact
+    // routes are deliberately not stream-unified, so this route keeps the draw
+    // order its equivalence tests are anchored to. Only the (tr, te) index
+    // pairs are drawn here; standardization is deferred to per_split_z below so
     // peak memory stays O(np) plus the (B+1)-column blocks, per spec "Cost" —
     // materializing xs_tr/xs_te for all J splits up front would be O(J·n·p)
     // (≈2.1 GB at the embedding-scale n=13365, p=400, J=50 case).
     // standardize/standardize_apply are pure functions of x[tr]/x[te] with no
     // RNG, so moving them into the (possibly parallel) per-split closure
     // changes nothing about determinism or the parallel-order guarantee.
-    struct SplitIdx {
-        tr: Vec<usize>,
-        te: Vec<usize>,
-    }
     let splits: Vec<SplitIdx> = (0..n_splits)
         .map(|_| {
             let (tr, te) = one_split(n, n_train, rng);
@@ -1087,7 +1346,7 @@ fn split_perm_nr_zbars(
         .collect();
 
     // Outcome matrix Y (n x n_cols): column 0 is the observed y, columns
-    // 1..=n_perm are independent permutations drawn exactly as split_perm
+    // 1..=n_perm are independent permutations drawn exactly as run_split_perm
     // draws its null replicates (resample::permute_indices). No y
     // standardization anywhere — see the identity note above; it would only
     // rescale coef by a positive constant that the correlation divides out.
@@ -1121,12 +1380,52 @@ fn split_perm_nr_zbars(
     let per_split_z = |sp: &SplitIdx| -> Vec<f64> {
         let x_tr = row_subset(x, &sp.tr);
         let x_te = row_subset(x, &sp.te);
-        let (xs_tr, mean, scale) = standardize(x_tr.as_ref());
+
+        // Per-half weights renormalized to mean 1 within the half, weighted
+        // moments, then √w row-scaling — every step mirrored from
+        // split_half_correlations (change together; that function owns the
+        // Convention A explanation). `normalize_weights` only returns None on
+        // an all-zero half, which the parent's weight validation makes
+        // unreachable; fall back to uniform there exactly as that function
+        // does rather than growing an error path this route cannot hit.
+        let half_weights = |idx: &[usize]| -> Option<Col<f64>> {
+            w_norm.map(|w| {
+                let s = col_row_subset(w, idx);
+                normalize_weights(s.as_ref()).unwrap_or_else(|| Col::from_fn(idx.len(), |_| 1.0))
+            })
+        };
+        let w_tr = half_weights(&sp.tr);
+        let w_te = half_weights(&sp.te);
+        // Root taken once per row here, not once per (row, column) — with
+        // n_cols = B+1 columns of Y the inline form would repeat it B times.
+        let root = |w: &Col<f64>| Col::<f64>::from_fn(w.nrows(), |i| w[i].sqrt());
+        let sw_tr = w_tr.as_ref().map(root);
+        let sw_te = w_te.as_ref().map(root);
+
+        let (xs_tr, mean, scale) = match w_tr.as_ref() {
+            Some(w) => standardize_weighted(x_tr.as_ref(), Some(w.as_ref())),
+            None => standardize(x_tr.as_ref()),
+        };
         let xs_te = standardize_apply(x_te.as_ref(), mean.as_ref(), scale.as_ref());
 
         let y_tr = row_subset(y_mat.as_ref(), &sp.tr);
         let y_te = row_subset(y_mat.as_ref(), &sp.te);
         let n_te = sp.te.len();
+
+        // Convention A row-scaling. On the train side the √w_tr on Y is the
+        // `diag(√w_tr)` that sits *inside* the linear map (see "Under
+        // weights"): X̃_tr already carries one √w_tr, and the raw y needs the
+        // other. On the test side both the scores (through X̃_te) and the raw
+        // test y carry √w_te, so the Pearson r below is taken on √w_te-scaled
+        // data — matching what split_half_correlations reports.
+        let scale_rows = |m: Mat<f64>, sw: Option<&Col<f64>>| match sw {
+            Some(sw) => Mat::<f64>::from_fn(m.nrows(), m.ncols(), |i, j| m[(i, j)] * sw[i]),
+            None => m,
+        };
+        let xs_tr = scale_rows(xs_tr, sw_tr.as_ref());
+        let xs_te = scale_rows(xs_te, sw_te.as_ref());
+        let y_tr = scale_rows(y_tr, sw_tr.as_ref());
+        let y_te = scale_rows(y_te, sw_te.as_ref());
 
         // Same two GEMM calls either way — only the operand grouping differs.
         let t_te: Mat<f64> = if route_b {
@@ -1570,7 +1869,10 @@ mod tests {
                 weights: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                args: ConfirmatoryArgs::SplitNb {
+                    n_splits: 30,
+                    force: false,
+                },
                 seed: Some(1),
                 ..Default::default()
             },
@@ -1629,7 +1931,7 @@ mod tests {
         assert!(r.pvalue < 0.05, "p={}", r.pvalue);
     }
 
-    // ── split_nb and split_perm tests ───────────────────────────────────────
+    // ── split_nb and split_exact tests ──────────────────────────────────────
 
     #[test]
     fn split_nb_rejects_under_signal() {
@@ -1642,7 +1944,10 @@ mod tests {
                 weights: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                args: ConfirmatoryArgs::SplitNb {
+                    n_splits: 30,
+                    force: false,
+                },
                 seed: Some(2),
                 ..Default::default()
             },
@@ -1652,8 +1957,10 @@ mod tests {
         assert!(r.pvalue < 0.1, "p={}", r.pvalue);
     }
 
+    // k=2 forces split_exact's refit route (run_split_perm) — moved from the
+    // old standalone split_perm method test, which this replaces.
     #[test]
-    fn split_perm_runs_with_signal() {
+    fn split_exact_refit_route_runs_with_signal() {
         let (x, y) = synth_with_signal(60, 5, 4.0, 23);
         let r = pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
@@ -1663,7 +1970,7 @@ mod tests {
                 weights: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitPerm {
+                args: ConfirmatoryArgs::SplitExact {
                     n_perm: 100,
                     n_splits: 20,
                 },
@@ -1672,11 +1979,205 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(r.method, "split_perm");
+        assert_eq!(r.method, "split_exact");
         assert!((0.0..=1.0).contains(&r.pvalue));
+        // The statistic is tanh(z̄) on this path too, so it stays a correlation
+        // and remains in (-1, 1) — the clamp before atanh bounds |z̄| well
+        // short of infinity.
+        assert!(r.statistic.abs() < 1.0, "statistic={}", r.statistic);
     }
 
-    // ── split_perm_nr tests ──────────────────────────────────────────────────
+    // ── split_exact tests ────────────────────────────────────────────────────
+
+    // §7 route agreement. The two routes draw splits from different RNG
+    // streams (no-refit sequentially off the parent, refit through
+    // parallel_for_each_seeded child RNGs), so they never agree seed-for-seed.
+    // Injecting the same splits into both removes that difference and turns
+    // the check into the exact statement the method rests on: at K = 1 the
+    // batched linear map and an honest per-half pls1_fit produce the same
+    // test-half correlation, hence the same tanh(z̄).
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn split_exact_routes_agree_on_identical_splits() {
+        let n = 60_usize;
+        // Weighted case: the same identity has to survive Convention A
+        // (per-half weighted moments + √w row-scaling), which is the whole
+        // claim the no-refit route makes about weighted input.
+        let w = crate::linalg::normalize_weights(
+            Col::<f64>::from_fn(n, |i| if i % 3 == 0 { 2.0 } else { 0.5 }).as_ref(),
+        )
+        .unwrap();
+        assert_split_exact_routes_agree(n, None);
+        assert_split_exact_routes_agree(n, Some(w.as_ref()));
+    }
+
+    #[allow(clippy::many_single_char_names)]
+    fn assert_split_exact_routes_agree(n: usize, w_norm: Option<ColRef<'_, f64>>) {
+        use crate::resample::{one_split, split_sizes};
+
+        let (p, k) = (8_usize, 1_usize);
+        let (n_perm, n_splits, seed) = (9_usize, 6_usize, 31_u64);
+        let (x, y) = synth_with_signal(n, p, 3.0, 13);
+        let opts = ConfirmatoryTestOpts {
+            args: ConfirmatoryArgs::SplitExact { n_perm, n_splits },
+            seed: Some(seed),
+            ..Default::default()
+        };
+
+        let (_, mut rng_nr) = crate::rng::resolve_seed(Some(seed)).unwrap();
+        let z_bar_nr = split_perm_nr_zbars(
+            x.as_ref(),
+            y.as_ref(),
+            k,
+            n_perm,
+            n_splits,
+            w_norm,
+            &opts,
+            &mut rng_nr,
+        )
+        .unwrap();
+
+        // Replay the no-refit route's split draw exactly (same seed, same
+        // sequential one_split calls), then hand those splits to the refit
+        // route. Only the observed column exists on this side — the null
+        // columns depend on permutation draws the two routes do not share.
+        let (_, mut rng_re) = crate::rng::resolve_seed(Some(seed)).unwrap();
+        let (n_train, _) = split_sizes(n, k);
+        let splits: Vec<SplitIdx> = (0..n_splits)
+            .map(|_| {
+                let (tr, te) = one_split(n, n_train, &mut rng_re);
+                SplitIdx { tr, te }
+            })
+            .collect();
+        let z_bar_re = mean_fisher_z(&split_half_correlations(
+            x.as_ref(),
+            y.as_ref(),
+            k,
+            &splits,
+            w_norm,
+            false,
+            None,
+        ));
+
+        let scale = z_bar_nr[0].abs().max(z_bar_re.abs());
+        let rel = if scale == 0.0 {
+            0.0
+        } else {
+            (z_bar_nr[0] - z_bar_re).abs() / scale
+        };
+        assert!(
+            rel < 1e-10,
+            "weighted={}: no-refit z̄={} refit z̄={z_bar_re} rel={rel}",
+            w_norm.is_some(),
+            z_bar_nr[0]
+        );
+    }
+
+    // Route selection is by input shape, not by a caller knob. Each case is
+    // pinned bit-for-bit against the route it must land on, so a future edit
+    // to the predicate fails here rather than silently switching routes.
+    // Task 8 parked this rewrite at the test's creation: `SplitPermNr` and
+    // `SplitPerm` are no longer selectable methods, so the comparator side
+    // now calls `run_split_perm_nr` / `run_split_perm` directly instead of
+    // going through `pls1_confirmatory_test` with those (now-deleted) args
+    // variants. `run_route` reproduces exactly the preprocessing
+    // `pls1_confirmatory_test` performs ahead of dispatch — weight
+    // normalization and `resolve_seed` — so the comparator sees the same
+    // `(w_norm, rng)` state dispatch would hand the route. `SplitExact` args
+    // never trip the `split_nb` auto-gate (the only other RNG consumer ahead
+    // of dispatch), so no extra RNG draws sit between `resolve_seed` and the
+    // route call on either side.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn split_exact_selects_route_from_input_shape() {
+        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
+        let w = Col::<f64>::from_fn(60, |i| if i % 2 == 0 { 1.5 } else { 0.5 });
+        let (n_perm, n_splits) = (49_usize, 5_usize);
+        let n = 60_usize;
+
+        let run_exact = |k: usize, weights: Option<ColRef<'_, f64>>, keep| {
+            pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k,
+                    weights,
+                },
+                ConfirmatoryTestOpts {
+                    args: ConfirmatoryArgs::SplitExact { n_perm, n_splits },
+                    seed: Some(2),
+                    keep,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let run_route = |k: usize, weights: Option<ColRef<'_, f64>>, keep, refit: bool| {
+            let (w_norm, _, _) =
+                crate::fit::validate_and_normalize_weights(weights, n, k).unwrap();
+            let (_, mut rng) = crate::rng::resolve_seed(Some(2)).unwrap();
+            let opts = ConfirmatoryTestOpts {
+                keep,
+                ..Default::default()
+            };
+            if refit {
+                run_split_perm(
+                    x.as_ref(),
+                    y.as_ref(),
+                    k,
+                    n_perm,
+                    n_splits,
+                    w_norm.as_ref().map(Col::as_ref),
+                    &opts,
+                    &mut rng,
+                )
+                .unwrap()
+            } else {
+                run_split_perm_nr(
+                    x.as_ref(),
+                    y.as_ref(),
+                    k,
+                    n_perm,
+                    n_splits,
+                    w_norm.as_ref().map(Col::as_ref),
+                    &opts,
+                    &mut rng,
+                )
+                .unwrap()
+            }
+        };
+
+        // k=1, dense ⇒ no-refit route, weighted or not.
+        for weights in [None, Some(w.as_ref())] {
+            let a = run_exact(1, weights, None);
+            let b = run_route(1, weights, None, false);
+            assert_eq!(a.method, "split_exact");
+            assert_eq!(
+                a.pvalue.to_bits(),
+                b.pvalue.to_bits(),
+                "weighted={} took the wrong route",
+                weights.is_some()
+            );
+            assert_eq!(a.statistic.to_bits(), b.statistic.to_bits());
+        }
+
+        // k>1 and sparse keep each independently force the refit route.
+        // Both cases are unweighted: weights no longer affect route choice,
+        // so pairing them with these two would test nothing extra.
+        for (k, keep) in [(2, None), (1, Some(3))] {
+            let e = run_exact(k, None, keep);
+            let s = run_route(k, None, keep, true);
+            assert_eq!(e.method, "split_exact");
+            assert_eq!(
+                e.pvalue.to_bits(),
+                s.pvalue.to_bits(),
+                "k={k} keep={keep:?} took the wrong route"
+            );
+            assert_eq!(e.statistic.to_bits(), s.statistic.to_bits());
+        }
+    }
+
+    // ── split_exact's no-refit route (split_perm_nr) tests ──────────────────
 
     // Test 1 (write first, per spec): the equivalence test. Route A is an
     // honest per-split, per-column pls1_fit refit; route B is the shipped
@@ -1709,13 +2210,30 @@ mod tests {
         n_splits: usize,
         seed: u64,
         expect_route_b: bool,
+        weighted: bool,
     ) {
-        use crate::linalg::{row_subset, standardize, standardize1, standardize_apply};
+        use crate::linalg::{
+            col_row_subset, normalize_weights, row_subset, standardize, standardize1,
+            standardize1_weighted, standardize_apply, standardize_weighted,
+        };
         use crate::resample::{one_split, permute_indices, split_sizes};
 
         let k = 1_usize;
         let (x, y) = synth_with_signal(n, p, snr, data_seed);
         let n_cols = n_perm + 1;
+
+        // Globally mean-1-normalized weights, exactly what
+        // pls1_confirmatory_test hands the runner. Deliberately unequal and
+        // not aligned to the split boundary, so per-half renormalization
+        // actually changes the numbers (a uniform w would pass even if the
+        // implementation ignored weights entirely).
+        let w_all: Option<Col<f64>> = weighted.then(|| {
+            normalize_weights(
+                Col::<f64>::from_fn(n, |i| 0.25 + ((i * 7) % 5) as f64 * 0.5).as_ref(),
+            )
+            .unwrap()
+        });
+        let w_norm = w_all.as_ref().map(Col::as_ref);
 
         // Cost-model check (mirrors split_perm_nr_zbars' own comparison):
         // fails loudly if a future edit to the thresholds moves this
@@ -1739,9 +2257,9 @@ mod tests {
             k,
             n_perm,
             n_splits,
-            None,
+            w_norm,
             &ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitPermNr { n_perm, n_splits },
+                args: ConfirmatoryArgs::SplitExact { n_perm, n_splits },
                 seed: Some(seed),
                 ..Default::default()
             },
@@ -1758,19 +2276,44 @@ mod tests {
             te: Vec<usize>,
             xs_tr: Mat<f64>,
             xs_te: Mat<f64>,
+            /// Per-half mean-1-renormalized weights; `None` when unweighted.
+            w_tr: Option<Col<f64>>,
+            w_te: Option<Col<f64>>,
         }
         let splits: Vec<Split> = (0..n_splits)
             .map(|_| {
                 let (tr, te) = one_split(n, n_train, &mut rng_a);
                 let x_tr = row_subset(x.as_ref(), &tr);
                 let x_te = row_subset(x.as_ref(), &te);
-                let (xs_tr, mean, scale) = standardize(x_tr.as_ref());
+                // Convention A, spelled out the long way (this is the
+                // reference — it deliberately does not call the production
+                // helper): renormalize each half's weights to mean 1,
+                // standardize with weighted moments, then √w row-scale.
+                let w_tr =
+                    w_norm.map(|w| normalize_weights(col_row_subset(w, &tr).as_ref()).unwrap());
+                let w_te =
+                    w_norm.map(|w| normalize_weights(col_row_subset(w, &te).as_ref()).unwrap());
+                let (xs_tr, mean, scale) = if let Some(w) = w_tr.as_ref() {
+                    standardize_weighted(x_tr.as_ref(), Some(w.as_ref()))
+                } else {
+                    standardize(x_tr.as_ref())
+                };
                 let xs_te = standardize_apply(x_te.as_ref(), mean.as_ref(), scale.as_ref());
+                let scale_rows = |m: Mat<f64>, w: Option<&Col<f64>>| match w {
+                    Some(w) => {
+                        Mat::<f64>::from_fn(m.nrows(), m.ncols(), |i, j| m[(i, j)] * w[i].sqrt())
+                    }
+                    None => m,
+                };
+                let xs_tr = scale_rows(xs_tr, w_tr.as_ref());
+                let xs_te = scale_rows(xs_te, w_te.as_ref());
                 Split {
                     tr,
                     te,
                     xs_tr,
                     xs_te,
+                    w_tr,
+                    w_te,
                 }
             })
             .collect();
@@ -1790,7 +2333,17 @@ mod tests {
             let n_te = sp.te.len();
             for col in 0..n_cols {
                 let y_tr_col = Col::<f64>::from_fn(sp.tr.len(), |i| y_mat[(sp.tr[i], col)]);
-                let (ys_tr, _, _) = standardize1(y_tr_col.as_ref());
+                let (ys_tr, _, _) = if let Some(w) = sp.w_tr.as_ref() {
+                    standardize1_weighted(y_tr_col.as_ref(), Some(w.as_ref()))
+                } else {
+                    standardize1(y_tr_col.as_ref())
+                };
+                // √w_tr on the standardized train y, matching the √w_tr
+                // already baked into sp.xs_tr (Convention A).
+                let ys_tr = match sp.w_tr.as_ref() {
+                    Some(w) => Col::<f64>::from_fn(ys_tr.nrows(), |i| ys_tr[i] * w[i].sqrt()),
+                    None => ys_tr,
+                };
                 let m = pls1_fit(
                     sp.xs_tr.as_ref(),
                     ys_tr.as_ref(),
@@ -1804,7 +2357,12 @@ mod tests {
                 )
                 .unwrap();
                 let scores_te: Col<f64> = &sp.xs_te * &m.coef;
-                let y_te_col = Col::<f64>::from_fn(n_te, |i| y_mat[(sp.te[i], col)]);
+                // Test-half y is raw-but-√w_te-scaled (never standardized) —
+                // the correlation is taken on √w-scaled data on both sides.
+                let y_te_col = Col::<f64>::from_fn(n_te, |i| match sp.w_te.as_ref() {
+                    Some(w) => y_mat[(sp.te[i], col)] * w[i].sqrt(),
+                    None => y_mat[(sp.te[i], col)],
+                });
                 let s_mean: f64 = (0..n_te).map(|i| scores_te[i]).sum::<f64>() / n_te as f64;
                 let y_mean: f64 = (0..n_te).map(|i| y_te_col[i]).sum::<f64>() / n_te as f64;
                 let ss_s: f64 = (0..n_te).map(|i| (scores_te[i] - s_mean).powi(2)).sum();
@@ -1841,7 +2399,21 @@ mod tests {
     fn split_perm_nr_route_a_matches_honest_refit_reference() {
         // n=60, p=5, B+1=50: route_b cost 30·30·55=49,500 > route A cost
         // 60·5·50=15,000 ⇒ route A is the active branch here.
-        assert_split_perm_nr_route_matches_honest_refit(60, 5, 4.0, 7, 49, 5, 11, false);
+        assert_split_perm_nr_route_matches_honest_refit(60, 5, 4.0, 7, 49, 5, 11, false, false);
+    }
+
+    // Same two association orders again, weighted. This is the check that
+    // licenses the weighted derivation: the batched map folds diag(√w_tr)
+    // into a fixed linear map, the reference refits honestly under
+    // Convention A, and every one of the B+1 columns must still agree.
+    #[test]
+    fn split_perm_nr_route_a_matches_honest_refit_weighted() {
+        assert_split_perm_nr_route_matches_honest_refit(60, 5, 4.0, 7, 49, 5, 11, false, true);
+    }
+
+    #[test]
+    fn split_perm_nr_route_b_matches_honest_refit_weighted() {
+        assert_split_perm_nr_route_matches_honest_refit(60, 40, 4.0, 7, 49, 5, 11, true, true);
     }
 
     #[test]
@@ -1850,7 +2422,7 @@ mod tests {
         // 60·40·50=120,000 ⇒ route B is the active branch here — the branch
         // production actually uses on the near-singular grid (n≤320, p=400,
         // B=1000).
-        assert_split_perm_nr_route_matches_honest_refit(60, 40, 4.0, 7, 49, 5, 11, true);
+        assert_split_perm_nr_route_matches_honest_refit(60, 40, 4.0, 7, 49, 5, 11, true, false);
     }
 
     // Same case as above, degenerate: every X row identical ⇒ standardize's
@@ -1880,7 +2452,7 @@ mod tests {
             n_splits,
             None,
             &ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitPermNr { n_perm, n_splits },
+                args: ConfirmatoryArgs::SplitExact { n_perm, n_splits },
                 seed: Some(seed),
                 ..Default::default()
             },
@@ -1936,8 +2508,10 @@ mod tests {
     // generally different p. Splits are drawn once, so same seed ⇒ same
     // splits too — checked here via the identical statistic (tanh(z̄[0])),
     // which only matches if both the splits and the observed column agree.
+    // k=1, dense, unweighted ⇒ split_exact's no-refit route (SplitPermNr's
+    // former public identity) via the public API.
     #[test]
-    fn split_perm_nr_deterministic_under_same_seed() {
+    fn split_exact_no_refit_route_deterministic_under_same_seed() {
         let (x, y) = synth_with_signal(60, 5, 4.0, 5);
         let mk = |seed| {
             pls1_confirmatory_test(
@@ -1948,7 +2522,7 @@ mod tests {
                     weights: None,
                 },
                 ConfirmatoryTestOpts {
-                    args: ConfirmatoryArgs::SplitPermNr {
+                    args: ConfirmatoryArgs::SplitExact {
                         n_perm: 100,
                         n_splits: 10,
                     },
@@ -1977,7 +2551,7 @@ mod tests {
     // the fast suite.
     #[test]
     #[ignore = "slow MC null-uniformity check; run deliberately with --ignored"]
-    fn split_perm_nr_null_p_is_uniform() {
+    fn split_exact_no_refit_route_null_p_is_uniform() {
         use rand::RngExt;
         use rand::SeedableRng;
         let mut seed_rng = rand_chacha::ChaCha8Rng::seed_from_u64(2026);
@@ -1994,7 +2568,7 @@ mod tests {
                     weights: None,
                 },
                 ConfirmatoryTestOpts {
-                    args: ConfirmatoryArgs::SplitPermNr {
+                    args: ConfirmatoryArgs::SplitExact {
                         n_perm: 199,
                         n_splits: 20,
                     },
@@ -2016,89 +2590,93 @@ mod tests {
         );
     }
 
-    // Test 5: guards. k=2 and weighted input both error, each message naming
-    // split_perm as the alternative; unweighted k=1 succeeds.
+    // Test 5: guards. k=2 and sparse keep both error, each message naming
+    // run_split_perm as the alternative route. Both guards live inside
+    // split_perm_nr_zbars/run_split_perm_nr and are unreachable through the
+    // public API now: split_exact's dispatch never calls this route for k!=1
+    // or with keep set (it picks run_split_perm instead), so these tests call
+    // run_split_perm_nr directly. k=1 dense succeeds (weighted included — see
+    // split_exact_no_refit_route_accepts_weighted_input).
     #[test]
-    fn split_perm_nr_guard_rejects_k_not_one() {
+    fn split_exact_no_refit_route_guard_rejects_k_not_one() {
         let (x, y) = synth_with_signal(60, 5, 4.0, 17);
-        let e = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 2,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitPermNr {
-                    n_perm: 49,
-                    n_splits: 5,
-                },
-                seed: Some(2),
-                ..Default::default()
-            },
+        let (_, mut rng) = crate::rng::resolve_seed(Some(2)).unwrap();
+        let e = run_split_perm_nr(
+            x.as_ref(),
+            y.as_ref(),
+            2,
+            49,
+            5,
+            None,
+            &ConfirmatoryTestOpts::default(),
+            &mut rng,
         )
         .unwrap_err();
         assert_eq!(e.code(), "invalid_argument");
-        assert!(e.to_string().contains("split_perm"), "msg={e}");
+        assert!(e.to_string().contains("split_exact"), "msg={e}");
     }
 
+    // Inverse of the guard this test used to assert: weighted k=1 dense input
+    // is now in scope for the no-refit route, and the weights must actually
+    // reach the statistic (a run that silently dropped them would return the
+    // unweighted numbers bit-for-bit).
     #[test]
-    fn split_perm_nr_guard_rejects_weighted_input() {
+    fn split_exact_no_refit_route_accepts_weighted_input() {
         let (x, y) = synth_with_signal(60, 5, 4.0, 17);
         let w = Col::<f64>::from_fn(60, |i| if i % 2 == 0 { 1.5 } else { 0.5 });
-        let e = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 1,
-                weights: Some(w.as_ref()),
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitPermNr {
-                    n_perm: 49,
-                    n_splits: 5,
+        let run = |weights| {
+            pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k: 1,
+                    weights,
                 },
-                seed: Some(2),
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
-        assert_eq!(e.code(), "invalid_argument");
-        assert!(e.to_string().contains("split_perm"), "msg={e}");
+                ConfirmatoryTestOpts {
+                    args: ConfirmatoryArgs::SplitExact {
+                        n_perm: 49,
+                        n_splits: 5,
+                    },
+                    seed: Some(2),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let weighted = run(Some(w.as_ref()));
+        let unweighted = run(None);
+        assert_eq!(weighted.method, "split_exact");
+        assert!((0.0..=1.0).contains(&weighted.pvalue));
+        assert_ne!(
+            weighted.statistic.to_bits(),
+            unweighted.statistic.to_bits(),
+            "weights were ignored"
+        );
     }
 
     // Guard, not fallback: opts.keep is live sparse-fit plumbing honored by
-    // raw_perm/split_nb/split_perm/e, but split_perm_nr performs no inner
-    // fits at all (see "Why no refits"), so a caller-set keep must error
-    // rather than silently running dense with no signal that keep was
-    // ignored.
+    // raw_perm/split_nb/split_exact's refit route/e, but split_exact's
+    // no-refit route performs no inner fits at all (see "Why no refits"), so
+    // a caller-set keep must error rather than silently running dense with no
+    // signal that keep was ignored. Calls run_split_perm_nr directly — see
+    // the comment on split_exact_no_refit_route_guard_rejects_k_not_one for
+    // why the public API cannot reach this guard.
     #[test]
-    fn split_perm_nr_guard_rejects_sparse_keep() {
+    fn split_exact_no_refit_route_guard_rejects_sparse_keep() {
         let (x, y) = synth_with_signal(60, 5, 4.0, 17);
-        let e = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 1,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitPermNr {
-                    n_perm: 49,
-                    n_splits: 5,
-                },
-                seed: Some(2),
-                keep: Some(2),
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
+        let (_, mut rng) = crate::rng::resolve_seed(Some(2)).unwrap();
+        let opts = ConfirmatoryTestOpts {
+            keep: Some(2),
+            ..Default::default()
+        };
+        let e = run_split_perm_nr(x.as_ref(), y.as_ref(), 1, 49, 5, None, &opts, &mut rng)
+            .unwrap_err();
         assert_eq!(e.code(), "invalid_argument");
-        assert!(e.to_string().contains("split_perm"), "msg={e}");
+        assert!(e.to_string().contains("split_exact"), "msg={e}");
     }
 
     #[test]
-    fn split_perm_nr_succeeds_unweighted_k_one() {
+    fn split_exact_no_refit_route_succeeds_unweighted_k_one() {
         let (x, y) = synth_with_signal(60, 5, 4.0, 17);
         let r = pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
@@ -2108,7 +2686,7 @@ mod tests {
                 weights: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitPermNr {
+                args: ConfirmatoryArgs::SplitExact {
                     n_perm: 49,
                     n_splits: 5,
                 },
@@ -2117,14 +2695,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(r.method, "split_perm_nr");
+        assert_eq!(r.method, "split_exact");
         assert!((0.0..=1.0).contains(&r.pvalue));
         assert!(r.pvalue >= 1.0 / 50.0 - 1e-12, "p={}", r.pvalue);
-        assert!(r.rho_hat.is_none(), "split_perm_nr has no rho_hat");
+        assert!(r.rho_hat.is_none(), "split_exact has no rho_hat");
     }
 
     // Test 6: rho_hat relocation (Rust side). split_nb, unweighted, n_te >= 4
-    // ⇒ Some in [0, 1]. Weighted or n_te = 3 ⇒ None. split_perm_nr and every
+    // ⇒ Some in [0, 1]. Weighted or n_te = 3 ⇒ None. split_exact and every
     // other method ⇒ None (checked above and in the other methods' tests).
     #[test]
     fn split_nb_rho_hat_populated_when_ruler_valid() {
@@ -2137,7 +2715,10 @@ mod tests {
                 weights: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                args: ConfirmatoryArgs::SplitNb {
+                    n_splits: 30,
+                    force: false,
+                },
                 seed: Some(2),
                 ..Default::default()
             },
@@ -2161,7 +2742,10 @@ mod tests {
                 weights: Some(w.as_ref()),
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                args: ConfirmatoryArgs::SplitNb {
+                    n_splits: 30,
+                    force: false,
+                },
                 seed: Some(2),
                 ..Default::default()
             },
@@ -2183,13 +2767,313 @@ mod tests {
                 weights: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb { n_splits: 10 },
+                // `force` — this test is about the NB ruler's n_test floor, so
+                // NB has to actually run; n = 10 trips the auto-gate's n floor
+                // and would otherwise reroute to split_exact, which reports
+                // `rho_hat: None` for its own reasons and would pass vacuously.
+                args: ConfirmatoryArgs::SplitNb {
+                    n_splits: 10,
+                    force: true,
+                },
                 seed: Some(2),
                 ..Default::default()
             },
         )
         .unwrap();
         assert!(r.rho_hat.is_none());
+    }
+
+    // ── split_nb auto-gate ───────────────────────────────────────────────────
+
+    /// Single dominant factor: every column is the same latent `f` plus a tiny
+    /// jitter, so σ₁ carries nearly all the energy and the stable rank sits
+    /// just above 1 — the concentrated-spectrum half of the gate.
+    #[allow(clippy::many_single_char_names)]
+    fn synth_one_factor(n: usize, d: usize, seed: u64) -> (Mat<f64>, Col<f64>) {
+        use rand::RngExt;
+        use rand::SeedableRng;
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let f = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
+        let x = Mat::<f64>::from_fn(n, d, |i, _| f[i] + 0.01 * rng.random_range(-1.0..1.0));
+        let y = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
+        (x, y)
+    }
+
+    fn gate_run(
+        x: MatRef<'_, f64>,
+        y: ColRef<'_, f64>,
+        weights: Option<ColRef<'_, f64>>,
+        n_splits: usize,
+        force: bool,
+    ) -> ConfirmatoryTestOutput {
+        pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x,
+                y,
+                k: 1,
+                weights,
+            },
+            ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::SplitNb { n_splits, force },
+                seed: Some(4242),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn gate_reroutes_when_n_below_floor() {
+        // n = 20 < 25, spectrum flat (iid) — the size clause fires. d = 10 so
+        // neither the rank clause nor the column precheck can be the reason.
+        let (x, y) = synth_no_signal(20, 10, 5);
+        let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
+        assert_eq!(r.method, "split_exact");
+        let sr = r.stable_rank.expect("gate was evaluated");
+        assert!(
+            sr >= SPLIT_NB_GATE_MIN_STABLE_RANK,
+            "n, not the spectrum, must be what fired here (stable_rank={sr})"
+        );
+    }
+
+    /// The column precheck: `stable_rank ≤ ncols`, so at four columns the
+    /// computed rank is not trustworthy even when it clears the floor. n = 60
+    /// keeps the size clause out of it, and the rank assertion proves the
+    /// precheck — not the rank clause — is what fired.
+    #[test]
+    fn gate_reroutes_on_narrow_x_despite_adequate_rank() {
+        let (x, y) = synth_no_signal(60, 4, 11);
+        let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
+        assert_eq!(r.method, "split_exact");
+        let sr = r.stable_rank.expect("gate was evaluated");
+        assert!(
+            sr >= SPLIT_NB_GATE_MIN_STABLE_RANK,
+            "column count, not the spectrum, must be what fired here (stable_rank={sr})"
+        );
+    }
+
+    /// `force` overrides the column precheck exactly as it overrides the other
+    /// two clauses — the precheck is one more OR term, not a hard block.
+    #[test]
+    fn gate_force_runs_nb_on_narrow_x() {
+        let (x, y) = synth_no_signal(60, 4, 11);
+        let r = gate_run(x.as_ref(), y.as_ref(), None, 20, true);
+        assert_eq!(r.method, "split_nb");
+    }
+
+    #[test]
+    fn gate_reroutes_when_stable_rank_below_floor() {
+        let (x, y) = synth_one_factor(40, 5, 6);
+        let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
+        assert_eq!(r.method, "split_exact");
+        let sr = r.stable_rank.expect("gate was evaluated");
+        assert!(sr < SPLIT_NB_GATE_MIN_STABLE_RANK, "stable_rank={sr}");
+    }
+
+    #[test]
+    fn gate_passes_flat_spectrum_at_adequate_n() {
+        // d = 10 rather than the file's usual 5: at n = 60, d = 5 the stable
+        // rank lands around 3.1, so the negative case would clear the floor by
+        // a few percent and turn into a coin flip under any reseeding. Ten iid
+        // columns put it near 7.
+        let (x, y) = synth_no_signal(60, 10, 7);
+        let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
+        assert_eq!(r.method, "split_nb");
+        // No rank assertion — `method == "split_nb"` at n = 60 already implies
+        // the rank cleared the floor. What is worth pinning is that the
+        // diagnostic is populated on the pass path too.
+        assert!(r.stable_rank.is_some());
+        // Reported counts still come from the (unrewritten) split_nb args.
+        assert_eq!(r.n_perm, None);
+        assert_eq!(r.n_splits, Some(20));
+    }
+
+    #[test]
+    fn gate_force_runs_nb_on_flagged_design_and_still_reports_rank() {
+        let (x, y) = synth_one_factor(40, 5, 6);
+        let r = gate_run(x.as_ref(), y.as_ref(), None, 20, true);
+        assert_eq!(r.method, "split_nb");
+        let sr = r.stable_rank.expect(
+            "rank is computed even under force — it is how a caller sees what the gate saw",
+        );
+        assert!(sr < SPLIT_NB_GATE_MIN_STABLE_RANK, "stable_rank={sr}");
+    }
+
+    #[test]
+    fn gate_uses_n_eff_under_weights() {
+        // Raw n = 40 clears the floor; the weights pull Kish n_eff under it.
+        // Σw = 22, Σw² = 20.2 ⇒ n_eff = 22²/20.2 ≈ 23.96 < 25.
+        let (x, y) = synth_no_signal(40, 5, 8);
+        let w = Col::<f64>::from_fn(40, |i| if i % 2 == 0 { 1.0 } else { 0.1 });
+
+        let unweighted = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
+        assert_eq!(
+            unweighted.method, "split_nb",
+            "the same X at raw n = 40 must clear the gate, so the weighted \
+             case below isolates n_eff"
+        );
+
+        let r = gate_run(x.as_ref(), y.as_ref(), Some(w.as_ref()), 20, false);
+        assert_eq!(r.method, "split_exact");
+        let sr = r.stable_rank.expect("gate was evaluated");
+        assert!(
+            sr >= SPLIT_NB_GATE_MIN_STABLE_RANK,
+            "n_eff, not the spectrum, must be what fired here (stable_rank={sr})"
+        );
+    }
+
+    /// Weights change the gate's rank through the standardization constants,
+    /// not through any row scaling: `standardize_weighted` divides each column
+    /// by its *weighted* sd, so down-weighting the rows that carry a column's
+    /// spread shrinks that divisor and inflates the column's share of the
+    /// energy. Here column 0 is 50× wider in the first half of the rows, and
+    /// the weights all but ignore that half — so under weighted standardization
+    /// column 0 swamps the spectrum (rank ≈ 1.5) while plain standardization
+    /// leaves it in scale with the other nine (rank ≈ 6).
+    ///
+    /// This is the one test that fails if the gate standardizes with `None`
+    /// where it should pass `w_norm`.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn gate_weighted_standardization_drives_the_rank_clause() {
+        use rand::RngExt;
+        use rand::SeedableRng;
+        let (n, d) = (60, 10);
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(3);
+        let x = Mat::<f64>::from_fn(n, d, |i, j| {
+            let u = rng.random_range(-1.0..1.0);
+            if j == 0 && i < n / 2 {
+                50.0 * u
+            } else {
+                u
+            }
+        });
+        let y = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
+        // Kish n_eff = 60²/(30·0.05² + 30·1.95²) ≈ 31.5 — comfortably over the
+        // size floor, so only the rank clause can fire.
+        let w = Col::<f64>::from_fn(n, |i| if i < n / 2 { 0.05 } else { 1.95 });
+
+        let unweighted = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
+        assert_eq!(unweighted.method, "split_nb");
+
+        let weighted = gate_run(x.as_ref(), y.as_ref(), Some(w.as_ref()), 20, false);
+        assert_eq!(weighted.method, "split_exact");
+        assert!(
+            weighted.n_eff >= SPLIT_NB_GATE_MIN_N_EFF,
+            "{}",
+            weighted.n_eff
+        );
+        let (sr_u, sr_w) = (
+            unweighted.stable_rank.expect("gate was evaluated"),
+            weighted.stable_rank.expect("gate was evaluated"),
+        );
+        assert!(
+            sr_u >= SPLIT_NB_GATE_MIN_STABLE_RANK,
+            "unweighted sr={sr_u}"
+        );
+        assert!(sr_w < SPLIT_NB_GATE_MIN_STABLE_RANK, "weighted sr={sr_w}");
+    }
+
+    #[test]
+    fn gate_result_counts_read_off_resolved_args() {
+        let (x, y) = synth_one_factor(40, 5, 6);
+        let r = gate_run(x.as_ref(), y.as_ref(), None, 12, false);
+        assert_eq!(r.method, "split_exact");
+        // n_perm is split_exact's own default; n_splits is what the caller asked for.
+        assert_eq!(r.n_perm, Some(1000));
+        assert_eq!(r.n_splits, Some(12));
+    }
+
+    #[test]
+    fn gate_not_evaluated_for_other_methods() {
+        let (x, y) = synth_no_signal(20, 4, 5);
+        let r = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: 1,
+                weights: None,
+            },
+            ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::SplitExact {
+                    n_perm: 100,
+                    n_splits: 10,
+                },
+                seed: Some(4242),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(r.stable_rank.is_none());
+    }
+
+    // ── the public gate query ────────────────────────────────────────────────
+    //
+    // These are the whole contract of `split_nb_gate`: it must answer exactly
+    // what the embedded gate decides, and it must reject bad input with the
+    // same errors the test entry points do rather than reaching the SVD.
+
+    /// One flagged design and one clean one, checked against what
+    /// `pls1_confirmatory_test` actually did with the same X.
+    #[test]
+    #[allow(clippy::float_cmp)] // same rule on the same standardized X — bit-exact or it's a bug
+    fn public_gate_answers_what_the_embedded_gate_decided() {
+        for (x, y, expect_fires) in [
+            (synth_one_factor(40, 5, 6).0, synth_one_factor(40, 5, 6).1, true),
+            (synth_no_signal(60, 10, 7).0, synth_no_signal(60, 10, 7).1, false),
+        ] {
+            let embedded = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
+            let q = split_nb_gate(x.as_ref(), None).unwrap();
+            assert_eq!(q.fires, expect_fires);
+            assert_eq!(q.fires, embedded.method == "split_exact");
+            assert_eq!(q.stable_rank, embedded.stable_rank.unwrap());
+            assert_eq!(q.n_eff, embedded.n_eff);
+        }
+    }
+
+    /// The weighted path: both the `n_eff` clause and the weighted-moment
+    /// standardization behind the rank clause have to travel with it.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn public_gate_answers_under_weights() {
+        let (x, y) = synth_no_signal(40, 5, 8);
+        let w = Col::<f64>::from_fn(40, |i| if i % 2 == 0 { 1.0 } else { 0.1 });
+        let embedded = gate_run(x.as_ref(), y.as_ref(), Some(w.as_ref()), 20, false);
+        let q = split_nb_gate(x.as_ref(), Some(w.as_ref())).unwrap();
+        assert!(q.fires);
+        assert_eq!(q.fires, embedded.method == "split_exact");
+        assert_eq!(q.stable_rank, embedded.stable_rank.unwrap());
+        assert_eq!(q.n_eff, embedded.n_eff);
+        assert!(q.n_eff < 40.0, "weights must reach n_eff: {}", q.n_eff);
+    }
+
+    /// The reason the function repeats entry-point validation: without it a
+    /// NaN reaches `linalg::stable_rank`'s SVD instead of this error.
+    #[test]
+    fn public_gate_rejects_non_finite_x() {
+        let mut x = synth_no_signal(60, 10, 7).0;
+        x[(3, 2)] = f64::NAN;
+        assert!(matches!(
+            split_nb_gate(x.as_ref(), None),
+            Err(PlsKitError::NonFiniteInput)
+        ));
+    }
+
+    #[test]
+    fn public_gate_rejects_bad_weights() {
+        let x = synth_no_signal(60, 10, 7).0;
+        let neg = Col::<f64>::from_fn(60, |i| if i == 0 { -1.0 } else { 1.0 });
+        assert!(matches!(
+            split_nb_gate(x.as_ref(), Some(neg.as_ref())),
+            Err(PlsKitError::InvalidWeights { reason: "negative" })
+        ));
+        let short = Col::<f64>::from_fn(59, |_| 1.0);
+        assert!(matches!(
+            split_nb_gate(x.as_ref(), Some(short.as_ref())),
+            Err(PlsKitError::InvalidWeights {
+                reason: "length_mismatch"
+            })
+        ));
     }
 
     // ── Score test ───────────────────────────────────────────────────────────
@@ -2252,7 +3136,10 @@ mod tests {
                 weights: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                args: ConfirmatoryArgs::SplitNb {
+                    n_splits: 30,
+                    force: false,
+                },
                 seed: Some(7),
                 ci: Some(CIOpts {
                     n_boot: 200,
@@ -2280,7 +3167,10 @@ mod tests {
                 weights: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                args: ConfirmatoryArgs::SplitNb {
+                    n_splits: 30,
+                    force: false,
+                },
                 seed: Some(7),
                 ci: None,
                 ..Default::default()
@@ -2302,7 +3192,10 @@ mod tests {
                     weights: None,
                 },
                 ConfirmatoryTestOpts {
-                    args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                    args: ConfirmatoryArgs::SplitNb {
+                        n_splits: 30,
+                        force: false,
+                    },
                     seed: Some(2),
                     keep,
                     ..Default::default()
@@ -2327,7 +3220,10 @@ mod tests {
                 weights: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                args: ConfirmatoryArgs::SplitNb {
+                    n_splits: 30,
+                    force: false,
+                },
                 seed: Some(2),
                 keep: Some(2),
                 ..Default::default()
@@ -2348,7 +3244,10 @@ mod tests {
                 weights: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                args: ConfirmatoryArgs::SplitNb {
+                    n_splits: 30,
+                    force: false,
+                },
                 seed: Some(7),
                 keep: Some(2),
                 ci: Some(CIOpts::default()),
@@ -2389,7 +3288,10 @@ mod tests {
                 weights: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                args: ConfirmatoryArgs::SplitNb {
+                    n_splits: 30,
+                    force: false,
+                },
                 seed: Some(7),
                 ci: Some(CIOpts {
                     n_boot: 200,

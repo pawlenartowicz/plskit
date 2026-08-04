@@ -189,6 +189,7 @@ pub fn small_n50_d10_sequence(root: &Path) -> Result<Case> {
             alpha: 0.05,
             n_perm: 1000,
             n_splits: 50,
+            force: false,
             pre_standardized: false,
             seed: Some(42),
             disable_parallelism: false,

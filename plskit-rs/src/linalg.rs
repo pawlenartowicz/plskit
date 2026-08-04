@@ -138,6 +138,26 @@ pub fn compute_n_eff(w: ColRef<'_, f64>) -> f64 {
     (s * s) / s2
 }
 
+/// Stable rank: `‖A‖²_F / ‖A‖²_2` — Frobenius norm squared over the largest
+/// singular value squared. Equivalently `Σσᵢ² / σ₁²`. Does NOT standardize
+/// `a`; the caller standardizes first (intended use: `stable_rank(standardized X)`,
+/// where it equals the reciprocal of the first principal component's variance
+/// share — VE1 in Aquino et al., 2020).
+/// Zero matrix (σ₁ = 0) returns 0.0.
+///
+/// # Panics
+/// Panics if faer's SVD fails to converge (only expected on pathological input).
+#[must_use]
+pub fn stable_rank(a: MatRef<'_, f64>) -> f64 {
+    let s = a.singular_values().expect("SVD failed to converge");
+    let sigma1 = s.first().copied().unwrap_or(0.0);
+    if sigma1 <= 0.0 {
+        return 0.0;
+    }
+    let frob_sq: f64 = s.iter().map(|v| v * v).sum();
+    frob_sq / (sigma1 * sigma1)
+}
+
 /// Normalize weights so Σw' = n (mean 1). Returns `None` if `Σw == 0`.
 /// Validation (negative, NaN) is the caller's responsibility.
 #[must_use]
@@ -379,6 +399,40 @@ mod tests {
         // scipy.stats.t.sf(2.228, 10) ≈ 0.025 (two-tailed 0.05 critical)
         let p = t_sf(2.228, 10.0);
         assert_relative_eq!(p, 0.025, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn stable_rank_identity_equals_n() {
+        let x = Mat::<f64>::identity(5, 5);
+        assert_relative_eq!(stable_rank(x.as_ref()), 5.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn stable_rank_rank1_is_one() {
+        // Outer product u v^T: single nonzero singular value.
+        let x = mat(3, 2, &[1.0, 2.0, 2.0, 4.0, 3.0, 6.0]);
+        assert_relative_eq!(stable_rank(x.as_ref()), 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn stable_rank_mixed_spectrum_matches_formula() {
+        // diag(2, 1, 1): singular values (2, 1, 1) → (4+1+1)/4 = 1.5
+        let x = mat(3, 3, &[2.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        assert_relative_eq!(stable_rank(x.as_ref()), 1.5, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn stable_rank_zero_matrix_is_zero() {
+        let x = Mat::<f64>::zeros(4, 3);
+        assert_relative_eq!(stable_rank(x.as_ref()), 0.0, epsilon = 1e-15);
+    }
+
+    #[test]
+    fn stable_rank_scale_invariant() {
+        let x = mat(3, 3, &[2.0, 0.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 5.0]);
+        let base = stable_rank(x.as_ref());
+        let scaled = Mat::<f64>::from_fn(3, 3, |i, j| 7.5 * x[(i, j)]);
+        assert_relative_eq!(stable_rank(scaled.as_ref()), base, epsilon = 1e-10);
     }
 }
 

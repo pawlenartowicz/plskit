@@ -18,7 +18,8 @@ use plskit::{
     pls1_find_k_optimal as core_pls1_find_k_optimal,
     pls1_find_k_sequence as core_pls1_find_k_sequence, pls1_fit as core_pls1_fit,
     pls1_predict as core_pls1_predict, pls1_rotation_stability as core_pls1_rotation_stability,
-    rotate as core_rotate, spls1_find_k_optimal as core_spls1_find_k_optimal,
+    rotate as core_rotate, split_nb_gate as core_split_nb_gate,
+    spls1_find_k_optimal as core_spls1_find_k_optimal,
     spls1_find_k_sequence as core_spls1_find_k_sequence,
     spls1_find_keep_optimal as core_spls1_find_keep_optimal, spls1_fit as core_spls1_fit,
     ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
@@ -265,8 +266,7 @@ fn parse_confirmatory_method(s: &str) -> PyResult<ConfirmatoryMethod> {
     match s {
         "raw_perm" => Ok(ConfirmatoryMethod::RawPerm),
         "split_nb" => Ok(ConfirmatoryMethod::SplitNb),
-        "split_perm_nr" => Ok(ConfirmatoryMethod::SplitPermNr),
-        "split_perm" => Ok(ConfirmatoryMethod::SplitPerm),
+        "split_exact" => Ok(ConfirmatoryMethod::SplitExact),
         "score" => Ok(ConfirmatoryMethod::Score),
         "e" => Ok(ConfirmatoryMethod::E),
         _ => Err(PlsKitException::new_err(format!("unknown method: {s}"))),
@@ -294,7 +294,7 @@ fn parse_confirmatory_args(
             Ok(ConfirmatoryArgs::RawPerm { n_perm, n_folds })
         }
         "split_nb" => {
-            let allowed: &[&str] = &["n_splits"];
+            let allowed: &[&str] = &["n_splits", "force"];
             if let Some(a) = args {
                 validate_keys("split_nb", a, allowed)?;
             }
@@ -302,12 +302,18 @@ fn parse_confirmatory_args(
                 Some(v) => v.extract::<usize>()?,
                 None => 50,
             };
-            Ok(ConfirmatoryArgs::SplitNb { n_splits })
+            let force = match args.and_then(|a| a.get_item("force").ok().flatten()) {
+                Some(v) => v.extract::<bool>().map_err(|_| {
+                    invalid_args_err("args['force'] for method='split_nb' must be a bool")
+                })?,
+                None => false,
+            };
+            Ok(ConfirmatoryArgs::SplitNb { n_splits, force })
         }
-        "split_perm_nr" => {
+        "split_exact" => {
             let allowed: &[&str] = &["n_perm", "n_splits"];
             if let Some(a) = args {
-                validate_keys("split_perm_nr", a, allowed)?;
+                validate_keys("split_exact", a, allowed)?;
             }
             let n_perm = match args.and_then(|a| a.get_item("n_perm").ok().flatten()) {
                 Some(v) => v.extract::<usize>()?,
@@ -317,22 +323,7 @@ fn parse_confirmatory_args(
                 Some(v) => v.extract::<usize>()?,
                 None => 50,
             };
-            Ok(ConfirmatoryArgs::SplitPermNr { n_perm, n_splits })
-        }
-        "split_perm" => {
-            let allowed: &[&str] = &["n_perm", "n_splits"];
-            if let Some(a) = args {
-                validate_keys("split_perm", a, allowed)?;
-            }
-            let n_perm = match args.and_then(|a| a.get_item("n_perm").ok().flatten()) {
-                Some(v) => v.extract::<usize>()?,
-                None => 1000,
-            };
-            let n_splits = match args.and_then(|a| a.get_item("n_splits").ok().flatten()) {
-                Some(v) => v.extract::<usize>()?,
-                None => 50,
-            };
-            Ok(ConfirmatoryArgs::SplitPerm { n_perm, n_splits })
+            Ok(ConfirmatoryArgs::SplitExact { n_perm, n_splits })
         }
         "score" => {
             let allowed: &[&str] = &[];
@@ -649,8 +640,29 @@ fn pls1_confirmatory_test_raw<'py>(
     d.set_item("seed", r.seed)?;
     d.set_item("n_eff", r.n_eff)?;
     d.set_item("rho_hat", r.rho_hat)?;
+    d.set_item("stable_rank", r.stable_rank)?;
     let ci_py: Option<Bound<'_, PyDict>> = r.ci.map(|c| confirmatory_ci_to_dict(py, c));
     d.set_item("ci", ci_py)?;
+    Ok(d)
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, *, weights=None))]
+fn split_nb_gate<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'py, f64>,
+    weights: Option<PyReadonlyArray1<'py, f64>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let xf = np_mat_to_faer(x);
+    let wf = weights.map(np_col_to_faer);
+    let r = map_res(core_split_nb_gate(
+        xf.as_ref(),
+        wf.as_ref().map(Col::as_ref),
+    ))?;
+    let d = PyDict::new(py);
+    d.set_item("fires", r.fires)?;
+    d.set_item("stable_rank", r.stable_rank)?;
+    d.set_item("n_eff", r.n_eff)?;
     Ok(d)
 }
 
@@ -788,7 +800,7 @@ fn run_find_k_optimal<'py>(
         Some(s) => Some(parse_confirmatory_method(s)?),
         None => None,
     };
-    let allowed: &[&str] = &["n_folds", "n_perm", "n_splits"];
+    let allowed: &[&str] = &["n_folds", "n_perm", "n_splits", "force"];
     if let Some(a) = args.as_ref() {
         validate_keys("optimal", a, allowed)?;
     }
@@ -822,10 +834,10 @@ fn run_find_k_optimal<'py>(
             };
             if !matches!(
                 dm,
-                ConfirmatoryMethod::RawPerm | ConfirmatoryMethod::SplitPerm
+                ConfirmatoryMethod::RawPerm | ConfirmatoryMethod::SplitExact
             ) {
                 return Err(invalid_args_err(
-                    "args['n_perm'] only valid for diagnostic in {raw_perm, split_perm}",
+                    "args['n_perm'] only valid for diagnostic in {raw_perm, split_exact}",
                 ));
             }
             v.extract::<usize>()?
@@ -844,15 +856,33 @@ fn run_find_k_optimal<'py>(
             };
             if !matches!(
                 dm,
-                ConfirmatoryMethod::SplitNb | ConfirmatoryMethod::SplitPerm
+                ConfirmatoryMethod::SplitNb | ConfirmatoryMethod::SplitExact
             ) {
                 return Err(invalid_args_err(
-                    "args['n_splits'] only valid for diagnostic in {split_nb, split_perm}",
+                    "args['n_splits'] only valid for diagnostic in {split_nb, split_exact}",
                 ));
             }
             v.extract::<usize>()?
         }
         None => 50,
+    };
+    let force = match args.as_ref().and_then(|a| a.get_item("force").ok().flatten()) {
+        Some(v) => {
+            let Some(dm) = diag_method else {
+                return Err(invalid_args_err(
+                    "args['force'] requires diagnostic to be set",
+                ));
+            };
+            if !matches!(dm, ConfirmatoryMethod::SplitNb) {
+                return Err(invalid_args_err(
+                    "args['force'] only valid for diagnostic='split_nb'",
+                ));
+            }
+            v.extract::<bool>().map_err(|_| {
+                invalid_args_err("args['force'] for diagnostic='split_nb' must be a bool")
+            })?
+        }
+        None => false,
     };
     let opts = FindKOptimalOpts {
         selector: sel,
@@ -860,6 +890,7 @@ fn run_find_k_optimal<'py>(
         diagnostic: diag_method,
         n_perm,
         n_splits,
+        force,
         pre_standardized,
         seed,
         disable_parallelism,
@@ -905,6 +936,7 @@ fn run_find_k_optimal<'py>(
     d.set_item("diagnostic", r.diagnostic)?;
     d.set_item("seed", r.seed)?;
     d.set_item("n_eff", r.n_eff)?;
+    d.set_item("stable_rank", r.stable_rank)?;
     Ok(d)
 }
 
@@ -1010,13 +1042,12 @@ fn run_find_k_sequence<'py>(
     let tm = parse_confirmatory_method(test_method)?;
     let allowed: &[&str] = match tm {
         ConfirmatoryMethod::RawPerm => &["n_perm"],
-        ConfirmatoryMethod::SplitNb => &["n_splits"],
-        ConfirmatoryMethod::SplitPerm => &["n_perm", "n_splits"],
+        ConfirmatoryMethod::SplitNb => &["n_splits", "force"],
+        ConfirmatoryMethod::SplitExact => &["n_perm", "n_splits"],
         ConfirmatoryMethod::E => &[],
-        // split_perm_nr has no sequential variant (same as score) — reachable
-        // now that parse_confirmatory_method accepts the tag, so this rejects at
-        // runtime rather than being dead code.
-        ConfirmatoryMethod::Score | ConfirmatoryMethod::SplitPermNr => {
+        // Score has no per-component reading, so it has no sequential
+        // variant to dispatch to (mirrors SequentialArgs::defaults_for).
+        ConfirmatoryMethod::Score => {
             return Err(invalid_args_err(&format!(
                 "test_method='{}' has no sequential variant",
                 tm.as_str()
@@ -1040,11 +1071,18 @@ fn run_find_k_sequence<'py>(
         Some(v) => v.extract::<usize>()?,
         None => 50,
     };
+    let force = match args.as_ref().and_then(|a| a.get_item("force").ok().flatten()) {
+        Some(v) => v.extract::<bool>().map_err(|_| {
+            invalid_args_err("args['force'] for test_method='split_nb' must be a bool")
+        })?,
+        None => false,
+    };
     let opts = FindKSequenceOpts {
         test_method: tm,
         alpha,
         n_perm,
         n_splits,
+        force,
         pre_standardized,
         seed,
         disable_parallelism,
@@ -1078,6 +1116,7 @@ fn run_find_k_sequence<'py>(
     d.set_item("alpha", r.alpha)?;
     d.set_item("seed", r.seed)?;
     d.set_item("n_eff", r.n_eff)?;
+    d.set_item("stable_rank", r.stable_rank)?;
     Ok(d)
 }
 
@@ -1402,6 +1441,7 @@ fn _plskit(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pls1_fit, m)?)?;
     m.add_function(wrap_pyfunction!(pls1_predict, m)?)?;
     m.add_function(wrap_pyfunction!(pls1_confirmatory_test_raw, m)?)?;
+    m.add_function(wrap_pyfunction!(split_nb_gate, m)?)?;
     m.add_function(wrap_pyfunction!(pls1_rotation_stability_raw, m)?)?;
     m.add_function(wrap_pyfunction!(pls1_find_k_optimal, m)?)?;
     m.add_function(wrap_pyfunction!(pls1_find_k_sequence, m)?)?;

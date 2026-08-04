@@ -129,17 +129,23 @@ class RotationStabilityResult:
 class ConfirmatoryTestResult:
     pvalue: float
     statistic: float
-    method: str               # "raw_perm" | "split_nb" | "split_perm_nr" | "split_perm" | "score" | "e"
+    method: str               # what actually ran: "raw_perm" | "split_nb" | "split_exact" | "score" | "e"
     k: int                    # the K tested
     n_perm: int | None
     n_splits: int | None
     seed: int
     # Populated (non-None) for method="split_nb" only, when unweighted and
     # the test half has at least 4 rows. None for every other method
-    # (including "split_perm_nr", which has no z-scatter interpretation to
+    # (including "split_exact", which has no z-scatter interpretation to
     # offer), and None for "split_nb" itself when weighted or the test half
     # is too small.
     rho_hat: float | None = None
+    # Stable rank of the standardized X, as seen by the split_nb auto-gate.
+    # Populated (non-None) whenever "split_nb" was the REQUESTED method —
+    # whether the gate fired or not, and also under args={"force": True} —
+    # so it shows what the gate saw. None for every other requested method,
+    # which never evaluates the gate.
+    stable_rank: float | None = None
     n_eff: float = float("nan")
     ci: ConfirmatoryCI | None = None
 
@@ -152,19 +158,35 @@ class FindKOptimalResult:
     cv_scores_se: dict[int, float] | None
     bic_scores: dict[int, float] | None
     pvalues: np.ndarray | None
-    diagnostic: str | None
+    diagnostic: str | None   # which diagnostic actually ran; a flagged "split_nb" reads "split_exact"
     seed: int
     n_eff: float = float("nan")
+    # Stable rank of the standardized X, as the sequence-level auto-gate saw
+    # it. Same meaning as on ConfirmatoryTestResult: populated whenever
+    # "split_nb" was the REQUESTED diagnostic, fired or not, including under
+    # args={"force": True}. None otherwise, and None when no diagnostic ran.
+    stable_rank: float | None = None
 
 
 @dataclass(frozen=True)
 class FindKSequenceResult:
     k_star: int
     pvalues: np.ndarray
-    test_method: str
+    test_method: str          # which test actually ran; a flagged "split_nb" reads "split_exact"
     alpha: float
     seed: int
     n_eff: float = float("nan")
+    # As on FindKOptimalResult: what the gate saw, populated whenever
+    # "split_nb" was the requested test_method.
+    stable_rank: float | None = None
+
+
+@dataclass(frozen=True)
+class SplitNbGateResult:
+    """Output of `split_nb_gate` — what the auto-gate sees on a design."""
+    fires: bool               # True → a "split_nb" request here reroutes to "split_exact"
+    stable_rank: float        # stable rank of the standardized X
+    n_eff: float              # Kish's effective sample size; equals n for uniform/absent weights
 
 
 @dataclass(frozen=True)

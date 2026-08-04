@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented here.
 
+## [0.4.0] - 2026-08-03
+
+- Changed: `split_perm` and `split_perm_nr` are merged into one method,
+  `split_exact` — the permutation-calibrated split-half test. The engine
+  picks the no-refit route at K = 1 (dense input) or the refit route
+  otherwise; there is no route knob, and `split_perm` / `split_perm_nr`
+  are no longer valid `method` values. This changes the refit route's
+  numbers versus 0.3.0's `split_perm`: splits are now drawn once and held
+  fixed across permutation replicates instead of redrawn per replicate —
+  redrawing folded split-to-split scatter into the null and miscalibrated
+  `split_perm`'s p-values — and the reported statistic moved from mean-r
+  to `tanh(z̄)` to match. Re-running a 0.3.0 `split_perm` analysis under
+  0.4.0 will produce different numbers. The no-refit route's numbers are
+  unchanged from 0.3.0's `split_perm_nr` (bit-identical), but it now also
+  accepts weighted input at K = 1, which `split_perm_nr` used to reject.
+- Added: `split_nb` auto-gate. `split_nb`'s Fisher-z correction drifts
+  off level when `n_eff < 25` or the stable rank of the standardized `X`
+  is `< 3`. Stable rank can never exceed the column count, so `X` with 4
+  columns or fewer is rerouted outright without consulting the computed
+  rank. A request that trips any of the three clauses now reroutes to
+  `split_exact` (at `n_perm=1000`) and `result.method` reports the
+  method actually run. Pass `args={'force': True}` to run `split_nb`
+  anyway. Python raises a `UserWarning` when a reroute happens.
+- Added: `stable_rank` on `ConfirmatoryTestResult`, `FindKOptimalResult`
+  and `FindKSequenceResult` — the stable rank the `split_nb` auto-gate
+  saw, populated whenever `split_nb` was requested (fired or not,
+  including under `force`); `None` for every other method. On the two
+  `find_k` results it is the sequence-level gate's value, read off the
+  undeflated `X`, so a rerouted run can say which clause fired.
+- Added: `split_nb_gate(X, weights=None)` — ask whether the auto-gate
+  flags a design without running a test. Returns `fires`, `stable_rank`
+  and `n_eff`. It evaluates the same rule the test functions apply
+  internally, so it cannot drift from them.
+- Changed: the recommended default for `pls1_confirmatory_test` is now
+  K = 1 with `method="split_exact"` (previously `split_nb`).
+
 ## [0.3.0] - 2026-07-31
 
 - Added: `split_perm_nr` confirmatory test method — the same statistic as

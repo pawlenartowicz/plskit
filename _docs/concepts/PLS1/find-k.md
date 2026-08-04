@@ -15,7 +15,7 @@ distinct K-selection paths, each appropriate to a different question.
 ## `pls1_find_k_sequence`
 
 - Sequential closed-test path: incrementally test `k = 1, 2, …` and stop at the first non-rejection
-- Inner test driven by `test_method` (`raw_perm`, `split_nb`, `split_perm`, `e`)
+- Inner test driven by `test_method` (`raw_perm`, `split_nb`, `split_exact`, `e`)
 - Strong control over the family-wise error rate by closed testing
 - When to use: hypothesis-driven workflows where the question is "how many components are statistically supported"
 

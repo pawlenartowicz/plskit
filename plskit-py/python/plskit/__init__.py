@@ -17,6 +17,7 @@ from plskit._api import (
     pls1_rotation_stability,
     preprocess,
     rotate,
+    split_nb_gate,
     spls1_fit,
     spls1_find_keep_optimal,
     spls1_find_k_optimal,
@@ -36,6 +37,7 @@ from plskit._results import (
     RotateResult,
     RotationSpec,
     RotationStabilityResult,
+    SplitNbGateResult,
 )
 
 __all__ = [
@@ -43,6 +45,7 @@ __all__ = [
     "preprocess",
     "pls1_fit", "pls1_predict",
     "pls1_confirmatory_test",
+    "split_nb_gate",
     "pls1_find_k_optimal", "pls1_find_k_sequence",
     "pls1_perm_null",
     "pls1_rotation_stability",
@@ -61,4 +64,5 @@ __all__ = [
     "PermNullResult",
     "RotateResult", "RotationSpec",
     "CIScalar", "ConfirmatoryCI", "RotationStabilityResult",
+    "SplitNbGateResult",
 ]

@@ -115,7 +115,7 @@ def test_corpus_case(case):
         kw = dict(kwargs); k = kw.pop("k")
         kw = _resolve_corpus_weights(case, kw, inputs)
         r = plskit.pls1_confirmatory_test(X, y, k, **kw)
-        for field in ["pvalue", "statistic", "method", "k", "n_perm", "n_splits", "seed"]:
+        for field in ["pvalue", "statistic", "method", "k", "n_perm", "n_splits", "seed", "stable_rank"]:
             if field in expected:
                 assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
         # CI fixture: when ci=True kwarg is set, also pin the CI bundle.

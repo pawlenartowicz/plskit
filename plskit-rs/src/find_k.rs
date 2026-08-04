@@ -40,12 +40,16 @@ pub struct FindKOptimalOpts {
     /// except `Score`). Selection and test share data, so the resulting
     /// pvalues are diagnostic only and not honest inference.
     pub diagnostic: Option<ConfirmatoryMethod>,
-    /// Number of permutations for `raw_perm` / `split_perm` diagnostic. Inert
+    /// Number of permutations for `raw_perm` / `split_exact` diagnostic. Inert
     /// when `diagnostic is None`.
     pub n_perm: usize,
-    /// Number of split-half repetitions for `split_nb` / `split_perm`
+    /// Number of split-half repetitions for `split_nb` / `split_exact`
     /// diagnostic. Inert when `diagnostic is None`.
     pub n_splits: usize,
+    /// `split_nb` diagnostic only: run NB even on a design the sequence-level
+    /// auto-gate flags. Default `false`, which reroutes the diagnostic to
+    /// `split_exact`. Inert unless `diagnostic == Some(SplitNb)`.
+    pub force: bool,
     /// Caller asserts X and y are already standardized; skips centering/scaling.
     pub pre_standardized: bool,
     /// RNG seed; `None` draws from OS entropy.
@@ -64,6 +68,7 @@ impl Default for FindKOptimalOpts {
             diagnostic: None,
             n_perm: 1000,
             n_splits: 50,
+            force: false,
             pre_standardized: false,
             seed: None,
             disable_parallelism: false,
@@ -89,12 +94,19 @@ pub struct FindKOptimalOutput {
     /// K* (present when `diagnostic.is_some()`). Same-sample → diagnostic only,
     /// not honest inference.
     pub pvalues: Option<Col<f64>>,
-    /// Name of the diagnostic method used (present when `diagnostic.is_some()`).
+    /// Name of the diagnostic method that actually ran (present when
+    /// `diagnostic.is_some()`). A `split_nb` request the sequence-level
+    /// auto-gate flagged reads `"split_exact"`.
     pub diagnostic: Option<String>,
     /// RNG seed actually used.
     pub seed: u64,
     /// Kish's effective sample size. Equals `n_samples` for uniform/absent weights.
     pub n_eff: f64,
+    /// Stable rank of the standardized X, as the sequence-level auto-gate saw
+    /// it. `Some` whenever `diagnostic == Some(SplitNb)` — whether the gate
+    /// fired or not, and also under `force`. `None` otherwise, including when
+    /// no diagnostic was requested.
+    pub stable_rank: Option<f64>,
 }
 
 /// Optimal-K selection on full data. Optionally attaches a same-sample
@@ -238,7 +250,7 @@ fn find_k_optimal_impl(
         }
     };
 
-    let (pvalues, diagnostic_str) = if let Some(method) = opts.diagnostic {
+    let (pvalues, diagnostic_str, stable_rank) = if let Some(method) = opts.diagnostic {
         // stop_early_override=true so we collect the full p-value vector up to K*.
         let seq_args = SequentialArgs::defaults_for(method).ok_or_else(|| {
             PlsKitError::InvalidArgument(format!("{} has no sequential variant", method.as_str()))
@@ -249,8 +261,9 @@ fn find_k_optimal_impl(
             },
             SequentialArgs::SplitNb { .. } => SequentialArgs::SplitNb {
                 n_splits: opts.n_splits,
+                force: opts.force,
             },
-            SequentialArgs::SplitPerm { .. } => SequentialArgs::SplitPerm {
+            SequentialArgs::SplitExact { .. } => SequentialArgs::SplitExact {
                 n_perm: opts.n_perm,
                 n_splits: opts.n_splits,
             },
@@ -275,9 +288,11 @@ fn find_k_optimal_impl(
                 keep,
             },
         )?;
-        (Some(r.pvalues), Some(method.as_str().to_owned()))
+        // Echo what RAN, not what was asked for: the hoisted `split_nb`
+        // auto-gate can reroute the whole sequence to `split_exact`.
+        (Some(r.pvalues), Some(r.method), r.stable_rank)
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     Ok(FindKOptimalOutput {
@@ -290,6 +305,7 @@ fn find_k_optimal_impl(
         diagnostic: diagnostic_str,
         seed: seed_used,
         n_eff: n_eff_val,
+        stable_rank,
     })
 }
 
@@ -298,13 +314,20 @@ fn find_k_optimal_impl(
 #[allow(clippy::struct_excessive_bools)]
 pub struct FindKSequenceOpts {
     /// Per-step test method (any `ConfirmatoryMethod` except `Score`).
+    /// `SplitNb` is subject to the sequence-level auto-gate:
+    /// a flagged design runs `split_exact` instead, and
+    /// `FindKSequenceOutput.test_method` says so.
     pub test_method: ConfirmatoryMethod,
     /// Significance threshold for sequential rejection.
     pub alpha: f64,
-    /// Number of permutations for `raw_perm` / `split_perm`.
+    /// Number of permutations for `raw_perm` / `split_exact`.
     pub n_perm: usize,
-    /// Number of split-half repetitions for `split_nb` / `split_perm`.
+    /// Number of split-half repetitions for `split_nb` / `split_exact`.
     pub n_splits: usize,
+    /// `split_nb` only: run NB even on a design the sequence-level auto-gate
+    /// flags. Default `false`, which reroutes the whole sequence to
+    /// `split_exact`. Inert for every other `test_method`.
+    pub force: bool,
     /// Caller asserts X and y are already standardized; skips centering/scaling.
     pub pre_standardized: bool,
     /// RNG seed; `None` draws from OS entropy.
@@ -322,6 +345,7 @@ impl Default for FindKSequenceOpts {
             alpha: 0.05,
             n_perm: 1000,
             n_splits: 50,
+            force: false,
             pre_standardized: false,
             seed: None,
             disable_parallelism: false,
@@ -337,7 +361,8 @@ pub struct FindKSequenceOutput {
     pub k_star: usize,
     /// Per-component p-values, length `k_max`. NaN past the stop point.
     pub pvalues: Col<f64>,
-    /// Name of the test method used.
+    /// Name of the test method that actually ran. A `split_nb` request the
+    /// sequence-level auto-gate flagged reads `"split_exact"`.
     pub test_method: String,
     /// Significance threshold used.
     pub alpha: f64,
@@ -345,6 +370,11 @@ pub struct FindKSequenceOutput {
     pub seed: u64,
     /// Kish's effective sample size. Equals `n_samples` for uniform/absent weights.
     pub n_eff: f64,
+    /// Stable rank of the standardized X, as the sequence-level auto-gate saw
+    /// it. `Some` whenever `test_method == SplitNb` — whether the gate fired
+    /// or not, and also under `force`. `None` for every other test method,
+    /// which never evaluates the gate.
+    pub stable_rank: Option<f64>,
 }
 
 /// Sequence-based K selection on full data. Stop-early is
@@ -431,8 +461,9 @@ fn find_k_sequence_impl(
         },
         SequentialArgs::SplitNb { .. } => SequentialArgs::SplitNb {
             n_splits: opts.n_splits,
+            force: opts.force,
         },
-        SequentialArgs::SplitPerm { .. } => SequentialArgs::SplitPerm {
+        SequentialArgs::SplitExact { .. } => SequentialArgs::SplitExact {
             n_perm: opts.n_perm,
             n_splits: opts.n_splits,
         },
@@ -458,10 +489,13 @@ fn find_k_sequence_impl(
     Ok(FindKSequenceOutput {
         k_star,
         pvalues: r.pvalues,
-        test_method: opts.test_method.as_str().to_owned(),
+        // What RAN, not what was asked for — see `run_incremental_sequence`'s
+        // hoisted `split_nb` auto-gate.
+        test_method: r.method,
         alpha: opts.alpha,
         seed: r.seed,
         n_eff: n_eff_val,
+        stable_rank: r.stable_rank,
     })
 }
 
@@ -1059,6 +1093,30 @@ mod tests {
         assert_eq!(r.diagnostic.as_deref(), Some("split_nb"));
     }
 
+    /// The sequence-level `split_nb` gate is hoisted into
+    /// `run_incremental_sequence`, so the diagnostic path inherits it — and
+    /// the echoed name must say what ran. n = 20 trips the gate's
+    /// effective-sample floor of 25.
+    #[test]
+    fn optimal_diagnostic_reports_rerouted_method() {
+        let (x, y) = synth(20, 5, 1, 5.0, 1);
+        let r = pls1_find_k_optimal(
+            x.as_ref(),
+            y.as_ref(),
+            2,
+            None,
+            FindKOptimalOpts {
+                selector: Selector::Bic,
+                diagnostic: Some(ConfirmatoryMethod::SplitNb),
+                n_splits: 10,
+                seed: Some(7),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(r.diagnostic.as_deref(), Some("split_exact"));
+    }
+
     #[test]
     fn optimal_score_diagnostic_rejected() {
         let (x, y) = synth(60, 5, 1, 4.0, 3);
@@ -1073,6 +1131,26 @@ mod tests {
             },
         );
         assert!(matches!(err, Err(PlsKitError::InvalidArgument(_))));
+    }
+
+    /// `force` has to be reachable from the optimal entry point's diagnostic
+    /// too, not only from the sequence API: n = 20 trips the gate, and only
+    /// the opts field can hold NB in place.
+    #[test]
+    fn optimal_diagnostic_force_is_settable_from_public_opts() {
+        let (x, y) = synth(20, 5, 1, 5.0, 1);
+        let opts = |force: bool| FindKOptimalOpts {
+            selector: Selector::Bic,
+            diagnostic: Some(ConfirmatoryMethod::SplitNb),
+            n_splits: 10,
+            force,
+            seed: Some(7),
+            ..Default::default()
+        };
+        let rerouted = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, None, opts(false)).unwrap();
+        assert_eq!(rerouted.diagnostic.as_deref(), Some("split_exact"));
+        let forced = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, None, opts(true)).unwrap();
+        assert_eq!(forced.diagnostic.as_deref(), Some("split_nb"));
     }
 
     #[test]
@@ -1095,6 +1173,59 @@ mod tests {
         assert_eq!(r.pvalues.nrows(), 4);
         assert_eq!(r.test_method, "split_nb");
         assert!((r.n_eff - 80.0).abs() < 1e-9);
+    }
+
+    /// `force` has to be reachable from the public sequence API, not just from
+    /// the crate-internal variant knob: n = 20 trips the gate, and only the
+    /// opts field can hold NB in place.
+    #[test]
+    fn sequence_force_is_settable_from_public_opts() {
+        let (x, y) = synth(20, 5, 1, 5.0, 1);
+        let opts = |force: bool| FindKSequenceOpts {
+            test_method: ConfirmatoryMethod::SplitNb,
+            n_splits: 10,
+            alpha: 0.05,
+            force,
+            seed: Some(7),
+            ..Default::default()
+        };
+        let rerouted =
+            pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, opts(false)).unwrap();
+        assert_eq!(rerouted.test_method, "split_exact");
+        let forced = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, opts(true)).unwrap();
+        assert_eq!(forced.test_method, "split_nb");
+        // Both carry what the gate saw — that is what makes the reroute
+        // explainable to the caller, and `force` doesn't suppress it.
+        assert_eq!(rerouted.stable_rank, forced.stable_rank);
+        assert!(rerouted.stable_rank.is_some());
+    }
+
+    /// The sequence-level rank has to survive the trip out through
+    /// `find_k_optimal`'s diagnostic branch, and only that branch produces it.
+    #[test]
+    fn optimal_diagnostic_carries_the_gate_rank() {
+        let (x, y) = synth(20, 5, 1, 5.0, 1);
+        let run = |diagnostic| {
+            pls1_find_k_optimal(
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                None,
+                FindKOptimalOpts {
+                    diagnostic,
+                    n_splits: 10,
+                    n_perm: 50,
+                    seed: Some(7),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let gated = run(Some(ConfirmatoryMethod::SplitNb));
+        assert_eq!(gated.diagnostic.as_deref(), Some("split_exact"));
+        assert!(gated.stable_rank.is_some());
+        assert!(run(Some(ConfirmatoryMethod::RawPerm)).stable_rank.is_none());
+        assert!(run(None).stable_rank.is_none());
     }
 
     #[test]

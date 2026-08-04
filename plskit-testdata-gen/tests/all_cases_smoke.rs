@@ -12,8 +12,8 @@ fn all_cases_produces_full_corpus() {
     let cases = all_cases(dir.path()).unwrap();
     assert_eq!(
         cases.len(),
-        36,
-        "expected exactly 36 cases, got {}",
+        38,
+        "expected exactly 38 cases, got {}",
         cases.len()
     );
     let functions: HashSet<_> = cases.iter().map(|c| c.function.clone()).collect();

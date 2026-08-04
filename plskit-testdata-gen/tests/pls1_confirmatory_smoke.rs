@@ -2,7 +2,7 @@
 
 use ndarray_npy::NpzReader;
 use plskit_testdata_gen::cases::pls1_confirmatory_test::{
-    e, raw_perm, score, split_nb, split_nb_ci, split_perm,
+    e, raw_perm, score, split_exact, split_exact_k1, split_nb, split_nb_ci,
 };
 use plskit_testdata_gen::manifest::Case;
 use tempfile::tempdir;
@@ -37,8 +37,13 @@ fn split_nb_emits_files() {
 }
 
 #[test]
-fn split_perm_emits_files() {
-    check_basic(split_perm, "pls1_confirmatory_split_perm");
+fn split_exact_emits_files() {
+    check_basic(split_exact, "pls1_confirmatory_split_exact");
+}
+
+#[test]
+fn split_exact_k1_emits_files() {
+    check_basic(split_exact_k1, "pls1_confirmatory_split_exact_k1");
 }
 
 #[test]

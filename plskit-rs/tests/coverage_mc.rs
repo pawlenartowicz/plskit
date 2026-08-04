@@ -203,7 +203,10 @@ fn coverage_mc_two_sided_grid() {
                         let mut orng = ChaCha8Rng::seed_from_u64(oracle_seed);
                         let (xo, yo) = synth(&mut orng, n, d, snr);
                         let oracle_opts = ConfirmatoryTestOpts {
-                            args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                            args: ConfirmatoryArgs::SplitNb {
+                                n_splits: 30,
+                                force: false,
+                            },
                             ci: Some(CIOpts {
                                 n_boot: N_BOOT,
                                 m_rate: 0.7,
@@ -253,7 +256,10 @@ fn coverage_mc_two_sided_grid() {
                         let mut rng = ChaCha8Rng::seed_from_u64(dataset_seed);
                         let (x, y) = synth(&mut rng, n, d, snr);
                         let opts = ConfirmatoryTestOpts {
-                            args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+                            args: ConfirmatoryArgs::SplitNb {
+                                n_splits: 30,
+                                force: false,
+                            },
                             ci: Some(CIOpts {
                                 n_boot: N_BOOT,
                                 m_rate: 0.7,

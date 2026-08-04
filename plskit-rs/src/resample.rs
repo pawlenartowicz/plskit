@@ -12,7 +12,7 @@ use crate::rng::{child_rng, child_seeds, Rng};
 /// `n_train = min(max(n/2, k+2), n−3)` can produce `n_train < k+2`
 /// when `n−3 < k+2` (i.e. `n < k+5`, e.g. `n=7, k=4 → n_train=4 < 6`).
 /// Below that threshold the per-half fit degrades to a silent r=0.
-/// `split_half_correlations` and `run_e` enforce this floor; subsamplers
+/// `draw_splits` and `run_e` enforce this floor; subsamplers
 /// enforce a stronger `m ≥ k+2` check after resolving `m`.
 #[allow(dead_code)]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

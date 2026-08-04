@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import warnings
 from types import MappingProxyType
 from typing import Literal
 
@@ -23,6 +24,7 @@ from plskit._results import (
     RotateResult,
     RotationSpec,
     RotationStabilityResult,
+    SplitNbGateResult,
 )
 
 
@@ -97,6 +99,48 @@ def _validate_find_k_args(fk_args: dict, allowed: tuple[str, ...]) -> None:
                 f"allowed: {list(allowed)}",
                 code="invalid_args",
             )
+
+
+# Permutation budget the split_nb → split_exact reroute spends when the result
+# object carries no n_perm of its own (neither FindKSequenceResult nor
+# FindKOptimalResult has such a field). It must equal the n_perm the engine
+# writes into the reroute itself — the literal 1000 in
+# plskit-rs/src/sequential.rs (SequentialArgs::SplitExact) and its mirror in
+# plskit-rs/src/signal_test.rs (ConfirmatoryArgs::SplitExact); all three change
+# together.
+_REROUTE_FALLBACK_N_PERM = 1000
+
+
+def _warn_if_rerouted(
+    requested, actual, *, n_perm, stable_rank=None, n_eff=None,
+):
+    """Tell the caller when the split_nb auto-gate sent the run elsewhere.
+
+    The gate rule lives in Rust and only there — this reports the values the
+    engine already returned (which condition fired is read off them), never
+    the thresholds and never a recomputed stable rank.
+
+    ``stacklevel=4`` lands on user code: warn → this helper → the public API
+    function → its ``_convert_errors`` wrapper → the caller.
+    """
+    # A caller that requested nothing (`diagnostic=None`) gets nothing back
+    # (`result.diagnostic is None`), so the equality test covers that case too.
+    if requested == actual:
+        return
+    saw = []
+    if stable_rank is not None:
+        saw.append(f"stable rank of the standardized X = {stable_rank:.4g}")
+    if n_eff is not None:
+        saw.append(f"n_eff = {n_eff:.4g}")
+    seen = f" ({'; '.join(saw)})" if saw else ""
+    override = f" Pass args={{'force': True}} to run {requested} anyway."
+    warnings.warn(
+        f"{requested!r} was rerouted to {actual!r}: the {requested} auto-gate "
+        f"flagged this design{seen}. The fallback runs n_perm={n_perm} "
+        f"permutations, so it costs more than {requested}.{override}",
+        UserWarning,
+        stacklevel=4,
+    )
 
 
 @_convert_errors
@@ -256,7 +300,7 @@ def pls1_predict(model: PLS1Result, X_new: np.ndarray) -> np.ndarray:
 def pls1_confirmatory_test(
     X: np.ndarray, y: np.ndarray, k: int = 1,
     *,
-    method: Literal["raw_perm", "split_nb", "split_perm_nr", "split_perm", "score", "e"],
+    method: Literal["raw_perm", "split_nb", "split_exact", "score", "e"],
     args: dict | None = None,
     ci: bool = False,
     n_boot: int = 1000,
@@ -281,19 +325,27 @@ def pls1_confirmatory_test(
     k : int, default 1
         Number of components to test.
     method : str
-        Test method: ``'raw_perm'``, ``'split_nb'``, ``'split_perm_nr'``,
-        ``'split_perm'``, ``'score'``, or ``'e'``. ``'split_perm_nr'`` uses
-        the same statistic as ``'split_nb'`` (mean Fisher-z of held-out
-        correlations, reported as ``tanh(z̄)``), compared against a
-        permutation reference instead of the t approximation. It supports
-        K = 1 and unweighted input only; it raises rather than degrading on
-        ineligible input (use ``'split_perm'`` for K > 1 or weighted data).
+        Test method: ``'raw_perm'``, ``'split_nb'``, ``'split_exact'``,
+        ``'score'``, or ``'e'``.
+
+        ``'split_exact'`` is the recommended default: a split-half test
+        (statistic ``tanh(z̄)``, the mean Fisher-z of held-out correlations)
+        calibrated by permutation, so it holds its level on any design.
+        ``'split_nb'`` uses the same statistic with an asymptotic correction
+        instead of permutations — much cheaper, and appropriate when n ≫ p
+        with a flat X spectrum. Designs outside that regime are auto-gated:
+        a flagged ``'split_nb'`` request runs ``'split_exact'`` instead
+        (``result.method`` says so, and Python warns). Pass
+        ``args={'force': True}`` to run ``'split_nb'`` anyway.
+
         ``rho_hat`` is populated for ``'split_nb'`` only; ``None`` for every
-        other method, including ``'split_perm_nr'``, and ``None`` for
+        other method, including ``'split_exact'``, and ``None`` for
         ``'split_nb'`` itself when the input is weighted or the test half
-        is too small.
+        is too small. ``stable_rank`` is populated whenever ``'split_nb'``
+        was requested — it is what the auto-gate saw.
     args : dict | None
-        Method-specific kwargs (e.g. ``{'n_perm': 500}`` for ``raw_perm``).
+        Method-specific kwargs (e.g. ``{'n_perm': 500}`` for ``raw_perm``,
+        ``{'force': True}`` for ``split_nb``).
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See spec §3.5.
@@ -325,7 +377,47 @@ def pls1_confirmatory_test(
     )
     ci_dict = raw.pop("ci", None)
     ci_obj = _confirmatory_ci_from_dict(ci_dict) if ci_dict is not None else None
-    return ConfirmatoryTestResult(ci=ci_obj, **raw)
+    result = ConfirmatoryTestResult(ci=ci_obj, **raw)
+    _warn_if_rerouted(
+        method, result.method,
+        n_perm=result.n_perm,
+        stable_rank=result.stable_rank,
+        n_eff=result.n_eff,
+    )
+    return result
+
+
+@_convert_errors
+def split_nb_gate(
+    X: np.ndarray,
+    *,
+    weights: np.ndarray | None = None,
+) -> SplitNbGateResult:
+    """Ask whether the ``split_nb`` auto-gate flags a design, without testing.
+
+    Reports the decision ``pls1_confirmatory_test`` and the ``find_k``
+    functions make internally, so you can see it before paying for a run.
+    ``fires=True`` means a ``'split_nb'`` request on this X reroutes to
+    ``'split_exact'`` unless you pass ``args={'force': True}``.
+
+    Standardizes its own copy of X (weighted moments when ``weights`` is
+    given), as the embedded gates do. Only X and the weights enter the rule —
+    y does not.
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (n, p)
+    weights : np.ndarray | None, shape (n,), default None
+        Non-negative observation weights. ``None`` means uniform weights.
+
+    Returns
+    -------
+    SplitNbGateResult
+    """
+    X = _ensure_array(X, "X", 2)
+    if weights is not None:
+        weights = _ensure_array(weights, "weights", 1)
+    return SplitNbGateResult(**_plskit.split_nb_gate(X, weights=weights))
 
 
 @_convert_errors
@@ -333,7 +425,7 @@ def pls1_find_k_optimal(
     X: np.ndarray, y: np.ndarray, k_max: int,
     *,
     selector: Literal["r2_se", "r2_max", "bic"] = "r2_se",
-    diagnostic: Literal["raw_perm", "split_nb", "split_perm", "e"] | None = None,
+    diagnostic: Literal["raw_perm", "split_nb", "split_exact", "e"] | None = None,
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
@@ -355,14 +447,17 @@ def pls1_find_k_optimal(
         Selection criterion: ``'r2_se'`` (1-SE rule), ``'r2_max'``, or ``'bic'``.
     diagnostic : str | None, default None
         Optional same-sample sequential diagnostic to attach to K*. One of
-        ``'raw_perm'`` / ``'split_nb'`` / ``'split_perm'`` / ``'e'``, or
+        ``'raw_perm'`` / ``'split_nb'`` / ``'split_exact'`` / ``'e'``, or
         ``None`` (no diagnostic). Selection and test share data, so the
         resulting ``pvalues`` are a robustness check, not honest inference.
+        A ``'split_nb'`` diagnostic the auto-gate flags runs ``'split_exact'``
+        instead; ``result.diagnostic`` says so and Python warns. Pass
+        ``args={'force': True}`` to run ``'split_nb'`` anyway.
     args : dict | None
         Method-specific kwargs. Selector keys: ``n_folds``. Diagnostic
-        keys: ``n_perm`` (for ``raw_perm``/``split_perm``), ``n_splits``
-        (for ``split_nb``/``split_perm``). Diagnostic keys require
-        ``diagnostic`` to be set.
+        keys: ``n_perm`` (for ``raw_perm``/``split_exact``), ``n_splits``
+        (for ``split_nb``/``split_exact``), ``force`` (for ``split_nb``).
+        Diagnostic keys require ``diagnostic`` to be set.
     pre_standardized : bool, default False
         If True, skip standardization — X and y are assumed already zero-mean,
         unit-variance.
@@ -395,14 +490,23 @@ def pls1_find_k_optimal(
         verbose=verbose,
         weights=weights,
     )
-    return FindKOptimalResult(**raw)
+    result = FindKOptimalResult(**raw)
+    # The diagnostic runs through the same hoisted sequence gate, so it can be
+    # rerouted the same way.
+    _warn_if_rerouted(
+        diagnostic, result.diagnostic,
+        n_perm=_REROUTE_FALLBACK_N_PERM,
+        stable_rank=result.stable_rank,
+        n_eff=result.n_eff,
+    )
+    return result
 
 
 @_convert_errors
 def pls1_find_k_sequence(
     X: np.ndarray, y: np.ndarray, k_max: int,
     *,
-    test_method: Literal["raw_perm", "split_nb", "split_perm", "e"] = "split_nb",
+    test_method: Literal["raw_perm", "split_nb", "split_exact", "e"] = "split_nb",
     alpha: float = 0.05,
     args: dict | None = None,
     pre_standardized: bool = False,
@@ -426,12 +530,18 @@ def pls1_find_k_sequence(
     k_max : int
         Maximum number of components to test.
     test_method : str, default 'split_nb'
-        Per-step test method: ``'raw_perm'``, ``'split_nb'``, ``'split_perm'``,
-        or ``'e'``.
+        Per-step test method: ``'raw_perm'``, ``'split_nb'``,
+        ``'split_exact'``, or ``'e'``. ``'split_exact'`` is the recommended
+        default (permutation-calibrated, holds its level on any design);
+        ``'split_nb'`` is the cheaper asymptotic alternative for n ≫ p with a
+        flat X spectrum. The auto-gate is evaluated once for the whole
+        sequence: a flagged ``'split_nb'`` request runs ``'split_exact'``
+        for every step and ``result.test_method`` says so.
     alpha : float, default 0.05
         Significance threshold for rejection.
     args : dict | None
-        Method-specific kwargs (e.g. ``{'n_splits': 50}``).
+        Method-specific kwargs (e.g. ``{'n_splits': 50}``, or
+        ``{'force': True}`` to run ``split_nb`` past the auto-gate).
     pre_standardized : bool, default False
         If True, skip standardization — X and y are assumed already zero-mean,
         unit-variance.
@@ -464,7 +574,14 @@ def pls1_find_k_sequence(
         verbose=verbose,
         weights=weights,
     )
-    return FindKSequenceResult(**raw)
+    result = FindKSequenceResult(**raw)
+    _warn_if_rerouted(
+        test_method, result.test_method,
+        n_perm=_REROUTE_FALLBACK_N_PERM,
+        stable_rank=result.stable_rank,
+        n_eff=result.n_eff,
+    )
+    return result
 
 
 @_convert_errors
@@ -575,7 +692,7 @@ def spls1_find_k_optimal(
     X: np.ndarray, y: np.ndarray, k_max: int, keep: int,
     *,
     selector: Literal["r2_se", "r2_max", "bic"] = "r2_se",
-    diagnostic: Literal["raw_perm", "split_nb", "split_perm", "e"] | None = None,
+    diagnostic: Literal["raw_perm", "split_nb", "split_exact", "e"] | None = None,
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
@@ -606,14 +723,22 @@ def spls1_find_k_optimal(
         verbose=verbose,
         weights=weights,
     )
-    return FindKOptimalResult(**raw)
+    result = FindKOptimalResult(**raw)
+    # Same reroute as pls1_find_k_optimal.
+    _warn_if_rerouted(
+        diagnostic, result.diagnostic,
+        n_perm=_REROUTE_FALLBACK_N_PERM,
+        stable_rank=result.stable_rank,
+        n_eff=result.n_eff,
+    )
+    return result
 
 
 @_convert_errors
 def spls1_find_k_sequence(
     X: np.ndarray, y: np.ndarray, k_max: int, keep: int,
     *,
-    test_method: Literal["raw_perm", "split_nb", "split_perm", "e"] = "split_nb",
+    test_method: Literal["raw_perm", "split_nb", "split_exact", "e"] = "split_nb",
     alpha: float = 0.05,
     args: dict | None = None,
     pre_standardized: bool = False,
@@ -642,7 +767,14 @@ def spls1_find_k_sequence(
         verbose=verbose,
         weights=weights,
     )
-    return FindKSequenceResult(**raw)
+    result = FindKSequenceResult(**raw)
+    _warn_if_rerouted(
+        test_method, result.test_method,
+        n_perm=_REROUTE_FALLBACK_N_PERM,
+        stable_rank=result.stable_rank,
+        n_eff=result.n_eff,
+    )
+    return result
 
 
 @_convert_errors

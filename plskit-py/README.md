@@ -5,7 +5,7 @@
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](../LICENSE)
 
 Python wrapper for **plskit** — Partial Least Squares with modern
-inference (canonical percentile CIs, `split_perm`, `split_nb`), backed
+inference (canonical percentile CIs, `split_exact`, `split_nb`), backed
 by a Rust engine.
 
 > Part of the **[plskit project](https://github.com/pawlenartowicz/plskit)** —

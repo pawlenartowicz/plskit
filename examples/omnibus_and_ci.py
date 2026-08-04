@@ -19,8 +19,10 @@ Pipeline:
   2. Fit PLS1 at K=2.
   3. Run every canonical omnibus method on the same X, y, k, seed and
      tabulate p-value + statistic + per-method workload knobs:
-       * split_nb   — canonical NB-Wald split test (concentrated signal)
-       * split_perm — canonical split-permutation variant
+       * split_nb    — canonical NB-Wald split test (concentrated signal)
+       * split_exact — permutation-calibrated split-half test (same
+                      statistic as split_nb, calibrated by permutation
+                      instead of the Fisher-z t approximation)
        * score      — closed-form Welch-Satterthwaite (diffuse signal,
                       anisotropy-aware, K-free)
        * e          — universal inference (calibration-free, exact α)
@@ -55,10 +57,10 @@ import plskit
 # args required by each omnibus method (SPECS.md §2.1, "args by method").
 # `score` and `e` take no method-specific kwargs.
 _OMNIBUS_ARGS: dict[str, dict] = {
-    "split_nb":   {"n_splits": 50},
-    "split_perm": {"n_perm": 500, "n_splits": 50},
-    "score":      {},
-    "e":          {},
+    "split_nb":    {"n_splits": 50},
+    "split_exact": {"n_perm": 500, "n_splits": 50},
+    "score":       {},
+    "e":           {},
 }
 
 
@@ -112,7 +114,7 @@ def main() -> None:
             f"{fmt_workload(r)}"
         )
     print(
-        "  (split_nb / split_perm / score / e are the canonical"
+        "  (split_nb / split_exact / score / e are the canonical"
         " modern-inference family; legacy raw_perm is omitted here.)"
     )
 

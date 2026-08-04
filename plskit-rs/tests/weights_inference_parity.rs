@@ -20,14 +20,14 @@
 //!   convention unification (perm_null standardizes with weighted moments then
 //!   fits pre_standardized; pls1_fit standardizes internally — same coef).
 //!
-//! Methods deliberately NOT given a parity test here (split_nb/split_perm/score
+//! Methods deliberately NOT given a parity test here (split_nb/split_exact/score
 //! are FPR-calibrated in `calibration_mc.rs`; raw_perm, e, and the find_k
 //! selectors get weighted end-to-end tests below):
 //! - `score` → its statistic `T = ‖X̃'ỹ‖²` and the χ² p-value scale with the
 //!   *total* weight: row duplication inflates n_eff from n to total, so weighted
 //!   and duplicated p-values genuinely differ (more rows ⇒ more power). The test
 //!   is sample-size-dependent by construction, not replication-equivalent.
-//! - `raw_perm` / `split_nb` / `split_perm` and the CV/sequence find_k selectors
+//! - `raw_perm` / `split_nb` / `split_exact` and the CV/sequence find_k selectors
 //!   draw folds/splits/permutations from the RNG, so the observed statistic is
 //!   not replication-equivalent (different draws for n vs n_dup).
 

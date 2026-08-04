@@ -6,8 +6,8 @@ use faer::{Col, ColRef, Mat, MatRef};
 use crate::error::PlsKitResult;
 use crate::signal_test::ConfirmatoryMethod;
 
-/// Method-specific arguments. `Score` has no sequential variant —
-/// it cannot be constructed for this function.
+/// Method-specific arguments. `Score` has no sequential variant — it cannot
+/// be constructed for this function.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SequentialArgs {
     /// Raw permutation CV R² test per component.
@@ -19,12 +19,24 @@ pub(crate) enum SequentialArgs {
     SplitNb {
         /// Number of split-half repetitions.
         n_splits: usize,
+        /// Run NB even on a design the hoisted auto-gate flags. Default
+        /// `false`: a flagged design reroutes the WHOLE sequence to
+        /// `split_exact` (see `run_incremental_sequence`).
+        force: bool,
     },
-    /// Permutation-calibrated split-half test per component.
-    SplitPerm {
+    /// Permutation-calibrated split-half test per component (`split_exact`).
+    ///
+    /// Every step tests at k = 1 on the deflated residual (`p_for_incremental`
+    /// passes a literal 1), so the confirmatory route split inside
+    /// `split_exact` is decided by `keep` alone, never by the step index:
+    /// `keep = None` takes the no-refit route at every step, a set `keep`
+    /// takes the refit route at every step. Both routes report `tanh(z̄)`, so
+    /// the statistic is uniform down the chain even when `keep` mixes them —
+    /// which is what closed testing needs.
+    SplitExact {
         /// Number of permutations.
         n_perm: usize,
-        /// Number of split-half repetitions per permutation.
+        /// Number of split-half repetitions.
         n_splits: usize,
     },
     /// Universal-inference split-LR e-value per component.
@@ -38,24 +50,28 @@ impl SequentialArgs {
         match self {
             SequentialArgs::RawPerm { .. } => ConfirmatoryMethod::RawPerm,
             SequentialArgs::SplitNb { .. } => ConfirmatoryMethod::SplitNb,
-            SequentialArgs::SplitPerm { .. } => ConfirmatoryMethod::SplitPerm,
+            SequentialArgs::SplitExact { .. } => ConfirmatoryMethod::SplitExact,
             SequentialArgs::E => ConfirmatoryMethod::E,
         }
     }
 
-    /// Default args for a given method. Returns `None` for `Score`
-    /// (rejected at the dispatch boundary in the wrapper).
+    /// Default args for a given method. Returns `None` for `Score` (rejected
+    /// at the dispatch boundary in the wrapper — score has no per-component
+    /// reading).
     #[must_use]
     pub(crate) fn defaults_for(method: ConfirmatoryMethod) -> Option<Self> {
         Some(match method {
             ConfirmatoryMethod::RawPerm => SequentialArgs::RawPerm { n_perm: 1000 },
-            ConfirmatoryMethod::SplitNb => SequentialArgs::SplitNb { n_splits: 50 },
-            ConfirmatoryMethod::SplitPerm => SequentialArgs::SplitPerm {
+            ConfirmatoryMethod::SplitNb => SequentialArgs::SplitNb {
+                n_splits: 50,
+                force: false,
+            },
+            ConfirmatoryMethod::SplitExact => SequentialArgs::SplitExact {
                 n_perm: 1000,
                 n_splits: 50,
             },
             ConfirmatoryMethod::E => SequentialArgs::E,
-            ConfirmatoryMethod::Score | ConfirmatoryMethod::SplitPermNr => return None,
+            ConfirmatoryMethod::Score => return None,
         })
     }
 
@@ -65,9 +81,15 @@ impl SequentialArgs {
         use crate::signal_test::ConfirmatoryArgs;
         match self {
             SequentialArgs::RawPerm { n_perm } => ConfirmatoryArgs::RawPerm { n_perm, n_folds: 5 },
-            SequentialArgs::SplitNb { n_splits } => ConfirmatoryArgs::SplitNb { n_splits },
-            SequentialArgs::SplitPerm { n_perm, n_splits } => {
-                ConfirmatoryArgs::SplitPerm { n_perm, n_splits }
+            // `force` is unread on this path: steps run under
+            // `GateMode::Decided`, which skips the gate outright. A fired gate
+            // never reaches here as SplitNb at all — it arrives already
+            // rewritten to SplitExact by `run_incremental_sequence`.
+            SequentialArgs::SplitNb { n_splits, force } => {
+                ConfirmatoryArgs::SplitNb { n_splits, force }
+            }
+            SequentialArgs::SplitExact { n_perm, n_splits } => {
+                ConfirmatoryArgs::SplitExact { n_perm, n_splits }
             }
             SequentialArgs::E => ConfirmatoryArgs::E,
         }
@@ -108,13 +130,20 @@ pub(crate) struct IncrementalSequenceOutput {
     /// Largest `k` with `p_k` < alpha, or `None` if no rejection.
     pub(crate) last_significant_k: Option<usize>,
     /// Method name as a lowercase string (e.g. `"split_nb"`, `"raw_perm"`).
-    #[allow(dead_code)]
+    /// Reports what actually RAN: a `split_nb` request that the hoisted gate
+    /// flagged reads `"split_exact"` here.
     pub(crate) method: String,
     /// Significance threshold alpha used.
     #[allow(dead_code)]
     pub(crate) alpha: f64,
     /// RNG seed actually used.
     pub(crate) seed: u64,
+    /// Stable rank of the standardized X, as the hoisted gate saw it.
+    /// `Some` whenever `split_nb` was the REQUESTED method — whether the gate
+    /// fired or not, and also under `force` — matching the same field on
+    /// `ConfirmatoryTestOutput`. `None` for every other requested method,
+    /// which never evaluates the gate.
+    pub(crate) stable_rank: Option<f64>,
 }
 
 /// Run the incremental sequence on raw data. Stops at the first
@@ -128,7 +157,7 @@ pub(crate) fn run_incremental_sequence(
     y: ColRef<'_, f64>,
     k_max: usize,
     weights: Option<ColRef<'_, f64>>,
-    opts: IncrementalSequenceOpts,
+    mut opts: IncrementalSequenceOpts,
 ) -> PlsKitResult<IncrementalSequenceOutput> {
     let max_allowed = x.ncols();
     if k_max == 0 || k_max > max_allowed {
@@ -137,6 +166,55 @@ pub(crate) fn run_incremental_sequence(
             k_max: max_allowed,
         });
     }
+
+    // ── hoisted `split_nb` auto-gate ────────────────────────────────────────
+    // Decided ONCE here, on the full X, before any deflation, and then frozen
+    // into `opts.args` for every step. Two reasons it cannot live in the
+    // per-step confirmatory call: each step passes the deflated residual,
+    // whose spectrum is not X's (deflation removes the y-correlated direction
+    // extracted so far, which need not be PC1), and a per-step decision could
+    // flip the method mid-sequence, which closed testing cannot use.
+    //
+    // Rewriting `opts.args` is also what makes the reported method honest —
+    // `IncrementalSequenceOutput.method` is read off the resolved args below,
+    // exactly as `result.method` is read off `args_resolved` in
+    // `pls1_confirmatory_test`.
+    let mut stable_rank_out = None;
+    if let SequentialArgs::SplitNb { n_splits, force } = opts.args {
+        // Evaluated even under `force`, whose only effect is to skip the
+        // reroute below: `stable_rank` means the same thing on every result
+        // type that carries it — what the gate saw on a `split_nb` request —
+        // and `pls1_confirmatory_test` populates it under `force` too. The
+        // price is one SVD on a forced run.
+        //
+        // Restandardize with the run's weights unconditionally, ignoring
+        // `pre_standardized`. The gate rule is one rule shared with
+        // `pls1_confirmatory_test`, which also standardizes here regardless
+        // of the flag; honouring the flag would make the two sites disagree
+        // whenever the caller standardized with unweighted moments. The
+        // cost is one owned copy of X — already paid on the other branch.
+        let (owned, _, _) = crate::linalg::standardize_weighted(x, weights);
+        let xs = owned.as_ref();
+        // n_gate: Kish n_eff under weights, raw row count without —
+        // matching `pls1_confirmatory_test`, which passes the `n_eff_val`
+        // that `validate_and_normalize_weights` defines the same way.
+        #[allow(clippy::cast_precision_loss)]
+        let n_gate = weights.map_or(x.nrows() as f64, crate::linalg::compute_n_eff);
+        let (fires, sr) = crate::signal_test::split_nb_gate_rule(xs, n_gate);
+        stable_rank_out = Some(sr);
+        if !force && fires {
+            // `n_perm` is split_exact's own default; the requested
+            // `n_splits` carries over untouched. Mirrored by the
+            // confirmatory reroute in signal_test.rs and by
+            // `_REROUTE_FALLBACK_N_PERM` in
+            // plskit-py/python/plskit/_api.py — all three change together.
+            opts.args = SequentialArgs::SplitExact {
+                n_perm: 1000,
+                n_splits,
+            };
+        }
+    }
+
     let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
     let mut pvalues_vec: Vec<f64> = vec![f64::NAN; k_max];
     let mut last_sig: Option<usize> = None;
@@ -159,6 +237,7 @@ pub(crate) fn run_incremental_sequence(
         method: opts.args.method().as_str().to_owned(),
         alpha: opts.alpha,
         seed: seed_used,
+        stable_rank: stable_rank_out,
     })
 }
 
@@ -170,7 +249,9 @@ fn p_for_confirmatory_at_k(
     opts: &IncrementalSequenceOpts,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<f64> {
-    use crate::signal_test::{pls1_confirmatory_test, ConfirmatoryTestInput, ConfirmatoryTestOpts};
+    use crate::signal_test::{
+        confirmatory_test_impl, ConfirmatoryTestInput, ConfirmatoryTestOpts, GateMode,
+    };
     // Burn one RNG advance so the per-step seed stream stays bit-stable
     // across `pls1_find_k_sequence` revisions. DO NOT remove without regen
     // of testdata/ — see byte_parity tests for the sentinel.
@@ -178,7 +259,7 @@ fn p_for_confirmatory_at_k(
         use rand::Rng;
         rng.next_u64()
     };
-    let r = pls1_confirmatory_test(
+    let r = confirmatory_test_impl(
         ConfirmatoryTestInput::Raw { x, y, k, weights },
         ConfirmatoryTestOpts {
             args: opts.args.to_confirmatory_args(),
@@ -195,6 +276,7 @@ fn p_for_confirmatory_at_k(
             max_skip_rate: 0.01,
             keep: opts.keep,
         },
+        GateMode::Decided,
     )?;
     Ok(r.pvalue)
 }
@@ -313,6 +395,190 @@ mod tests {
         assert!(SequentialArgs::defaults_for(ConfirmatoryMethod::Score).is_none());
     }
 
+    // ── hoisted split_nb auto-gate ───────────────────────────────────────────
+
+    /// `stop_early_override: true` so the whole p-value vector is filled —
+    /// these tests read every step, not just the first.
+    fn seq_run(
+        x: &faer::Mat<f64>,
+        y: &Col<f64>,
+        k_max: usize,
+        args: SequentialArgs,
+    ) -> IncrementalSequenceOutput {
+        run_incremental_sequence(
+            x.as_ref(),
+            y.as_ref(),
+            k_max,
+            None,
+            IncrementalSequenceOpts {
+                args,
+                alpha: 0.05,
+                stop_early_override: true,
+                pre_standardized: false,
+                seed: Some(99),
+                disable_parallelism: false,
+                verbose: false,
+                keep: None,
+            },
+        )
+        .unwrap()
+    }
+
+    /// n = 20 sits below the gate's effective-sample floor of 25 while the
+    /// iid-uniform spectrum stays well clear of the rank floor, so the size
+    /// half of the rule is what fires here.
+    #[test]
+    fn gate_reroutes_whole_sequence_on_flagged_design() {
+        let (x, y) = synth(20, 5, 1, 4.0, 5);
+        let r = seq_run(
+            &x,
+            &y,
+            2,
+            SequentialArgs::SplitNb {
+                n_splits: 10,
+                force: false,
+            },
+        );
+        assert_eq!(r.method, "split_exact");
+        // Every step ran: the reroute rewrites `opts.args` once, before the
+        // loop, so there is no per-step branch that could disagree.
+        assert!((0..2).all(|i| !r.pvalues[i].is_nan()), "{:?}", r.pvalues);
+    }
+
+    /// The gate restandardizes regardless of `pre_standardized`. Feeding it an
+    /// already-standardized flagged design and asserting the same reroute pins
+    /// that restandardizing standardized data is the identity for the gate.
+    #[test]
+    fn gate_reroutes_on_pre_standardized_input() {
+        use crate::linalg::{standardize, standardize1};
+        let (x, y) = synth(20, 5, 1, 4.0, 5);
+        let (xs, _, _) = standardize(x.as_ref());
+        let (ys, _, _) = standardize1(y.as_ref());
+        let r = run_incremental_sequence(
+            xs.as_ref(),
+            ys.as_ref(),
+            2,
+            None,
+            IncrementalSequenceOpts {
+                args: SequentialArgs::SplitNb {
+                    n_splits: 10,
+                    force: false,
+                },
+                alpha: 0.05,
+                stop_early_override: true,
+                pre_standardized: true,
+                seed: Some(99),
+                disable_parallelism: false,
+                verbose: false,
+                keep: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(r.method, "split_exact");
+    }
+
+    /// `force` suppresses the reroute only — the rule is still evaluated, so
+    /// the caller can see what it would have decided. Same as
+    /// `pls1_confirmatory_test` under `force`.
+    #[test]
+    fn gate_force_keeps_nb_on_flagged_design() {
+        let (x, y) = synth(20, 5, 1, 4.0, 5);
+        let r = seq_run(
+            &x,
+            &y,
+            2,
+            SequentialArgs::SplitNb {
+                n_splits: 10,
+                force: true,
+            },
+        );
+        assert_eq!(r.method, "split_nb");
+        assert!(r.stable_rank.is_some());
+    }
+
+    #[test]
+    fn gate_clears_on_adequate_design() {
+        let (x, y) = synth(60, 5, 1, 4.0, 2);
+        let r = seq_run(
+            &x,
+            &y,
+            3,
+            SequentialArgs::SplitNb {
+                n_splits: 10,
+                force: false,
+            },
+        );
+        assert_eq!(r.method, "split_nb");
+        // Populated on the pass path too — it reports what the gate saw, not
+        // whether it fired.
+        assert!(r.stable_rank.is_some());
+    }
+
+    /// Only a `split_nb` request evaluates the rule, so nothing else has a
+    /// rank to report.
+    #[test]
+    fn gate_not_evaluated_for_other_methods() {
+        let (x, y) = synth(60, 5, 1, 4.0, 2);
+        let r = seq_run(&x, &y, 2, SequentialArgs::RawPerm { n_perm: 20 });
+        assert_eq!(r.method, "raw_perm");
+        assert!(r.stable_rank.is_none());
+    }
+
+    /// The no-per-step-re-gate guarantee is structural, so pin the structure
+    /// rather than trying to build a design whose deflated residual would gate
+    /// differently from X: steps run under `GateMode::Decided`, so a
+    /// `split_nb` step never evaluates the gate and never reports a
+    /// `stable_rank` of its own, whatever the sequence-level `force` was.
+    #[test]
+    fn steps_never_re_gate() {
+        use crate::signal_test::{
+            confirmatory_test_impl, ConfirmatoryTestInput, ConfirmatoryTestOpts, GateMode,
+        };
+        let (x, y) = synth(60, 5, 1, 4.0, 7);
+        let r = confirmatory_test_impl(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: 1,
+                weights: None,
+            },
+            ConfirmatoryTestOpts {
+                args: SequentialArgs::SplitNb {
+                    n_splits: 10,
+                    force: false,
+                }
+                .to_confirmatory_args(),
+                seed: Some(7),
+                ..Default::default()
+            },
+            GateMode::Decided,
+        )
+        .unwrap();
+        assert_eq!(r.method, "split_nb");
+        assert!(r.stable_rank.is_none(), "step evaluated the gate");
+    }
+
+    #[test]
+    fn split_exact_runs_as_a_sequential_method() {
+        let (x, y) = synth(60, 5, 1, 4.0, 2);
+        let r = seq_run(
+            &x,
+            &y,
+            3,
+            SequentialArgs::SplitExact {
+                n_perm: 199,
+                n_splits: 10,
+            },
+        );
+        assert_eq!(r.method, "split_exact");
+        assert!(
+            (0..3).all(|i| r.pvalues[i] >= 0.0 && r.pvalues[i] <= 1.0),
+            "{:?}",
+            r.pvalues
+        );
+        assert!(r.pvalues[0] < 0.05, "signal component not detected");
+    }
+
     #[test]
     fn incremental_stops_early_at_first_nonrejection() {
         let (x, y) = synth(60, 5, 1, 4.0, 2);
@@ -322,7 +588,10 @@ mod tests {
             5,
             None,
             IncrementalSequenceOpts {
-                args: SequentialArgs::SplitNb { n_splits: 30 },
+                args: SequentialArgs::SplitNb {
+                    n_splits: 30,
+                    force: false,
+                },
                 alpha: 0.05,
                 stop_early_override: false,
                 pre_standardized: false,
@@ -353,7 +622,10 @@ mod tests {
             3,
             None,
             IncrementalSequenceOpts {
-                args: SequentialArgs::SplitNb { n_splits: 30 },
+                args: SequentialArgs::SplitNb {
+                    n_splits: 30,
+                    force: false,
+                },
                 alpha: 0.05,
                 stop_early_override: true,
                 pre_standardized: false,

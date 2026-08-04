@@ -18,10 +18,12 @@ def test_confirmatory_weights_uniform_invariance():
     assert r_n.n_eff == pytest.approx(60.0)
 
 
-@pytest.mark.parametrize("method", ["raw_perm", "split_nb", "split_perm", "score", "e"])
+@pytest.mark.parametrize("method", ["raw_perm", "split_nb", "split_exact", "score", "e"])
 def test_confirmatory_each_method_accepts_weights(method):
     rng = np.random.default_rng(1)
-    X = rng.normal(size=(80, 4))
+    # d = 6, not 4: the split_nb auto-gate reroutes any X with four columns or
+    # fewer, and this cell is meant to exercise split_nb's own weighted path.
+    X = rng.normal(size=(80, 6))
     y = X[:, 0] + rng.normal(size=80)
     w = rng.uniform(0.5, 2.0, size=80)
     r = plskit.pls1_confirmatory_test(X, y, k=2, method=method, weights=w, seed=7)

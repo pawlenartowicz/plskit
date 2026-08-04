@@ -1,7 +1,8 @@
 //! `pls1_confirmatory_test` fixture cases (Family D of Task 5).
 //!
-//! Six unweighted cases share one inputs file (`inputs/pls1_confirmatory_inputs.npz`):
-//! five base-method cases (no CI) and one CI-bundle variant.
+//! Seven unweighted cases share one inputs file (`inputs/pls1_confirmatory_inputs.npz`):
+//! six base-method cases (no CI; two of them, `split_exact` and `split_exact_k1`, cover
+//! `split_exact`'s refit and no-refit routes respectively) and one CI-bundle variant.
 //! Five weighted cases share a separate inputs file
 //! (`inputs/pls1_confirmatory_weighted_inputs.npz`) that also carries `weights`.
 
@@ -151,6 +152,9 @@ fn run_confirmatory_case(root: &Path, c: &ConfirmatoryCase) -> Result<Case> {
         if let Some(ns) = r.n_splits {
             w.add_i64("n_splits", &scalar_i64(i64::try_from(ns)?))?;
         }
+        if let Some(sr) = r.stable_rank {
+            w.add_f64("stable_rank", &scalar_f64(sr))?;
+        }
         w.add_i64("seed", &scalar_i64(i64::try_from(r.seed)?))?;
         if let Some(ci) = &r.ci {
             write_ci_fields(&mut w, ci)?;
@@ -210,7 +214,10 @@ pub fn split_nb(root: &Path) -> Result<Case> {
         root,
         &ConfirmatoryCase {
             name: "pls1_confirmatory_split_nb",
-            args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+            args: ConfirmatoryArgs::SplitNb {
+                n_splits: 30,
+                force: false,
+            },
             ci: None,
             disable_parallelism: false,
             kwargs: serde_json::json!({
@@ -227,16 +234,17 @@ pub fn split_nb(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls1_confirmatory_test` with `method=split_perm`, `n_perm=200`, `n_splits=30`, `seed=42`.
+/// Case: `pls1_confirmatory_test` with `method=split_exact`, `n_perm=200`, `n_splits=30`,
+/// `seed=42`. `k=2` sends this through `split_exact`'s honest-refit route.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
-pub fn split_perm(root: &Path) -> Result<Case> {
+pub fn split_exact(root: &Path) -> Result<Case> {
     run_confirmatory_case(
         root,
         &ConfirmatoryCase {
-            name: "pls1_confirmatory_split_perm",
-            args: ConfirmatoryArgs::SplitPerm {
+            name: "pls1_confirmatory_split_exact",
+            args: ConfirmatoryArgs::SplitExact {
                 n_perm: 200,
                 n_splits: 30,
             },
@@ -244,13 +252,45 @@ pub fn split_perm(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
-                "method": "split_perm",
+                "method": "split_exact",
                 "args": {"n_perm": 200, "n_splits": 30},
                 "seed": 42
             }),
             inputs_name: "pls1_confirmatory_inputs",
             synth_seed: 42,
             k: 2,
+            weights: None,
+        },
+    )
+}
+
+/// Case: `pls1_confirmatory_test` with `method=split_exact`, `n_perm=200`, `n_splits=30`,
+/// `seed=42`, `k=1`. Unweighted dense K = 1: exercises `split_exact`'s no-refit route
+/// (the [`split_exact`](self::split_exact) case above covers the refit route via K = 2;
+/// [`weighted_split_exact`] covers the no-refit route under weights).
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn split_exact_k1(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_split_exact_k1",
+            args: ConfirmatoryArgs::SplitExact {
+                n_perm: 200,
+                n_splits: 30,
+            },
+            ci: None,
+            disable_parallelism: false,
+            kwargs: serde_json::json!({
+                "k": 1,
+                "method": "split_exact",
+                "args": {"n_perm": 200, "n_splits": 30},
+                "seed": 42
+            }),
+            inputs_name: "pls1_confirmatory_inputs",
+            synth_seed: 42,
+            k: 1,
             weights: None,
         },
     )
@@ -324,7 +364,10 @@ pub fn split_nb_ci(root: &Path) -> Result<Case> {
         root,
         &ConfirmatoryCase {
             name: "pls1_confirmatory_split_nb_ci",
-            args: ConfirmatoryArgs::SplitNb { n_splits: 30 },
+            args: ConfirmatoryArgs::SplitNb {
+                n_splits: 30,
+                force: false,
+            },
             ci: Some(CIOpts {
                 n_boot: 300,
                 m_rate: 0.7,
@@ -396,7 +439,10 @@ pub fn weighted_split_nb(root: &Path) -> Result<Case> {
         root,
         &ConfirmatoryCase {
             name: "pls1_confirmatory_weighted_split_nb",
-            args: ConfirmatoryArgs::SplitNb { n_splits: 50 },
+            args: ConfirmatoryArgs::SplitNb {
+                n_splits: 50,
+                force: false,
+            },
             ci: None,
             disable_parallelism: false,
             kwargs: serde_json::json!({
@@ -414,16 +460,18 @@ pub fn weighted_split_nb(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: weighted `pls1_confirmatory_test` with `method=split_perm`, `n_perm=200`, `n_splits=50`.
+/// Case: weighted `pls1_confirmatory_test` with `method=split_exact`, `n_perm=200`,
+/// `n_splits=50`. `k=1` dense under weights: exercises `split_exact`'s weighted
+/// no-refit route.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
-pub fn weighted_split_perm(root: &Path) -> Result<Case> {
+pub fn weighted_split_exact(root: &Path) -> Result<Case> {
     run_confirmatory_case(
         root,
         &ConfirmatoryCase {
-            name: "pls1_confirmatory_weighted_split_perm",
-            args: ConfirmatoryArgs::SplitPerm {
+            name: "pls1_confirmatory_weighted_split_exact",
+            args: ConfirmatoryArgs::SplitExact {
                 n_perm: 200,
                 n_splits: 50,
             },
@@ -431,7 +479,7 @@ pub fn weighted_split_perm(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
-                "method": "split_perm",
+                "method": "split_exact",
                 "args": {"n_perm": 200, "n_splits": 50},
                 "seed": 42,
                 "weights": "nonuniform"

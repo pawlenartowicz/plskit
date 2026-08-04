@@ -70,8 +70,8 @@ pub use rotation_stability::{
     RotationStabilityOutput,
 };
 pub use signal_test::{
-    pls1_confirmatory_test, CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput,
-    ConfirmatoryTestOpts, ConfirmatoryTestOutput,
+    pls1_confirmatory_test, split_nb_gate, CIOpts, ConfirmatoryArgs, ConfirmatoryMethod,
+    ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput, SplitNbGateOutput,
 };
 // subsample is pub(crate) — only these two result types are on the public surface.
 // See subsample.rs module header for the full engine contract.

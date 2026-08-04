@@ -6,7 +6,7 @@
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 
 Cross-language Partial Least Squares with **modern inference**:
-canonical percentile CIs, `split_perm`, and `split_nb` tests.
+canonical percentile CIs, `split_exact`, and `split_nb` tests.
 
 ## Wrappers
 
@@ -35,7 +35,7 @@ sig.pvalue, sig.statistic
 ## Why plskit?
 
 - **Modern inference is canonical.** Procrustes-aligned percentile CIs,
-  `split_perm`, and `split_nb` are the default.
+  `split_exact`, and `split_nb` are the default.
 - **One Rust engine, identical results across wrappers.** All
   numerical computation lives in `plskit-rs`. Python (and the
   forthcoming R and Julia wrappers) call into it via FFI, so a fixed

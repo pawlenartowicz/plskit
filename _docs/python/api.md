@@ -87,17 +87,20 @@ name itself.
 data; optionally a per-component same-sample diagnostic.
 **arguments:** `X`, `y`, `k_max`
 **options:** `selector` (`"r2_se"` | `"r2_max"` | `"bic"`; default
-`"r2_se"`); `diagnostic` (`"raw_perm"` | `"split_nb"` | `"split_perm"`
+`"r2_se"`); `diagnostic` (`"raw_perm"` | `"split_nb"` | `"split_exact"`
 | `"e"` | `None`; default `None` — `None` disables the diagnostic;
 `"score"` is rejected, has no sequential variant); `args` (dict —
 selector key `n_folds`; diagnostic keys `n_perm` for `raw_perm` /
-`split_perm`, `n_splits` for `split_nb` / `split_perm`. Diagnostic
-keys require `diagnostic` to be set.); `pre_standardized`; `weights`;
-`seed`; `disable_parallelism`; `verbose`.
-**returns:** `FindKOptimalResult`. When `diagnostic` is set, the
-`pvalues` and `diagnostic` fields are populated; selection and the
-diagnostic reuse the same data, so the pvalues are a robustness
-check, not honest inference. The `diagnostic=` parameter name (vs.
+`split_exact`, `n_splits` for `split_nb` / `split_exact`, `force` for
+`split_nb`. Diagnostic keys require `diagnostic` to be set.);
+`pre_standardized`; `weights`; `seed`; `disable_parallelism`;
+`verbose`.
+**returns:** `FindKOptimalResult`. A `"split_nb"` diagnostic the
+auto-gate flags reroutes to `"split_exact"`; `result.diagnostic` says
+so and Python warns. Pass `args={'force': True}` to run `"split_nb"`
+anyway. When `diagnostic` is set, the `pvalues` and `diagnostic`
+fields are populated; selection and the diagnostic reuse the same
+data, so the pvalues are a robustness check, not honest inference. The `diagnostic=` parameter name (vs.
 `test_method=` on `pls1_find_k_sequence`) is the structural signal —
 same enum, different inferential weight.
 
@@ -106,12 +109,15 @@ same enum, different inferential weight.
 components carry signal at α?" with exact FWER control.
 **arguments:** `X`, `y`, `k_max`
 **options:** `test_method` (`"raw_perm"` | `"split_nb"` |
-`"split_perm"` | `"e"`; default `"split_nb"`); `args` (dict of
-method-specific kwargs: `n_perm`, `n_splits`); `alpha` (default
+`"split_exact"` | `"e"`; default `"split_nb"`); `args` (dict of
+method-specific kwargs: `n_perm`, `n_splits`, and `force` for
+`split_nb`); `alpha` (default
 `0.05`); `pre_standardized`; `weights`; `seed`;
 `disable_parallelism`; `verbose`. Stop-early at the first
 non-rejection is hard-coded on; `K*` is the count of components that
-rejected before the first failure.
+rejected before the first failure. The `split_nb` auto-gate is
+evaluated once for the whole sequence: a flagged request runs
+`split_exact` for every step and `result.test_method` says so.
 **returns:** `FindKSequenceResult`. Closed testing on nested H is
 exact, so the per-step pvalues form an honest FWER-controlled
 sequence. To recover the path-max p-value, compute
@@ -173,7 +179,7 @@ result shape as the dense version. `keep = n_features` reproduces the
 dense function bit-exactly.
 **arguments:** `X`, `y`, `k_max`, `keep`
 **options:** `selector` (`"r2_se"` | `"r2_max"` | `"bic"`; default
-`"r2_se"`); `diagnostic` (`"raw_perm"` | `"split_nb"` | `"split_perm"`
+`"r2_se"`); `diagnostic` (`"raw_perm"` | `"split_nb"` | `"split_exact"`
 | `"e"` | `None`; default `None`); `args`; `pre_standardized`; `seed`;
 `disable_parallelism`; `verbose`; `weights`.
 **Dense-BIC caveat:** `selector='bic'` reuses the dense complexity
@@ -188,7 +194,7 @@ sparse fit at the caller's fixed `keep`. Each step deflates on the sparse
 residual and tests the sparse marginal component — a coherent sequential
 test. `keep = n_features` reproduces the dense function bit-exactly.
 **arguments:** `X`, `y`, `k_max`, `keep`
-**options:** `test_method` (`"raw_perm"` | `"split_nb"` | `"split_perm"`
+**options:** `test_method` (`"raw_perm"` | `"split_nb"` | `"split_exact"`
 | `"e"`; default `"split_nb"`); `alpha` (default `0.05`); `args`;
 `pre_standardized`; `seed`; `disable_parallelism`; `verbose`; `weights`.
 **returns:** `FindKSequenceResult` (same type as `pls1_find_k_sequence`).
@@ -199,19 +205,30 @@ test. `keep = n_features` reproduces the dense function bit-exactly.
 
 ### 3.1 Confirmatory omnibus test
 
-**Six test methods.** `raw_perm` / `split_nb` / `split_perm_nr` /
-`split_perm` are the predictive-validity split-resampling family (the
-methods paper's core; `split_perm_nr` is `split_nb`'s statistic with a
-permutation reference instead of the t approximation, K = 1 and
-unweighted only);
+**Five test methods.** `raw_perm` / `split_nb` / `split_exact` are the
+predictive-validity split-resampling family (the methods paper's core;
+`split_exact` is the same held-out-correlation statistic as `split_nb`,
+calibrated by permutation instead of the Fisher-z t approximation, so
+it holds its level on any design — it is the recommended default at
+`k=1`);
 `score` is closed-form on `T = ‖X′y‖²` (generalized χ² under Gaussian
 y, anisotropy-aware by construction, K-free); `e` is universal
 inference (split-LR e-value, calibration-free, non-asymptotic α bound
 — `P(reject | H₀) ≤ α` exactly, with a power tax of ~30–50% vs.
-`split_nb` as the validity cost). `score` and `split_nb` complement
+`split_exact` as the validity cost). `score` and `split_exact` complement
 rather than replace each other — `score` wins on diffuse signal across
-many directions, `split_nb` wins on signal concentrated in a few
+many directions, `split_exact` wins on signal concentrated in a few
 directions; reporting both side-by-side is the canonical pattern.
+
+**`split_nb` auto-gate.** `split_nb`'s Fisher-z correction is exact at
+ρ = ½ and drifts off level when `n_eff < 25` or the stable rank of the
+standardized `X` is `< 3`. Since stable rank can never exceed the column
+count, `X` with 4 columns or fewer is rerouted outright, without
+consulting the computed rank. A `split_nb` request on a design that trips
+any of these reroutes to `split_exact` at `n_perm=1000`;
+`result.method` reports `"split_exact"` and Python raises a
+`UserWarning`. Pass `args={'force': True}` to run `split_nb` anyway.
+Call `split_nb_gate` (§3.2) to ask the same question in advance.
 
 **function:** `pls1_confirmatory_test`
 **need:** omnibus null test at a pre-specified `k` ("is there signal
@@ -220,8 +237,8 @@ rotation-invariant CIs.
 **arguments:** `X`, `y`, `k` (default `1`)
 **options:**
 
-- `method` (`"raw_perm"` | `"split_nb"` | `"split_perm_nr"` |
-  `"split_perm"` | `"score"` | `"e"`)
+- `method` (`"raw_perm"` | `"split_nb"` | `"split_exact"` |
+  `"score"` | `"e"`)
 - `args` (dict of method-specific kwargs)
 - `ci` (bool, default `False`) — when `True`, runs an independent
   subsample pass after the headline test and populates `result.ci`.
@@ -235,9 +252,9 @@ rotation-invariant CIs.
 **args by method:**
 
 - `"raw_perm"` — `n_perm`, `n_folds`
-- `"split_nb"` — `n_splits`
-- `"split_perm_nr"` — `n_perm`, `n_splits`
-- `"split_perm"` — `n_perm`, `n_splits`
+- `"split_nb"` — `n_splits`, `force` (bool, default `False`; run `split_nb`
+  even on a design the auto-gate flags)
+- `"split_exact"` — `n_perm`, `n_splits`
 - `"score"` — none (anisotropy handled internally by Welch–Satterthwaite)
 - `"e"` — none
 
@@ -265,7 +282,20 @@ are a regression-style diagnostic; canonical inference is
 shrinkage / multiplicity / standardization caveats that apply to
 `beta_ci_*`.
 
-### 3.2 Permutation-null engine
+### 3.2 Auto-gate query
+
+**function:** `split_nb_gate`
+**need:** find out whether the `split_nb` auto-gate (§3.1) flags your
+design, before spending a test run to discover it from
+`result.method`. Reports the engine's own decision — it evaluates the
+one rule, it does not restate it.
+**arguments:** `X`
+**options:** `weights`.
+**returns:** `SplitNbGateResult` — `fires` (would a `"split_nb"`
+request reroute?), plus the `stable_rank` and `n_eff` the rule read.
+`y` is not an argument: only `X` and the weights enter the rule.
+
+### 3.3 Permutation-null engine
 
 **function:** `pls1_perm_null`
 **need:** signed per-voxel z + (optional) full perm matrix, suitable

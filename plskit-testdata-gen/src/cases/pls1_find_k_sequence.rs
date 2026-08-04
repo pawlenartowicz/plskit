@@ -142,17 +142,17 @@ pub fn split_nb(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls1_find_k_sequence` with `test_method=split_perm`, `n_perm=100`, `n_splits=20`, `seed=42`.
+/// Case: `pls1_find_k_sequence` with `test_method=split_exact`, `n_perm=100`, `n_splits=20`, `seed=42`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_find_k_sequence` fails.
-pub fn split_perm(root: &Path) -> Result<Case> {
+pub fn split_exact(root: &Path) -> Result<Case> {
     run_sequence_case(
         root,
         &SequenceCase {
-            name: "pls1_find_k_sequence_split_perm",
+            name: "pls1_find_k_sequence_split_exact",
             opts: FindKSequenceOpts {
-                test_method: ConfirmatoryMethod::SplitPerm,
+                test_method: ConfirmatoryMethod::SplitExact,
                 n_perm: 100,
                 n_splits: 20,
                 seed: Some(42),
@@ -160,7 +160,7 @@ pub fn split_perm(root: &Path) -> Result<Case> {
             },
             kwargs: serde_json::json!({
                 "k_max": 4,
-                "test_method": "split_perm",
+                "test_method": "split_exact",
                 "args": {"n_perm": 100, "n_splits": 20},
                 "seed": 42
             }),

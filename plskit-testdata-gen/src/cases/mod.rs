@@ -153,18 +153,19 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
 
     cases.push(pls1_find_k_sequence::raw_perm(root)?);
     cases.push(pls1_find_k_sequence::split_nb(root)?);
-    cases.push(pls1_find_k_sequence::split_perm(root)?);
+    cases.push(pls1_find_k_sequence::split_exact(root)?);
     cases.push(pls1_find_k_sequence::e(root)?);
 
     cases.push(pls1_confirmatory_test::raw_perm(root)?);
     cases.push(pls1_confirmatory_test::split_nb(root)?);
-    cases.push(pls1_confirmatory_test::split_perm(root)?);
+    cases.push(pls1_confirmatory_test::split_exact(root)?);
+    cases.push(pls1_confirmatory_test::split_exact_k1(root)?);
     cases.push(pls1_confirmatory_test::score(root)?);
     cases.push(pls1_confirmatory_test::e(root)?);
     cases.push(pls1_confirmatory_test::split_nb_ci(root)?);
     cases.push(pls1_confirmatory_test::weighted_raw_perm(root)?);
     cases.push(pls1_confirmatory_test::weighted_split_nb(root)?);
-    cases.push(pls1_confirmatory_test::weighted_split_perm(root)?);
+    cases.push(pls1_confirmatory_test::weighted_split_exact(root)?);
     cases.push(pls1_confirmatory_test::weighted_score(root)?);
     cases.push(pls1_confirmatory_test::weighted_e(root)?);
 
@@ -179,6 +180,7 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(spls1_find_keep_optimal::k1(root)?);
     cases.push(spls1_find_k_optimal::r2_se_keep3(root)?);
     cases.push(spls1_find_k_sequence::split_nb_keep3(root)?);
+    cases.push(spls1_find_k_sequence::split_nb_keep3_gated(root)?);
 
     Ok(cases)
 }

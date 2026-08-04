@@ -3,7 +3,7 @@
 `plskit` is a cross-language Partial Least Squares library: a Rust core
 (`cargo add plskit`) with thin wrappers for Python (`pip install plskit`),
 R, and Julia. Its distinguishing feature is *modern inference* —
-canonical percentile CIs, `split_perm`, and `split_nb` tests — alongside
+canonical percentile CIs, `split_exact`, and `split_nb` tests — alongside
 a compatibility layer for legacy outputs.
 
 ## Sections

@@ -1185,7 +1185,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "plskit"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "approx",
  "faer",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "plskit-py"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "faer",
  "ndarray",
@@ -1215,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "plskit-testdata-gen"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "faer",

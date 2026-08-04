@@ -53,7 +53,10 @@ Format: `name` | description | functions where used.
 | `W` | weight matrix `(p, k)` for standalone rotation | `rotate` (array overload) |
 | `L` | loading basis on which simple-structure is computed (default identity) | `rotate`, `pls1_rotation_stability` |
 | `v0` | target direction `(p,)` for direction-level test | `grassmannian_alignment_test` |
-| `weights` | length-n float64 vector; optional; default `None` = uniform; row-scales `(X, y/Y)` by `√w` (WLS-style precision/sampling weights) | `pls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_rotation_stability`, `pls1_perm_null` |
+| `weights` | length-n float64 vector; optional; default `None` = uniform; row-scales `(X, y/Y)` by `√w` (WLS-style precision/sampling weights) | `pls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_rotation_stability`, `pls1_perm_null`, `split_nb_gate` |
+
+`split_nb_gate(X, weights=None)` is the one entry point that takes `X`
+without `y`: the `split_nb` auto-gate rule reads only the design.
 
 `pls1_confirmatory_test` takes `(X, y, k)` directly — there is no `model` overload (the test refuses to consume a model whose K was selected on the same data).
 
@@ -70,8 +73,8 @@ Format: `name` | description | functions where used.
 
 | name | description | functions |
 |---|---|---|
-| `n_perm` | permutations for `raw_perm` / `split_perm` / `split_perm_nr` / Grassmannian (in `pls1_find_k_optimal`, lives in the shared `args` dict and applies to the diagnostic) | `pls1_confirmatory_test`, `pls1_find_k_optimal` (diagnostic), `pls1_find_k_sequence`, `grassmannian_alignment_test` |
-| `n_splits` | split-half repetitions for `split_nb` / `split_perm` / `split_perm_nr` (in `pls1_find_k_optimal`, lives in the shared `args` dict and applies to the diagnostic) | `pls1_confirmatory_test`, `pls1_find_k_optimal` (diagnostic), `pls1_find_k_sequence` |
+| `n_perm` | permutations for `raw_perm` / `split_exact` / Grassmannian (in `pls1_find_k_optimal`, lives in the shared `args` dict and applies to the diagnostic) | `pls1_confirmatory_test`, `pls1_find_k_optimal` (diagnostic), `pls1_find_k_sequence`, `grassmannian_alignment_test` |
+| `n_splits` | split-half repetitions for `split_nb` / `split_exact` (in `pls1_find_k_optimal`, lives in the shared `args` dict and applies to the diagnostic) | `pls1_confirmatory_test`, `pls1_find_k_optimal` (diagnostic), `pls1_find_k_sequence` |
 | `n_boot` | bootstrap / subsampling iterations | `bootstrap_saliences`, `pls1_confirmatory_test` (`ci=True`), `pls1_rotation_stability` |
 | `m_rate` | subsampling exponent: resolved subsample size is `m = ceil(n^m_rate)` (default `0.7`; must satisfy `0.5 < m_rate < 0.95`) | `pls1_confirmatory_test` (`ci=True`), `pls1_rotation_stability` |
 | `n_folds` | CV folds | `pls1_find_k_optimal` (`r2_se` / `r2_max`), `pls1_confirmatory_test` (`raw_perm`) |
@@ -88,7 +91,7 @@ Format: `name` | description | functions where used.
 | `rotation_args` | method-specific kwargs for the inner rotation (parallel to `args` for `rotate`) | `pls1_rotation_stability` |
 | `find_k_args` | method-specific kwargs forwarded by `pls1_fit(k="optimal" \| "sequence")` to the underlying `pls1_find_k_*` call. Allowed keys are the public params of the target function except `seed` / `pre_standardized` / `weights` / `disable_parallelism` / `verbose`, which live on `pls1_fit`. Unknown keys raise `PlsKitError(code="invalid_args")` listing the allowed set. | `pls1_fit` |
 | `selector` | K-selection criterion (`"r2_se"` / `"r2_max"` / `"bic"`) | `pls1_find_k_optimal` |
-| `test_method` | inner test for the sequential closed-test path (`"raw_perm"` / `"split_nb"` / `"split_perm"` / `"e"`; `"score"` and `"split_perm_nr"` rejected — no sequential variant) | `pls1_find_k_sequence` |
+| `test_method` | inner test for the sequential closed-test path (`"raw_perm"` / `"split_nb"` / `"split_exact"` / `"e"`; `"score"` rejected — no sequential variant) | `pls1_find_k_sequence` |
 | `diagnostic` | optional same-sample sequential diagnostic on `pls1_find_k_optimal`; same enum as `test_method` but `None` disables it. Distinct param name encodes "diagnostic, not confirmatory inference." | `pls1_find_k_optimal` |
 | `quantity` | CI/BSR target (`"salience"` / `"loading"` / `"beta"` / `"score_loading"`) | `percentile_ci`, `bsr` |
 | `which` | scores to project (`"x_scores"` / `"y_scores"` / `"both"`) | `pls3_transform` |
@@ -221,3 +224,11 @@ Override by editing the table; do not ship code that mixes both.
 4. **`estimator` over `type` on `percentile_ci`.** `type` is awkward in
    every target language. Override only to copy sklearn's habit of
    using `type` as a kwarg.
+5. **`split_exact` over `split_perm` / `exact`.** `exact` collides with
+   the `e` method's name in prose (both read as "the exact test").
+   `split_exact` groups visibly with `split_nb` — same statistic
+   (Fisher-z of held-out correlation), two calibrations — while naming
+   the property that matters: it holds its level exactly, by
+   permutation, on any design. It replaces both former `split_perm` and
+   `split_perm_nr` method values; the engine picks the no-refit or
+   refit route internally, so there is only one method value to name.
