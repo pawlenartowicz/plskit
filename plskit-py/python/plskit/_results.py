@@ -241,3 +241,39 @@ class PreprocessResult:
     Y_scale: float | np.ndarray | None
     weights_normalized: np.ndarray | None
     n_eff: float | None
+
+
+@dataclass(frozen=True)
+class PLS3Result:
+    """Output of `pls3_fit` / `plssvd_fit`.
+
+    PLS3 is symmetric: neither block is the outcome, so there is no `beta`,
+    no `coef` and no `predict`. Use `pls3_transform` to project new data.
+
+    `U` and `V` have orthonormal columns and their signs are pinned by the
+    engine (largest-magnitude entry of each `U` column positive, flipped
+    jointly with the matching `V` column), so repeated fits on the same data
+    agree exactly.
+    """
+    U: np.ndarray                  # (p, k_used) X-side saliences
+    V: np.ndarray                  # (q, k_used) Y-side saliences
+    singular_values: np.ndarray    # (k_used,) descending
+    x_scores: np.ndarray           # (n, k_used) in-sample X-side LV scores
+    y_scores: np.ndarray           # (n, k_used) in-sample Y-side LV scores
+    X_mean: np.ndarray             # (p,); zeros when pre_standardized_X
+    X_scale: np.ndarray            # (p,); ones when pre_standardized_X
+    Y_mean: np.ndarray             # (q,); zeros when pre_standardized_Y
+    Y_scale: np.ndarray            # (q,); ones when pre_standardized_Y
+    k_used: int
+    pre_standardized_X: bool
+    pre_standardized_Y: bool
+
+
+@dataclass(frozen=True)
+class PLS3Scores:
+    """Output of `pls3_transform` / `plssvd_transform`.
+
+    A block is ``None`` exactly when ``which`` did not ask for it.
+    """
+    x_scores: np.ndarray | None    # (n_new, k_used)
+    y_scores: np.ndarray | None    # (n_new, k_used)

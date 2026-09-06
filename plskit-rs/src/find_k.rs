@@ -667,7 +667,7 @@ fn select_cv(
             FitOpts {
                 pre_standardized: true,
                 // check_n_eff: false — per-fold slice may have low n_eff; let the math degrade
-                // and rely on the parent statistic to absorb noise (see Option B contract)
+                // and rely on the parent statistic to absorb noise.
                 check_n_eff: false,
                 // Seq inside the per-fold worker — outer Rayon owns the threadpool.
                 par: crate::fit::ParChoice::Seq,

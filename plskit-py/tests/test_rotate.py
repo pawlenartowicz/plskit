@@ -152,6 +152,21 @@ def test_rotate_model_already_rotated_raises():
     assert ei.value.code == "already_rotated"
 
 
+def test_rotate_sparse_model_keeps_keep():
+    X, y = _data()
+    m = plskit.spls1_fit(X, y, k=2, keep=3)
+    m2 = plskit.rotate(m, method="varimax")
+    assert m2.keep == m.keep == 3
+
+
+def test_rotate_optimal_k_model_keeps_selection_result():
+    X, y = _data()
+    m = plskit.pls1_fit(X, y, k="optimal", k_max=4)
+    m2 = plskit.rotate(m, method="varimax")
+    assert m2.selection_result is m.selection_result
+    assert m2.selection_result is not None
+
+
 # ── Bad input ─────────────────────────────────────────────────
 
 

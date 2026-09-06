@@ -220,8 +220,7 @@ fn nonuniform_weights(n: usize) -> Col<f64> {
 fn raw_perm_weighted_runs_end_to_end() {
     // raw_perm: CV folds + permuted-y nulls are RNG-drawn ⇒ resampling, not
     // parity. Pin that the weighted path produces a bounded p and a reduced
-    // n_eff. (Supersedes the deferred TODO(F11) internal parity attempt: the
-    // weighted raw_perm path is now exercised through the public API.)
+    // n_eff. The weighted raw_perm path is exercised through the public API.
     let (x, y) = synth(40, 5, 3.0, 5);
     let w = nonuniform_weights(40);
     let r = pls1_confirmatory_test(

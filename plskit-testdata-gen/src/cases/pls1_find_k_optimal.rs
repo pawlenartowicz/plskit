@@ -1,4 +1,4 @@
-//! `pls1_find_k_optimal` fixture cases (Family B of Task 5).
+//! `pls1_find_k_optimal` fixture cases.
 
 use std::collections::BTreeMap;
 use std::path::Path;

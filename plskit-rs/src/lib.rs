@@ -9,6 +9,10 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_precision_loss)] // sample-size usize → f64 casts are routine in math kernels
 
+/// Dual (Gram) execution route for resampling loops. Crate-internal — the
+/// route is chosen by the engine from `(n_tr, p, B, q)` and is not
+/// observable from any public surface.
+pub(crate) mod dual_route;
 /// Error types for plskit.
 pub mod error;
 /// K selection (CV / BIC / sequence).
@@ -20,6 +24,10 @@ pub mod linalg;
 /// Permutation-null engine for signed per-voxel z statistics.
 /// Powers the TFCE / cluster-mass / max-stat downstream pipeline.
 pub mod perm_null;
+/// PLS3 / PLSSVD fit and transform (SVD on X'Y, no deflation).
+pub mod pls3;
+/// Confirmatory PLS3 / PLSSVD omnibus test at LV1.
+pub mod pls3_signal_test;
 /// PLS1 prediction from a fitted model.
 pub mod predict;
 /// Public preprocess helper: validates/normalizes weights and standardizes (X, y).
@@ -62,6 +70,11 @@ pub use find_k::{
 };
 pub use fit::{pls1_fit, spls1_fit, FitOpts, KSpec, ParChoice, Pls1Model};
 pub use perm_null::{pls1_perm_null, PermNullOpts, PermNullOutput};
+pub use pls3::{
+    pls3_fit, pls3_transform, plssvd_fit, plssvd_transform, Pls3FitOpts, Pls3Model, Pls3Scores,
+    TransformWhich,
+};
+pub use pls3_signal_test::{pls3_confirmatory_test, Pls3ConfirmatoryTestOpts};
 pub use predict::pls1_predict;
 pub use preprocess::{preprocess, PreprocessInput, PreprocessResult};
 pub use rotate::{rotate, RotateOutput, RotationMethod, VarimaxArgs};

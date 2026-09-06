@@ -12,8 +12,8 @@ fn all_cases_produces_full_corpus() {
     let cases = all_cases(dir.path()).unwrap();
     assert_eq!(
         cases.len(),
-        38,
-        "expected exactly 38 cases, got {}",
+        46,
+        "expected exactly 46 cases, got {}",
         cases.len()
     );
     let functions: HashSet<_> = cases.iter().map(|c| c.function.clone()).collect();
@@ -31,6 +31,9 @@ fn all_cases_produces_full_corpus() {
         "spls1_find_keep_optimal",
         "spls1_find_k_optimal",
         "spls1_find_k_sequence",
+        "pls3_fit",
+        "pls3_transform",
+        "pls3_confirmatory_test",
     ] {
         assert!(functions.contains(f), "missing function family: {f}");
     }
@@ -45,6 +48,11 @@ fn all_cases_produces_full_corpus() {
     assert!(names.contains("pls1_rotation_stability_n80_d6_k2"));
     assert!(names.contains("pls1_fit_weighted_n50_d10_k2"));
     assert!(names.contains("pls1_confirmatory_weighted_score"));
+    assert!(names.contains("pls3_fit_wide_n30_p100_q3_k2"));
+    assert!(names.contains("pls3_transform_basic_n80_p6_q3_k2"));
+    assert!(names.contains("pls3_confirmatory_split_exact"));
+    assert!(names.contains("pls1_confirmatory_raw_perm_wide"));
+    assert!(names.contains("pls3_confirmatory_split_exact_wide"));
     for c in &cases {
         assert_eq!(
             c.hashes.inputs_sha256.len(),

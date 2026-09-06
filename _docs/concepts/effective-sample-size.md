@@ -119,7 +119,7 @@ Earlier versions enforced the n_eff check inside
 `validate_and_normalize_weights`, which is called at every call site —
 including per-fold CV. That coupled two distinct failure modes: "user
 request infeasible on the full dataset" and "one unlucky fold has low
-n_eff by construction." Option B (this contract, implemented in wave
-F11+) separates them: `validate_and_normalize_weights` no longer does
-the n_eff check; `check_n_eff_for_k` is called explicitly at top-level
-entries via the `FitOpts.check_n_eff` flag.
+n_eff by construction." The current contract separates them:
+`validate_and_normalize_weights` no longer does the n_eff check;
+`check_n_eff_for_k` is called explicitly at top-level entries via the
+`FitOpts.check_n_eff` flag.

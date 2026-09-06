@@ -1,4 +1,5 @@
-//! Manifest v2: index for `plskit/testdata/`. See `TESTDATA.md` for governance.
+//! Manifest v2: index for `plskit/testdata/`. See `_docs/internals/testdata.md`
+//! for governance.
 
 use serde::{Deserialize, Serialize};
 

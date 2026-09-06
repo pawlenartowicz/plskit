@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import warnings
 from types import MappingProxyType
@@ -20,6 +21,8 @@ from plskit._results import (
     FindKSequenceResult,
     PermNullResult,
     PLS1Result,
+    PLS3Result,
+    PLS3Scores,
     PreprocessResult,
     RotateResult,
     RotationSpec,
@@ -105,8 +108,9 @@ def _validate_find_k_args(fk_args: dict, allowed: tuple[str, ...]) -> None:
 # object carries no n_perm of its own (neither FindKSequenceResult nor
 # FindKOptimalResult has such a field). It must equal the n_perm the engine
 # writes into the reroute itself — the literal 1000 in
-# plskit-rs/src/sequential.rs (SequentialArgs::SplitExact) and its mirror in
-# plskit-rs/src/signal_test.rs (ConfirmatoryArgs::SplitExact); all three change
+# plskit-rs/src/sequential.rs (SequentialArgs::SplitExact),
+# plskit-rs/src/signal_test.rs (ConfirmatoryArgs::SplitExact) and
+# plskit-rs/src/pls3_signal_test.rs (the PLS3 reroute); all four change
 # together.
 _REROUTE_FALLBACK_N_PERM = 1000
 
@@ -294,6 +298,263 @@ def pls1_predict(model: PLS1Result, X_new: np.ndarray) -> np.ndarray:
         "n_eff": float(model.n_eff),
     }
     return _plskit.pls1_predict(model_dict, X_new)
+
+
+def _ensure_2d_Y(Y: np.ndarray) -> np.ndarray:
+    """PLS3 takes a Y matrix. A 1-D Y is a PLS1 problem, so say that.
+
+    Thin wrapper over `_ensure_array` — the shape check and the error code
+    are already there; the only thing added is the pls1_fit hint, worth a
+    sentence because a 1-D Y is the mistake this family invites. Scoped to
+    genuinely 1-D input: a 3-D array isn't a PLS1 problem either, and the
+    hint is nonsense there.
+    """
+    try:
+        return _ensure_array(Y, "Y", 2)
+    except PlsKitError as exc:
+        if np.ndim(Y) == 1:
+            raise PlsKitError(
+                f"{exc}. A single-column outcome is a PLS1 problem — use pls1_fit.",
+                code="invalid_argument",
+            ) from exc
+        raise
+
+
+@_convert_errors
+def pls3_fit(
+    X: np.ndarray,
+    Y: np.ndarray,
+    k: int = 1,
+    *,
+    pre_standardized_X: bool = False,
+    pre_standardized_Y: bool = False,
+    weights: np.ndarray | None = None,
+) -> PLS3Result:
+    """Fit PLS3 / PLSSVD — SVD of the standardized cross-covariance ``X'Y``.
+
+    Symmetric analysis: neither block is the outcome. The question is which
+    pattern of X covaries with which pattern of Y. In psychology and
+    neuroimaging this method is called PLSC.
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (n, p)
+        First block. Standardized internally unless ``pre_standardized_X=True``.
+    Y : np.ndarray, shape (n, q)
+        Second block. Must be 2-D.
+    k : int, default 1
+        Number of latent variables to keep; ``k <= min(p, q)``. All k come
+        out of one SVD — there is no deflation, so the components are
+        orthogonal by construction.
+    pre_standardized_X, pre_standardized_Y : bool, default False
+        Skip centering/scaling of that block. The returned moments are then
+        the identity, so ``pls3_transform`` will not re-apply any transform.
+    weights : np.ndarray | None, default None
+        Not implemented for this family; anything other than ``None`` raises
+        ``PlsKitError(code="invalid_argument")``.
+
+    Returns
+    -------
+    PLS3Result
+    """
+    X = _ensure_array(X, "X", 2)
+    Y = _ensure_2d_Y(Y)
+    if weights is not None:
+        weights = _ensure_array(weights, "weights", 1)
+    raw = _plskit.pls3_fit(
+        X, Y, k,
+        pre_standardized_X=pre_standardized_X,
+        pre_standardized_Y=pre_standardized_Y,
+        weights=weights,
+    )
+    return PLS3Result(**raw)
+
+
+@_convert_errors
+def plssvd_fit(
+    X: np.ndarray,
+    Y: np.ndarray,
+    k: int = 1,
+    *,
+    pre_standardized_X: bool = False,
+    pre_standardized_Y: bool = False,
+    weights: np.ndarray | None = None,
+) -> PLS3Result:
+    """Alias for :func:`pls3_fit` under the SVD-PLS name. Same function."""
+    return pls3_fit(
+        X, Y, k,
+        pre_standardized_X=pre_standardized_X,
+        pre_standardized_Y=pre_standardized_Y,
+        weights=weights,
+    )
+
+
+@_convert_errors
+def pls3_transform(
+    model: PLS3Result,
+    X_new: np.ndarray | None = None,
+    Y_new: np.ndarray | None = None,
+    *,
+    which: Literal["x_scores", "y_scores", "both"] = "both",
+) -> PLS3Scores:
+    """Project new data onto a fitted PLS3's latent-variable scores.
+
+    New data is standardized with the *fit's* moments. PLS3 has no
+    regression ``predict`` — it is symmetric, so there is nothing to predict.
+
+    Parameters
+    ----------
+    model : PLS3Result
+    X_new : np.ndarray | None, shape (n_new, p)
+    Y_new : np.ndarray | None, shape (n_new, q)
+    which : {'x_scores', 'y_scores', 'both'}, default 'both'
+        Which block(s) to project. A block ``which`` asks for must be
+        supplied, or ``PlsKitError(code="invalid_argument")`` is raised.
+
+    Returns
+    -------
+    PLS3Scores
+    """
+    model_dict = {
+        "U": np.ascontiguousarray(model.U, dtype=np.float64),
+        "V": np.ascontiguousarray(model.V, dtype=np.float64),
+        "singular_values": np.ascontiguousarray(model.singular_values, dtype=np.float64),
+        "x_scores": np.ascontiguousarray(model.x_scores, dtype=np.float64),
+        "y_scores": np.ascontiguousarray(model.y_scores, dtype=np.float64),
+        "X_mean": np.ascontiguousarray(model.X_mean, dtype=np.float64),
+        "X_scale": np.ascontiguousarray(model.X_scale, dtype=np.float64),
+        "Y_mean": np.ascontiguousarray(model.Y_mean, dtype=np.float64),
+        "Y_scale": np.ascontiguousarray(model.Y_scale, dtype=np.float64),
+        "k_used": int(model.k_used),
+        "pre_standardized_X": bool(model.pre_standardized_X),
+        "pre_standardized_Y": bool(model.pre_standardized_Y),
+    }
+    if X_new is not None:
+        X_new = _ensure_array(X_new, "X_new", 2)
+    if Y_new is not None:
+        Y_new = _ensure_array(Y_new, "Y_new", 2)
+    raw = _plskit.pls3_transform(model_dict, X_new, Y_new, which=which)
+    return PLS3Scores(x_scores=raw["x_scores"], y_scores=raw["y_scores"])
+
+
+@_convert_errors
+def plssvd_transform(
+    model: PLS3Result,
+    X_new: np.ndarray | None = None,
+    Y_new: np.ndarray | None = None,
+    *,
+    which: Literal["x_scores", "y_scores", "both"] = "both",
+) -> PLS3Scores:
+    """Alias for :func:`pls3_transform` under the SVD-PLS name."""
+    return pls3_transform(model, X_new, Y_new, which=which)
+
+
+@_convert_errors
+def pls3_confirmatory_test(
+    X: np.ndarray,
+    Y: np.ndarray,
+    k: int = 1,
+    *,
+    method: Literal["split_exact", "split_nb"],
+    args: dict | None = None,
+    pre_standardized_X: bool = False,
+    pre_standardized_Y: bool = False,
+    seed: int | None = None,
+    disable_parallelism: bool = False,
+    verbose: bool = False,
+) -> ConfirmatoryTestResult:
+    """Confirmatory PLS3 omnibus test at LV1.
+
+    Statistic: the held-out latent-variable correlation
+    ``r = cor(X_te @ u1, Y_te @ v1)``, where ``(u1, v1)`` come from a PLS3
+    fit on the training half only. Fisher-z averaged across ``n_splits``
+    splits and reported as ``tanh(z_bar)``. Both methods report that same
+    statistic and differ only in what they compare it against.
+
+    Sign indeterminacy costs nothing here: an SVD fixes ``(u1, v1)`` only up
+    to a simultaneous flip, and a flip negates both held-out score vectors
+    at once, leaving ``r`` unchanged.
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (n, p)
+    Y : np.ndarray, shape (n, q)
+    k : int, default 1
+        Must be 1. Above LV1 the training-half component ordering need not
+        survive to the test half, and whether the statistic should then be
+        per-component or subspace-level is not settled.
+    method : {'split_exact', 'split_nb'}
+        ``'split_exact'`` is the recommended default: the p-value comes from
+        a permutation reference built by shuffling the rows of Y against X,
+        with the splits held fixed across all permutations, so it holds its
+        level on any design. ``'split_nb'`` compares the same statistic
+        against an asymptotic t reference instead, costing ``n_splits``
+        fits in total rather than ``n_perm * n_splits``.
+
+        Both sides of the correlation are estimated on the training half,
+        where PLS1 has an observed outcome on one side. That costs the
+        asymptotic reference nothing: conditional on the training half the
+        two held-out score vectors are fixed linear combinations of
+        independent test-half rows, so under the null ``r`` follows the
+        ordinary null correlation law. Measured on Gaussian, heavy-tailed,
+        low-stable-rank and real two-block designs, ``'split_nb'`` came out
+        conservative, never anti-conservative.
+
+        ``'split_nb'`` requests are auto-gated on X exactly as in
+        ``pls1_confirmatory_test``: a flagged design runs ``'split_exact'``
+        instead (``result.method`` says so, and Python warns). Pass
+        ``args={'force': True}`` to run ``'split_nb'`` anyway. Y never
+        enters the gate — q is small by construction in PLSC, so a
+        stable-rank floor on Y would flag almost every design. The gate
+        thresholds are the PLS1 ones and have not been re-derived for a
+        two-block design.
+
+        ``'raw_perm'`` needs a CV statistic that a method with no
+        ``predict`` does not have. ``'score'`` and ``'e'`` have no
+        symmetric formulation.
+    args : dict | None
+        ``'split_exact'``: ``{'n_perm': int, 'n_splits': int}``, defaults
+        1000 and 50. ``'split_nb'``: ``{'n_splits': int, 'force': bool}``,
+        defaults 50 and False.
+    pre_standardized_X, pre_standardized_Y : bool, default False
+        Accepted but have no effect on either method: each training half is
+        re-standardized with its own moments regardless, and the gate
+        standardizes its own copy of X. Kept on the signature so it does not
+        change when a method that reads them lands.
+    seed : int | None
+        RNG seed. ``None`` draws from OS entropy and records the value on
+        ``result.seed``.
+
+    Returns
+    -------
+    ConfirmatoryTestResult
+        ``ci`` is always ``None`` for this family, and ``n_eff`` equals ``n``
+        (weights are not implemented). ``rho_hat`` is populated for
+        ``'split_nb'`` only, and only when the test half has at least 4 rows.
+        ``stable_rank`` is populated whenever ``'split_nb'`` was requested —
+        it is what the auto-gate saw. ``n_perm`` is ``None`` for
+        ``'split_nb'``, which runs no permutations.
+    """
+    X = _ensure_array(X, "X", 2)
+    Y = _ensure_2d_Y(Y)
+    raw = _plskit.pls3_confirmatory_test_raw(
+        X, Y, k,
+        method=method, args=args,
+        pre_standardized_X=pre_standardized_X,
+        pre_standardized_Y=pre_standardized_Y,
+        seed=seed,
+        disable_parallelism=disable_parallelism,
+        verbose=verbose,
+    )
+    raw.pop("ci", None)
+    result = ConfirmatoryTestResult(ci=None, **raw)
+    _warn_if_rerouted(
+        method, result.method,
+        n_perm=result.n_perm,
+        stable_rank=result.stable_rank,
+        n_eff=result.n_eff,
+    )
+    return result
 
 
 @_convert_errors
@@ -828,18 +1089,14 @@ def _rotate_array(W, method, L, resolved_args) -> RotateResult:
 def _rotate_model(model: PLS1Result, method, L, resolved_args) -> PLS1Result:
     rot = _rotate_array(model.W, method, L, resolved_args)
     R = rot.spec.R
-    return PLS1Result(
+    # replace() carries every field rotation doesn't touch (e.g. keep,
+    # selection_result) so sparse/optimal-k models don't silently lose them
+    return dataclasses.replace(
+        model,
         T=model.T @ R,
         P=model.P @ R,
         W=rot.W_rot,
         Q=R.T @ model.Q,
-        coef=model.coef,
-        beta=model.beta,
-        intercept=model.intercept,
-        k_used=model.k_used,
-        pre_standardized=model.pre_standardized,
-        weights=model.weights,
-        n_eff=model.n_eff,
         rotation_spec=rot.spec,
     )
 

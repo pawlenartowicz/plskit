@@ -205,9 +205,9 @@ pub(crate) fn run_incremental_sequence(
         if !force && fires {
             // `n_perm` is split_exact's own default; the requested
             // `n_splits` carries over untouched. Mirrored by the
-            // confirmatory reroute in signal_test.rs and by
-            // `_REROUTE_FALLBACK_N_PERM` in
-            // plskit-py/python/plskit/_api.py — all three change together.
+            // confirmatory reroute in signal_test.rs, the PLS3 reroute in
+            // pls3_signal_test.rs, and by `_REROUTE_FALLBACK_N_PERM` in
+            // plskit-py/python/plskit/_api.py — all four change together.
             opts.args = SequentialArgs::SplitExact {
                 n_perm: 1000,
                 n_splits,
@@ -271,8 +271,8 @@ fn p_for_confirmatory_at_k(
             disable_parallelism: opts.disable_parallelism,
             verbose: opts.verbose,
             ci: None,
-            // TODO: forward `max_skip_rate` from IncrementalSequenceOpts when Task 10/11
-            //       wires that knob through. Currently `ci: None` makes this field dead.
+            // `IncrementalSequenceOpts` does not expose `max_skip_rate` yet, and
+            // `ci: None` makes this field dead until it does.
             max_skip_rate: 0.01,
             keep: opts.keep,
         },

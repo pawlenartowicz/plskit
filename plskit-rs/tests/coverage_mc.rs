@@ -23,9 +23,7 @@
 //!    property of m-out-of-n subsampling for the bounded nonlinear leverage
 //!    ratio (the engine docs scope these CIs as "directional sanity checks"
 //!    outside the easy regime), not a test-oracle artifact. `holdout_corr` is
-//!    therefore the sole asserted calibration guarantee. See the parent
-//!    project's `docs/specs/2026-06-16-leverage-ci-anticonservative.md` for the
-//!    evidence and the deferred engine-estimator decision.
+//!    therefore the sole asserted calibration guarantee.
 //!
 //! ## Coverage target (the oracle)
 //!
@@ -45,7 +43,7 @@
 //! All seeds are deterministic per (cell, dataset) so a re-run reproduces
 //! identical numbers. Failures panic with the cell `(n, d, k, snr)`, the
 //! offending metric, and the empirical coverage vs. the band — surfacing
-//! release-gate findings without blocking Phase 1.
+//! release-gate findings without blocking the default test run.
 
 use faer::{Col, Mat};
 use plskit::{
@@ -364,8 +362,7 @@ fn coverage_mc_two_sided_grid() {
                     // (src/subsample.rs `beta_ci_lower` doc). holdout_corr is the
                     // asserted calibration guarantee. Any move to make leverage
                     // coverage nominal is a deliberate change to the inference
-                    // estimator — see the parent project's
-                    // docs/specs/2026-06-16-leverage-ci-anticonservative.md.
+                    // estimator, not something this test asserts.
                 }
             }
         }

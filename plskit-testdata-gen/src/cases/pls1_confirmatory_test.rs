@@ -1,10 +1,12 @@
-//! `pls1_confirmatory_test` fixture cases (Family D of Task 5).
+//! `pls1_confirmatory_test` fixture cases.
 //!
 //! Seven unweighted cases share one inputs file (`inputs/pls1_confirmatory_inputs.npz`):
 //! six base-method cases (no CI; two of them, `split_exact` and `split_exact_k1`, cover
 //! `split_exact`'s refit and no-refit routes respectively) and one CI-bundle variant.
 //! Five weighted cases share a separate inputs file
 //! (`inputs/pls1_confirmatory_weighted_inputs.npz`) that also carries `weights`.
+//! One further case, `raw_perm_wide`, carries its own wide (n=30, p=100) inputs
+//! file because it is the only shape that routes through `dual_route`.
 
 use std::path::Path;
 
@@ -23,7 +25,8 @@ use crate::cases::{ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
 
-/// Shared synth parameters for all `pls1_confirmatory_test` cases.
+/// Default synth design shared by every case except `raw_perm_wide`, which
+/// needs `n < p` and sets its own `n` / `d` on the descriptor.
 const SYNTH_N: usize = 80;
 const SYNTH_D: usize = 6;
 const SYNTH_K_SIGNAL: usize = 2;
@@ -42,6 +45,10 @@ struct ConfirmatoryCase {
     kwargs: serde_json::Value,
     /// Inputs file stem and synth seed; set to the weighted variants for weighted cases.
     inputs_name: &'static str,
+    /// Synth design shape. Every case sharing an `inputs_name` must agree on
+    /// these — the inputs file is written once per name and the last writer wins.
+    n: usize,
+    d: usize,
     synth_seed: u64,
     k: usize,
     /// Non-uniform weights array (first 40 obs get 2.0, rest 1.0); `None` for unweighted cases.
@@ -105,7 +112,7 @@ fn run_confirmatory_case(root: &Path, c: &ConfirmatoryCase) -> Result<Case> {
         std::fs::create_dir_all(p)?;
     }
 
-    let (x, y) = synth_data(SYNTH_N, SYNTH_D, SYNTH_K_SIGNAL, SYNTH_SNR, c.synth_seed);
+    let (x, y) = synth_data(c.n, c.d, SYNTH_K_SIGNAL, SYNTH_SNR, c.synth_seed);
 
     // Write shared inputs (idempotent — same bytes every call).
     {
@@ -198,6 +205,8 @@ pub fn raw_perm(root: &Path) -> Result<Case> {
                 "seed": 42
             }),
             inputs_name: "pls1_confirmatory_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 42,
             k: 2,
             weights: None,
@@ -227,6 +236,8 @@ pub fn split_nb(root: &Path) -> Result<Case> {
                 "seed": 42
             }),
             inputs_name: "pls1_confirmatory_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 42,
             k: 2,
             weights: None,
@@ -257,6 +268,8 @@ pub fn split_exact(root: &Path) -> Result<Case> {
                 "seed": 42
             }),
             inputs_name: "pls1_confirmatory_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 42,
             k: 2,
             weights: None,
@@ -289,6 +302,8 @@ pub fn split_exact_k1(root: &Path) -> Result<Case> {
                 "seed": 42
             }),
             inputs_name: "pls1_confirmatory_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 42,
             k: 1,
             weights: None,
@@ -317,6 +332,8 @@ pub fn score(root: &Path) -> Result<Case> {
                 "seed": 42
             }),
             inputs_name: "pls1_confirmatory_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 42,
             k: 2,
             weights: None,
@@ -345,6 +362,8 @@ pub fn e(root: &Path) -> Result<Case> {
                 "seed": 42
             }),
             inputs_name: "pls1_confirmatory_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 42,
             k: 2,
             weights: None,
@@ -388,8 +407,52 @@ pub fn split_nb_ci(root: &Path) -> Result<Case> {
                 "max_failure_rate": 0.0
             }),
             inputs_name: "pls1_confirmatory_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 42,
             k: 2,
+            weights: None,
+        },
+    )
+}
+
+/// Case: `pls1_confirmatory_test` with `method=raw_perm` on a wide design
+/// (n=30, p=100), `k=1`, `n_perm=100`, `n_folds=5`.
+///
+/// The corpus's only fixture that reaches the Gram route in
+/// `plskit-rs/src/dual_route.rs`. `run_raw_perm` takes that route when
+/// `k == 1`, `keep` is unset, the design is unweighted, and
+/// `n_tr·(B·q + p) < p·B·q` holds for `n_tr = n − n/n_folds = 24`, `q = 1`
+/// and `B = n_perm + 1`. At this shape the inequality reduces to
+/// `n_perm ≥ 31`, so `n_perm = 100` clears it by more than 3×. Lowering
+/// `n_perm`, raising `n_folds` or narrowing X silently sends the fixture
+/// back onto the primal route, which would leave the Gram route with no
+/// cross-language coverage at all.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn raw_perm_wide(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_raw_perm_wide",
+            args: ConfirmatoryArgs::RawPerm {
+                n_perm: 100,
+                n_folds: 5,
+            },
+            ci: None,
+            disable_parallelism: false,
+            kwargs: serde_json::json!({
+                "k": 1,
+                "method": "raw_perm",
+                "args": {"n_perm": 100, "n_folds": 5},
+                "seed": 42
+            }),
+            inputs_name: "pls1_confirmatory_wide_inputs",
+            n: 30,
+            d: 100,
+            synth_seed: 42,
+            k: 1,
             weights: None,
         },
     )
@@ -423,6 +486,8 @@ pub fn weighted_raw_perm(root: &Path) -> Result<Case> {
                 "weights": "nonuniform"
             }),
             inputs_name: "pls1_confirmatory_weighted_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 77,
             k: 1,
             weights: Some(weighted_confirmatory_weights()),
@@ -453,6 +518,8 @@ pub fn weighted_split_nb(root: &Path) -> Result<Case> {
                 "weights": "nonuniform"
             }),
             inputs_name: "pls1_confirmatory_weighted_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 77,
             k: 1,
             weights: Some(weighted_confirmatory_weights()),
@@ -485,6 +552,8 @@ pub fn weighted_split_exact(root: &Path) -> Result<Case> {
                 "weights": "nonuniform"
             }),
             inputs_name: "pls1_confirmatory_weighted_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 77,
             k: 1,
             weights: Some(weighted_confirmatory_weights()),
@@ -512,6 +581,8 @@ pub fn weighted_score(root: &Path) -> Result<Case> {
                 "weights": "nonuniform"
             }),
             inputs_name: "pls1_confirmatory_weighted_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 77,
             k: 1,
             weights: Some(weighted_confirmatory_weights()),
@@ -539,6 +610,8 @@ pub fn weighted_e(root: &Path) -> Result<Case> {
                 "weights": "nonuniform"
             }),
             inputs_name: "pls1_confirmatory_weighted_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
             synth_seed: 77,
             k: 1,
             weights: Some(weighted_confirmatory_weights()),

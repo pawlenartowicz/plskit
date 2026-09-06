@@ -1,6 +1,4 @@
-//! Public preprocess helper. Normalizes weights and standardizes (X, y) using §3.2 math.
-//!
-//! Spec: docs/specs/2026-05-01-pls1-observation-weights.md §5.
+//! Public preprocess helper. Normalizes weights and standardizes (X, y).
 
 use faer::{Col, ColRef, Mat, MatRef};
 

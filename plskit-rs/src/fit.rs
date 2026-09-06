@@ -90,7 +90,7 @@ impl Default for FitOpts {
 /// `Par::rayon(0)` (default thread pool) when `n * d * k ≥ 1_000_000`,
 /// else `Par::Seq`. Saturating arithmetic guards against `usize` overflow
 /// on absurd inputs.
-fn resolve_par(choice: ParChoice, n: usize, d: usize, k: usize) -> Par {
+pub(crate) fn resolve_par(choice: ParChoice, n: usize, d: usize, k: usize) -> Par {
     match choice {
         ParChoice::Seq => Par::Seq,
         ParChoice::Auto => {

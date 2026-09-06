@@ -162,7 +162,7 @@ def test_ci_beta_se_nonnegative():
 
 
 def _signal_vs_noise_fixture():
-    """The canonical signal-vs-noise dataset from the spec test grid."""
+    """The canonical signal-vs-noise dataset from the test grid."""
     rng = np.random.default_rng(42)
     n, d = 200, 8
     x = rng.standard_normal((n, d))
@@ -301,7 +301,7 @@ def test_beta_sign_z_is_half_normal_under_null_beta():
 
     Under the null where y is independent of every column of X, the bootstrap
     fraction p̂_pos[j] of resamples with β_b[j] > 0 should center on 0.5
-    (the spec premise). The naive sign-z (2·p̂_pos - 1)·√n_boot would then be
+    (the premise here). The naive sign-z (2·p̂_pos - 1)·√n_boot would then be
     N(0, 1), so the folded |z| should be half-normal with mean √(2/π) ≈ 0.7979
     and sd √(1 - 2/π) ≈ 0.6028.
 

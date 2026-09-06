@@ -12,6 +12,7 @@ pub mod pls1_fit;
 pub mod pls1_perm_null;
 pub mod pls1_predict;
 pub mod pls1_rotation_stability;
+pub mod pls3;
 pub mod preprocess;
 pub mod rotate;
 pub mod spls1_find_k_optimal;
@@ -60,7 +61,8 @@ impl CasePaths {
 }
 
 pub(crate) use synth_helpers::{
-    faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data,
+    faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64,
+    synth_data, synth_xy,
 };
 
 mod synth_helpers {
@@ -95,6 +97,59 @@ mod synth_helpers {
                 acc += x[(i, j)];
             }
             y[i] = acc * snr + rng.sample::<f64, _>(StandardNormal);
+        }
+        (x, y)
+    }
+
+    /// Generate a two-block `(X, Y)` sharing `k_signal` latent factors at
+    /// signal-to-noise ratio `snr` — the shape PLS3 / PLSSVD analyses.
+    ///
+    /// Factor `a` drives `X[:, a]` and `Y[:, a]` for every `a < k_signal`;
+    /// every other column of X and Y is pure noise. This keeps the leading
+    /// singular triplet of `X'Y` well separated so the fixtures are not
+    /// recording noise. There is no wraparound: a `k_signal` greater than
+    /// `q` silently leaves the surplus factors out of Y rather than
+    /// wrapping them, so callers must keep `k_signal <= q` (and, for the
+    /// same reason, `<= p`) for every factor to land in both blocks. The
+    /// RNG is a deterministic `ChaCha8` seeded with `seed`; factors are
+    /// drawn first, then X, then Y, so the byte stream is fixed by
+    /// `(n, p, q, k_signal, seed)` alone.
+    #[must_use]
+    #[allow(clippy::many_single_char_names)]
+    pub fn synth_xy(
+        n: usize,
+        p: usize,
+        q: usize,
+        k_signal: usize,
+        snr: f64,
+        seed: u64,
+    ) -> (Array2<f64>, Array2<f64>) {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut factors = Array2::<f64>::zeros((n, k_signal));
+        for v in &mut factors {
+            *v = rng.sample::<f64, _>(StandardNormal);
+        }
+        let mut x = Array2::<f64>::zeros((n, p));
+        for i in 0..n {
+            for j in 0..p {
+                let noise: f64 = rng.sample(StandardNormal);
+                x[(i, j)] = if j < k_signal {
+                    snr * factors[(i, j)] + noise
+                } else {
+                    noise
+                };
+            }
+        }
+        let mut y = Array2::<f64>::zeros((n, q));
+        for i in 0..n {
+            for j in 0..q {
+                let noise: f64 = rng.sample(StandardNormal);
+                y[(i, j)] = if j < k_signal {
+                    snr * factors[(i, j)] + noise
+                } else {
+                    noise
+                };
+            }
         }
         (x, y)
     }
@@ -168,6 +223,7 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_confirmatory_test::weighted_split_exact(root)?);
     cases.push(pls1_confirmatory_test::weighted_score(root)?);
     cases.push(pls1_confirmatory_test::weighted_e(root)?);
+    cases.push(pls1_confirmatory_test::raw_perm_wide(root)?);
 
     cases.push(pls1_predict::basic_n80_d6_k2(root)?);
     cases.push(rotate::varimax_d6_k2(root)?);
@@ -181,6 +237,14 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(spls1_find_k_optimal::r2_se_keep3(root)?);
     cases.push(spls1_find_k_sequence::split_nb_keep3(root)?);
     cases.push(spls1_find_k_sequence::split_nb_keep3_gated(root)?);
+
+    cases.push(pls3::fit_small_n50_p10_q4_k1(root)?);
+    cases.push(pls3::fit_small_n50_p10_q4_k3(root)?);
+    cases.push(pls3::fit_wide_n30_p100_q3_k2(root)?);
+    cases.push(pls3::transform_basic_n80_p6_q3_k2(root)?);
+    cases.push(pls3::confirmatory_split_exact(root)?);
+    cases.push(pls3::confirmatory_split_exact_wide(root)?);
+    cases.push(pls3::confirmatory_split_nb(root)?);
 
     Ok(cases)
 }

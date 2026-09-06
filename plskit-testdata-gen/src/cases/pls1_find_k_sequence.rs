@@ -1,4 +1,4 @@
-//! `pls1_find_k_sequence` fixture cases (Family C of Task 5).
+//! `pls1_find_k_sequence` fixture cases.
 
 use std::path::Path;
 

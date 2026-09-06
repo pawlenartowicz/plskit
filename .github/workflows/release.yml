@@ -1,6 +1,6 @@
 name: Release
 
-# Tag scheme (RULES.md RULE 7):
+# Tag scheme:
 #   vX.Y.Z       → cargo publish (engine);  workspace version must equal X.Y.Z.
 #   vX.Y.Z-py    → PyPI publish (Python);   plskit-py version must equal X.Y.Z.
 #   vX.Y.Z-r     → R tarball;               plskit-r DESCRIPTION:Version must equal X.Y.Z.
@@ -9,7 +9,7 @@ name: Release
 #                  Registrator runs as a bot comment on the release commit (no API).
 #
 # Each tag publishes exactly one artifact. Wrapper tags require X.Y.Z ≤ workspace
-# version, which follows from list-versions.py enforcement (RULE 7).
+# version.
 #
 # Required repo secrets:
 #   CARGO_REGISTRY_TOKEN — for vX.Y.Z   (engine)

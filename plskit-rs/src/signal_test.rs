@@ -507,9 +507,10 @@ pub(crate) fn confirmatory_test_impl(
         if !force && fires {
             // `n_perm` is split_exact's own default; the requested `n_splits`
             // carries over untouched. Mirrored by the hoisted sequence-level
-            // reroute in `sequential::run_incremental_sequence` and by
+            // reroute in `sequential::run_incremental_sequence`, the PLS3
+            // reroute in `pls3_signal_test.rs`, and by
             // `_REROUTE_FALLBACK_N_PERM` in plskit-py/python/plskit/_api.py —
-            // all three change together.
+            // all four change together.
             args_resolved = ConfirmatoryArgs::SplitExact {
                 n_perm: 1000,
                 n_splits,
@@ -684,7 +685,7 @@ struct RunResult {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Step 4: `raw_perm` CV R² test
+// `raw_perm` CV R² test
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[allow(clippy::many_single_char_names)]
@@ -710,19 +711,67 @@ fn run_raw_perm(
     indices.shuffle(rng);
     let folds = crate::linalg::fold_split(&indices, n_folds);
 
-    let cv_r2_obs = pls1_cv_r2(x, y, k, &folds, w_norm, opts.keep)?;
+    let cv_r2_obs;
+    let nulls_vec: Vec<f64>;
 
-    let nulls_vec = crate::resample::parallel_for_each_seeded(
-        rng,
-        n_perm,
-        opts.disable_parallelism,
-        |_, child| {
-            // Permute y rows; weights stay tied to row indices (not permuted).
-            let perm = crate::resample::permute_indices(n, child);
-            let y_perm = Col::<f64>::from_fn(n, |i| y[perm[i]]);
-            pls1_cv_r2(x, y_perm.as_ref(), k, &folds, w_norm, opts.keep).unwrap_or(f64::NAN)
-        },
-    );
+    // Route choice: internal, silent, and decided from shape alone —
+    // execution strategy stays inside the crate. The dual route needs a
+    // fixed training set reused across replicates, which K-fold gives, plus
+    // the K = 1 coefficient identity — deflation forecloses K ≥ 2, sparse
+    // `keep` moves the selected column set every replicate, and the
+    // weighted case is unverified so it stays primal. `n_tr_max` is the
+    // largest training fold (fold_split's groups differ by at most one), so
+    // the memory side of the rule sees the worst case and the whole
+    // statistic runs on one route.
+    let n_tr_max = n - n / n_folds;
+    let dual = k == 1
+        && opts.keep.is_none()
+        && w_norm.is_none()
+        && crate::dual_route::use_dual_route(n_tr_max, x.ncols(), n_perm + 1, 1);
+
+    if dual {
+        // Re-derive exactly the child-seed sequence
+        // `parallel_for_each_seeded` would draw, so both routes see the
+        // identical permutations at the same seed. Without this an input
+        // that changes route between releases would silently change its
+        // p-value.
+        let seeds = crate::rng::child_seeds(rng, n_perm);
+        // Draw and consume one permutation at a time. Holding all `n_perm`
+        // of them alive while `y_mat` is built doubles the peak allocation,
+        // and `y_mat` is not covered by the dual route's `n_tr` cap (see
+        // `DUAL_ROUTE_MAX_N_TR`) — that bounds only the Gram matrix.
+        let mut y_mat = Mat::<f64>::zeros(n, n_perm + 1);
+        for i in 0..n {
+            y_mat[(i, 0)] = y[i];
+        }
+        for (col, s) in seeds.iter().enumerate() {
+            let perm = crate::resample::permute_indices(n, &mut crate::rng::child_rng(*s));
+            for i in 0..n {
+                y_mat[(i, col + 1)] = y[perm[i]];
+            }
+        }
+        let r2 = crate::dual_route::pls1_cv_r2_columns(
+            x,
+            y_mat.as_ref(),
+            &folds,
+            opts.disable_parallelism,
+        );
+        cv_r2_obs = r2[0];
+        nulls_vec = r2[1..].to_vec();
+    } else {
+        cv_r2_obs = pls1_cv_r2(x, y, k, &folds, w_norm, opts.keep)?;
+        nulls_vec = crate::resample::parallel_for_each_seeded(
+            rng,
+            n_perm,
+            opts.disable_parallelism,
+            |_, child| {
+                // Permute y rows; weights stay tied to row indices (not permuted).
+                let perm = crate::resample::permute_indices(n, child);
+                let y_perm = Col::<f64>::from_fn(n, |i| y[perm[i]]);
+                pls1_cv_r2(x, y_perm.as_ref(), k, &folds, w_norm, opts.keep).unwrap_or(f64::NAN)
+            },
+        );
+    }
 
     // A failed null fit surfaces as NaN (parallel_for_each_seeded has no error
     // channel); count it as an exceedance so it biases p upward, never downward.
@@ -821,7 +870,7 @@ fn pls1_cv_r2(
             FitOpts {
                 pre_standardized: true,
                 // check_n_eff: false — per-fold slice may have low n_eff; let the math degrade
-                // and rely on the parent statistic to absorb noise (see Option B contract)
+                // and rely on the parent statistic to absorb noise.
                 check_n_eff: false,
                 // Seq inside the per-fold worker — outer Rayon owns the threadpool.
                 par: crate::fit::ParChoice::Seq,
@@ -850,13 +899,13 @@ fn pls1_cv_r2(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Step 5: `split_nb` and `split_exact`'s refit route (`run_split_perm`)
+// `split_nb` and `split_exact`'s refit route (`run_split_perm`)
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// One split-half partition of the row indices `0..n`.
-struct SplitIdx {
-    tr: Vec<usize>,
-    te: Vec<usize>,
+pub(crate) struct SplitIdx {
+    pub(crate) tr: Vec<usize>,
+    pub(crate) te: Vec<usize>,
 }
 
 /// Draw the J split-half partitions used by `split_nb` and by `split_exact`'s
@@ -870,7 +919,10 @@ struct SplitIdx {
 /// inside its per-split worker: same parent state in, same J child seeds, and
 /// `one_split` is still the first draw off each child. So lifting the draw out
 /// to this function leaves `split_nb` seed-for-seed identical.
-fn draw_splits(
+///
+/// Also drawn by `pls3_signal_test::pls3_confirmatory_test`, which needs the
+/// same fixed-across-replicates split set on the PLS3 statistic.
+pub(crate) fn draw_splits(
     n: usize,
     k: usize,
     n_splits: usize,
@@ -1025,10 +1077,11 @@ fn split_half_correlations(
         let ss_s: f64 = (0..n_te).map(|i| scores_c[i] * scores_c[i]).sum();
         let ss_y: f64 = (0..n_te).map(|i| y_c[i] * y_c[i]).sum();
 
-        // Mirrored in split_perm_nr_zbars — change together; the mirror
-        // explanation lives there (split_perm_nr duplicates this
-        // arithmetic deliberately, since it removes the fit this
-        // function performs above).
+        // Mirrored in split_perm_nr_zbars and in pls3_signal_test's
+        // pearson_r_guarded — change together; the mirror explanation lives
+        // in split_perm_nr_zbars (split_perm_nr duplicates this arithmetic
+        // deliberately, since it removes the fit this function performs
+        // above).
         if ss_s < 1e-15 || ss_y < 1e-15 {
             return 0.0;
         }
@@ -1079,26 +1132,9 @@ fn run_split_nb(
     );
     let (p, mean_r, _t_stat, _df) = nb_test(&r_splits, n_train, n_test);
 
-    // ρ̂ carve-out (spec "Salvage from the working tree" — moved here from the
-    // retired split_j_eff arm, since the paper's Lemma 2 depends on it). The
-    // ruler σ₀² = 1/(n_test−3) needs unweighted input and n_test ≥ 4; None
-    // otherwise. ρ̂ itself is clip(1 − s²·(n_test−3), 0, 1), s² = var(z_j) with
-    // ddof=1 — the same s² nb_test already computes internally for its own SE,
-    // recomputed here rather than threaded out, since it is cheap relative to
-    // the resampling loop above and keeps nb_test's signature untouched
-    // (nb_test is shared history with the committed split_nb path — do not
-    // reshape it for a caller-side quantity it doesn't need itself).
-    let rho_hat = if w_norm.is_none() && n_test >= 4 {
-        let j = r_splits.nrows() as f64;
-        // ±0.9999 pre-atanh clamp mirrored from nb_test above (change
-        // together) — nb_test owns the explanation.
-        let z_vec: Vec<f64> = (0..r_splits.nrows())
-            .map(|i| r_splits[i].clamp(-0.9999, 0.9999).atanh())
-            .collect();
-        let z_mean: f64 = z_vec.iter().sum::<f64>() / j;
-        let s2: f64 = z_vec.iter().map(|v| (v - z_mean).powi(2)).sum::<f64>() / (j - 1.0);
-        let sigma0_sq = 1.0 / (n_test as f64 - 3.0);
-        Some((1.0 - s2 / sigma0_sq).clamp(0.0, 1.0))
+    // ρ̂ additionally needs unweighted input; the n_test floor is nb_rho_hat's.
+    let rho_hat = if w_norm.is_none() {
+        nb_rho_hat(&r_splits, n_test)
     } else {
         None
     };
@@ -1110,14 +1146,18 @@ fn run_split_nb(
 }
 
 /// NB t-test on Fisher-z transforms. Port of `_core.py:32-89`.
+///
+/// Shared with `pls3_signal_test::pls3_confirmatory_test`, whose `split_nb`
+/// runs the identical statistic on PLS3's held-out LV correlations — the two
+/// families differ in how `r` is produced, not in how it is tested.
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
-fn nb_test(stats: &Col<f64>, n_train: usize, n_test: usize) -> (f64, f64, f64, f64) {
+pub(crate) fn nb_test(stats: &Col<f64>, n_train: usize, n_test: usize) -> (f64, f64, f64, f64) {
     let j = stats.nrows() as f64;
     // Fisher-z transform. The ±0.9999 pre-atanh clamp is mirrored in
-    // split_perm_nr_zbars, in mean_fisher_z, and in run_split_nb's rho_hat
-    // block below — change together; this site owns the explanation (keeps z̄
-    // finite at |r| = 1).
+    // split_perm_nr_zbars, in mean_fisher_z, in run_split_nb's rho_hat block
+    // below, and in dual_route::pls3_split_zbars_columns — change together;
+    // this site owns the explanation (keeps z̄ finite at |r| = 1).
     let z_vec: Vec<f64> = (0..stats.nrows())
         .map(|i| stats[i].clamp(-0.9999, 0.9999).atanh())
         .collect();
@@ -1132,6 +1172,33 @@ fn nb_test(stats: &Col<f64>, n_train: usize, n_test: usize) -> (f64, f64, f64, f
     let t = z_mean / se;
     let p = crate::linalg::t_sf(t, j - 1.0);
     (p, z_mean.tanh(), t, j - 1.0)
+}
+
+/// ρ̂, the split-stability estimate reported alongside a `split_nb` p-value.
+///
+/// `clip(1 − s²/σ₀², 0, 1)` with `σ₀² = 1/(n_test−3)` and `s²` the ddof-1
+/// variance of the Fisher-z values. `None` when `n_test < 4`, where the ruler
+/// is undefined. Callers add their own eligibility rules on top: PLS1 returns
+/// `None` under weights, since the ruler assumes unweighted input.
+///
+/// `s²` is the same quantity `nb_test` computes internally for its own SE,
+/// recomputed here rather than threaded out: it is cheap next to the
+/// resampling loop that produced `stats`, and it keeps `nb_test`'s signature
+/// free of a quantity `nb_test` itself does not need.
+pub(crate) fn nb_rho_hat(stats: &Col<f64>, n_test: usize) -> Option<f64> {
+    if n_test < 4 {
+        return None;
+    }
+    let j = stats.nrows() as f64;
+    // ±0.9999 pre-atanh clamp mirrored from nb_test above (change together) —
+    // nb_test owns the explanation.
+    let z_vec: Vec<f64> = (0..stats.nrows())
+        .map(|i| stats[i].clamp(-0.9999, 0.9999).atanh())
+        .collect();
+    let z_mean: f64 = z_vec.iter().sum::<f64>() / j;
+    let s2: f64 = z_vec.iter().map(|v| (v - z_mean).powi(2)).sum::<f64>() / (j - 1.0);
+    let sigma0_sq = 1.0 / (n_test as f64 - 3.0);
+    Some((1.0 - s2 / sigma0_sq).clamp(0.0, 1.0))
 }
 
 #[allow(clippy::many_single_char_names)]
@@ -1213,7 +1280,7 @@ fn run_split_perm(
 /// permutation routes it is also the scale the null comparison happens on —
 /// mean-of-z is not a monotone function of mean-of-r, so comparing on one
 /// scale and reporting the other would give a p-value for a different test.
-fn mean_fisher_z(r: &Col<f64>) -> f64 {
+pub(crate) fn mean_fisher_z(r: &Col<f64>) -> f64 {
     let j = r.nrows();
     if j == 0 {
         return 0.0;
@@ -1227,7 +1294,7 @@ fn mean_fisher_z(r: &Col<f64>) -> f64 {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Step 5b: `split_exact`'s no-refit route (`run_split_perm_nr` / `split_perm_nr_zbars`)
+// `split_exact`'s no-refit route (`run_split_perm_nr` / `split_perm_nr_zbars`)
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Per-column z̄ values for `split_perm_nr` (length `n_perm + 1`; column 0 is
@@ -1443,10 +1510,11 @@ fn split_perm_nr_zbars(
                 let ss_s: f64 = (0..n_te).map(|i| (t_te[(i, col)] - s_mean).powi(2)).sum();
                 let ss_y: f64 = (0..n_te).map(|i| (y_te[(i, col)] - y_mean).powi(2)).sum();
 
-                // Guard mirrored from split_half_correlations (change
-                // together): a degenerate column returns r = 0.0, never
-                // skipped or NaN, so the equivalence test agrees on the rare
-                // draw that hits it.
+                // Guard mirrored in split_half_correlations and
+                // pls3_signal_test::pearson_r_guarded (change together): a
+                // degenerate column returns r = 0.0, never skipped or NaN,
+                // so the equivalence test agrees on the rare draw that hits
+                // it.
                 let r = if ss_s < 1e-15 || ss_y < 1e-15 {
                     0.0
                 } else {
@@ -1511,7 +1579,7 @@ fn run_split_perm_nr(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Step 6: score test (Welch-Satterthwaite generalized χ²)
+// score test (Welch-Satterthwaite generalized χ²)
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[allow(clippy::many_single_char_names)]
@@ -1675,7 +1743,7 @@ fn gammainc_upper(a: f64, x: f64) -> f64 {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Step 7: universal-inference split-LR e-value
+// universal-inference split-LR e-value
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[allow(clippy::many_single_char_names)]
@@ -1931,6 +1999,338 @@ mod tests {
         assert!(r.pvalue < 0.05, "p={}", r.pvalue);
     }
 
+    // ── raw_perm dual (Gram) route tests ────────────────────────────────
+
+    /// The equivalence test the dual route rests on. Route A is the shipped
+    /// primal path — one honest `pls1_cv_r2` per replicate column. Route B
+    /// is `dual_route::pls1_cv_r2_columns`. Both are handed the *same*
+    /// folds and the *same* permutation columns, so they evaluate the same
+    /// quantity two ways and must agree on every column, not just on the
+    /// final p-value. Small B and n keep the refitting route affordable.
+    ///
+    /// `expect_dual` re-derives the routing rule the runner uses internally
+    /// and asserts which branch a given configuration lands on, so the
+    /// coverage claim is enforced rather than assumed.
+    ///
+    /// The routing decision is a pure function of shape (`n_tr_max`, `p`,
+    /// `B+1`, `k`) with no caller-facing override, so the production
+    /// `run_raw_perm` cannot be run twice on identical inputs to land on
+    /// both branches — whichever `p` is chosen picks one branch
+    /// deterministically. The check below instead calls `run_raw_perm`
+    /// itself (not just the isolated `dual_route` module) on the branch
+    /// this fixture's shape selects, and compares its aggregate output
+    /// against the reference built from primitives, so a bug in the
+    /// production permutation loop — dual or primal — cannot hide behind
+    /// an in-test reimplementation.
+    #[allow(clippy::many_single_char_names)]
+    #[allow(clippy::similar_names)]
+    #[allow(clippy::too_many_arguments)]
+    fn assert_raw_perm_dual_route_matches_primal(
+        n: usize,
+        p: usize,
+        snr: f64,
+        data_seed: u64,
+        n_perm: usize,
+        n_folds: usize,
+        seed: u64,
+        expect_dual: bool,
+    ) {
+        use crate::resample::permute_indices;
+        use rand::seq::SliceRandom;
+
+        let (x, y) = synth_with_signal(n, p, snr, data_seed);
+        let n_cols = n_perm + 1;
+
+        // Rebuild the runner's fold draw off the same seed, then its child
+        // seeds — `parallel_for_each_seeded` draws exactly this sequence.
+        let (_, mut rng) = crate::rng::resolve_seed(Some(seed)).unwrap();
+        let mut indices: Vec<usize> = (0..n).collect();
+        indices.shuffle(&mut rng);
+        let folds = crate::linalg::fold_split(&indices, n_folds);
+        let seeds = crate::rng::child_seeds(&mut rng, n_perm);
+        let perms: Vec<Vec<usize>> = seeds
+            .iter()
+            .map(|s| permute_indices(n, &mut crate::rng::child_rng(*s)))
+            .collect();
+        let y_mat = Mat::<f64>::from_fn(n, n_cols, |i, col| {
+            if col == 0 {
+                y[i]
+            } else {
+                y[perms[col - 1][i]]
+            }
+        });
+
+        // Routing-rule check, mirroring the runner's own expression.
+        let n_tr_max = n - n / n_folds;
+        let dual = crate::dual_route::use_dual_route(n_tr_max, p, n_cols, 1);
+        assert_eq!(
+            dual, expect_dual,
+            "routing check: expected dual={expect_dual}, computed={dual} \
+             (n_tr_max={n_tr_max}, p={p}, B+1={n_cols})"
+        );
+
+        // Route A: the shipped primal path, one refit per column.
+        let a: Vec<f64> = (0..n_cols)
+            .map(|col| {
+                let y_col = Col::<f64>::from_fn(n, |i| y_mat[(i, col)]);
+                pls1_cv_r2(x.as_ref(), y_col.as_ref(), 1, &folds, None, None).unwrap()
+            })
+            .collect();
+
+        // Call the production runner itself, on a fresh rng seeded the same
+        // way the reference draw above was, so it consumes the identical
+        // shuffle/child-seed sequence and lands on whichever branch this
+        // fixture's shape selects (asserted above via `expect_dual`).
+        let (_, mut prod_rng) = crate::rng::resolve_seed(Some(seed)).unwrap();
+        let prod_opts = ConfirmatoryTestOpts {
+            args: ConfirmatoryArgs::RawPerm { n_perm, n_folds },
+            disable_parallelism: true,
+            ..Default::default()
+        };
+        let prod = run_raw_perm(
+            x.as_ref(),
+            y.as_ref(),
+            1,
+            n_perm,
+            n_folds,
+            None,
+            &prod_opts,
+            &mut prod_rng,
+        )
+        .unwrap();
+        let stat_scale = prod.statistic.abs().max(a[0].abs());
+        let stat_rel = if stat_scale == 0.0 {
+            0.0
+        } else {
+            (prod.statistic - a[0]).abs() / stat_scale
+        };
+        assert!(
+            stat_rel < 1e-10,
+            "production statistic diverges from reference: prod={} ref={} rel={stat_rel}",
+            prod.statistic,
+            a[0]
+        );
+        let ref_count = a[1..].iter().filter(|r| r.is_nan() || **r >= a[0]).count();
+        let ref_pvalue = (ref_count as f64 + 1.0) / (n_perm as f64 + 1.0);
+        // Both sides evaluate the identical `(exceedances + 1) / (n_perm + 1)`
+        // formula on the same n_perm, so exact equality — not a tolerance —
+        // is the right check here.
+        #[allow(clippy::float_cmp)]
+        let pvalues_match = ref_pvalue == prod.pvalue;
+        assert!(
+            pvalues_match,
+            "production pvalue diverges from reference: prod={} ref={ref_pvalue}",
+            prod.pvalue
+        );
+
+        // Route B: the Gram path, all columns at once.
+        let b = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds, false);
+
+        assert_eq!(a.len(), b.len());
+        // Pure relative tolerance — no absolute escape hatch. Scale by the
+        // larger magnitude so the ratio stays defined when both are 0.
+        for (col, (av, bv)) in a.iter().zip(b.iter()).enumerate() {
+            let scale = av.abs().max(bv.abs());
+            let rel = if scale == 0.0 {
+                0.0
+            } else {
+                (av - bv).abs() / scale
+            };
+            assert!(rel < 1e-10, "col {col}: primal={av} dual={bv} rel={rel}");
+        }
+
+        // The p-value is a count of exceedances, so a near-tie could in
+        // principle split even when every column agrees to 1e-10. Assert it
+        // does not on these fixtures; a failure here is a report-and-stop,
+        // not a tolerance to widen.
+        let count = |v: &[f64]| v[1..].iter().filter(|r| r.is_nan() || **r >= v[0]).count();
+        assert_eq!(count(&a), count(&b), "exceedance counts split on a tie");
+    }
+
+    #[test]
+    fn raw_perm_dual_route_matches_primal_when_selected() {
+        // n=60, p=3000, n_folds=5 ⇒ n_tr_max=48, B+1=50:
+        // 48·(50+3000) = 146,400 < 3000·50 = 150,000 ⇒ dual is live.
+        assert_raw_perm_dual_route_matches_primal(60, 3000, 4.0, 7, 49, 5, 11, true);
+    }
+
+    #[test]
+    fn raw_perm_primal_route_is_the_default_on_narrow_p() {
+        // n=60, p=6 ⇒ 48·(50+6) = 2,688 > 6·50 = 300 ⇒ primal.
+        // The same equivalence must still hold — the kernel is correct on
+        // both sides of the rule, the rule only decides which one runs.
+        assert_raw_perm_dual_route_matches_primal(60, 6, 4.0, 7, 49, 5, 11, false);
+    }
+
+    #[test]
+    fn raw_perm_dual_route_serial_and_parallel_are_byte_equal() {
+        let (x, y) = synth_with_signal(60, 3000, 4.0, 7);
+        let (_, mut rng) = crate::rng::resolve_seed(Some(3)).unwrap();
+        let mut indices: Vec<usize> = (0..60).collect();
+        {
+            use rand::seq::SliceRandom;
+            indices.shuffle(&mut rng);
+        }
+        let folds = crate::linalg::fold_split(&indices, 5);
+        let y_mat = Mat::<f64>::from_fn(60, 5, |i, _| y[i]);
+        let par = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds, false);
+        let ser = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds, true);
+        for (a, b) in par.iter().zip(ser.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    #[test]
+    fn raw_perm_dual_route_degenerate_x_is_finite_and_matches_primal() {
+        // Every X row identical ⇒ standardize's zero-variance branch makes
+        // X̃_tr exactly zero ⇒ z'Gz = 0 ⇒ the NIPALS norm guard fires ⇒ the
+        // prediction is zero. The pooled R² that follows is finite but not
+        // 0: ss_res = Σ ys_val² while ss_tot = Σ(ys_val − mean_val)², and
+        // ys_val carries the *training* fold's y moments, so its validation
+        // mean is not 0. The claim under test is finiteness (never NaN) and
+        // agreement with the primal route, not a particular value.
+        let x = Mat::<f64>::from_fn(40, 8, |_, _| 3.0);
+        let (_, y) = synth_with_signal(40, 8, 4.0, 5);
+        let folds = crate::linalg::fold_split(&(0..40).collect::<Vec<_>>(), 4);
+        let y_mat = Mat::<f64>::from_fn(40, 3, |i, _| y[i]);
+        let dual = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds, true);
+        for (col, v) in dual.iter().enumerate() {
+            assert!(v.is_finite(), "col {col} is not finite: {v}");
+            let primal = {
+                let y_col = Col::<f64>::from_fn(40, |i| y_mat[(i, col)]);
+                pls1_cv_r2(x.as_ref(), y_col.as_ref(), 1, &folds, None, None).unwrap()
+            };
+            assert!(
+                (v - primal).abs() < 1e-12,
+                "col {col}: primal={primal} dual={v}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_perm_end_to_end_is_unchanged_on_a_primal_shaped_input() {
+        // Smoke test: a primal-shaped configuration still dispatches and
+        // returns a well-formed result after the branch is added. It pins
+        // no value, so it is not a regression guard — the guards for the
+        // primal numbers are `byte_parity`, `check_corpus_hash.py` and the
+        // pytest corpus suite.
+        let (x, y) = synth_with_signal(80, 6, 4.0, 42);
+        let r = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: 1,
+                weights: None,
+            },
+            ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::RawPerm {
+                    n_perm: 200,
+                    n_folds: 5,
+                },
+                seed: Some(42),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(r.method, "raw_perm");
+        assert!(r.pvalue.is_finite() && r.pvalue > 0.0 && r.pvalue <= 1.0);
+    }
+
+    /// Wiring test: the public runner, on an input the rule sends *dual*,
+    /// must return exactly the p-value and statistic the primal branch
+    /// would have returned at the same seed.
+    ///
+    /// This is the test the kernel-level equivalence test cannot be. That
+    /// one hands both routes the same locally-built permutations, so it
+    /// proves the kernels agree but says nothing about the branch that
+    /// calls them: a column-0 convention slip, or a child-seed derivation
+    /// that drifts from what `parallel_for_each_seeded` actually draws,
+    /// would pass it. Here the reference is built from the runner's *own*
+    /// primal machinery — the same `shuffle` + `fold_split` draw, then
+    /// `pls1_cv_r2` and `parallel_for_each_seeded` verbatim — so both of
+    /// those separate the two p-values.
+    ///
+    /// A wrong *routing* argument (`n_tr_max`, `n_perm + 1`) is a different
+    /// failure and this test does not catch it: it flips the runner to
+    /// primal, which then matches the primal reference exactly. The
+    /// precondition assert below covers that, but it re-derives the rule
+    /// locally rather than reading it off the runner, so a routing
+    /// expression that drifts inside `run_raw_perm` stays uncovered.
+    ///
+    /// Replaying the pre-branch draw is valid because `pls1_confirmatory_test`
+    /// dispatches to `run_raw_perm` immediately after `resolve_seed`
+    /// (`signal_test.rs:520` then `:524`) with no RNG draw in between.
+    // `float_cmp` (pedantic, on crate-wide at lib.rs:8) fires on `assert_eq!`
+    // over f64. Here the equality is the point: a p-value is a count over a
+    // fixed denominator, so the two routes match to the bit or one of them
+    // is wrong.
+    #[allow(clippy::float_cmp)]
+    #[allow(clippy::many_single_char_names)]
+    #[test]
+    fn raw_perm_dual_route_runner_matches_the_primal_reference() {
+        use rand::seq::SliceRandom;
+
+        let (n, p, n_perm, n_folds, seed) = (60_usize, 3000_usize, 49_usize, 5_usize, 11_u64);
+        let (x, y) = synth_with_signal(n, p, 4.0, 7);
+
+        // Precondition: if this shape ever stops routing dual the test
+        // silently stops testing anything.
+        assert!(
+            crate::dual_route::use_dual_route(n - n / n_folds, p, n_perm + 1, 1),
+            "test premise: this shape must take the dual route"
+        );
+
+        // Reference: the runner's pre-branch fold draw, then its primal
+        // branch, statement for statement.
+        let (_, mut rng) = crate::rng::resolve_seed(Some(seed)).unwrap();
+        let mut indices: Vec<usize> = (0..n).collect();
+        indices.shuffle(&mut rng);
+        let folds = crate::linalg::fold_split(&indices, n_folds);
+        let obs = pls1_cv_r2(x.as_ref(), y.as_ref(), 1, &folds, None, None).unwrap();
+        let nulls =
+            crate::resample::parallel_for_each_seeded(&mut rng, n_perm, true, |_, child| {
+                let perm = crate::resample::permute_indices(n, child);
+                let y_perm = Col::<f64>::from_fn(n, |i| y[perm[i]]);
+                pls1_cv_r2(x.as_ref(), y_perm.as_ref(), 1, &folds, None, None).unwrap_or(f64::NAN)
+            });
+        let exceedances = nulls.iter().filter(|v| v.is_nan() || **v >= obs).count();
+        let p_expected = (exceedances as f64 + 1.0) / (n_perm as f64 + 1.0);
+
+        let r = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: 1,
+                weights: None,
+            },
+            ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::RawPerm { n_perm, n_folds },
+                seed: Some(seed),
+                disable_parallelism: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // The p-value is a count, so it is exactly equal or it is wrong.
+        assert_eq!(
+            r.pvalue, p_expected,
+            "dual runner p={} vs primal reference p={p_expected}",
+            r.pvalue
+        );
+        let scale = r.statistic.abs().max(obs.abs());
+        let rel = if scale == 0.0 {
+            0.0
+        } else {
+            (r.statistic - obs).abs() / scale
+        };
+        assert!(
+            rel < 1e-10,
+            "statistic: dual={} primal={obs} rel={rel}",
+            r.statistic
+        );
+    }
+
     // ── split_nb and split_exact tests ──────────────────────────────────────
 
     #[test]
@@ -2076,9 +2476,8 @@ mod tests {
     // Route selection is by input shape, not by a caller knob. Each case is
     // pinned bit-for-bit against the route it must land on, so a future edit
     // to the predicate fails here rather than silently switching routes.
-    // Task 8 parked this rewrite at the test's creation: `SplitPermNr` and
-    // `SplitPerm` are no longer selectable methods, so the comparator side
-    // now calls `run_split_perm_nr` / `run_split_perm` directly instead of
+    // `SplitPermNr` and `SplitPerm` are no longer selectable methods, so the
+    // comparator side calls `run_split_perm_nr` / `run_split_perm` directly instead of
     // going through `pls1_confirmatory_test` with those (now-deleted) args
     // variants. `run_route` reproduces exactly the preprocessing
     // `pls1_confirmatory_test` performs ahead of dispatch — weight

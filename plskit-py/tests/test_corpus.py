@@ -323,5 +323,31 @@ def test_corpus_case(case):
         for field in ["k_star", "pvalues", "test_method", "alpha", "seed"]:
             if field in expected:
                 assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+    elif fn == "pls3_fit":
+        kw = dict(kwargs)
+        k = kw.pop("k")
+        kw.pop("seed", None)          # pls3_fit is deterministic; no seed argument
+        r = plskit.pls3_fit(X, inputs["Y"], k, **kw)
+        for field in ["U", "V", "singular_values", "x_scores", "y_scores", "k_used"]:
+            if field in expected:
+                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+    elif fn == "pls3_transform":
+        k = kwargs["k"]
+        which = kwargs["which"]
+        m = plskit.pls3_fit(X, inputs["Y"], k)
+        sc = plskit.pls3_transform(m, inputs["X_new"], inputs["Y_new"], which=which)
+        for field in ["x_scores", "y_scores"]:
+            if field in expected:
+                assert_close(getattr(sc, field), expected[field], f"{case['name']}.{field}")
+    elif fn == "pls3_confirmatory_test":
+        kw = dict(kwargs)
+        k = kw.pop("k")
+        r = plskit.pls3_confirmatory_test(X, inputs["Y"], k, **kw)
+        for field in [
+            "pvalue", "statistic", "method", "k", "n_perm", "n_splits",
+            "n_eff", "seed", "stable_rank",
+        ]:
+            if field in expected:
+                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
     else:
         pytest.skip(f"unknown function {fn}")

@@ -181,8 +181,8 @@ pub fn pls1_rotation_stability(
         pre_standardized: opts.pre_standardized,
         disable_parallelism: opts.disable_parallelism,
         max_failure_rate: 1.0,
-        // rotation_stability has its own skip-rate check (Task 11); this value
-        // is only used for shared-knob validation via validate(), not the CI loop.
+        // rotation_stability has its own skip-rate check; this value is only
+        // used for shared-knob validation via validate(), not the CI loop.
         max_skip_rate: 1.0,
     };
     sub_opts.validate()?;

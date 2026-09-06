@@ -18,14 +18,15 @@ use plskit::{
     pls1_find_k_optimal as core_pls1_find_k_optimal,
     pls1_find_k_sequence as core_pls1_find_k_sequence, pls1_fit as core_pls1_fit,
     pls1_predict as core_pls1_predict, pls1_rotation_stability as core_pls1_rotation_stability,
-    rotate as core_rotate, split_nb_gate as core_split_nb_gate,
-    spls1_find_k_optimal as core_spls1_find_k_optimal,
+    pls3_confirmatory_test as core_pls3_confirmatory_test, pls3_fit as core_pls3_fit,
+    pls3_transform as core_pls3_transform, rotate as core_rotate,
+    split_nb_gate as core_split_nb_gate, spls1_find_k_optimal as core_spls1_find_k_optimal,
     spls1_find_k_sequence as core_spls1_find_k_sequence,
     spls1_find_keep_optimal as core_spls1_find_keep_optimal, spls1_fit as core_spls1_fit,
     ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
     FindKOptimalOpts, FindKOptimalOutput, FindKSequenceOpts, FindKSequenceOutput,
-    FindKeepOptimalOpts, FitOpts, KSpec, Pls1Model, RotateOutput, RotationMethod, Selector,
-    VarimaxArgs,
+    FindKeepOptimalOpts, FitOpts, KSpec, Pls1Model, Pls3ConfirmatoryTestOpts, Pls3FitOpts,
+    Pls3Model, RotateOutput, RotationMethod, Selector, TransformWhich, VarimaxArgs,
 };
 use plskit::{pls1_perm_null as core_pls1_perm_null, PermNullOpts, PermNullOutput};
 
@@ -503,14 +504,14 @@ fn pls1_model_from_dict(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Pls1M
         .extract()?;
     let t_scores = get_mat("T")?;
     let n_samples = t_scores.nrows();
-    // "n_eff" — present in dicts written by Task 8+; default to n_samples for
-    // back-compat with old dicts that lack the key.
+    // "n_eff" — absent from dicts written by older versions; default to
+    // n_samples for back-compat with those.
     #[allow(clippy::cast_precision_loss)]
     let n_eff: f64 = match d.get_item("n_eff")? {
         Some(v) => v.extract()?,
         None => n_samples as f64,
     };
-    // "weights" — present in dicts written by Task 8+; default to None.
+    // "weights" — absent from dicts written by older versions; default to None.
     let weights: Option<Col<f64>> = match d.get_item("weights")? {
         Some(v) if !v.is_none() => {
             let arr: PyReadonlyArray1<'_, f64> = v.extract()?;
@@ -540,6 +541,206 @@ fn pls1_model_from_dict(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Pls1M
         n_eff,
         keep,
     })
+}
+
+fn pls3_model_to_dict(py: Python<'_>, m: Pls3Model) -> Bound<'_, PyDict> {
+    // Dict keys are the short Python-facing names; the Rust struct uses the
+    // long snake_case names. `U` / `V` follow the same single-letter
+    // math-symbol rule as PLS1's `T` / `P` / `W` / `Q`.
+    let d = PyDict::new(py);
+    d.set_item("U", faer_mat_to_np(py, m.u_saliences)).unwrap();
+    d.set_item("V", faer_mat_to_np(py, m.v_saliences)).unwrap();
+    d.set_item("singular_values", faer_col_to_np(py, m.singular_values))
+        .unwrap();
+    d.set_item("x_scores", faer_mat_to_np(py, m.x_scores))
+        .unwrap();
+    d.set_item("y_scores", faer_mat_to_np(py, m.y_scores))
+        .unwrap();
+    d.set_item("X_mean", faer_col_to_np(py, m.x_mean)).unwrap();
+    d.set_item("X_scale", faer_col_to_np(py, m.x_scale))
+        .unwrap();
+    d.set_item("Y_mean", faer_col_to_np(py, m.y_mean)).unwrap();
+    d.set_item("Y_scale", faer_col_to_np(py, m.y_scale))
+        .unwrap();
+    d.set_item("k_used", m.k_used).unwrap();
+    d.set_item("pre_standardized_X", m.pre_standardized_x)
+        .unwrap();
+    d.set_item("pre_standardized_Y", m.pre_standardized_y)
+        .unwrap();
+    d
+}
+
+fn pls3_model_from_dict(d: &Bound<'_, PyDict>) -> PyResult<Pls3Model> {
+    let get_mat = |k: &str| -> PyResult<Mat<f64>> {
+        let v: PyReadonlyArray2<'_, f64> = d
+            .get_item(k)?
+            .ok_or_else(|| PlsKitException::new_err(format!("missing field {k}")))?
+            .extract()?;
+        Ok(np_mat_to_faer(v))
+    };
+    let get_col = |k: &str| -> PyResult<Col<f64>> {
+        let v: PyReadonlyArray1<'_, f64> = d
+            .get_item(k)?
+            .ok_or_else(|| PlsKitException::new_err(format!("missing field {k}")))?
+            .extract()?;
+        Ok(np_col_to_faer(v))
+    };
+    Ok(Pls3Model {
+        u_saliences: get_mat("U")?,
+        v_saliences: get_mat("V")?,
+        singular_values: get_col("singular_values")?,
+        x_scores: get_mat("x_scores")?,
+        y_scores: get_mat("y_scores")?,
+        x_mean: get_col("X_mean")?,
+        x_scale: get_col("X_scale")?,
+        y_mean: get_col("Y_mean")?,
+        y_scale: get_col("Y_scale")?,
+        k_used: d
+            .get_item("k_used")?
+            .ok_or_else(|| PlsKitException::new_err("missing field k_used"))?
+            .extract()?,
+        pre_standardized_x: d
+            .get_item("pre_standardized_X")?
+            .ok_or_else(|| PlsKitException::new_err("missing field pre_standardized_X"))?
+            .extract()?,
+        pre_standardized_y: d
+            .get_item("pre_standardized_Y")?
+            .ok_or_else(|| PlsKitException::new_err("missing field pre_standardized_Y"))?
+            .extract()?,
+    })
+}
+
+fn parse_transform_which(s: &str) -> PyResult<TransformWhich> {
+    match s {
+        "x_scores" => Ok(TransformWhich::XScores),
+        "y_scores" => Ok(TransformWhich::YScores),
+        "both" => Ok(TransformWhich::Both),
+        _ => Err(invalid_args_err(&format!(
+            "unknown which: {s}; allowed: [\"x_scores\", \"y_scores\", \"both\"]"
+        ))),
+    }
+}
+
+fn parse_pls3_confirmatory_args(
+    method: &str,
+    args: Option<&Bound<'_, PyDict>>,
+) -> PyResult<ConfirmatoryArgs> {
+    // PLS3 registers two of the five methods. Reject the other three by name
+    // here rather than letting the core produce a less specific message. The
+    // two it accepts take the same keys, defaults and validation as their
+    // PLS1 counterparts, so they go through the same parser.
+    if method != "split_exact" && method != "split_nb" {
+        return Err(invalid_args_err(&format!(
+            "method='{method}' is not available for pls3_confirmatory_test; \
+             allowed: [\"split_exact\", \"split_nb\"]"
+        )));
+    }
+    parse_confirmatory_args(method, args)
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, y, k, *, pre_standardized_X=false, pre_standardized_Y=false, weights=None))]
+#[allow(clippy::needless_pass_by_value)]
+#[allow(non_snake_case)] // pre_standardized_X/_Y are the cross-language argument names
+fn pls3_fit<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray2<'_, f64>,
+    k: usize,
+    pre_standardized_X: bool,
+    pre_standardized_Y: bool,
+    weights: Option<PyReadonlyArray1<'_, f64>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let opts = Pls3FitOpts {
+        pre_standardized_x: pre_standardized_X,
+        pre_standardized_y: pre_standardized_Y,
+        ..Pls3FitOpts::default()
+    };
+    let xf = np_mat_to_faer(x);
+    let yf = np_mat_to_faer(y);
+    let wf = weights.map(np_col_to_faer);
+    let wref = wf.as_ref().map(Col::as_ref);
+    let m = map_res(core_pls3_fit(xf.as_ref(), yf.as_ref(), k, wref, opts))?;
+    Ok(pls3_model_to_dict(py, m))
+}
+
+#[pyfunction]
+#[pyo3(signature = (model, x_new=None, y_new=None, *, which="both"))]
+#[allow(clippy::needless_pass_by_value)]
+fn pls3_transform<'py>(
+    py: Python<'py>,
+    model: Bound<'_, PyDict>,
+    x_new: Option<PyReadonlyArray2<'_, f64>>,
+    y_new: Option<PyReadonlyArray2<'_, f64>>,
+    which: &str,
+) -> PyResult<Bound<'py, PyDict>> {
+    let m = pls3_model_from_dict(&model)?;
+    let w = parse_transform_which(which)?;
+    let xf = x_new.map(np_mat_to_faer);
+    let yf = y_new.map(np_mat_to_faer);
+    let s = map_res(core_pls3_transform(
+        &m,
+        xf.as_ref().map(Mat::as_ref),
+        yf.as_ref().map(Mat::as_ref),
+        w,
+    ))?;
+    let d = PyDict::new(py);
+    d.set_item("x_scores", s.x_scores.map(|a| faer_mat_to_np(py, a)))?;
+    d.set_item("y_scores", s.y_scores.map(|a| faer_mat_to_np(py, a)))?;
+    Ok(d)
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, y, k, *, method, args=None,
+                    pre_standardized_X=false, pre_standardized_Y=false,
+                    seed=None, disable_parallelism=false, verbose=false))]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::many_single_char_names)]
+#[allow(non_snake_case)]
+fn pls3_confirmatory_test_raw<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray2<'_, f64>,
+    k: usize,
+    method: &str,
+    args: Option<Bound<'_, PyDict>>,
+    pre_standardized_X: bool,
+    pre_standardized_Y: bool,
+    seed: Option<u64>,
+    disable_parallelism: bool,
+    verbose: bool,
+) -> PyResult<Bound<'py, PyDict>> {
+    let opts = Pls3ConfirmatoryTestOpts {
+        args: parse_pls3_confirmatory_args(method, args.as_ref())?,
+        pre_standardized_x: pre_standardized_X,
+        pre_standardized_y: pre_standardized_Y,
+        seed,
+        disable_parallelism,
+        verbose,
+    };
+    let xf = np_mat_to_faer(x);
+    let yf = np_mat_to_faer(y);
+    let r = map_res(core_pls3_confirmatory_test(
+        xf.as_ref(),
+        yf.as_ref(),
+        k,
+        opts,
+    ))?;
+    let d = PyDict::new(py);
+    d.set_item("pvalue", r.pvalue)?;
+    d.set_item("statistic", r.statistic)?;
+    d.set_item("method", r.method.clone())?;
+    d.set_item("k", r.k)?;
+    d.set_item("n_perm", r.n_perm)?;
+    d.set_item("n_splits", r.n_splits)?;
+    d.set_item("seed", r.seed)?;
+    d.set_item("n_eff", r.n_eff)?;
+    d.set_item("rho_hat", r.rho_hat)?;
+    d.set_item("stable_rank", r.stable_rank)?;
+    d.set_item("ci", py.None())?;
+    Ok(d)
 }
 
 #[pyfunction]
@@ -1457,5 +1658,8 @@ fn _plskit(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spls1_find_keep_optimal, m)?)?;
     m.add_function(wrap_pyfunction!(spls1_find_k_optimal, m)?)?;
     m.add_function(wrap_pyfunction!(spls1_find_k_sequence, m)?)?;
+    m.add_function(wrap_pyfunction!(pls3_fit, m)?)?;
+    m.add_function(wrap_pyfunction!(pls3_transform, m)?)?;
+    m.add_function(wrap_pyfunction!(pls3_confirmatory_test_raw, m)?)?;
     Ok(())
 }

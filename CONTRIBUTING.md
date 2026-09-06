@@ -2,7 +2,7 @@
 
 File all PRs and issues against the monorepo at https://github.com/pawlenartowicz/plskit. Every wrapper (`plskit-rs`, `plskit-py`, `plskit-r`, `plskit-jl`) lives in this repo as a subdirectory; there are no per-language mirror repos.
 
-Versions are per-artifact (RULES.md RULE 7); each artifact tags independently as `vX.Y.Z` (engine), `vX.Y.Z-py`, `vX.Y.Z-r`, or `vX.Y.Z-jl`. Wrappers may lag the engine; CI verifies the artifact↔tag match on each tag push.
+Versions are per-artifact; each artifact tags independently as `vX.Y.Z` (engine), `vX.Y.Z-py`, `vX.Y.Z-r`, or `vX.Y.Z-jl`. Wrappers may lag the engine; CI verifies the artifact↔tag match on each tag push.
 
 ## Pre-release: slow MC tests
 

@@ -13,19 +13,19 @@ orientation and side-by-side examples for users moving between languages.
 
 ## Surface at a glance
 
-The crate is organized around three thematic groups, the same as the
+The crate is organized around five thematic groups, the same as the
 Python wrapper:
 
 - **Core fit / predict** — `pls1_fit`, `pls1_predict`, `preprocess`. K-selection lives in `pls1_find_k_optimal` and `pls1_find_k_sequence`.
 - **Sparse PLS1** — `spls1_fit`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`. `keep ∈ [1, n_features]`; `keep = n_features` reproduces the dense functions bit-exactly. One axis is always fixed: no joint `(k, keep)` 2-D search. Prediction uses `pls1_predict` on the `Pls1Model` returned by `spls1_fit` — no separate `spls1_predict`. Per-coordinate β CIs are not offered under selection (post-selection inference, deferred to a separate spec).
+- **PLS3 / PLSSVD** — `pls3_fit` (alias `plssvd_fit`), `pls3_transform` (alias `plssvd_transform`), `pls3_confirmatory_test`. Symmetric X↔Y covariance analysis: one SVD of the standardized `X'Y`, no deflation, so all `k ≤ min(p, q)` components are orthogonal by construction and `p ≫ n` is the ordinary case. There is no `pls3_predict` — neither block is the outcome. Observation weights are not implemented for this family and error rather than being ignored.
 - **Inference** — `pls1_confirmatory_test` (with the five methods `raw_perm` / `split_nb` / `split_exact` / `score` / `e`; `split_exact` at `k=1` is the recommended default). CIs ride on `pls1_confirmatory_test(ci=true)` plus the standalone `pls1_rotation_stability`. `pls1_perm_null` is the permutation-null engine. `split_nb_gate` answers whether the `split_nb` auto-gate flags a design, without running a test.
 - **Interpretive** — `rotate` with pluggable `L` and method-axis `(method, args)` dispatch.
 
 ### Planned — not yet implemented
 
 The following names are roadmap items and do **not** compile in the current crate:
-`pls2_fit`, `pls3_fit`, `plssvd_fit`, `pls1_robust_fit`, `mbpls_fit`,
-`pls2_predict`, `pls3_predict`, `pls2_transform`, `pls3_transform`,
+`pls2_fit`, `pls1_robust_fit`, `mbpls_fit`, `pls2_predict`, `pls2_transform`,
 `grassmannian_alignment_test`, `anisotropic_null`.
 
 For per-function need / arguments / options / why-core entries, read
@@ -86,6 +86,42 @@ pub fn spls1_find_k_sequence(
 `spls1_find_keep_optimal` sweeps a logged geometric grid (powers of two,
 endpoints always included) and selects the sparsest `keep` within 1 SE of
 the best mean CV R²; the swept grid is in `FindKeepOptimalOutput.keep_grid`.
+
+## PLS3 / PLSSVD signatures
+
+```rust
+pub fn pls3_fit(
+    x: MatRef<f64>,          // (n, p)
+    y: MatRef<f64>,          // (n, q)
+    k: usize,                // 1 ..= min(p, q)
+    weights: Option<ColRef<f64>>,   // must be None — errors on Some
+    opts: Pls3FitOpts,       // pre_standardized_x, pre_standardized_y, par
+) -> PlsKitResult<Pls3Model>
+// plssvd_fit has the identical signature and delegates to pls3_fit.
+
+pub fn pls3_transform(
+    model: &Pls3Model,
+    x_new: Option<MatRef<f64>>,
+    y_new: Option<MatRef<f64>>,
+    which: TransformWhich,   // XScores | YScores | Both
+) -> PlsKitResult<Pls3Scores>
+// plssvd_transform has the identical signature and delegates to pls3_transform.
+
+pub fn pls3_confirmatory_test(
+    x: MatRef<f64>,
+    y: MatRef<f64>,
+    k: usize,                // must be 1
+    opts: Pls3ConfirmatoryTestOpts,
+    // args: ConfirmatoryArgs::SplitExact { n_perm, n_splits }
+    //    or ConfirmatoryArgs::SplitNb { n_splits, force };
+    // pre_standardized_x, pre_standardized_y, seed, disable_parallelism, verbose
+) -> PlsKitResult<ConfirmatoryTestOutput>
+```
+
+The saliences carry a pinned sign: the largest-magnitude entry of each `U`
+column is positive, and the matching `V` column flips with it. The pair moves
+as a unit, so `σ_i`, `X'Y` and every held-out LV correlation are unchanged —
+the pin exists so repeated fits and cross-platform runs agree.
 
 ## Side-by-side example
 

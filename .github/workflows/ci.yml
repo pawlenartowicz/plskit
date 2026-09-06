@@ -15,6 +15,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
+      - name: Check docs drift (API surface / result fields)
+        run: python3 scripts/check-docs-drift.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

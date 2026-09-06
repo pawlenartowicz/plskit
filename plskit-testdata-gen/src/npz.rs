@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufWriter, Read};
 use std::path::Path;
+use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, DateTime};
 
 /// Thin wrapper around [`ndarray_npy::NpzWriter`] for writing testdata `.npz` files.
 pub struct NpzWriter {
@@ -16,12 +18,28 @@ pub struct NpzWriter {
 impl NpzWriter {
     /// Create (or overwrite) the `.npz` file at `path`.
     ///
+    /// The written bytes are reproducible across runs: the manifest records a
+    /// SHA-256 of the whole `.npz` container, so anything varying run-to-run
+    /// would make the hash useless as a change detector.
+    ///
+    /// `.npz` is a ZIP, and each entry carries a DOS last-modified stamp.
+    /// `SimpleFileOptions::default()` fills that stamp from the wall clock when
+    /// the `zip` crate is compiled with its `time` feature — which happens here
+    /// through Cargo feature unification, since another crate in the workspace
+    /// depends on `zip` with default features. DOS stamps have two-second
+    /// granularity, so two writes seconds apart produce different bytes. Pin the
+    /// stamp to the ZIP epoch (1980-01-01), which is also what the `zip` crate
+    /// writes when its `time` feature is off, so hashes match either build.
+    ///
     /// # Errors
     /// Returns an error if the file cannot be created.
     pub fn create(path: &Path) -> Result<Self> {
         let f = File::create(path)?;
+        let options = SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Stored)
+            .last_modified_time(DateTime::default());
         Ok(Self {
-            inner: InnerWriter::new(BufWriter::new(f)),
+            inner: InnerWriter::new_with_options(BufWriter::new(f), options),
         })
     }
 

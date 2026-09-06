@@ -4,6 +4,19 @@ User-facing field shapes for each public Python result class. All fields
 are immutable (`@dataclass(frozen=True)`), and field names match across
 language wrappers.
 
+## `PreprocessResult` — what `preprocess` returns
+
+| Field | Python type | Notes |
+|---|---|---|
+| `X_std` | `np.ndarray \| None` | standardized `X`; populated when `X` was passed |
+| `X_mean` | `np.ndarray \| None` | per-column mean of `X`; populated when `X` was passed |
+| `X_scale` | `np.ndarray \| None` | per-column scale of `X`; populated when `X` was passed |
+| `Y_std` | `np.ndarray \| None` | standardized `Y`; shape matches the input (1-D or 2-D); populated when `Y` was passed |
+| `Y_mean` | `float \| np.ndarray \| None` | scalar for 1-D `Y`, one entry per column for 2-D `Y`; populated when `Y` was passed |
+| `Y_scale` | `float \| np.ndarray \| None` | scalar for 1-D `Y`, one entry per column for 2-D `Y`; populated when `Y` was passed |
+| `weights_normalized` | `np.ndarray \| None` | weights normalized to mean 1; populated when `weights` was passed |
+| `n_eff` | `float \| None` | Kish's effective sample size; populated when `weights` was passed |
+
 ## `PLS1Result` — what `pls1_fit` returns
 
 | Python field | Rust core field | numpy type | Shape |
@@ -17,7 +30,10 @@ language wrappers.
 | `intercept` | `intercept` | `float` | scalar |
 | `k_used` | `k_used` | `int` | scalar |
 | `pre_standardized` | `pre_standardized` | `bool` | scalar |
+| `weights` | `weights` | `np.ndarray \| None` | `(n,)` when present; `None` for uniform/absent weights |
+| `n_eff` | `n_eff` | `float` | scalar; Kish's effective sample size, equals `n` for uniform/absent weights |
 | `rotation_spec` | `rotation_spec` | `RotationSpec \| None` | — |
+| `selection_result` | — | `FindKOptimalResult \| FindKSequenceResult \| None` | `None` unless the model came from `pls1_fit(X, y, k="optimal" \| "sequence")` |
 | `keep` | — | `int \| None` | `int` for `spls1_fit`; `None` for `pls1_fit` |
 
 There is no `k_was_auto` flag and no `find_k_certificate` field. The
@@ -25,6 +41,36 @@ There is no `k_was_auto` flag and no `find_k_certificate` field. The
 diagnostics onto the K-selection result objects themselves, where
 they originate. `rotation_spec` is `None` until `rotate(model, ...)`
 stamps it onto a copy of the model.
+
+## `PLS3Result` — what `pls3_fit` / `plssvd_fit` returns
+
+| Python field | Rust core field | numpy type | Shape |
+|---|---|---|---|
+| `U` | `u_saliences` | `np.ndarray` | `(p, k_used)` |
+| `V` | `v_saliences` | `np.ndarray` | `(q, k_used)` |
+| `singular_values` | `singular_values` | `np.ndarray` | `(k_used,)` |
+| `x_scores` | `x_scores` | `np.ndarray` | `(n, k_used)` |
+| `y_scores` | `y_scores` | `np.ndarray` | `(n, k_used)` |
+| `X_mean` | `x_mean` | `np.ndarray` | `(p,)` |
+| `X_scale` | `x_scale` | `np.ndarray` | `(p,)` |
+| `Y_mean` | `y_mean` | `np.ndarray` | `(q,)` |
+| `Y_scale` | `y_scale` | `np.ndarray` | `(q,)` |
+| `k_used` | `k_used` | `int` | scalar |
+| `pre_standardized_X` | `pre_standardized_x` | `bool` | scalar |
+| `pre_standardized_Y` | `pre_standardized_y` | `bool` | scalar |
+
+PLS3 is symmetric, so there is no `coef`, no `beta`, no `intercept` and no
+`predict`. `U` and `V` have pinned signs (largest-magnitude entry of each
+`U` column positive, the matching `V` column flipped with it), so repeated
+fits on the same data agree exactly. Observation weights are not
+implemented for this family, so there is no `weights` and no `n_eff`.
+
+## `PLS3Scores` — what `pls3_transform` / `plssvd_transform` returns
+
+| Python field | Rust core field | numpy type | Shape |
+|---|---|---|---|
+| `x_scores` | `x_scores` | `np.ndarray \| None` | `(n_new, k_used)`; `None` when `which` did not ask for it |
+| `y_scores` | `y_scores` | `np.ndarray \| None` | `(n_new, k_used)`; `None` when `which` did not ask for it |
 
 ## `FindKOptimalResult` — what `pls1_find_k_optimal` returns
 
@@ -98,6 +144,7 @@ candidates were evaluated.
 | `n_perm` | `int \| None` | not None for resampling-family methods, None for `score` / `e` |
 | `n_splits` | `int \| None` | not None for `split_*` methods, None for `raw_perm` / `score` / `e` |
 | `seed` | `int` | always |
+| `n_eff` | `float` | always; Kish effective sample size, equals `n` for uniform/absent weights |
 | `rho_hat` | `float \| None` | `split_nb` only, and only when unweighted with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
 | `stable_rank` | `float \| None` | stable rank of the standardized `X`, as seen by the `split_nb` auto-gate; populated whenever `"split_nb"` was requested (fired or not, including under `force`), `None` for every other requested method |
 | `ci` | `ConfirmatoryCI \| None` | not None when called with `ci=True`; carries the rotation-invariant subsample CIs |
@@ -118,6 +165,20 @@ dropped from the public surface; only the headline result and
 Every field is always populated. This is the same rule the test
 functions apply internally, evaluated on the same standardized `X` —
 querying it costs one SVD and no resampling.
+
+## `PermNullResult` — what `pls1_perm_null` returns
+
+| Field | Python type | Notes |
+|---|---|---|
+| `n_perm` | `int` | number of permutations actually run |
+| `k` | `int` | K used for fitting |
+| `seed` | `int` | RNG seed actually used |
+| `beta_ref` | `np.ndarray` | shape `(D,)`; full-data β |
+| `beta_perm_mean` | `np.ndarray` | shape `(D,)`; ≈ 0 under H0 (calibration diagnostic) |
+| `beta_perm_sd` | `np.ndarray` | shape `(D,)`; SD of β under permuted y |
+| `beta_perm_z` | `np.ndarray` | shape `(D,)`; signed = β_ref / β_perm_sd |
+| `beta_perm_matrix` | `np.ndarray \| None` | shape `(n_perm, D)` when `return_perm_matrix=True` |
+| `n_eff` | `float` | effective sample size; `nan` if unavailable |
 
 ## `CIScalar` — scalar subsample CI
 
@@ -177,7 +238,7 @@ versus β_ref; β being unbounded means no transform is needed.
 
 PLS1 only. In PLS2/PLSC the analogue β is a matrix that inherits W's
 rotation/sign indeterminacy and requires procrustes alignment; per-β CIs
-for those families are out of scope and will be specced separately.
+for those families are out of scope and will be documented separately.
 
 Caveats — part of the contract, not optional commentary:
 
@@ -220,6 +281,13 @@ Memory: storing per-resample β adds `8 · D · n_boot_finite` bytes —
 scale). Brain-scale users typically reach for `pls1_perm_null` (sparse
 z-map output) instead of the confirmatory CI bundle.
 
+## `RotateResult` — what `rotate(W: np.ndarray, ...)` returns
+
+| Field | Python type | Notes |
+|---|---|---|
+| `W_rot` | `np.ndarray` | rotated weights `W @ R` |
+| `spec` | `RotationSpec` | the stamped rotation spec (method, args, `R`, sweeps, convergence value) |
+
 ## `RotationStabilityResult` — what `pls1_rotation_stability` returns
 
 | Field | Python type | Notes |
@@ -230,7 +298,21 @@ z-map output) instead of the confirmatory CI bundle.
 | `m_rate` | `float` | echoed from the input |
 | `level` | `float` | echoed from the input |
 | `seed` | `int` | always |
-| `agreement` | `CIScalar` | post-procrustes Frobenius CI; `agreement.point` is `0` by construction (full-data fit aligns to itself), so the CI width is the diagnostic |
+| `variance_ratio` | `CIScalar` | headline aggregate variance ratio `ρ = V_rot / V_unrot` with paired-bootstrap percentile CI |
+| `variance_ratio_per_axis` | `list[CIScalar]` | per-axis ratio `ρ_k = V_rot,k / V_unrot,k`, length K, reference-axis order |
+| `variance_unrot` | `float` | aggregate `V_unrot = (1/B) Σ_b Σ_k α²_unrot,b,k` |
+| `variance_rot` | `float` | aggregate `V_rot = (1/B) Σ_b Σ_k α²_rot,b,k` |
+| `variance_unrot_per_axis` | `np.ndarray` | per-axis `V_unrot,k`, length K, reference-axis order |
+| `variance_rot_per_axis` | `np.ndarray` | per-axis `V_rot,k`, length K, reference-axis order |
+| `degenerate_baseline` | `bool` | `True` iff `V_unrot = 0` on the engine pass or more than 5% of bootstrap iterations had `V_unrot* = 0`; when set, `variance_ratio.point` is `NaN` |
+| `n_boot_finite` | `int` | number of resamples that produced finite per-axis squared residuals (≤ `n_boot`) |
+| `n_eff` | `float` | effective sample size `(Σ wᵢ)² / Σ wᵢ²` from the full normalized weight vector; equals `n` for uniform weights |
+
+Interpretation: ratio < 1 means rotation reduced axis variance
+(rotated axes are more replicable than unrotated ones); ratio ≈ 1
+means rotation did not change axis replicability; ratio > 1 means
+rotation increased axis variance (rotated axes are less replicable —
+suspect a local-optimum varimax convergence issue).
 
 ## `RotationSpec` — stamped by `rotate(model, ...)`
 

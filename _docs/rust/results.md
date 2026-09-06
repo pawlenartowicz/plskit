@@ -18,6 +18,15 @@ short-form matrix names (`T`, `P`, `W`, `Q`) at the user-facing boundary
 to match the standard PLS notation; the underlying field name is the
 long form below.
 
+## `PreprocessResult` — what `preprocess` returns
+
+| Field | Rust type | Notes |
+|---|---|---|
+| `x_std` | `Option<(Mat<f64>, Col<f64>, Col<f64>)>` | `Some((X_std, X_mean, X_scale))` when `X` was passed |
+| `y_std` | `Option<(Col<f64>, f64, f64)>` | `Some((y_std, y_mean, y_scale))` when `y` was passed |
+| `weights_normalized` | `Option<Col<f64>>` | `Some(w')` (normalized to mean 1, Σ = n) when weights were passed |
+| `n_eff` | `Option<f64>` | populated when weights were passed; `None` otherwise |
+
 ## `Pls1Model` — what `pls1_fit` returns
 
 | Field | Rust type | Shape |
@@ -31,16 +40,54 @@ long form below.
 | `intercept` | `f64` | scalar |
 | `k_used` | `usize` | scalar |
 | `pre_standardized` | `bool` | scalar |
-| `rotation_spec` | `Option<RotationSpec>` | — |
+| `weights` | `Option<Col<f64>>` | `(n,)` when present; `None` for uniform/absent weights |
+| `n_eff` | `f64` | scalar; Kish's effective sample size, equals `n` for uniform/absent weights |
 | `keep` | `Option<usize>` | `Some(keep)` for `spls1_fit`; `None` for `pls1_fit` |
 
 There is no `k_was_auto` flag and no `find_k_certificate` field. The
 2026-04 confirmatory-vs-exploratory overhaul moved K-selection
 diagnostics onto the K-selection result structs themselves, where
-they originate. `rotation_spec` is `None` until `rotate(model, ...)`
-stamps it onto a copy of the model.
+they originate. Rotation is stamped wrapper-side: the Python
+`PLS1Result` carries a `rotation_spec` field that `rotate(model, ...)`
+sets on a copy of the model, but there is no Rust `RotationSpec` type
+and no `rotation_spec` field on the Rust `Pls1Model` — it never
+crosses the FFI seam.
 
-## `FindKOptimalResult` — what `pls1_find_k_optimal` returns
+## `Pls3Model` — what `pls3_fit` / `plssvd_fit` returns
+
+| Field | Rust type | Shape |
+|---|---|---|
+| `u_saliences` | `Mat<f64>` | `(p, k_used)`, orthonormal columns |
+| `v_saliences` | `Mat<f64>` | `(q, k_used)`, orthonormal columns |
+| `singular_values` | `Col<f64>` | `(k_used,)`, descending |
+| `x_scores` | `Mat<f64>` | `(n, k_used)` |
+| `y_scores` | `Mat<f64>` | `(n, k_used)` |
+| `x_mean` | `Col<f64>` | `(p,)`; zeros when `pre_standardized_x` |
+| `x_scale` | `Col<f64>` | `(p,)`; ones when `pre_standardized_x` |
+| `y_mean` | `Col<f64>` | `(q,)`; zeros when `pre_standardized_y` |
+| `y_scale` | `Col<f64>` | `(q,)`; ones when `pre_standardized_y` |
+| `k_used` | `usize` | scalar; `< k` when a singular value fell below `1e-14` |
+| `pre_standardized_x` | `bool` | scalar |
+| `pre_standardized_y` | `bool` | scalar |
+
+There is no `beta`, no `coef` and no `intercept`: PLS3 is symmetric, so
+there is nothing to regress. There is no `weights` / `n_eff` pair either —
+observation weights are not implemented for this family.
+
+## `Pls3Scores` — what `pls3_transform` / `plssvd_transform` returns
+
+| Field | Rust type | When populated |
+|---|---|---|
+| `x_scores` | `Option<Mat<f64>>` | `which ∈ {XScores, Both}`; shape `(n_new, k_used)` |
+| `y_scores` | `Option<Mat<f64>>` | `which ∈ {YScores, Both}`; shape `(n_new, k_used)` |
+
+`pls3_confirmatory_test` returns the same `ConfirmatoryTestOutput` struct
+`pls1_confirmatory_test` does. For PLS3 `ci` is always `None` and `n_eff`
+equals `n`. `rho_hat` is populated for `split_nb` only, and only when the
+test half has at least 4 rows; `stable_rank` is populated whenever
+`split_nb` was requested.
+
+## `FindKOptimalOutput` — what `pls1_find_k_optimal` returns
 
 | Field | Rust type | When populated |
 |---|---|---|
@@ -61,7 +108,7 @@ echoes the method name. Selection and the diagnostic share the same
 data, so the pvalues are a robustness check, not honest inference — a
 fresh sample is required for a confirmatory claim.
 
-## `FindKSequenceResult` — what `pls1_find_k_sequence` returns
+## `FindKSequenceOutput` — what `pls1_find_k_sequence` returns
 
 | Field | Rust type | When populated |
 |---|---|---|
@@ -99,7 +146,7 @@ sparsest keep whose mean CV R² is within 1 SE of the maximum. The full
 field semantics are identical to the Python counterpart; see
 [Python results](../python/results.md).
 
-## `ConfirmatoryTestResult` — what `pls1_confirmatory_test` returns
+## `ConfirmatoryTestOutput` — what `pls1_confirmatory_test` returns
 
 | Field | Rust type | Notes |
 |---|---|---|
@@ -110,6 +157,7 @@ field semantics are identical to the Python counterpart; see
 | `n_perm` | `Option<usize>` | `Some` for resampling-family methods, `None` for `score` / `e` |
 | `n_splits` | `Option<usize>` | `Some` for `split_*` methods, `None` for `raw_perm` / `score` / `e` |
 | `seed` | `u64` | always |
+| `n_eff` | `f64` | always; Kish effective sample size, equals `n_samples` for uniform/absent weights |
 | `rho_hat` | `Option<f64>` | `Some` for `split_nb` only, and only when unweighted with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
 | `stable_rank` | `Option<f64>` | stable rank of the standardized `X`, as seen by the `split_nb` auto-gate; `Some` whenever `split_nb` was requested (fired or not, including under `force`), `None` for every other requested method |
 | `ci` | `Option<ConfirmatoryCI>` | `Some` when called with `ci=true`; carries the rotation-invariant subsample CIs |
@@ -125,6 +173,20 @@ field semantics are identical to the Python counterpart; see
 Every field is always populated. This is the same rule the test
 functions apply internally, on the same standardized `X` — querying it
 costs one SVD and no resampling.
+
+## `PermNullOutput` — what `pls1_perm_null` returns
+
+| Field | Rust type | Notes |
+|---|---|---|
+| `n_perm` | `usize` | number of permutations actually run |
+| `k` | `usize` | K used for fitting |
+| `seed` | `u64` | RNG seed actually used |
+| `n_eff` | `f64` | effective sample size (`sum(w)² / sum(w²)`); equals `n` when weights are uniform |
+| `beta_ref` | `Vec<f64>` | full-data β reference, length D |
+| `beta_perm_mean` | `Vec<f64>` | mean of β under permuted y, length D; ≈ 0 under H0 (calibration diagnostic) |
+| `beta_perm_sd` | `Vec<f64>` | SD of β under permuted y, length D |
+| `beta_perm_z` | `Vec<f64>` | signed per-voxel z = β_ref / β_perm_sd; NaN where SD ≈ 0, length D |
+| `beta_perm_matrix` | `Option<Vec<f64>>` | optional `(n_perm, D)` β matrix, row-major; `Some` when `opts.return_perm_matrix == true` |
 
 ## `CIScalar` — scalar subsample CI
 
@@ -166,7 +228,16 @@ beta-ci three-way distinction) are stated alongside the Python type
 table — see [Python results](../python/results.md). The semantics are
 identical.
 
-## `RotationStabilityResult` — what `pls1_rotation_stability` returns
+## `RotateOutput` — what `rotate` returns
+
+| Field | Rust type | Notes |
+|---|---|---|
+| `w_rot` | `Mat<f64>` | rotated weights `W @ R`, shape `(D, K)` |
+| `r` | `Mat<f64>` | orthogonal rotation, shape `(K, K)`; `w_rot = w @ r` |
+| `sweeps` | `usize` | number of Kaiser sweeps actually run (≤ `args.max_iter`) |
+| `v_converged` | `f64` | final value of the varimax criterion `V = Σ_j Var(target[:, j]²)` |
+
+## `RotationStabilityOutput` — what `pls1_rotation_stability` returns
 
 | Field | Rust type | Notes |
 |---|---|---|
@@ -176,18 +247,20 @@ identical.
 | `m_rate` | `f64` | echoed from the input |
 | `level` | `f64` | echoed from the input |
 | `seed` | `u64` | always |
-| `agreement` | `CIScalar` | post-procrustes Frobenius CI; `agreement.point` is `0.0` by construction (full-data fit aligns to itself), so the CI width is the diagnostic |
+| `variance_ratio` | `CIScalar` | headline aggregate variance ratio `ρ = V_rot / V_unrot` with paired-bootstrap percentile CI |
+| `variance_ratio_per_axis` | `Vec<CIScalar>` | per-axis ratio `ρ_k = V_rot,k / V_unrot,k`, length K, reference-axis order |
+| `variance_unrot` | `f64` | aggregate `V_unrot = (1/B) Σ_b Σ_k α²_unrot,b,k` |
+| `variance_rot` | `f64` | aggregate `V_rot = (1/B) Σ_b Σ_k α²_rot,b,k` |
+| `variance_unrot_per_axis` | `Vec<f64>` | per-axis `V_unrot,k`, length K, reference-axis order |
+| `variance_rot_per_axis` | `Vec<f64>` | per-axis `V_rot,k`, length K, reference-axis order |
+| `degenerate_baseline` | `bool` | `true` iff `V_unrot = 0` on the engine pass or more than 5% of bootstrap iterations had `V_unrot* = 0`; when set, `variance_ratio.point` is `NaN` |
+| `n_boot_finite` | `usize` | number of resamples that produced finite per-axis squared residuals (≤ `n_boot`) |
+| `n_eff` | `f64` | effective sample size `(Σ wᵢ)² / Σ wᵢ²` from the full normalized weight vector; equals `n` for uniform weights |
 
-## `RotationSpec` — stamped by `rotate(model, ...)`
-
-| Field | Rust type | Notes |
-|---|---|---|
-| `method` | `String` | `"varimax"` today; future `"promax"` / `"oblimin"` / `"geomin"` |
-| `args` | `RotationArgs` (enum) | method-specific kwargs used at rotate-time |
-| `R` | `Mat<f64>` | `(K, K)` rotation matrix; `W_rot = W * R` |
-| `sweeps` | `usize` | varimax iterations to convergence |
-| `V_converged` | `f64` | final varimax criterion value |
-| `L_was_provided` | `bool` | whether caller passed a loading basis |
-
-`rotation_spec` is `None` until `rotate(model, ...)` stamps it on a
-copy of the model.
+`RotationSpec` (the record of a `rotate(model, ...)` call — method,
+args, `R`, sweeps, convergence value) exists only on the Python
+`PLS1Result` dataclass. There is no Rust `RotationSpec` type and no
+Rust counterpart on `Pls1Model` or `RotationStabilityOutput`; the Rust
+`rotate` function returns `RotateOutput` (`w_rot, r, sweeps,
+v_converged`), and the Python wrapper assembles `RotationSpec` from
+that plus the caller's method/args.

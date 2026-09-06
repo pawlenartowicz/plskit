@@ -18,7 +18,7 @@ fn deterministic_pls1_fit_cases_match_corpus() {
     let manifest_path = corpus_dir().join("manifest.json");
     assert!(
         manifest_path.exists(),
-        "corpus manifest missing at {} — RULE 3 requires the testdata corpus; run scripts/generate.py. \
+        "corpus manifest missing at {} — the reference corpus is required; run scripts/generate.py. \
          testdata/ is never excluded from the repo, so a `cargo test` checkout always has it.",
         manifest_path.display()
     );
@@ -129,5 +129,78 @@ fn assert_col_close(
         let a = actual[i];
         let diff = (a - e).abs();
         assert!(diff < atol, "{name}: |{a} - {e}| = {diff} > {atol}");
+    }
+}
+
+/// `pls3_fit` is deterministic (one SVD, no RNG), so the Rust side can
+/// check it directly — the same split `corpus.rs`'s module header draws for
+/// `pls1_fit`. The `pls3_confirmatory_test` fixture is resampling-based and
+/// is exercised from the Python side.
+#[test]
+fn deterministic_pls3_fit_cases_match_corpus() {
+    let manifest_path = corpus_dir().join("manifest.json");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let cases = manifest["cases"].as_array().unwrap();
+    let mut tested = 0;
+    for case in cases {
+        if case["function"].as_str() != Some("pls3_fit") {
+            continue;
+        }
+        let name = case["name"].as_str().unwrap();
+        let k = usize::try_from(case["kwargs"]["k"].as_u64().expect("fixed k")).unwrap();
+        let (x, y) = load_xy_inputs(&corpus_dir().join(case["inputs"].as_str().unwrap()));
+        let expected = load_expected(&corpus_dir().join(case["outputs"].as_str().unwrap()));
+
+        let m = plskit::pls3_fit(
+            x.as_ref(),
+            y.as_ref(),
+            k,
+            None,
+            plskit::Pls3FitOpts::default(),
+        )
+        .expect("fit");
+
+        assert_mat_close(&m.u_saliences, expected.get("U").expect("U"), 1e-10, name);
+        assert_mat_close(&m.v_saliences, expected.get("V").expect("V"), 1e-10, name);
+        assert_col_close(
+            &m.singular_values,
+            expected.get("singular_values").expect("singular_values"),
+            1e-10,
+            name,
+        );
+        tested += 1;
+    }
+    assert!(tested > 0, "no deterministic pls3_fit cases found");
+}
+
+fn load_xy_inputs(path: &PathBuf) -> (faer::Mat<f64>, faer::Mat<f64>) {
+    let bytes = fs::read(path).unwrap();
+    let mut npz = ndarray_npy::NpzReader::new(std::io::Cursor::new(bytes)).unwrap();
+    let x_nd: ndarray::Array2<f64> = npz.by_name("X.npy").unwrap();
+    let y_nd: ndarray::Array2<f64> = npz.by_name("Y.npy").unwrap();
+    let x = faer::Mat::<f64>::from_fn(x_nd.nrows(), x_nd.ncols(), |i, j| x_nd[(i, j)]);
+    let y = faer::Mat::<f64>::from_fn(y_nd.nrows(), y_nd.ncols(), |i, j| y_nd[(i, j)]);
+    (x, y)
+}
+
+fn assert_mat_close(
+    actual: &faer::Mat<f64>,
+    expected: &ndarray::ArrayD<f64>,
+    atol: f64,
+    name: &str,
+) {
+    assert_eq!(expected.ndim(), 2, "{name}: expected a 2-D array");
+    assert_eq!(actual.nrows(), expected.shape()[0], "{name}: row mismatch");
+    assert_eq!(actual.ncols(), expected.shape()[1], "{name}: col mismatch");
+    for i in 0..actual.nrows() {
+        for j in 0..actual.ncols() {
+            let (a, e) = (actual[(i, j)], expected[[i, j]]);
+            let diff = (a - e).abs();
+            assert!(
+                diff < atol,
+                "{name}[{i},{j}]: |{a} - {e}| = {diff} > {atol}"
+            );
+        }
     }
 }

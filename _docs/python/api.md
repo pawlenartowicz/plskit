@@ -3,7 +3,8 @@
 > Argument names follow [naming](../internals/naming.md). Result-field
 > shapes live in [results](results.md).
 
-The Python wrapper exposes the PLS1 family of plskit. Every function
+The Python wrapper exposes the PLS1, sparse PLS1, and PLS3 / PLSSVD
+families of plskit. Every function
 listed here is reachable from `import plskit`. Each entry documents
 what the function does, what it takes, and what it returns; brief
 design rationale is omitted here and lives in the internal API surface
@@ -201,16 +202,55 @@ test. `keep = n_features` reproduces the dense function bit-exactly.
 
 ---
 
+## 2c. PLS3 / PLSSVD
+
+Symmetric X↔Y covariance analysis. Neither block is the outcome: the
+question is which pattern of X covaries with which pattern of Y. Psychology
+and neuroimaging call this PLSC.
+
+### 2c.1 Fit
+
+**function:** `pls3_fit`
+**function:** `plssvd_fit`
+**need:** SVD-PLS / PLSC — one SVD of the standardized `X'Y`, no deflation,
+so all `k` components come out orthogonal from a single decomposition. The
+SVD acts on a `p × q` matrix and never on a `p × p` one, so `p ≫ n` is the
+ordinary case.
+**arguments:** `X` (shape `(n, p)`), `Y` (shape `(n, q)`, must be 2-D),
+`k` (`int`, default `1`, `k ≤ min(p, q)`)
+**options:** `pre_standardized_X` (bool, default `False`);
+`pre_standardized_Y` (bool, default `False`); `weights` (length-`n` vector —
+**not implemented for this family**; anything other than `None` raises
+`PlsKitError(code="invalid_argument")`).
+**returns:** `PLS3Result` with `U`, `V`, `singular_values`, `x_scores`,
+`y_scores`, the four standardization moment arrays, `k_used` and the two
+`pre_standardized_*` echoes. `U` and `V` have a pinned sign (largest-|.|
+entry of each `U` column positive, `V` flipped with it), so repeated fits
+agree exactly.
+
+### 2c.2 Transform
+
+**function:** `pls3_transform`
+**function:** `plssvd_transform`
+**need:** project new data onto a fitted PLS3's LV scores. There is no
+`pls3_predict` — PLS3 is symmetric, so there is nothing to predict.
+**arguments:** `model`, `X_new` (optional), `Y_new` (optional)
+**options:** `which` (`"x_scores"` | `"y_scores"` | `"both"`, default
+`"both"`). A block `which` asks for must be supplied.
+**returns:** `PLS3Scores`; a field is `None` exactly when `which` did not
+ask for it.
+
+---
+
 ## 3. Inference
 
 ### 3.1 Confirmatory omnibus test
 
 **Five test methods.** `raw_perm` / `split_nb` / `split_exact` are the
-predictive-validity split-resampling family (the methods paper's core;
-`split_exact` is the same held-out-correlation statistic as `split_nb`,
-calibrated by permutation instead of the Fisher-z t approximation, so
-it holds its level on any design — it is the recommended default at
-`k=1`);
+predictive-validity split-resampling family (`split_exact` is the same
+held-out-correlation statistic as `split_nb`, calibrated by permutation
+instead of the Fisher-z t approximation, so it holds its level on any
+design — it is the recommended default at `k=1`);
 `score` is closed-form on `T = ‖X′y‖²` (generalized χ² under Gaussian
 y, anisotropy-aware by construction, K-free); `e` is universal
 inference (split-LR e-value, calibration-free, non-asymptotic α bound
@@ -308,6 +348,66 @@ fMRI / NIRS scale.
 **returns:** `PermNullResult`. Pair with
 `pls1_confirmatory_test(method="split_nb")` as an omnibus gate before
 spending the `n_perm` permutation budget.
+
+### 3.4 Confirmatory PLS3 omnibus test
+
+**function:** `pls3_confirmatory_test`
+**need:** "is there a real X↔Y association at LV1?" — a test on the held-out
+latent-variable correlation, calibrated by permutation or against a t
+reference.
+**arguments:** `X`, `Y`, `k` (must be `1`)
+**options:** `method` (`"split_exact"` | `"split_nb"`); `args`
+(`"split_exact"`: `{"n_perm": int, "n_splits": int}`, defaults `1000` / `50`;
+`"split_nb"`: `{"n_splits": int, "force": bool}`, defaults `50` / `False`);
+`pre_standardized_X`; `pre_standardized_Y`; `seed`; `disable_parallelism`;
+`verbose`. `pre_standardized_X` / `pre_standardized_Y` are accepted but have
+no effect on either method: each training half is re-standardized with its
+own moments regardless, and the flags exist only so the signature does not
+change when a method that reads them lands.
+**returns:** `ConfirmatoryTestResult` — the same object
+`pls1_confirmatory_test` returns. `ci` is always `None` here and `n_eff`
+equals `n`. `rho_hat` is populated for `split_nb` only (and only when the
+test half has at least 4 rows); `stable_rank` is populated whenever
+`split_nb` was requested; `n_perm` is `None` for `split_nb`.
+
+**The statistic.** Fit PLS3 on the training half for `(u1, v1)`, then take
+`r = cor(X_te @ u1, Y_te @ v1)` on the held-out half. Fisher-z average
+across the splits; the reported `statistic` is `tanh(z_bar)`, matching what
+`split_nb` and `split_exact` report for PLS1. The p-value compares that
+against a reference built by permuting the rows of Y against X, with the
+splits drawn once and held fixed across all permutations.
+
+**Sign indeterminacy costs nothing.** An SVD fixes `(u1, v1)` only up to a
+simultaneous flip, and a flip negates both held-out score vectors at once,
+so `r` is unchanged. No alignment step is needed.
+
+**Which method.** `split_exact` is the recommendation: it holds its level on
+any design. `split_nb` compares the same statistic against a t reference
+instead of permuting, costing `n_splits` fits in total rather than
+`n_perm * n_splits`. Both sides of the correlation are estimated on the
+training half, where PLS1 has an observed outcome on one side, but that
+costs the t reference nothing — conditional on the training half the two
+held-out score vectors are fixed linear combinations of independent
+test-half rows, so under the null `r` follows the ordinary null correlation
+law. Measured on Gaussian, heavy-tailed, low-stable-rank and real two-block
+designs, `split_nb` came out conservative, never anti-conservative.
+
+**The `split_nb` auto-gate.** Identical to `pls1_confirmatory_test`'s and
+applied to X only: a flagged design runs `split_exact` instead
+(`result.method` says so, and Python warns), and `args={"force": True}`
+overrides it. Y never enters the gate — `q` is small by construction in
+PLSC, so a stable-rank floor on Y would flag almost every design. The gate
+thresholds are the PLS1 ones and have not been re-derived for a two-block
+design.
+
+**The three methods that are not available.** `raw_perm` needs a
+cross-validated R², which a method with no `predict` does not have. `score`
+is single-`y` by construction and `e` has no symmetric formulation.
+
+**Why only `k=1`.** Above LV1 neither the component ordering nor the
+individual directions need survive to the test half when singular values
+are close, and whether the statistic should then be per-component or
+subspace-level is not settled.
 
 ---
 

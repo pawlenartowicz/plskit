@@ -1,4 +1,4 @@
-//! Smoke tests for `pls1_confirmatory_test` cases (Family D of Task 5).
+//! Smoke tests for `pls1_confirmatory_test` cases.
 
 use ndarray_npy::NpzReader;
 use plskit_testdata_gen::cases::pls1_confirmatory_test::{
