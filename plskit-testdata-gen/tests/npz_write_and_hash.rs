@@ -34,7 +34,10 @@ fn npz_bytes_are_identical_across_a_two_second_boundary() {
         w.add_f64("X", &array![[1.0, 2.0], [3.0, 4.0]].into_dyn())
             .unwrap();
         w.finish().unwrap();
-        (std::fs::read(&path).unwrap(), sha256_of_file(&path).unwrap())
+        (
+            std::fs::read(&path).unwrap(),
+            sha256_of_file(&path).unwrap(),
+        )
     };
     let (bytes_a, hash_a) = write("a.npz");
     sleep(Duration::from_millis(2100));
