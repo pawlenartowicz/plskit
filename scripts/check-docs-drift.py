@@ -49,14 +49,14 @@ RE_PUB_FIELD = re.compile(r"^\s*pub (\w+):\s*(.+)$", re.MULTILINE)
 
 
 def parse_doc_functions(path: Path) -> set[str]:
-    return set(RE_DOC_FUNCTION.findall(path.read_text()))
+    return set(RE_DOC_FUNCTION.findall(path.read_text(encoding="utf-8")))
 
 
 def parse_doc_type_fields(path: Path) -> dict[str, set[str]]:
     """Map type name -> set of documented field names, per `## \\`Type\\`` section."""
     sections: dict[str, set[str]] = {}
     current = None
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         header = RE_DOC_TYPE_HEADER.match(line)
         if header:
             current = header.group(1)
@@ -84,7 +84,7 @@ def parse_rust_doc_sections(api_md: Path) -> tuple[set[str], set[str]]:
     the reverse, so a stray snake_case tag someone was discussing (`keep`,
     `score`) never shows up as a false "exported but not documented".
     """
-    text = api_md.read_text()
+    text = api_md.read_text(encoding="utf-8")
 
     def snake_backticks(chunk: str) -> set[str]:
         return {
@@ -106,7 +106,7 @@ def parse_rust_doc_sections(api_md: Path) -> tuple[set[str], set[str]]:
 
 def rust_reexported_items(rs_src: Path) -> dict[str, str]:
     """Map re-exported item name -> the module it's re-exported from."""
-    text = (rs_src / "lib.rs").read_text()
+    text = (rs_src / "lib.rs").read_text(encoding="utf-8")
     items: dict[str, str] = {}
     for module, items_blob in RE_PUB_USE.findall(text):
         for item in items_blob.strip("{}").split(","):
@@ -189,7 +189,7 @@ def rust_functions_and_result_types(rs_src: Path) -> tuple[set[str], dict[str, s
     for module in set(items.values()):
         f = rs_src / f"{module}.rs"
         if f.exists():
-            module_text[module] = f.read_text()
+            module_text[module] = f.read_text(encoding="utf-8")
 
     functions: set[str] = set()
     struct_text: dict[str, str] = {}  # struct name -> its module's full text
@@ -227,7 +227,7 @@ def rust_functions_and_result_types(rs_src: Path) -> tuple[set[str], dict[str, s
 
 
 def python_all_names(init_path: Path) -> list[str]:
-    tree = ast.parse(init_path.read_text())
+    tree = ast.parse(init_path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets
@@ -241,7 +241,7 @@ def python_all_names(init_path: Path) -> list[str]:
 
 
 def python_def_names(api_path: Path) -> set[str]:
-    tree = ast.parse(api_path.read_text())
+    tree = ast.parse(api_path.read_text(encoding="utf-8"))
     return {
         node.name
         for node in tree.body
@@ -260,7 +260,7 @@ def _is_dataclass(node: ast.ClassDef) -> bool:
 
 
 def python_dataclass_fields(results_path: Path) -> dict[str, set[str]]:
-    tree = ast.parse(results_path.read_text())
+    tree = ast.parse(results_path.read_text(encoding="utf-8"))
     types: dict[str, set[str]] = {}
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and _is_dataclass(node):
