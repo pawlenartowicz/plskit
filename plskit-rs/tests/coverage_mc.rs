@@ -1,29 +1,30 @@
 //! Monte Carlo coverage / calibration test for the confirmatory CI engine.
 //!
-//! Slow (36 cells × 200 datasets × 300 resamples each, plus a 50k-sample
-//! oracle fit per cell). Gated with `#[ignore]`. Run before tagging a release:
+//! Slow (36 cells × 200 datasets × 300 resampling replicates each, plus
+//! 200 oracle datasets per cell). Gated with `#[ignore]`. Run before tagging
+//! a release:
 //!
 //!     cargo test -p plskit --release --test coverage_mc -- --ignored --nocapture
 //!
-//! The release-gate check covers two surviving CI metrics on the
+//! The release-gate check covers two CI metrics on the
 //! `pls1_confirmatory_test` engine across the cell grid
-//! `n ∈ {100, 200, 500} × d ∈ {6, 20} × K ∈ {1, 2, 3} × SNR ∈ {1, 4}`:
+//! `n ∈ {100, 200, 500} × d ∈ {6, 20} × K ∈ {1, 2, 3} × SNR ∈ {1, 4}`.
+//! Both must have two-sided empirical coverage in `[0.90, 1.00]`
+//! (`level ± 0.05`) at level=0.95:
 //!
-//!  * **`holdout_corr` two-sided coverage at level=0.95.** Empirical coverage
-//!    must lie in `[0.90, 1.00]` (`level ± 0.05`). NB-Wald is conservative
-//!    by construction (Nadeau–Bengio 2003), so empirical coverage tends to
-//!    sit at or above 0.95 — over-coverage near 1.00 is expected and
-//!    accepted by the upper edge of the band.
-//!  * **Per-coordinate `leverage_ci_*` coverage — DIAGNOSTIC ONLY, not
-//!    asserted.** All leverage coverage numbers (signal coords `j < 2`, noise
-//!    coords `j ≥ 2`, every `k`) are printed for monitoring but do NOT gate.
-//!    The centered-scaled leverage CI is anti-conservative — measured
-//!    between-dataset SD / reported SE ≈ 1.2 even in the low-`d`/large-`n` easy
-//!    regime, rising to ≈ 2.1 at `d=20, n=100`. This is a methodological
-//!    property of m-out-of-n subsampling for the bounded nonlinear leverage
-//!    ratio (the engine docs scope these CIs as "directional sanity checks"
-//!    outside the easy regime), not a test-oracle artifact. `holdout_corr` is
-//!    therefore the sole asserted calibration guarantee.
+//!  * **`holdout_corr`**, every cell. NB-Wald is conservative by
+//!    construction (Nadeau–Bengio 2003), so empirical coverage tends to sit
+//!    at or above 0.95; over-coverage near 1.00 is expected and accepted by
+//!    the upper edge of the band.
+//!  * **`leverage_ci_*` on each signal coordinate (`j < 2`) at
+//!    `k ≤ SIGNAL_RANK`.** The interval is a normal-theory bootstrap
+//!    interval centered on the full-data leverage (n-out-of-n refits; see
+//!    `_docs/python/results.md`, "Per-variable readouts"). Noise coordinates
+//!    and `k > SIGNAL_RANK` are printed but not asserted: a `k = 1` noise
+//!    coordinate's leverage is of order `1/n` and sits at the boundary (its
+//!    interval over-covers by construction), and at `k > SIGNAL_RANK` the
+//!    extra components fit noise, so the target is not identified across
+//!    datasets. Both read inside the band in practice.
 //!
 //! ## Coverage target (the oracle)
 //!
@@ -44,6 +45,7 @@
 //! identical numbers. Failures panic with the cell `(n, d, k, snr)`, the
 //! offending metric, and the empirical coverage vs. the band — surfacing
 //! release-gate findings without blocking the default test run.
+#![allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
 
 use faer::{Col, Mat};
 use plskit::{
@@ -338,31 +340,31 @@ fn coverage_mc_two_sided_grid() {
                              [{band_lo:.2}, {band_hi:.2}]",
                         ));
                     }
-                    // Leverage coverage is DIAGNOSTIC-ONLY (printed, not asserted).
-                    // The centered-scaled leverage CI is anti-conservative —
-                    // measured between-dataset SD / reported SE ≈ 1.2 even in the
-                    // low-d easy regime, rising to ≈2.1 at d=20,n=100 and decaying
-                    // toward the constant only as n→∞. That is a methodological
-                    // property of m-out-of-n subsampling for the bounded nonlinear
-                    // leverage ratio, the superposition of two effects: (1) a
-                    // constant ≈1.2× from the finite m/n rate-remainder — centered-
-                    // scaled rescales the subsample deviation by √(m/n) and is
-                    // consistent only as m/n→0, but m=ceil(n^0.7) gives m/n≈0.2
-                    // (not vanishing), so the √(m/n) rescaling is first-order and
-                    // leaves a model-dependent remainder of that order; (2) the
-                    // high-d excess from subsamples sharing the dataset's noise
-                    // realization, which fades only as n→∞. NOT a test-oracle
-                    // artifact — the same-n MC oracle above is unbiased (low-d
-                    // center 0.50 ≈ cloud 0.51). (This is NOT a finite-population
-                    // correction √(m/(n−m)): that factor is the Nadeau–Bengio
-                    // overlap term, valid for the holdout estimand, not a
-                    // subsampling FPC — it has no meaning for the leverage
-                    // functional.) The engine already scopes these CIs as
-                    // "directional sanity checks" outside the easy regime
-                    // (src/subsample.rs `beta_ci_lower` doc). holdout_corr is the
-                    // asserted calibration guarantee. Any move to make leverage
-                    // coverage nominal is a deliberate change to the inference
-                    // estimator, not something this test asserts.
+                    // Leverage: asserted on the signal coordinates at
+                    // k ≤ SIGNAL_RANK. The target is E[ĥ_n], the expected
+                    // leverage of a size-n fit (oracle above), which at small
+                    // n/d sits well below the large-sample leverage of the
+                    // signal coordinates (≈0.39 vs 0.5 at d=20, n=100,
+                    // snr=1). The CI is centered on ĥ with the SD of
+                    // n-out-of-n bootstrap refits and no bias correction, so
+                    // it targets that estimand. The subsampling interval it
+                    // replaced (reflected around ĥ at the rate √(m/(n − m)))
+                    // covered it only 0.40 to 0.65 at d=20: a fit on m rows
+                    // puts less leverage on the signal coordinates than the
+                    // full fit, and the reflection turned that gap into an
+                    // offset. Noise coordinates and k > SIGNAL_RANK are
+                    // printed only (see module doc).
+                    if k <= SIGNAL_RANK {
+                        for (j, &cov) in cov_lev.iter().enumerate().take(2) {
+                            if !(band_lo..=band_hi).contains(&cov) {
+                                failures.push(format!(
+                                    "cell (n={n}, d={d}, k={k}, snr={snr}): leverage \
+                                     signal coord {j} coverage {cov:.3} outside band \
+                                     [{band_lo:.2}, {band_hi:.2}]",
+                                ));
+                            }
+                        }
+                    }
                 }
             }
         }

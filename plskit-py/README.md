@@ -4,11 +4,12 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/plskit.svg)](https://pypi.org/project/plskit/)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](../LICENSE)
 
-Python wrapper for **plskit** — Partial Least Squares with modern
-inference (canonical percentile CIs, `split_exact`, `split_nb`), backed
+Python wrapper for **plskit**: Partial Least Squares with modern
+inference (`split_exact` and `split_nb` tests, rotation-invariant
+subsampling CIs), backed
 by a Rust engine.
 
-> Part of the **[plskit project](https://github.com/pawlenartowicz/plskit)** —
+> Part of the **[plskit project](https://github.com/pawlenartowicz/plskit)**:
 > the Rust core, sibling wrappers (R and Julia, planned), shared test
 > corpus, issues, and PRs all live there.
 
@@ -38,29 +39,36 @@ optimal = plskit.pls1_fit(X, y, k="optimal", k_max=10, seed=42)
 
 y_hat = plskit.pls1_predict(model, X_new=X[:5])
 
-# Confirmatory test at the pre-specified K.
+# Confirmatory test for any signal; k=1 with split_exact is recommended.
 sig = plskit.pls1_confirmatory_test(
-    X, y, k=3,
-    method="split_nb", args={"n_splits": 50}, seed=42,
+    X, y, k=1, method="split_exact", seed=42,
 )
 print(sig.pvalue, sig.statistic)
 ```
 
-PLS1 (single continuous `y`) is the only family available in v0.1;
-PLS2, PLS3 / PLSSVD, and multi-block follow.
-
 ## Public surface
 
-Functions: `preprocess`, `pls1_fit`, `pls1_predict`,
-`pls1_confirmatory_test`, `pls1_find_k_optimal`,
-`pls1_find_k_sequence`, `pls1_perm_null`, `pls1_rotation_stability`,
-`rotate`.
+Three model families: PLS1 (single continuous `y`), sparse PLS1, and
+PLS3 / PLSSVD (symmetric `X`/`Y` covariance analysis) with a sparse
+variant. PLS2 and multi-block PLS are planned.
 
-Result types: `PreprocessResult`, `PLS1Result`,
-`ConfirmatoryTestResult`, `FindKOptimalResult`, `FindKSequenceResult`,
-`PermNullResult`, `RotationStabilityResult`, `RotateResult`,
-`RotationSpec`, `CIScalar`, `ConfirmatoryCI`. All are frozen
-dataclasses and carry the inputs and seed that produced them.
+- **Preprocessing:** `preprocess`.
+- **PLS1 fit / predict:** `pls1_fit`, `pls1_predict`; K-selection via
+  `pls1_find_k_optimal`, `pls1_find_k_sequence`.
+- **Sparse PLS1:** `spls1_fit`, `spls1_find_keep_optimal`,
+  `spls1_find_k_optimal`, `spls1_find_k_sequence` (predict with
+  `pls1_predict`).
+- **PLS3 / PLSSVD:** `pls3_fit` (alias `plssvd_fit`), `pls3_transform`
+  (alias `plssvd_transform`), sparse `spls3_fit` (new in 0.6.0).
+- **Inference:** `pls1_confirmatory_test`, `pls3_confirmatory_test`,
+  `split_nb_gate`, `pls1_perm_null`.
+- **Interpretive:** `rotate`, `pls1_rotation_stability`.
+
+The [Python API reference](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md)
+documents every function, and the
+[results reference](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md)
+every result type. Results are frozen dataclasses and carry the inputs
+and seed that produced them.
 
 Errors raised by the Rust engine surface as `plskit.PlsKitError`
 (with `PlsKitInvalidWeights` and `PlsKitResamplingDegenerate`

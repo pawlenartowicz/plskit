@@ -38,6 +38,11 @@ pub struct RotationStabilityOpts {
     /// Optional fixed RNG seed; `None` draws from OS entropy.
     pub seed: Option<u64>,
     /// Run resamples sequentially (disables Rayon). Useful for tests.
+    ///
+    /// Serial replicate loops only: single top-level products (a reference
+    /// fit under `ParChoice::Auto`, a one-off scoring product or
+    /// decomposition) keep the crate's fixed parallel split, so results
+    /// match the parallel run bit for bit.
     pub disable_parallelism: bool,
     /// Reserved for future progress reporting.
     pub verbose: bool,
@@ -313,6 +318,67 @@ impl RotationStabilityWorkerRow {
     }
 }
 
+/// Fit `k` components on the rows `sample_idx` of `(x, y)` and return the
+/// weight matrix `W` of that fit: the per-replicate fit of
+/// `run_one_rotation_stability`.
+///
+/// Weights are sliced to the subsample and re-normalized, and the rows are
+/// standardized with the subsample's own weighted moments (plain moments
+/// when unweighted), as `pls1_fit` standardizes the full data for the
+/// reference fit. Under `pre_standardized_x` the rows are taken as they are.
+#[allow(clippy::many_single_char_names)]
+fn fit_subsample(
+    x: MatRef<'_, f64>,
+    y: ColRef<'_, f64>,
+    sample_idx: &[usize],
+    k: usize,
+    pre_standardized_x: bool,
+    weights: Option<ColRef<'_, f64>>,
+) -> PlsKitResult<Mat<f64>> {
+    use crate::fit::{pls1_fit, validate_and_normalize_weights, FitOpts, KSpec};
+    use crate::linalg::{col_row_subset, row_subset, standardize1_weighted};
+
+    let m = sample_idx.len();
+    let y_sub = col_row_subset(y, sample_idx);
+
+    // Slice + re-normalize weights for this subsample. A too-small n_eff_sub
+    // surfaces from the pls1_fit call below, not here; the caller maps either
+    // error to a NaN row.
+    let w_sub_norm: Option<Col<f64>> = match weights {
+        Some(w_full) => {
+            let w_sub = col_row_subset(w_full, sample_idx);
+            let (w_norm_sub, _, _) = validate_and_normalize_weights(Some(w_sub.as_ref()), m, k)?;
+            w_norm_sub
+        }
+        None => None,
+    };
+
+    // Pre-standardized: the subsample rows are the block. Otherwise they are
+    // gathered and standardized in one pass.
+    let wref = w_sub_norm.as_ref().map(Col::as_ref);
+    let (xs, ys) = if pre_standardized_x {
+        (row_subset(x, sample_idx), y_sub)
+    } else {
+        let (xs, _, _) = crate::linalg::standardize_rows(x, sample_idx, wref, None);
+        let (ys, _, _) = standardize1_weighted(y_sub.as_ref(), wref);
+        (xs, ys)
+    };
+
+    let fit_b = pls1_fit(
+        xs.as_ref(),
+        ys.as_ref(),
+        KSpec::Fixed(k),
+        w_sub_norm.as_ref().map(Col::as_ref),
+        FitOpts {
+            pre_standardized: true,
+            // Seq inside the per-resample worker — outer Rayon owns the threadpool.
+            par: crate::fit::ParChoice::Seq,
+            ..FitOpts::default()
+        },
+    )?;
+    Ok(fit_b.w_star)
+}
+
 /// One subsample worker pass. Draws `m` indices, fits PLS1, and computes
 /// signed-permutation-aligned squared per-axis Frobenius residuals against
 /// both the unrotated and rotated references.
@@ -331,51 +397,11 @@ fn run_one_rotation_stability(
     weights: Option<ColRef<'_, f64>>,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<RotationStabilityWorkerRow> {
-    use crate::fit::{pls1_fit, validate_and_normalize_weights, FitOpts, KSpec};
-    use crate::linalg::{col_row_subset, row_subset, standardize, standardize1};
-
     let n = x.nrows();
     let d = x.ncols();
 
     let (sample_idx, _holdout_idx) = crate::subsample::subsample_indices(n, m, rng);
-    let x_sub = row_subset(x, &sample_idx);
-    let y_sub = col_row_subset(y, &sample_idx);
-
-    // Slice + re-normalize weights for this subsample; propagates InvalidWeights
-    // (e.g. n_eff_sub < k+1) up to the caller, which maps it to a NaN row.
-    let w_sub_norm: Option<Col<f64>> = match weights {
-        Some(w_full) => {
-            let w_sub = col_row_subset(w_full, &sample_idx);
-            let (w_norm_sub, _, _) = validate_and_normalize_weights(Some(w_sub.as_ref()), m, k)?;
-            w_norm_sub
-        }
-        None => None,
-    };
-
-    let (xs, ys) = if pre_standardized_x {
-        (
-            Mat::<f64>::from_fn(x_sub.nrows(), d, |i, j| x_sub[(i, j)]),
-            Col::<f64>::from_fn(y_sub.nrows(), |i| y_sub[i]),
-        )
-    } else {
-        let (xs, _, _) = standardize(x_sub.as_ref());
-        let (ys, _, _) = standardize1(y_sub.as_ref());
-        (xs, ys)
-    };
-
-    let fit_b = pls1_fit(
-        xs.as_ref(),
-        ys.as_ref(),
-        KSpec::Fixed(k),
-        w_sub_norm.as_ref().map(Col::as_ref),
-        FitOpts {
-            pre_standardized: true,
-            // Seq inside the per-resample worker — outer Rayon owns the threadpool.
-            par: crate::fit::ParChoice::Seq,
-            ..FitOpts::default()
-        },
-    )?;
-    let w_b = fit_b.w_star;
+    let w_b = fit_subsample(x, y, &sample_idx, k, pre_standardized_x, weights)?;
 
     // Unrotated alignment — signed-permutation against the unrotated ref.
     // Per-axis squared residual is read directly from the alignment payload
@@ -400,7 +426,10 @@ fn run_one_rotation_stability(
     // Continuous-orthogonal alignment is scaffolding — puts W_b into the
     // same orthogonal frame as the reference so varimax converges to a
     // comparable simple-structure target. Residual is discarded.
-    let r_orth = procrustes::orthogonal(w_b.as_ref(), w_unrot_ref, false)?.rotation;
+    // `procrustes::orthogonal`'s rotation, on a sequential SVD (that crate
+    // reads faer's global parallelism). The shapes were validated by the
+    // `signed_permutation` call above, which fails on the same inputs.
+    let r_orth = crate::linalg::orthogonal_rotation(w_b.as_ref(), w_unrot_ref);
     let mut w_b_rot_input = Mat::<f64>::zeros(d, k);
     faer::linalg::matmul::matmul(
         w_b_rot_input.as_mut(),
@@ -642,6 +671,81 @@ mod tests {
     use faer::Mat;
     use rand::RngExt;
     use rand::SeedableRng;
+
+    /// A weighted replicate is standardized the way the weighted reference
+    /// fit standardizes the full data: with weighted moments. Its `W` is
+    /// then the `W` of `pls1_fit` on the same rows and weights (which
+    /// standardizes internally), up to the last-bit effect of normalizing
+    /// the weights once more on the reference path.
+    #[test]
+    fn weighted_subsample_uses_weighted_moments() {
+        let (x, y) = synth(60, 5, 2.0, 7);
+        let w = faer::Col::<f64>::from_fn(60, |i| 0.2 + (i % 5) as f64);
+        let idx: Vec<usize> = (0..60).filter(|i| i % 3 != 0).collect();
+        let k = 2;
+        let got = fit_subsample(x.as_ref(), y.as_ref(), &idx, k, false, Some(w.as_ref())).unwrap();
+
+        let x_sub = crate::linalg::row_subset(x.as_ref(), &idx);
+        let y_sub = crate::linalg::col_row_subset(y.as_ref(), &idx);
+        let w_sub = crate::linalg::col_row_subset(w.as_ref(), &idx);
+        let want = crate::fit::pls1_fit(
+            x_sub.as_ref(),
+            y_sub.as_ref(),
+            crate::fit::KSpec::Fixed(k),
+            Some(w_sub.as_ref()),
+            crate::fit::FitOpts {
+                check_n_eff: false,
+                ..crate::fit::FitOpts::default()
+            },
+        )
+        .unwrap()
+        .w_star;
+        for a in 0..k {
+            for j in 0..5 {
+                assert!(
+                    (got[(j, a)] - want[(j, a)]).abs() <= 1e-12,
+                    "W[({j}, {a})]: {} vs {}",
+                    got[(j, a)],
+                    want[(j, a)]
+                );
+            }
+        }
+    }
+
+    /// Unweighted replicates are unchanged by the weighted standardization:
+    /// `standardize_weighted(x, None)` is `standardize(x)` bit for bit.
+    #[test]
+    fn unweighted_subsample_matches_plain_standardization() {
+        let (x, y) = synth(40, 4, 2.0, 9);
+        let idx: Vec<usize> = (0..40).filter(|i| i % 4 != 1).collect();
+        let got = fit_subsample(x.as_ref(), y.as_ref(), &idx, 2, false, None).unwrap();
+        let x_sub = crate::linalg::row_subset(x.as_ref(), &idx);
+        let y_sub = crate::linalg::col_row_subset(y.as_ref(), &idx);
+        let (xs, _, _) = crate::linalg::standardize(x_sub.as_ref());
+        let (ys, _, _) = crate::linalg::standardize1(y_sub.as_ref());
+        let want = crate::fit::pls1_fit(
+            xs.as_ref(),
+            ys.as_ref(),
+            crate::fit::KSpec::Fixed(2),
+            None,
+            crate::fit::FitOpts {
+                pre_standardized: true,
+                par: crate::fit::ParChoice::Seq,
+                ..crate::fit::FitOpts::default()
+            },
+        )
+        .unwrap()
+        .w_star;
+        for a in 0..2 {
+            for j in 0..4 {
+                assert_eq!(
+                    got[(j, a)].to_bits(),
+                    want[(j, a)].to_bits(),
+                    "W[({j}, {a})]"
+                );
+            }
+        }
+    }
 
     fn synth(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, faer::Col<f64>) {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
@@ -1028,5 +1132,250 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code(), "shape_mismatch");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::many_single_char_names, clippy::too_many_arguments)]
+#[allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
+mod copy_free_reference {
+    use super::*;
+    use crate::signal_test::with_new_routes_disabled;
+    use crate::test_support::{assert_bits_eq, copy_free_families, Layouts};
+
+    /// Pre-change body, verbatim.
+    #[allow(clippy::many_single_char_names)]
+    fn fit_subsample_reference(
+        x: MatRef<'_, f64>,
+        y: ColRef<'_, f64>,
+        sample_idx: &[usize],
+        k: usize,
+        pre_standardized_x: bool,
+        weights: Option<ColRef<'_, f64>>,
+    ) -> PlsKitResult<Mat<f64>> {
+        use crate::fit::{pls1_fit, validate_and_normalize_weights, FitOpts, KSpec};
+        use crate::linalg::{
+            col_row_subset, row_subset, standardize1_weighted, standardize_weighted,
+        };
+
+        let m = sample_idx.len();
+        let d = x.ncols();
+        let x_sub = row_subset(x, sample_idx);
+        let y_sub = col_row_subset(y, sample_idx);
+
+        // Slice + re-normalize weights for this subsample. A too-small n_eff_sub
+        // surfaces from the pls1_fit call below, not here; the caller maps either
+        // error to a NaN row.
+        let w_sub_norm: Option<Col<f64>> = match weights {
+            Some(w_full) => {
+                let w_sub = col_row_subset(w_full, sample_idx);
+                let (w_norm_sub, _, _) =
+                    validate_and_normalize_weights(Some(w_sub.as_ref()), m, k)?;
+                w_norm_sub
+            }
+            None => None,
+        };
+
+        let (xs, ys) = if pre_standardized_x {
+            (
+                Mat::<f64>::from_fn(x_sub.nrows(), d, |i, j| x_sub[(i, j)]),
+                Col::<f64>::from_fn(y_sub.nrows(), |i| y_sub[i]),
+            )
+        } else {
+            let wref = w_sub_norm.as_ref().map(Col::as_ref);
+            let (xs, _, _) = standardize_weighted(x_sub.as_ref(), wref);
+            let (ys, _, _) = standardize1_weighted(y_sub.as_ref(), wref);
+            (xs, ys)
+        };
+
+        let fit_b = pls1_fit(
+            xs.as_ref(),
+            ys.as_ref(),
+            KSpec::Fixed(k),
+            w_sub_norm.as_ref().map(Col::as_ref),
+            FitOpts {
+                pre_standardized: true,
+                // Seq inside the per-resample worker — outer Rayon owns the threadpool.
+                par: crate::fit::ParChoice::Seq,
+                ..FitOpts::default()
+            },
+        )?;
+        Ok(fit_b.w_star)
+    }
+
+    /// Pre-change body, verbatim.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::many_single_char_names)]
+    fn run_one_rotation_stability_reference(
+        x: MatRef<'_, f64>,
+        y: ColRef<'_, f64>,
+        k: usize,
+        m: usize,
+        pre_standardized_x: bool,
+        w_unrot_ref: MatRef<'_, f64>,
+        w_rot_ref: MatRef<'_, f64>,
+        varimax_args: VarimaxArgs,
+        l: Option<MatRef<'_, f64>>,
+        weights: Option<ColRef<'_, f64>>,
+        rng: &mut crate::rng::Rng,
+    ) -> PlsKitResult<RotationStabilityWorkerRow> {
+        let n = x.nrows();
+        let d = x.ncols();
+
+        let (sample_idx, _holdout_idx) = crate::subsample::subsample_indices(n, m, rng);
+        let w_b = fit_subsample_reference(x, y, &sample_idx, k, pre_standardized_x, weights)?;
+
+        // Unrotated alignment — signed-permutation against the unrotated ref.
+        // Per-axis squared residual is read directly from the alignment payload
+        // (no need to materialize an aligned matrix); see the cost
+        // identity on `SignedPermutationAlignment.residual_frobenius`.
+        // `?` so that a truncated `w_b` (NIPALS short-circuit, k_used < k)
+        // propagates as Err to the outer worker, which maps it to a NaN row.
+        let aln_unrot = procrustes::signed_permutation(w_b.as_ref(), w_unrot_ref, false)?;
+        let sq_unrot_per_axis: Vec<f64> = (0..k)
+            .map(|kk| {
+                let src = aln_unrot.assigned[kk];
+                let s = aln_unrot.signs[kk];
+                let mut acc = 0.0_f64;
+                for j in 0..d {
+                    let diff = s * w_b[(j, src)] - w_unrot_ref[(j, kk)];
+                    acc += diff * diff;
+                }
+                acc
+            })
+            .collect();
+
+        // Continuous-orthogonal alignment is scaffolding — puts W_b into the
+        // same orthogonal frame as the reference so varimax converges to a
+        // comparable simple-structure target. Residual is discarded.
+        let r_orth = procrustes::orthogonal(w_b.as_ref(), w_unrot_ref, false)?.rotation;
+        let mut w_b_rot_input = Mat::<f64>::zeros(d, k);
+        faer::linalg::matmul::matmul(
+            w_b_rot_input.as_mut(),
+            faer::Accum::Replace,
+            w_b.as_ref(),
+            r_orth.as_ref(),
+            1.0,
+            faer::Par::Seq,
+        );
+
+        let rot_b = crate::rotate::rotate(
+            w_b_rot_input.as_ref(),
+            RotationMethod::Varimax(varimax_args),
+            l,
+        )?;
+        let w_b_rot = rot_b.w_rot;
+
+        // Rotated alignment — signed-permutation against the rotated ref.
+        let aln_rot = procrustes::signed_permutation(w_b_rot.as_ref(), w_rot_ref, false)?;
+        let sq_rot_per_axis: Vec<f64> = (0..k)
+            .map(|kk| {
+                let src = aln_rot.assigned[kk];
+                let s = aln_rot.signs[kk];
+                let mut acc = 0.0_f64;
+                for j in 0..d {
+                    let diff = s * w_b_rot[(j, src)] - w_rot_ref[(j, kk)];
+                    acc += diff * diff;
+                }
+                acc
+            })
+            .collect();
+
+        Ok(RotationStabilityWorkerRow {
+            sq_unrot_per_axis,
+            sq_rot_per_axis,
+        })
+    }
+
+    // Per-unit body: no parallel axis; serial vs parallel is covered by
+    // byte_parity (rotation_stability_byte_parity).
+    #[test]
+    fn run_one_rotation_stability_matches_reference() {
+        use crate::fit::{pls1_fit, FitOpts, KSpec};
+        with_new_routes_disabled(|| {
+            for f in copy_free_families() {
+                let n = f.x.nrows();
+                let w =
+                    f.w.as_ref()
+                        .map(|w| crate::linalg::normalize_weights(w.as_ref()).unwrap());
+                let wr = w.as_ref().map(Col::as_ref);
+                let k = 2;
+                let w_unrot = pls1_fit(
+                    f.x.as_ref(),
+                    f.y.as_ref(),
+                    KSpec::Fixed(k),
+                    None,
+                    FitOpts::default(),
+                )
+                .unwrap()
+                .w_star;
+                let w_rot = crate::rotate::rotate(
+                    w_unrot.as_ref(),
+                    RotationMethod::Varimax(VarimaxArgs::default()),
+                    None,
+                )
+                .unwrap()
+                .w_rot;
+                let (xs, _, _) = crate::linalg::standardize(f.x.as_ref());
+                let (ys, _, _) = crate::linalg::standardize1(f.y.as_ref());
+                for pre in [false, true] {
+                    let (x0, y0) = if pre { (&xs, &ys) } else { (&f.x, &f.y) };
+                    let lay = Layouts::new(x0.as_ref());
+                    for (view, xv) in lay.all(x0) {
+                        for seed in [1_u64, 2, 3] {
+                            let (_, mut r1) = crate::rng::resolve_seed(Some(seed)).unwrap();
+                            let (_, mut r2) = crate::rng::resolve_seed(Some(seed)).unwrap();
+                            let what = format!("{} {view} pre={pre} seed {seed}", f.name);
+                            let m = n * 2 / 3;
+                            match (
+                                run_one_rotation_stability(
+                                    xv,
+                                    y0.as_ref(),
+                                    k,
+                                    m,
+                                    pre,
+                                    w_unrot.as_ref(),
+                                    w_rot.as_ref(),
+                                    VarimaxArgs::default(),
+                                    None,
+                                    wr,
+                                    &mut r1,
+                                ),
+                                run_one_rotation_stability_reference(
+                                    xv,
+                                    y0.as_ref(),
+                                    k,
+                                    m,
+                                    pre,
+                                    w_unrot.as_ref(),
+                                    w_rot.as_ref(),
+                                    VarimaxArgs::default(),
+                                    None,
+                                    wr,
+                                    &mut r2,
+                                ),
+                            ) {
+                                (Ok(a), Ok(b)) => {
+                                    assert_bits_eq(
+                                        &a.sq_unrot_per_axis,
+                                        &b.sq_unrot_per_axis,
+                                        &format!("{what}.unrot"),
+                                    );
+                                    assert_bits_eq(
+                                        &a.sq_rot_per_axis,
+                                        &b.sq_rot_per_axis,
+                                        &format!("{what}.rot"),
+                                    );
+                                }
+                                (Err(a), Err(b)) => {
+                                    assert_eq!(a.to_string(), b.to_string(), "{what}");
+                                }
+                                (a, b) => panic!("{what}: ok {} vs {}", a.is_ok(), b.is_ok()),
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 }

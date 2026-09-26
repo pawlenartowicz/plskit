@@ -1,4 +1,4 @@
-//! Weighted-path coverage at the inference boundary (spec G1, bullets 1 & 3).
+//! Weighted-path coverage at the inference boundary.
 //!
 //! Per-method parity-vs-calibration determination (see each test for the
 //! justification grounded in the source):
@@ -248,7 +248,7 @@ fn raw_perm_weighted_runs_end_to_end() {
 #[test]
 fn e_weighted_runs_end_to_end() {
     // e: single random train/test split ⇒ resampling, not parity. e-method H0
-    // calibration is deferred to spec G4 (calibration_mc.rs); here we pin the
+    // calibration is covered by calibration_mc.rs; here we pin the
     // weighted path returns a bounded p with reduced n_eff.
     let (x, y) = synth(60, 5, 3.0, 6);
     let w = nonuniform_weights(60);

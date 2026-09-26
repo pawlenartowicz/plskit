@@ -30,8 +30,9 @@ your wrapper's docs.
 - **Loop over the same `(X, y, w)`** — `k`-sweep, bootstrap, permutation
   test, sensitivity analysis. Call `preprocess` once, then pass
   `pre_standardized=True` on every downstream fit so each iteration
-  skips an `O(n·p)` standardization. NIPALS is `O(n·p·k)`; the speedup
-  is `1 + 1/k`× — small but free.
+  skips an `O(n·p)` standardization, which takes about as long as the
+  rest of a one-component fit. The saving is largest at small `k` and
+  shrinks as `k` grows; either way it is free.
 - **Inspect the standardized data or the `(mean, scale)` plskit fits
   on.** Useful for sanity-checking units, plotting, or diagnosing why
   one column dominates a loading.
@@ -66,9 +67,30 @@ applies, per column on `X` and as a scalar on `y`:
 
     standardized = (raw − mean) / sqrt(var, ddof=0)
 
-(Population variance, not the unbiased sample variance.) Columns whose
-standard deviation is below `1e-12` are clamped to scale `1.0` instead
-of dividing by near-zero — zero-variance columns become zero columns.
+(Population variance, not the unbiased sample variance.) A column that
+is constant up to floating-point rounding keeps scale `1.0` and is only
+centered, so it becomes a column of zeros (up to rounding) instead of
+rounding noise blown up to unit variance. "Constant up to rounding"
+means the column's centered sum of squares is at most `(2nε)²` times its
+uncentered sum of squares (`ε` the machine epsilon; with weights, both
+sums are weighted by `w'`), which bounds what centering leaves of an
+exactly constant column. The rule is relative to the column's own
+magnitude, so rescaling a column (changing its units) never changes
+whether it is rescaled: a column with standard deviation `1e-13` is
+standardized like any other, and a constant column of magnitude `1e6`
+stays constant. This holds at any magnitude: the sums (and the mean and
+variance) are formed after dividing the column by a power of two near
+its largest entry, which is exact, so a column of order `1e200` or
+`1e-200`, whose raw squares would overflow or underflow, is classified
+and standardized like the same column near 1.
+
+Because the bound grows with `n`, a column that genuinely varies but
+whose standard deviation is at most about `2nε` times `|mean|` is also
+treated as constant (at `n = 1e6`, a relative spread below about
+`4e-10`, such as `1e6 + 1e-4·noise`). Variation that small sits within a
+few tens of the rounding error of the column's own mean, so no rule on
+these sums can tell it from a constant. If your data has a large offset
+and a tiny spread, subtract a baseline before fitting.
 
 When you pass observation weights `w`, plskit first normalizes them to
 mean 1 (`Σ w'ᵢ = n`), then uses weighted formulas:

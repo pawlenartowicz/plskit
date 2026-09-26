@@ -19,7 +19,8 @@ Python wrapper:
 - **Core fit / predict** — `pls1_fit`, `pls1_predict`, `preprocess`. K-selection lives in `pls1_find_k_optimal` and `pls1_find_k_sequence`.
 - **Sparse PLS1** — `spls1_fit`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`. `keep ∈ [1, n_features]`; `keep = n_features` reproduces the dense functions bit-exactly. One axis is always fixed: no joint `(k, keep)` 2-D search. Prediction uses `pls1_predict` on the `Pls1Model` returned by `spls1_fit` — no separate `spls1_predict`. Per-coordinate β CIs are not offered under selection (post-selection inference, deferred to a separate spec).
 - **PLS3 / PLSSVD** — `pls3_fit` (alias `plssvd_fit`), `pls3_transform` (alias `plssvd_transform`), `pls3_confirmatory_test`. Symmetric X↔Y covariance analysis: one SVD of the standardized `X'Y`, no deflation, so all `k ≤ min(p, q)` components are orthogonal by construction and `p ≫ n` is the ordinary case. There is no `pls3_predict` — neither block is the outcome. Observation weights are not implemented for this family and error rather than being ignored.
-- **Inference** — `pls1_confirmatory_test` (with the five methods `raw_perm` / `split_nb` / `split_exact` / `score` / `e`; `split_exact` at `k=1` is the recommended default). CIs ride on `pls1_confirmatory_test(ci=true)` plus the standalone `pls1_rotation_stability`. `pls1_perm_null` is the permutation-null engine. `split_nb_gate` answers whether the `split_nb` auto-gate flags a design, without running a test.
+- **Sparse PLS3**: `spls3_fit`. Keep-count selection on both salience sides: `keep_x ∈ [1, n_features]` bounds the non-zeros per `U` column, `keep_y ∈ [1, n_targets]` per `V` column. `keep_x = n_features && keep_y = n_targets` delegates to `pls3_fit` and is bit-identical; off that endpoint `max_iter = 0` and a NaN, infinite or negative `tol` return `InvalidArgument` (in `pls3_confirmatory_test` too). Unlike the dense fit the columns are not orthogonal and `singular_values` are not singular values of `X'Y`, so no explained-variance share can be read off them. `k_used` is decided independently of the dense fit's and may exceed it for the same `(x, y, k)`. There is no `spls3_find_keep_optimal` and no per-component keep budget. `pls3_confirmatory_test` also accepts `keep_x` / `keep_y` on its options struct, applying the selection inside each training half only; a `keep_x` below `n_features` silently forces the primal route (the Gram reduction needs `u` to be a positive multiple of `X'Yv`), and this confirmatory sparse surface is Rust-only today, with no wrapper exposing it.
+- **Inference**: `pls1_confirmatory_test` (with the five methods `raw_perm` / `split_nb` / `split_exact` / `score` / `e`; `split_exact` at `k=1` is the recommended method; see [Choosing the method in Rust](#choosing-the-method-in-rust)). CIs ride on `pls1_confirmatory_test(ci=true)` plus the standalone `pls1_rotation_stability`. `pls1_perm_null` is the permutation-null engine (`PermNullOpts` implements `Default`, `n_perm` 1000). `split_nb_gate` answers whether the `split_nb` auto-gate flags a design, without running a test.
 - **Interpretive** — `rotate` with pluggable `L` and method-axis `(method, args)` dispatch.
 
 ### Planned — not yet implemented
@@ -33,6 +34,12 @@ the [Python API](../python/api.md) — the entries are language-agnostic.
 Argument names match exactly; types follow Rust convention (`faer::Mat`
 where Python sees `np.ndarray`, `Option<u64>` where Python sees
 `int | None`, and so on).
+
+`SPLIT_NB_REROUTE_N_PERM` is a public constant (`usize = 1000`): the
+permutation budget the `split_nb` -> `split_exact` auto-gate reroute spends.
+The Python wrapper reads this constant through its seam instead of keeping
+its own copy (R and Julia will do the same once they have a seam to read
+it through).
 
 ## Sparse PLS1 signatures
 
@@ -114,7 +121,8 @@ pub fn pls3_confirmatory_test(
     opts: Pls3ConfirmatoryTestOpts,
     // args: ConfirmatoryArgs::SplitExact { n_perm, n_splits }
     //    or ConfirmatoryArgs::SplitNb { n_splits, force };
-    // pre_standardized_x, pre_standardized_y, seed, disable_parallelism, verbose
+    // pre_standardized_x, pre_standardized_y, keep_x, keep_y, max_iter (100),
+    // tol (1e-8), seed, disable_parallelism, verbose
 ) -> PlsKitResult<ConfirmatoryTestOutput>
 ```
 
@@ -123,14 +131,55 @@ column is positive, and the matching `V` column flips with it. The pair moves
 as a unit, so `σ_i`, `X'Y` and every held-out LV correlation are unchanged —
 the pin exists so repeated fits and cross-platform runs agree.
 
+## Sparse PLS3 signatures
+
+```rust
+pub fn spls3_fit(
+    x: MatRef<f64>,
+    y: MatRef<f64>,
+    k: usize,
+    keep_x: usize,       // keep_x ∈ [1, n_features]
+    keep_y: usize,       // keep_y ∈ [1, n_targets]
+    weights: Option<ColRef<f64>>,   // must be None; this family refuses weights
+    opts: Pls3FitOpts,   // pre_standardized_x, pre_standardized_y, par, max_iter (100), tol (1e-8)
+) -> PlsKitResult<Pls3Model>
+// Pls3Model.keep_x / .keep_y: Option<usize>, Some(..) for sparse fits, None for dense.
+// Pls3Model.converged / .n_iter: Option<Vec<..>> of length k_used, None for dense.
+```
+
+`keep_x = n_features && keep_y = n_targets` produces bit-exact `pls3_fit`
+output. The wrapper spelling of the two counts is `keep_X` / `keep_Y`,
+matching `pre_standardized_X` / `pre_standardized_Y`.
+
+## Choosing the method in Rust
+
+The wrappers make `method` a required keyword with no default. In Rust the
+method is the `ConfirmatoryArgs` variant in `opts.args`, and the options
+structs implement `Default`: both `ConfirmatoryTestOpts::default()` and
+`Pls3ConfirmatoryTestOpts::default()` fill `args` with `split_exact`
+settings (`n_perm = 1000`, `n_splits = 50`). Setting `args` explicitly
+keeps the method visible at the call site:
+
+```rust
+use plskit::{ConfirmatoryArgs, ConfirmatoryTestOpts};
+
+let opts = ConfirmatoryTestOpts {
+    args: ConfirmatoryArgs::SplitExact { n_perm: 1000, n_splits: 50 },
+    seed: Some(42),
+    ..ConfirmatoryTestOpts::default()
+};
+```
+
 ## Side-by-side example
 
 Fitting PLS1 with three components:
 
 ```rust
 // Rust
-use plskit::pls1_fit;
-let result = pls1_fit(&x, &y, 3, /* options... */);
+use plskit::{pls1_fit, FitOpts, KSpec};
+
+// x: Mat<f64> of shape (n, p), y: Col<f64> of length n
+let result = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(3), None, FitOpts::default())?;
 ```
 
 ```python
@@ -140,8 +189,47 @@ result = plskit.pls1_fit(X, y, k=3)
 ```
 
 Function name and arguments match; types and call syntax follow each
-language's conventions. The same is true for every other function on
-the public surface.
+language's conventions. In Rust, `k` is a `KSpec` (only `KSpec::Fixed` exists;
+the Python string modes `"optimal"` and `"sequence"` are the separate
+`pls1_find_k_optimal` and `pls1_find_k_sequence` functions), `weights` is an
+`Option<ColRef<f64>>` passed positionally (`None` for uniform weights), and
+the keyword options collect in an options struct (`FitOpts` here). Errors
+come back as `PlsKitResult<T>`. To fit at a selected K the way the string
+modes do, pass `KSpec::Fixed(sel.k_to_fit()?)`: `k_to_fit` on
+`FindKOptimalOutput` / `FindKSequenceOutput` returns `k_star`, or
+`PlsKitError::OptimalNoComponent` / `PlsKitError::SequenceNoRejection`
+when `k_star` is `0`. Every wrapper's string modes go through it. The [quickstart](quickstart.md) has a
+complete, runnable program.
+
+## Bypassing the `n_eff` check (Rust only)
+
+`pls1_fit` refuses a fit when the effective sample size is below `k + 1`
+(see [effective sample size](../concepts/effective-sample-size.md)). Rust
+callers who have a reason to fit anyway can turn the check off through
+`FitOpts::check_n_eff`:
+
+```rust
+use plskit::{pls1_fit, FitOpts, KSpec};
+
+let model = pls1_fit(
+    x,
+    y,
+    KSpec::Fixed(k),
+    weights,
+    FitOpts {
+        check_n_eff: false,
+        ..FitOpts::default()
+    },
+)?;
+```
+
+With the check off, the PLS1 kernel runs on whatever the weighted data supports and
+may return fewer components than requested (read `model.k_used`). The
+flag also disables the truncation guard for `pre_standardized: true` fits,
+so a fit that stops short returns a model instead of an `InvalidInput`
+error. The Python, R, and Julia wrappers do not expose `check_n_eff`, and
+it exists only on `pls1_fit` / `spls1_fit`: the other top-level entry
+points always run the check.
 
 ## Result types
 

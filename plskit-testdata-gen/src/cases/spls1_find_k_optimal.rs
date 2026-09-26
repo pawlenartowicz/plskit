@@ -6,16 +6,12 @@ use anyhow::Result;
 
 use crate::cases::pls1_find_k_optimal::write_btreemap;
 use crate::cases::{
-    faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_i64, synth_data,
+    default_tolerance, faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_i64,
+    synth_data,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
 use plskit::{spls1_find_k_optimal, FindKOptimalOpts, Selector};
-
-/// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10.
-fn default_tolerance() -> serde_json::Value {
-    serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10})
-}
 
 /// Shared synth parameters (mirrors dense `pls1_find_k_optimal` cases).
 const SYNTH_N: usize = 80;

@@ -31,6 +31,16 @@ def test_runs_end_to_end():
     assert out.n_boot_finite <= out.n_boot
 
 
+def test_none_defaults_are_recorded_as_resolved_values():
+    """None (the public default for n_boot/m_rate/level) must resolve to the
+    engine's own default and be recorded on the result, never as None."""
+    x, y = _synth()
+    out = pls1_rotation_stability(x, y, k=2, seed=7)
+    assert out.n_boot == 1000
+    assert out.m_rate == pytest.approx(0.7)
+    assert out.level == pytest.approx(0.95)
+
+
 def test_seed_is_reproducible():
     x, y = _synth(seed=11)
     a = pls1_rotation_stability(x, y, k=2, n_boot=200, seed=42)

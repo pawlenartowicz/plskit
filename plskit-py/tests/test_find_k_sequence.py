@@ -23,6 +23,17 @@ def test_sequence_returns_full_pvalues():
     assert r.alpha == 0.05
 
 
+def test_sequence_none_alpha_is_recorded_as_resolved_value():
+    """None (the public default for alpha) must resolve to the engine's own
+    default and be recorded on result.alpha, never as None."""
+    X, y = _data()
+    r = plskit.pls1_find_k_sequence(
+        X, y, k_max=4, test_method="split_nb",
+        args={"n_splits": 30}, seed=7,
+    )
+    assert r.alpha == pytest.approx(0.05)
+
+
 def test_sequence_no_rejection_returns_kstar_zero():
     # Pure noise + strict alpha → no rejection
     rng = np.random.default_rng(99)

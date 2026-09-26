@@ -1,6 +1,4 @@
 """Integration tests for pls1_confirmatory_test(ci=True)."""
-import os
-
 import numpy as np
 import pytest
 
@@ -44,6 +42,17 @@ def test_ci_true_populates_ci():
     assert r.ci.leverage_ci_upper.shape == (6,)
     assert r.ci.leverage_se.shape == (6,)
     assert isinstance(r.ci.holdout_corr, CIScalar)
+
+
+def test_ci_none_defaults_are_recorded_as_resolved_values():
+    """None (the public default for n_boot/m_rate/level) must resolve to the
+    engine's own default and be recorded on result.ci as that resolved
+    value, never as None itself."""
+    x, y = _synth()
+    r = pls1_confirmatory_test(x, y, k=2, method="split_nb", ci=True, seed=7)
+    assert r.ci.n_boot == 1000
+    assert r.ci.m_rate == pytest.approx(0.7)
+    assert r.ci.level == pytest.approx(0.95)
 
 
 def test_ci_signal_variables_have_higher_sign_z_than_noise():
@@ -119,6 +128,20 @@ def test_ci_exposes_signed_beta_sign_z():
         np.abs(r.ci.beta_sign_z),
         atol=1e-12,
     )
+
+
+def test_ci_leverage_bounds_lie_in_unit_interval():
+    """Leverage is in [0, 1], so its CI is clamped there: noise columns,
+    whose normal bootstrap interval would reach below 0, read exactly 0."""
+    x, y = _synth(n=200, d=8, snr=4.0, seed=42)
+    r = pls1_confirmatory_test(
+        x, y, k=1, method="split_nb",
+        ci=True, n_boot=300, m_rate=0.7, seed=2026,
+    )
+    lo, hi = r.ci.leverage_ci_lower, r.ci.leverage_ci_upper
+    assert np.all((lo >= 0.0) & (lo <= hi) & (hi <= 1.0)), (lo, hi)
+    assert np.all(lo[:2] > 0.0), lo
+    assert np.any(lo[2:] == 0.0), lo
 
 
 def test_ci_point_estimates_match_full_data_invariants():
@@ -282,46 +305,30 @@ def test_ci_max_failure_rate_validated():
         )
 
 
-@pytest.mark.skipif(
-    not os.getenv("PLSKIT_SLOW_TESTS"),
-    reason="slow Phase-2 sanity check; set PLSKIT_SLOW_TESTS=1 to run",
-)
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Half-normal premise does not hold for subsample-bootstrap β under "
-        "H0: bootstrap β_b is centered at the full-data β_ref (which is "
-        "nonzero by sampling noise), not at the population β=0, so p̂_pos "
-        "is biased toward sign(β_ref). Documented as a Phase-2 follow-up; "
-        "keep this test as a tripwire if the centering changes."
-    ),
-)
 def test_beta_sign_z_is_half_normal_under_null_beta():
-    """Sanity check: under H0 (β=0), |beta_sign_z| ~ half-normal.
+    """Under H0 (β = 0), |beta_sign_z| is roughly half-normal.
 
-    Under the null where y is independent of every column of X, the bootstrap
-    fraction p̂_pos[j] of resamples with β_b[j] > 0 should center on 0.5
-    (the premise here). The naive sign-z (2·p̂_pos - 1)·√n_boot would then be
-    N(0, 1), so the folded |z| should be half-normal with mean √(2/π) ≈ 0.7979
-    and sd √(1 - 2/π) ≈ 0.6028.
+    With y independent of every column of X, each population β_j is 0, so
+    the subsampling z `beta_sign_z_signed` should be close to N(0, 1) and the
+    folded |beta_sign_z| half-normal, with mean √(2/π) ≈ 0.7979 and
+    sd √(1 − 2/π) ≈ 0.6028, and about 5% of values above 1.96. K = 1 is the
+    regime where the calibration is documented (`_docs/python/results.md`,
+    "Per-variable readouts"); at K ≥ 2 it is not claimed.
 
-    Empirically this fails: subsample-bootstrap β_b is centered at β_ref
-    (the full-data point estimate, nonzero by sampling noise under H0), not
-    at the population β=0, so p̂_pos clusters near I(β_ref > 0). Pooled mean
-    runs ~5–9 vs. target 0.798. Marked xfail as a Phase-2 follow-up (per
-    spec: "if it fails, treat as a follow-up rather than a blocker for the
-    trim"). The test stays in place as a tripwire if/when the centering or
-    folding rule changes.
+    The former `(2p̂ − 1)·√n_boot` statistic failed this badly (pooled mean
+    5 to 9): subsample β_b is centered on the full-data β_ref, not on 0, and
+    the √n_boot factor grows without bound.
     """
-    n_replications = 30
-    n, d = 80, 6
+    n_replications = 60
+    n, d = 200, 6
     target_mean = np.sqrt(2.0 / np.pi)            # ≈ 0.7979
     target_sd = np.sqrt(1.0 - 2.0 / np.pi)        # ≈ 0.6028
-    # Tolerances are loose because n_boot=300 is finite and p̂_pos lives on a
-    # discrete grid of size n_boot+1, which biases moments of the naive sign-z
-    # toward slight discretization noise. 0.15 is comfortable for ~180 samples.
+    # Tolerances cover Monte Carlo noise in the pooled moments (360 values
+    # from 60 datasets) plus the small-sample conservativeness documented for
+    # a pure null (simulated mean |z| about 0.76 at this n).
     TOL_MEAN = 0.15
     TOL_SD = 0.15
+    MAX_SHARE_ABOVE_1_96 = 0.10
 
     rng_master = np.random.default_rng(20240501)
     pooled_abs_z = []
@@ -332,7 +339,7 @@ def test_beta_sign_z_is_half_normal_under_null_beta():
         x = rng.standard_normal((n, d))
         y = rng.standard_normal(n)  # β = 0: y independent of x
         r = pls1_confirmatory_test(
-            x, y, k=2, method="split_nb",
+            x, y, k=1, method="split_nb",
             args={"n_splits": 30},
             ci=True, n_boot=300, m_rate=0.7, level=0.95,
             max_failure_rate=0.05,
@@ -351,13 +358,16 @@ def test_beta_sign_z_is_half_normal_under_null_beta():
 
     emp_mean = float(np.mean(pooled))
     emp_sd = float(np.std(pooled, ddof=1))
+    share = float(np.mean(pooled > 1.96))
 
     msg = (
         f"\nempirical mean = {emp_mean:.4f} (target {target_mean:.4f}, "
         f"|Δ|={abs(emp_mean - target_mean):.4f}, tol {TOL_MEAN})"
         f"\nempirical sd   = {emp_sd:.4f} (target {target_sd:.4f}, "
         f"|Δ|={abs(emp_sd - target_sd):.4f}, tol {TOL_SD})"
+        f"\nshare > 1.96  = {share:.4f} (max {MAX_SHARE_ABOVE_1_96})"
         f"\npooled n = {pooled.size}"
     )
     assert abs(emp_mean - target_mean) < TOL_MEAN, msg
     assert abs(emp_sd - target_sd) < TOL_SD, msg
+    assert share <= MAX_SHARE_ABOVE_1_96, msg

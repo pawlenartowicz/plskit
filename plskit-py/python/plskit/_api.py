@@ -78,8 +78,21 @@ def _convert_errors(fn):
     return wrapper
 
 
-def _ensure_array(x: np.ndarray, name: str, ndim: int) -> np.ndarray:
+def _aligned_f64(x) -> np.ndarray:
+    """`x` as a C-contiguous, aligned float64 array (copied only if needed).
+
+    `np.ascontiguousarray` keeps a misaligned array (a byte-offset view of a
+    buffer) as it is; the extension may not read misaligned float64 data in
+    place, so such an array is copied.
+    """
     a = np.ascontiguousarray(x, dtype=np.float64)
+    if not a.flags.aligned:
+        a = a.copy()
+    return a
+
+
+def _ensure_array(x: np.ndarray, name: str, ndim: int) -> np.ndarray:
+    a = _aligned_f64(x)
     if a.ndim != ndim:
         raise PlsKitError(
             f"{name} must be {ndim}-D, got {a.ndim}-D",
@@ -106,13 +119,10 @@ def _validate_find_k_args(fk_args: dict, allowed: tuple[str, ...]) -> None:
 
 # Permutation budget the split_nb → split_exact reroute spends when the result
 # object carries no n_perm of its own (neither FindKSequenceResult nor
-# FindKOptimalResult has such a field). It must equal the n_perm the engine
-# writes into the reroute itself — the literal 1000 in
-# plskit-rs/src/sequential.rs (SequentialArgs::SplitExact),
-# plskit-rs/src/signal_test.rs (ConfirmatoryArgs::SplitExact) and
-# plskit-rs/src/pls3_signal_test.rs (the PLS3 reroute); all four change
-# together.
-_REROUTE_FALLBACK_N_PERM = 1000
+# FindKOptimalResult has such a field). Read straight off the engine constant
+# (SPLIT_NB_REROUTE_N_PERM in plskit-rs/src/signal_test.rs, which every Rust
+# reroute site reads) instead of keeping a copy here that could drift.
+_REROUTE_FALLBACK_N_PERM = _plskit.SPLIT_NB_REROUTE_N_PERM
 
 
 def _warn_if_rerouted(
@@ -156,12 +166,12 @@ def preprocess(
     """Standardize X / Y and normalize weights using plskit's canonical recipe.
 
     All arguments optional; only the fields matching passed inputs are populated.
-    See spec §5.1–5.2 and the preprocessing guide for the cache pattern.
+    See _docs/concepts/preprocessing.md for the recipe and the cache pattern.
     """
     if X is not None:
         X = _ensure_array(X, "X", 2)
     if Y is not None:
-        Y = np.ascontiguousarray(Y, dtype=np.float64)
+        Y = _aligned_f64(Y)
         if Y.ndim not in (1, 2):
             raise PlsKitError("Y must be 1-D or 2-D", code="invalid_argument")
     if weights is not None:
@@ -212,14 +222,16 @@ def pls1_fit(
         raise ``PlsKitError(code="invalid_args")`` listing the allowed set.
     pre_standardized : bool, default False
         If True, skip standardization — X and y are assumed already zero-mean,
-        unit-variance. See spec §3.5 readings table and the preprocessing guide
-        (``plskit.preprocess``) for the cache pattern.
+        unit-variance. See _docs/concepts/preprocessing.md (the
+        ``pre_standardized`` decision table) and ``plskit.preprocess`` for the
+        cache pattern.
     seed : int | None
         RNG seed forwarded to ``pls1_find_k_optimal`` / ``pls1_find_k_sequence``
         when ``k`` is a string.
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
-        Weights are normalized to mean 1 before use. See spec §3.5.
+        Weights are normalized to mean 1 before use. See
+        _docs/concepts/PLS1/weights.md.
 
     Returns
     -------
@@ -237,33 +249,30 @@ def pls1_fit(
                 code="invalid_argument",
             )
         fk_args = dict(find_k_args or {})
+        # `for_fit=True` hands the "no K to fit" decision to the engine
+        # (`k_to_fit` on the selection result), which raises
+        # `optimal_no_component` / `sequence_no_rejection` itself.
         if k == "optimal":
             _validate_find_k_args(fk_args, _FIND_K_ALLOWED["optimal"])
-            _sel = pls1_find_k_optimal(
+            _sel = _pls1_find_k_optimal(
                 X, y, k_max,
                 pre_standardized=pre_standardized,
                 seed=seed,
                 weights=weights,
+                for_fit=True,
                 **fk_args,
             )
             k_int = _sel.k_star
         elif k == "sequence":
             _validate_find_k_args(fk_args, _FIND_K_ALLOWED["sequence"])
-            _sel = pls1_find_k_sequence(
+            _sel = _pls1_find_k_sequence(
                 X, y, k_max,
                 pre_standardized=pre_standardized,
                 seed=seed,
                 weights=weights,
+                for_fit=True,
                 **fk_args,
             )
-            if _sel.k_star == 0:
-                raise PlsKitError(
-                    f"pls1_find_k_sequence rejected no component at alpha "
-                    f"{_sel.alpha:.4g} (all pvalues >= alpha). "
-                    f"No valid K to fit. Call pls1_find_k_sequence() directly "
-                    f"and pass an explicit int k if you want to fit anyway.",
-                    code="sequence_no_rejection",
-                )
             k_int = _sel.k_star
         else:
             raise PlsKitError(
@@ -390,6 +399,87 @@ def plssvd_fit(
 
 
 @_convert_errors
+def spls3_fit(
+    X: np.ndarray,
+    Y: np.ndarray,
+    k: int,
+    keep_X: int,
+    keep_Y: int,
+    *,
+    pre_standardized_X: bool = False,
+    pre_standardized_Y: bool = False,
+    max_iter: int | None = None,
+    tol: float | None = None,
+    weights: np.ndarray | None = None,
+) -> PLS3Result:
+    """Sparse PLS3 / PLSSVD: keep-count selection on both salience sides.
+
+    Each component loads on at most ``keep_X`` of the X variables and
+    ``keep_Y`` of the Y variables, selected by magnitude with exact ties
+    broken toward the lower index. ``keep_Y < q`` is the point of the
+    method: it forces each latent dimension onto a few outcomes, so the
+    outcomes separate into groups instead of every dimension loading a
+    little on everything.
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (n, p)
+        First block. Standardized internally unless ``pre_standardized_X=True``.
+    Y : np.ndarray, shape (n, q)
+        Second block. Must be 2-D.
+    k : int
+        Number of latent variables. Components come out of a deflating
+        alternation, not one SVD, so they are **not** orthogonal.
+    keep_X : int
+        Non-zeros per column of ``U``; ``1 <= keep_X <= p``.
+    keep_Y : int
+        Non-zeros per column of ``V``; ``1 <= keep_Y <= q``.
+    pre_standardized_X, pre_standardized_Y : bool, default False
+        Skip centering/scaling of that block.
+    max_iter : int | None, default None
+        Cap on alternation sweeps per component. ``None`` uses the engine
+        default, 100. Hitting it sets ``result.converged[a] = False`` for
+        that component; it is not an error.
+    tol : float | None, default None
+        Convergence tolerance, read as the max absolute change in ``v``
+        across one sweep. ``None`` uses the engine default, 1e-8.
+    weights : np.ndarray | None, default None
+        Not implemented for this family; anything other than ``None``
+        raises ``PlsKitError(code="invalid_argument")``.
+
+    Returns
+    -------
+    PLS3Result
+        With ``keep_X``, ``keep_Y``, ``converged`` and ``n_iter``
+        populated. ``keep_X = p`` and ``keep_Y = q`` together reproduce
+        ``pls3_fit`` bit for bit.
+
+    Notes
+    -----
+    ``singular_values`` on a sparse fit are ``u'Av`` on the deflated ``A``,
+    not singular values of ``X'Y``. Do not read an explained-variance share
+    off them. Rotating a sparse fit with ``rotate`` destroys the zeros:
+    choose sparsity or rotation, not both. That warning is reachable only
+    through ``rotate``'s array overload applied to ``U``; ``rotate``
+    refuses a ``PLS3Result`` outright (it takes a ``PLS1Result`` or an
+    ``np.ndarray``), so there is no model overload to guard.
+    """
+    X = _ensure_array(X, "X", 2)
+    Y = _ensure_2d_Y(Y)
+    if weights is not None:
+        weights = _ensure_array(weights, "weights", 1)
+    raw = _plskit.spls3_fit(
+        X, Y, k, keep_X, keep_Y,
+        pre_standardized_X=pre_standardized_X,
+        pre_standardized_Y=pre_standardized_Y,
+        max_iter=max_iter,
+        tol=tol,
+        weights=weights,
+    )
+    return PLS3Result(**raw)
+
+
+@_convert_errors
 def pls3_transform(
     model: PLS3Result,
     X_new: np.ndarray | None = None,
@@ -484,21 +574,27 @@ def pls3_confirmatory_test(
         survive to the test half, and whether the statistic should then be
         per-component or subspace-level is not settled.
     method : {'split_exact', 'split_nb'}
-        ``'split_exact'`` is the recommended default: the p-value comes from
+        ``'split_exact'`` is recommended (``method`` has no default): the p-value comes from
         a permutation reference built by shuffling the rows of Y against X,
-        with the splits held fixed across all permutations, so it holds its
-        level on any design. ``'split_nb'`` compares the same statistic
+        with the splits held fixed across all permutations, so it is exact
+        whenever the rows are exchangeable under the null. Neither method is
+        valid on clustered rows (e.g. repeated scans per subject): random
+        splits leak subjects across halves and row permutation breaks
+        within-subject exchangeability. ``'split_nb'`` compares the same statistic
         against an asymptotic t reference instead, costing ``n_splits``
         fits in total rather than ``n_perm * n_splits``.
 
         Both sides of the correlation are estimated on the training half,
-        where PLS1 has an observed outcome on one side. That costs the
-        asymptotic reference nothing: conditional on the training half the
-        two held-out score vectors are fixed linear combinations of
-        independent test-half rows, so under the null ``r`` follows the
-        ordinary null correlation law. Measured on Gaussian, heavy-tailed,
-        low-stable-rank and real two-block designs, ``'split_nb'`` came out
-        conservative, never anti-conservative.
+        where PLS1 has an observed outcome on one side. The per-split null
+        still carries over: conditional on the training half the two
+        held-out score vectors are fixed linear combinations of independent
+        test-half rows, so under the null ``r`` on one split follows the
+        ordinary null correlation law. The between-split correction the
+        p-value uses is PLS1's Nadeau-Bengio heuristic, which is not derived
+        for two blocks; its transfer is supported empirically only. Measured
+        on Gaussian, heavy-tailed, low-stable-rank and real two-block
+        designs, ``'split_nb'`` came out conservative, never
+        anti-conservative.
 
         ``'split_nb'`` requests are auto-gated on X exactly as in
         ``pls1_confirmatory_test``: a flagged design runs ``'split_exact'``
@@ -510,8 +606,11 @@ def pls3_confirmatory_test(
         two-block design.
 
         ``'raw_perm'`` needs a CV statistic that a method with no
-        ``predict`` does not have. ``'score'`` and ``'e'`` have no
-        symmetric formulation.
+        ``predict`` does not have. ``'score'`` is not implemented: its
+        symmetric analog is an RV-type test on ``||X'Y||_F^2``, which tests
+        a different estimand from the LV1 held-out correlation. ``'e'``
+        needs a generative model that symmetric cross-decomposition does
+        not supply.
     args : dict | None
         ``'split_exact'``: ``{'n_perm': int, 'n_splits': int}``, defaults
         1000 and 50. ``'split_nb'``: ``{'n_splits': int, 'force': bool}``,
@@ -564,16 +663,16 @@ def pls1_confirmatory_test(
     method: Literal["raw_perm", "split_nb", "split_exact", "score", "e"],
     args: dict | None = None,
     ci: bool = False,
-    n_boot: int = 1000,
-    m_rate: float = 0.7,
-    level: float = 0.95,
-    max_failure_rate: float = 0.01,
+    n_boot: int | None = None,
+    m_rate: float | None = None,
+    level: float | None = None,
+    max_failure_rate: float | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
     disable_parallelism: bool = False,
     verbose: bool = False,
     weights: np.ndarray | None = None,
-    max_skip_rate: float = 0.01,
+    max_skip_rate: float | None = None,
 ) -> ConfirmatoryTestResult:
     """Run the confirmatory PLS1 omnibus test at fixed K.
 
@@ -589,7 +688,7 @@ def pls1_confirmatory_test(
         Test method: ``'raw_perm'``, ``'split_nb'``, ``'split_exact'``,
         ``'score'``, or ``'e'``.
 
-        ``'split_exact'`` is the recommended default: a split-half test
+        ``'split_exact'`` is recommended (``method`` has no default): a split-half test
         (statistic ``tanh(z̄)``, the mean Fisher-z of held-out correlations)
         calibrated by permutation, so it holds its level on any design.
         ``'split_nb'`` uses the same statistic with an asymptotic correction
@@ -609,11 +708,26 @@ def pls1_confirmatory_test(
         ``{'force': True}`` for ``split_nb``).
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
-        Weights are normalized to mean 1 before use. See spec §3.5.
-    max_skip_rate : float, default 0.01
-        Subsample-loop skip threshold for the ``ci`` branch (spec §6.3).
-        The CI loop fails with ``PlsKitResamplingDegenerate`` if
-        ``skipped / total > max_skip_rate``.
+        Weights are normalized to mean 1 before use. See
+        _docs/concepts/PLS1/weights.md.
+    n_boot : int | None, default None
+        Number of subsampling resamples for the ``ci`` branch. ``None`` uses
+        the engine default, 1000. Inert when ``ci=False``.
+    m_rate : float | None, default None
+        Subsample-size exponent; ``m = ceil(n ** m_rate)``. ``None`` uses the
+        engine default, 0.7. Inert when ``ci=False``.
+    level : float | None, default None
+        Nominal CI level. ``None`` uses the engine default, 0.95. Inert when
+        ``ci=False``.
+    max_failure_rate : float | None, default None
+        Maximum tolerable combined per-resample failure rate for the ``ci``
+        branch. ``None`` uses the engine default, 0.01. Inert when
+        ``ci=False``.
+    max_skip_rate : float | None, default None
+        Subsample-loop skip threshold for the ``ci`` branch (see
+        _docs/concepts/effective-sample-size.md). ``None`` uses the engine
+        default, 0.01. The CI loop fails with ``PlsKitResamplingDegenerate``
+        if ``skipped / total > max_skip_rate``.
     pre_standardized : bool, default False
         If True, skip standardization — X and y are assumed already zero-mean,
         unit-variance.
@@ -725,17 +839,40 @@ def pls1_find_k_optimal(
     seed : int | None
         RNG seed.
     disable_parallelism : bool, default False
-        Force serial execution.
+        Run the replicate loops serially; single top-level products keep
+        the fixed parallel split, so results are bit-identical to the
+        parallel run.
     verbose : bool, default False
         Print progress to stderr.
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
-        Weights are normalized to mean 1 before use. See spec §3.5.
+        Weights are normalized to mean 1 before use. See
+        _docs/concepts/PLS1/weights.md.
 
     Returns
     -------
     FindKOptimalResult
     """
+    return _pls1_find_k_optimal(
+        X, y, k_max,
+        selector=selector,
+        diagnostic=diagnostic,
+        args=args,
+        pre_standardized=pre_standardized,
+        seed=seed,
+        disable_parallelism=disable_parallelism,
+        verbose=verbose,
+        weights=weights,
+        for_fit=False,
+    )
+
+
+def _pls1_find_k_optimal(
+    X, y, k_max, *, selector="r2_se", diagnostic=None, args=None,
+    pre_standardized=False, seed=None, disable_parallelism=False,
+    verbose=False, weights=None, for_fit,
+) -> FindKOptimalResult:
+    """Body of `pls1_find_k_optimal`; `for_fit=True` is `pls1_fit(k="optimal")`."""
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
     if weights is not None:
@@ -750,6 +887,7 @@ def pls1_find_k_optimal(
         disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=weights,
+        for_fit=for_fit,
     )
     result = FindKOptimalResult(**raw)
     # The diagnostic runs through the same hoisted sequence gate, so it can be
@@ -768,7 +906,7 @@ def pls1_find_k_sequence(
     X: np.ndarray, y: np.ndarray, k_max: int,
     *,
     test_method: Literal["raw_perm", "split_nb", "split_exact", "e"] = "split_nb",
-    alpha: float = 0.05,
+    alpha: float | None = None,
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
@@ -798,8 +936,9 @@ def pls1_find_k_sequence(
         flat X spectrum. The auto-gate is evaluated once for the whole
         sequence: a flagged ``'split_nb'`` request runs ``'split_exact'``
         for every step and ``result.test_method`` says so.
-    alpha : float, default 0.05
-        Significance threshold for rejection.
+    alpha : float | None, default None
+        Significance threshold for rejection. ``None`` uses the engine
+        default, 0.05.
     args : dict | None
         Method-specific kwargs (e.g. ``{'n_splits': 50}``, or
         ``{'force': True}`` to run ``split_nb`` past the auto-gate).
@@ -809,17 +948,40 @@ def pls1_find_k_sequence(
     seed : int | None
         RNG seed.
     disable_parallelism : bool, default False
-        Force serial execution.
+        Run the replicate loops serially; single top-level products keep
+        the fixed parallel split, so results are bit-identical to the
+        parallel run.
     verbose : bool, default False
         Print progress to stderr.
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
-        Weights are normalized to mean 1 before use. See spec §3.5.
+        Weights are normalized to mean 1 before use. See
+        _docs/concepts/PLS1/weights.md.
 
     Returns
     -------
     FindKSequenceResult
     """
+    return _pls1_find_k_sequence(
+        X, y, k_max,
+        test_method=test_method,
+        alpha=alpha,
+        args=args,
+        pre_standardized=pre_standardized,
+        seed=seed,
+        disable_parallelism=disable_parallelism,
+        verbose=verbose,
+        weights=weights,
+        for_fit=False,
+    )
+
+
+def _pls1_find_k_sequence(
+    X, y, k_max, *, test_method="split_nb", alpha=None, args=None,
+    pre_standardized=False, seed=None, disable_parallelism=False,
+    verbose=False, weights=None, for_fit,
+) -> FindKSequenceResult:
+    """Body of `pls1_find_k_sequence`; `for_fit=True` is `pls1_fit(k="sequence")`."""
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
     if weights is not None:
@@ -834,6 +996,7 @@ def pls1_find_k_sequence(
         disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=weights,
+        for_fit=for_fit,
     )
     result = FindKSequenceResult(**raw)
     _warn_if_rerouted(
@@ -882,9 +1045,9 @@ def spls1_fit(
     Returns
     -------
     PLS1Result
-        With ``keep`` set; exactly ``keep`` nonzeros per ``W`` column.
-        Per-coordinate β CIs are NOT offered under selection (post-selection
-        inference) — see the spls1 spec.
+        With ``keep`` set; each ``W`` column is zero outside its ``keep``
+        selected rows. Per-coordinate β CIs are NOT offered under selection
+        (post-selection inference); see ``_docs/concepts/sPLS1/keep-and-selection.md``.
     """
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
@@ -1000,7 +1163,7 @@ def spls1_find_k_sequence(
     X: np.ndarray, y: np.ndarray, k_max: int, keep: int,
     *,
     test_method: Literal["raw_perm", "split_nb", "split_exact", "e"] = "split_nb",
-    alpha: float = 0.05,
+    alpha: float | None = None,
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
@@ -1051,14 +1214,19 @@ def rotate(
     else:
         resolved_args = dict(args)
     if method == "varimax":
-        resolved_args.setdefault("max_iter", 50)
-        resolved_args.setdefault("tol", 1e-8)
-        resolved_args.setdefault("kaiser_normalize", True)
+        # Read the engine's own VarimaxArgs::default() through the seam
+        # rather than keeping a second, hand-maintained copy of the same
+        # three numbers here. Copied on read (never iterated in place) so
+        # this call can never accidentally mutate the shared module-level
+        # dict, even indirectly.
+        engine_defaults = dict(_plskit.VARIMAX_DEFAULTS)
+        for key, value in engine_defaults.items():
+            resolved_args.setdefault(key, value)
 
     if isinstance(model_or_W, PLS1Result):
         if model_or_W.rotation_spec is not None:
             raise PlsKitError(
-                "model already has a rotation_spec; v0.1.1 does not support re-rotation",
+                "model already has a rotation_spec; re-rotation is not supported",
                 code="already_rotated",
             )
         return _rotate_model(model_or_W, method, L, resolved_args)
@@ -1108,15 +1276,15 @@ def pls1_rotation_stability(
     rotation_method: Literal["varimax"] = "varimax",
     rotation_args: dict | None = None,
     L: np.ndarray | None = None,
-    n_boot: int = 1000,
-    m_rate: float = 0.7,
-    level: float = 0.95,
+    n_boot: int | None = None,
+    m_rate: float | None = None,
+    level: float | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
     disable_parallelism: bool = False,
     verbose: bool = False,
     weights: np.ndarray | None = None,
-    max_skip_rate: float = 0.01,
+    max_skip_rate: float | None = None,
 ) -> RotationStabilityResult:
     """PLS1 rotation-stability diagnostic.
 
@@ -1132,26 +1300,30 @@ def pls1_rotation_stability(
         Method-specific kwargs (e.g. ``{"max_iter": 100}`` for varimax).
     L : np.ndarray or None
         Optional fixed loading matrix for constrained rotation.
-    n_boot : int
-        Number of subsampling resamples.
-    m_rate : float
-        Subsample-size exponent; ``m = ceil(n ** m_rate)``.
-    level : float
-        Nominal CI level (e.g. 0.95).
+    n_boot : int | None, default None
+        Number of subsampling resamples. ``None`` uses the engine default,
+        1000.
+    m_rate : float | None, default None
+        Subsample-size exponent; ``m = ceil(n ** m_rate)``. ``None`` uses the
+        engine default, 0.7.
+    level : float | None, default None
+        Nominal CI level (e.g. 0.95). ``None`` uses the engine default, 0.95.
     pre_standardized : bool
         Set ``True`` when ``X`` is already column-standardized.
     seed : int or None
         RNG seed for reproducibility.
     disable_parallelism : bool
-        Disable Rayon parallelism (useful for tests).
+        Run the replicate loops serially; single top-level products keep
+        the fixed parallel split, so results are bit-identical to the
+        parallel run.
     verbose : bool
         Reserved for future progress reporting.
     weights : np.ndarray or None, shape (n,)
         Optional per-observation weights. ``None`` is equivalent to all-ones.
-    max_skip_rate : float
+    max_skip_rate : float | None, default None
         Maximum fraction of subsamples that may be skipped (due to weight
-        degeneracy) before raising ``PlsKitResamplingDegenerate``.
-        Default ``0.01``.
+        degeneracy) before raising ``PlsKitResamplingDegenerate``. ``None``
+        uses the engine default, 0.01.
     """
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
@@ -1193,7 +1365,7 @@ def pls1_rotation_stability(
 def pls1_perm_null(
     X: np.ndarray, y: np.ndarray, k: int,
     *,
-    n_perm: int = 1000,
+    n_perm: int | None = None,
     return_perm_matrix: bool = False,
     pre_standardized: bool = False,
     seed: int | None = None,
@@ -1203,7 +1375,7 @@ def pls1_perm_null(
 ) -> PermNullResult:
     """Permutation-null engine for PLS1 β. Signed per-voxel z + optional perm matrix.
 
-    Pair with `pls1_confirmatory_test(method="split_nb")` as an omnibus gate
+    Pair with `pls1_confirmatory_test(method="split_exact")` as an omnibus gate
     before spending the `n_perm` permutation budget at fMRI scale.
 
     Parameters
@@ -1214,8 +1386,9 @@ def pls1_perm_null(
         Response vector.
     k : int
         Number of PLS components.
-    n_perm : int, default 1000
-        Number of permutations (must be ≥ 100).
+    n_perm : int | None, default None
+        Number of permutations (must be ≥ 100). ``None`` uses the engine
+        default, 1000.
     return_perm_matrix : bool, default False
         If True, return the full `(n_perm, d)` β matrix. Memory-intensive at
         fMRI scale; use only when needed for cluster-based correction.
@@ -1225,7 +1398,9 @@ def pls1_perm_null(
     seed : int | None
         RNG seed for reproducibility.
     disable_parallelism : bool, default False
-        Force serial execution (useful for deterministic tests).
+        Run the replicate loops serially; single top-level products keep
+        the fixed parallel split, so results are bit-identical to the
+        parallel run.
     verbose : bool, default False
         Reserved for future progress reporting.
     weights : np.ndarray | None, shape (n,), default None

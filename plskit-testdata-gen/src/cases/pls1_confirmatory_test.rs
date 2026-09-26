@@ -6,22 +6,23 @@
 //! Five weighted cases share a separate inputs file
 //! (`inputs/pls1_confirmatory_weighted_inputs.npz`) that also carries `weights`.
 //! One further case, `raw_perm_wide`, carries its own wide (n=30, p=100) inputs
-//! file because it is the only shape that routes through `dual_route`.
+//! file because it is the only shape that routes through `dual_route`. Two
+//! K=2 cases on a wider design (n=60, p=3000), `raw_perm_wide_k2` and
+//! `split_exact_wide_k2`, share `inputs/pls1_confirmatory_wide_n60_d3000_inputs.npz`:
+//! both run the primal engine at p ≫ n.
 
 use std::path::Path;
 
 use anyhow::Result;
 
-/// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10.
-fn default_tolerance() -> serde_json::Value {
-    serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10})
-}
 use plskit::{
     pls1_confirmatory_test, CIOpts, ConfirmatoryArgs, ConfirmatoryCI, ConfirmatoryTestInput,
     ConfirmatoryTestOpts,
 };
 
-use crate::cases::{ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data};
+use crate::cases::{
+    default_tolerance, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data,
+};
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
 
@@ -53,6 +54,8 @@ struct ConfirmatoryCase {
     k: usize,
     /// Non-uniform weights array (first 40 obs get 2.0, rest 1.0); `None` for unweighted cases.
     weights: Option<ndarray::Array1<f64>>,
+    /// Signal-to-noise ratio passed to `synth_data`.
+    snr: f64,
 }
 
 /// Write the `ConfirmatoryCI` bundle fields into `w`.
@@ -112,7 +115,7 @@ fn run_confirmatory_case(root: &Path, c: &ConfirmatoryCase) -> Result<Case> {
         std::fs::create_dir_all(p)?;
     }
 
-    let (x, y) = synth_data(c.n, c.d, SYNTH_K_SIGNAL, SYNTH_SNR, c.synth_seed);
+    let (x, y) = synth_data(c.n, c.d, SYNTH_K_SIGNAL, c.snr, c.synth_seed);
 
     // Write shared inputs (idempotent — same bytes every call).
     {
@@ -210,6 +213,7 @@ pub fn raw_perm(root: &Path) -> Result<Case> {
             synth_seed: 42,
             k: 2,
             weights: None,
+            snr: SYNTH_SNR,
         },
     )
 }
@@ -241,6 +245,7 @@ pub fn split_nb(root: &Path) -> Result<Case> {
             synth_seed: 42,
             k: 2,
             weights: None,
+            snr: SYNTH_SNR,
         },
     )
 }
@@ -273,13 +278,14 @@ pub fn split_exact(root: &Path) -> Result<Case> {
             synth_seed: 42,
             k: 2,
             weights: None,
+            snr: SYNTH_SNR,
         },
     )
 }
 
 /// Case: `pls1_confirmatory_test` with `method=split_exact`, `n_perm=200`, `n_splits=30`,
 /// `seed=42`, `k=1`. Unweighted dense K = 1: exercises `split_exact`'s no-refit route
-/// (the [`split_exact`](self::split_exact) case above covers the refit route via K = 2;
+/// (the [`split_exact`] case above covers the refit route via K = 2;
 /// [`weighted_split_exact`] covers the no-refit route under weights).
 ///
 /// # Errors
@@ -307,6 +313,7 @@ pub fn split_exact_k1(root: &Path) -> Result<Case> {
             synth_seed: 42,
             k: 1,
             weights: None,
+            snr: SYNTH_SNR,
         },
     )
 }
@@ -337,6 +344,7 @@ pub fn score(root: &Path) -> Result<Case> {
             synth_seed: 42,
             k: 2,
             weights: None,
+            snr: SYNTH_SNR,
         },
     )
 }
@@ -367,6 +375,7 @@ pub fn e(root: &Path) -> Result<Case> {
             synth_seed: 42,
             k: 2,
             weights: None,
+            snr: SYNTH_SNR,
         },
     )
 }
@@ -412,6 +421,7 @@ pub fn split_nb_ci(root: &Path) -> Result<Case> {
             synth_seed: 42,
             k: 2,
             weights: None,
+            snr: SYNTH_SNR,
         },
     )
 }
@@ -454,6 +464,81 @@ pub fn raw_perm_wide(root: &Path) -> Result<Case> {
             synth_seed: 42,
             k: 1,
             weights: None,
+            snr: SYNTH_SNR,
+        },
+    )
+}
+
+/// Case: `pls1_confirmatory_test` with `method=raw_perm` on a wide design
+/// (n=60, p=3000), `k=2`, `n_perm=200`, `n_folds=5`.
+///
+/// The primal `raw_perm` route at p ≫ n: `k = 2` keeps it off the K = 1 Gram
+/// closed form, and the shape is eligible for an n-space Gram route at
+/// K ≥ 2 (both pinned in `plskit-rs/src/fixture_route_pins.rs`), so this
+/// fixture is the primal reference such a route must reproduce.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn raw_perm_wide_k2(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_raw_perm_wide_k2",
+            args: ConfirmatoryArgs::RawPerm {
+                n_perm: 200,
+                n_folds: 5,
+            },
+            ci: None,
+            disable_parallelism: false,
+            kwargs: serde_json::json!({
+                "k": 2,
+                "method": "raw_perm",
+                "args": {"n_perm": 200, "n_folds": 5},
+                "seed": 42
+            }),
+            inputs_name: "pls1_confirmatory_wide_n60_d3000_inputs",
+            n: 60,
+            d: 3000,
+            synth_seed: 42,
+            k: 2,
+            weights: None,
+            snr: SYNTH_SNR,
+        },
+    )
+}
+
+/// Case: `pls1_confirmatory_test` with `method=split_exact` on the wide
+/// design of [`raw_perm_wide_k2`], `k=2`, `n_perm=200`, `n_splits=20`.
+///
+/// `k = 2` takes the refit route (the no-refit route is K = 1 only), dense
+/// and at p ≫ n: the primal reference of the refit route's split loop.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn split_exact_wide_k2(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_split_exact_wide_k2",
+            args: ConfirmatoryArgs::SplitExact {
+                n_perm: 200,
+                n_splits: 20,
+            },
+            ci: None,
+            disable_parallelism: false,
+            kwargs: serde_json::json!({
+                "k": 2,
+                "method": "split_exact",
+                "args": {"n_perm": 200, "n_splits": 20},
+                "seed": 42
+            }),
+            inputs_name: "pls1_confirmatory_wide_n60_d3000_inputs",
+            n: 60,
+            d: 3000,
+            synth_seed: 42,
+            k: 2,
+            weights: None,
+            snr: SYNTH_SNR,
         },
     )
 }
@@ -491,6 +576,7 @@ pub fn weighted_raw_perm(root: &Path) -> Result<Case> {
             synth_seed: 77,
             k: 1,
             weights: Some(weighted_confirmatory_weights()),
+            snr: SYNTH_SNR,
         },
     )
 }
@@ -523,6 +609,7 @@ pub fn weighted_split_nb(root: &Path) -> Result<Case> {
             synth_seed: 77,
             k: 1,
             weights: Some(weighted_confirmatory_weights()),
+            snr: SYNTH_SNR,
         },
     )
 }
@@ -557,6 +644,7 @@ pub fn weighted_split_exact(root: &Path) -> Result<Case> {
             synth_seed: 77,
             k: 1,
             weights: Some(weighted_confirmatory_weights()),
+            snr: SYNTH_SNR,
         },
     )
 }
@@ -586,6 +674,7 @@ pub fn weighted_score(root: &Path) -> Result<Case> {
             synth_seed: 77,
             k: 1,
             weights: Some(weighted_confirmatory_weights()),
+            snr: SYNTH_SNR,
         },
     )
 }
@@ -615,6 +704,54 @@ pub fn weighted_e(root: &Path) -> Result<Case> {
             synth_seed: 77,
             k: 1,
             weights: Some(weighted_confirmatory_weights()),
+            snr: SYNTH_SNR,
         },
     )
 }
+
+/// Case: `pls1_confirmatory_test` with `method=raw_perm` on a tall design
+/// (n=2000, p=50), `k=2`, `n_perm=1000`, `n_folds=5`, `seed=42`.
+///
+/// Generated by the explicit-deflation engine before any p-space Gram route
+/// exists. The largest training fold has `n_tr = n − n/n_folds = 1600` rows
+/// and `B = n_perm + 1 = 1001` columns, so the X backend's work per block is
+/// `B·(2k + 1)·n_tr·p = 4.004e8`, 4× the Gram backend's starting work floor,
+/// and the n-space Gram route cannot claim it (`n_tr > p`).
+/// `plskit-rs/src/fixture_route_pins.rs` pins its route and shape numbers.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn raw_perm_tall_k2(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_raw_perm_tall_k2",
+            args: ConfirmatoryArgs::RawPerm {
+                n_perm: 1000,
+                n_folds: 5,
+            },
+            ci: None,
+            disable_parallelism: false,
+            kwargs: serde_json::json!({
+                "k": 2,
+                "method": "raw_perm",
+                "args": {"n_perm": 1000, "n_folds": 5},
+                "seed": 42
+            }),
+            inputs_name: "pls1_confirmatory_tall_inputs",
+            n: 2000,
+            d: 50,
+            synth_seed: 42,
+            k: 2,
+            weights: None,
+            snr: RAW_PERM_TALL_SNR,
+        },
+    )
+}
+
+/// Weak signal for `raw_perm_tall_k2`: the observed CV R² must sit inside
+/// the null distribution, so that the p-value depends on how every one of
+/// the 1000 null replicates ranks against it. At the shared `SYNTH_SNR`
+/// the observed value beats every null and the p-value is `1/1001`
+/// whatever the nulls are, which pins nothing about them.
+const RAW_PERM_TALL_SNR: f64 = 0.05;

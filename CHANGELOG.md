@@ -2,6 +2,104 @@
 
 All notable changes to this project will be documented here.
 
+## [0.6.0] - 2026-09-27
+
+- Added: `spls3_fit`, sparse PLS3 / PLSSVD with a keep-count per side
+  (`keep_X` non-zeros per column of `U`, `keep_Y` per column of `V`, ties
+  broken toward the lower index). `keep_Y < n_targets` forces each latent
+  dimension onto a few outcomes. Full keep-counts delegate to `pls3_fit`
+  (bit-identical); otherwise saliences are unit-norm but not orthogonal.
+  `Pls3Model` / `PLS3Result` gain `keep_X`, `keep_Y` (`None` on a dense
+  fit), `converged` and `n_iter`; reaching `max_iter` is not an error.
+- Added (Rust only): `keep_x` / `keep_y` on `Pls3ConfirmatoryTestOpts`,
+  applied inside each training half (the wrappers do not expose them);
+  `PermNullOpts: Default`; public `SPLIT_NB_REROUTE_N_PERM`; error variants
+  `PlsKitError::OptimalNoComponent` and `SequenceNoRejection { alpha }`
+  (an exhaustive `match` needs two new arms); `k_to_fit()` on the find-K
+  outputs.
+- Changed (behaviour): these inputs now raise `invalid_argument` instead of
+  returning a degenerate result. Check for them before upgrading.
+  - `pls1_confirmatory_test(method="raw_perm")` with `n_folds >= n` (was
+    statistic `0`, `p = 1`).
+  - `raw_perm` as `test_method` / `diagnostic` at `n <= 5`, through the
+    `*_find_k_*` functions and `pls1_fit(k="sequence")`.
+  - The CV selectors (`r2_se`, `r2_max`) at `n <= 2`, through
+    `*_find_k_optimal`, `spls1_find_keep_optimal` and
+    `pls1_fit(k="optimal")`. `bic` is unaffected.
+  - `preprocess` with a 2-D `Y` whose row count does not match `X` or
+    `weights` now raises `dimension_mismatch` / `invalid_weights`.
+- Changed (behaviour): truncation floors are relative to the data. Every
+  PLS1 component must clear `max(n, p)·ε·‖X‖_F·‖y‖`, every PLS3 component
+  `max(n, p, q)·ε·‖X̃‖_F·‖Ỹ‖_F`, instead of an absolute `1e-14`. Fits no
+  longer keep noise components once `y` is exhausted or on a
+  rank-deficient `X'Y`, so `k_used` can be smaller (`n = 2000`, `p = 40` of
+  rank 39, `k = 40`: 40 → 13). A `y` or `Y` orthogonal to `X` up to
+  rounding gives `k_used = 0`, and then `*_find_k_optimal` returns
+  `k_star = 0` and `spls1_find_keep_optimal` returns `keep_star = 0`. No
+  corpus fixture changes.
+- Changed: PLS1 fits use Improved Kernel PLS (Dayal and MacGregor 1997)
+  instead of explicit deflation. Same model; one-component fits are
+  bit-identical, multi-component fits may differ in the last bits (RULE 2).
+- Changed: `pls1_fit(k="optimal" | "sequence")` raises
+  `optimal_no_component` / `sequence_no_rejection` from the engine, not
+  the Python wrapper. Codes unchanged, wording slightly different.
+- Changed (Python): resampling defaults (`n_boot`, `m_rate`, `level`,
+  `max_failure_rate`, `max_skip_rate`, `n_perm`, `alpha`, and `spls3_fit`'s
+  `max_iter` / `tol`) are now `None`, resolving to the engine default.
+  Values and results are unchanged.
+- Changed (Rust only): `ConfirmatoryTestOpts::default()` selects
+  `split_exact` (`n_perm = 1000`, `n_splits = 50`) instead of `split_nb`.
+- Fixed: results for a fixed seed no longer depend on the Rayon pool size.
+  faer split parallel products by pool size, so large fits (`n·d·k >= 1e6`
+  for PLS1, `n·p·q >= 1e6` for PLS3) and everything built on them moved in
+  the last bits with `RAYON_NUM_THREADS`. Every faer call now uses a fixed
+  8-way split or `Par::Seq`; `tests/thread_count_parity.rs` requires
+  bit-identical output at 1, 3 and 5 threads.
+- Fixed: `ConfirmatoryCI` (the subsampling CI of `pls1_confirmatory_test`).
+  - `beta_sign_z` is `|β_ref[j]| / beta_se[j]`, using the finite-population
+    rate `√(m/(n − m))` and a correction for subsample shrinkage `κ̂`
+    (`beta_sign_z_signed` keeps the sign). The old z flagged 63–92% of
+    noise variables.
+  - `beta_ci_*` / `beta_se` carry the same corrections: coverage at nominal
+    95% rose from 77–89% to 91–96% at `K = 1`. β remains uncalibrated at
+    `K ≥ 2`.
+  - `leverage_*` come from an n-out-of-n bootstrap, with a normal interval
+    clamped to `[0, 1]`: signal-variable coverage 0.92–0.97 at `K = 1`,
+    0.92–0.98 at `K = 2, 3` (was 40–65% at `D = 20`).
+  - The `pls1_confirmatory_*_ci` fixtures are regenerated.
+- Fixed: scale invariance. Standardization's constant-column test and the
+  split-half correlation (`split_exact`, `split_nb`,
+  `pls3_confirmatory_test`) were absolute (`sd <= 1e-12`, `ss < 1e-15`)
+  and overflowed or underflowed past about `1e±154`, so rescaling the data
+  could zero a column or return statistic `0`. Both are now relative and
+  exactly rescaled by a power of two; wherever the old sums stayed in
+  range, outputs are bit-identical.
+- Fixed: weighted `pls1_rotation_stability` standardized each resample with
+  unweighted moments. Weighted results change; unweighted are identical.
+- Fixed: the `split_nb` auto-gate uses one `n_eff` everywhere, so
+  `*_find_k_sequence` and the confirmatory test agree at the floor.
+- Fixed: the `split_exact` no-refit route at `k = 1`, the `raw_perm` Gram
+  route at `k = 1`, and the sparse-Y Gram route of `pls3_confirmatory_test`
+  now recompute on the primal route any case that sits within rounding of
+  a decision threshold, so the route choice is again invisible.
+- Fixed (Python): misaligned `float64` arrays were read in place
+  (undefined behaviour in Rust); they are now copied.
+- Performance: Gram routes for resampling loops, chosen from shape alone,
+  with a primal refit for any replicate they cannot certify. A p-space
+  `X'X` route serves `pls1_perm_null`, `raw_perm` and `split_exact` refits
+  on tall data (dense, weighted, sparse); an n-space `X X'` route serves
+  the same loops at `k <= 2` when `p ≫ n`. At a fixed seed, p-values are
+  unchanged except where a null statistic lies within `1e-10` of the
+  observed one.
+- Performance: IKPLS reads `X` twice per component and never writes it;
+  resampling loops no longer copy `X` per replicate; standardization is
+  faster and bit-identical; Python no longer copies a C-ordered `X` before
+  fitting. `pls1_fit` from Python now beats scikit-learn on all four rows
+  of `scripts/bench_pls1_fit.py`'s default grid.
+- Tests and docs: `tests/corpus.rs` checks every fixture family from Rust;
+  three `spls3_fit` fixtures added. README examples use `k=1` with
+  `split_exact`.
+
 ## [0.5.0] - 2026-09-06
 
 - Added: `pls3_fit` (alias `plssvd_fit`) — SVD-PLS / PLSC. One SVD of the

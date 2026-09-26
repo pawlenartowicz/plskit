@@ -10,30 +10,16 @@ use plskit::{
 };
 
 use crate::cases::{
-    faer_col_to_array, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_xy, CasePaths,
+    default_tolerance, faer_col_to_array, faer_mat_to_array, ndarray_to_faer_mat, scalar_f64,
+    scalar_i64, synth_xy, CasePaths,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
-
-/// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10.
-fn default_tolerance() -> serde_json::Value {
-    serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10})
-}
 
 /// Shared signal strength and factor count for every PLS3 fixture.
 const SYNTH_K_SIGNAL: usize = 2;
 const SYNTH_SNR: f64 = 4.0;
 const CASE_SEED: u64 = 42;
-
-/// Convert a 2-D `faer::Mat` to a dynamic `ndarray` for the npz writer.
-///
-/// Module-private on purpose: there is no shared version, and
-/// `cases/rotate.rs` carries its own copy for the same reason. The `Col`
-/// equivalent *is* shared — this module imports
-/// `crate::cases::faer_col_to_array` rather than repeating it.
-fn faer_mat_to_array(m: &plskit::Mat<f64>) -> ndarray::ArrayD<f64> {
-    ndarray::Array2::from_shape_fn((m.nrows(), m.ncols()), |(i, j)| m[(i, j)]).into_dyn()
-}
 
 /// Synth parameters for a fixed-k `pls3_fit` case.
 struct Pls3FitCase<'a> {

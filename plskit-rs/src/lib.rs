@@ -9,16 +9,25 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_precision_loss)] // sample-size usize → f64 casts are routine in math kernels
 
-/// Dual (Gram) execution route for resampling loops. Crate-internal — the
-/// route is chosen by the engine from `(n_tr, p, B, q)` and is not
-/// observable from any public surface.
+/// Dual (Gram) execution routes for resampling loops, including the
+/// n-space PLS1 kernel for `k ≥ 1`. Crate-internal: the route is chosen by
+/// the engine from `(n_tr, p, B)` and the per-replicate multiplicity, and
+/// is not observable from any public surface.
 pub(crate) mod dual_route;
 /// Error types for plskit.
 pub mod error;
 /// K selection (CV / BIC / sequence).
 pub mod find_k;
-/// PLS1 model fitting (NIPALS loop).
+/// PLS1 model fitting (the NIPALS PLS1 model, computed by Improved Kernel PLS).
 pub mod fit;
+/// Route pins for the corpus fixtures that exist to exercise one route.
+#[cfg(test)]
+mod fixture_route_pins;
+/// p-space Gram backend (Improved Kernel PLS, Algorithm 2) for the fixed-X
+/// PLS1 resampling loops at `n ≫ p`. Crate-internal: the route is chosen by
+/// the engine from `(n_tr, p, B, k)` and is not observable from any public
+/// surface.
+pub(crate) mod gram_p;
 /// Low-level linear algebra helpers (standardize, row-subset, etc.).
 pub mod linalg;
 /// Permutation-null engine for signed per-voxel z statistics.
@@ -36,7 +45,7 @@ pub mod preprocess;
 pub mod resample;
 /// Seeded RNG construction.
 pub mod rng;
-/// Simple-structure rotation of PLS weights (varimax in v0.1.1).
+/// Simple-structure rotation of PLS weights (varimax).
 pub mod rotate;
 /// Rotation-stability diagnostic for PLS1.
 pub mod rotation_stability;
@@ -49,6 +58,9 @@ pub mod signal_test;
 /// the `CI` path of `pls1_confirmatory_test` and `pls1_rotation_stability`,
 /// but the engine entry points themselves are not on the public surface.
 pub(crate) mod subsample;
+/// Helpers shared by several modules' unit tests.
+#[cfg(test)]
+mod test_support;
 
 /// Re-export of faer's owned and borrowed matrix/column types.
 ///
@@ -58,8 +70,8 @@ pub(crate) mod subsample;
 /// typically want to pass these straight back into linear-algebra code.
 /// Downstream users can `use plskit::{Mat, Col}` instead of adding faer
 /// to their `Cargo.toml`. The R, Python, and Julia wrappers translate
-/// these types to their host array representations at the FFI seam — see
-/// `_docs/internals/api-contract.md`.
+/// these types to their host array representations at the FFI seam; see
+/// `_docs/rust/api.md`.
 pub use faer::{Col, ColRef, Mat, MatRef};
 
 pub use error::{PlsKitError, PlsKitResult};
@@ -71,8 +83,8 @@ pub use find_k::{
 pub use fit::{pls1_fit, spls1_fit, FitOpts, KSpec, ParChoice, Pls1Model};
 pub use perm_null::{pls1_perm_null, PermNullOpts, PermNullOutput};
 pub use pls3::{
-    pls3_fit, pls3_transform, plssvd_fit, plssvd_transform, Pls3FitOpts, Pls3Model, Pls3Scores,
-    TransformWhich,
+    pls3_fit, pls3_transform, plssvd_fit, plssvd_transform, spls3_fit, Pls3FitOpts, Pls3Model,
+    Pls3Scores, TransformWhich,
 };
 pub use pls3_signal_test::{pls3_confirmatory_test, Pls3ConfirmatoryTestOpts};
 pub use predict::pls1_predict;
@@ -85,6 +97,7 @@ pub use rotation_stability::{
 pub use signal_test::{
     pls1_confirmatory_test, split_nb_gate, CIOpts, ConfirmatoryArgs, ConfirmatoryMethod,
     ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput, SplitNbGateOutput,
+    SPLIT_NB_REROUTE_N_PERM,
 };
 // subsample is pub(crate) — only these two result types are on the public surface.
 // See subsample.rs module header for the full engine contract.

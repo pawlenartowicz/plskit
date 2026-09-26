@@ -1,17 +1,13 @@
 //! `pls1_fit` fixture cases.
 
 use crate::cases::{
-    faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64,
-    synth_data, CasePaths,
+    default_tolerance, faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64,
+    scalar_i64, synth_data, CasePaths,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
 use anyhow::{bail, Result};
 
-/// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10.
-fn default_tolerance() -> serde_json::Value {
-    serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10})
-}
 use plskit::{
     pls1_find_k_sequence, pls1_fit, ConfirmatoryMethod, FindKSequenceOpts, FitOpts, KSpec,
 };

@@ -1,24 +1,14 @@
 //! `rotate` fixture cases.
 
 use crate::cases::{
-    ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data, CasePaths,
+    default_tolerance, faer_mat_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64,
+    scalar_i64, synth_data, CasePaths,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
 use anyhow::Result;
-use faer::Mat;
 use plskit::{pls1_fit, rotate, FitOpts, KSpec, RotationMethod, VarimaxArgs};
 use std::path::Path;
-
-/// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10.
-fn default_tolerance() -> serde_json::Value {
-    serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10})
-}
-
-/// Convert a `faer::Mat<f64>` (d × k) into a 2-D `ndarray::ArrayD<f64>`.
-fn faer_mat_to_array(m: &Mat<f64>) -> ndarray::ArrayD<f64> {
-    ndarray::Array2::from_shape_fn((m.nrows(), m.ncols()), |(i, j)| m[(i, j)]).into_dyn()
-}
 
 /// Case: varimax rotation of a `W*` matrix derived from a synthetic PLS1 fit.
 ///

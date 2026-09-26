@@ -49,8 +49,25 @@ def test_preprocess_shape_mismatch_raises():
         plskit.preprocess(X=X, Y=y[:-1])
 
 
+def test_preprocess_2d_y_weights_length_mismatch_raises():
+    X, y, w = _data()
+    Y = y.reshape(-1, 1)
+    with pytest.raises(plskit.PlsKitError) as exc_info:
+        plskit.preprocess(X=X, Y=Y, weights=w[:-1])
+    assert exc_info.value.code == "invalid_weights"
+    assert exc_info.value.reason == "length_mismatch"
+
+
+def test_preprocess_2d_y_x_row_mismatch_raises():
+    X, y, _ = _data()
+    Y = y.reshape(-1, 1)
+    with pytest.raises(plskit.PlsKitError) as exc_info:
+        plskit.preprocess(X=X[:-1], Y=Y)
+    assert exc_info.value.code == "dimension_mismatch"
+
+
 def test_preprocess_cache_pattern_round_trip():
-    """Spec §5.5: cache-pattern parity. Helper output + pre_standardized=True
+    """Cache-pattern parity. Helper output + pre_standardized=True
     must reproduce the from-raw fit. The standardized-space coef is identical
     in both paths; beta and intercept differ because the cached fit operates in
     standardized space (beta == coef, intercept == 0) while the raw fit

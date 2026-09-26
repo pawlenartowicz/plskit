@@ -17,8 +17,8 @@ MANIFEST = ROOT / "manifest.json"
 def load_manifest():
     if not MANIFEST.exists():
         pytest.skip(
-            f"{MANIFEST} missing — run "
-            f"`cargo run -p plskit-testdata-gen -- --testdata-root plskit/testdata`"
+            f"{MANIFEST} missing: from the workspace root, run "
+            f"`cargo run -p plskit-testdata-gen -- --testdata-root testdata`"
         )
     return json.loads(MANIFEST.read_text())["cases"]
 
@@ -89,25 +89,16 @@ def test_corpus_case(case):
     kwargs = case["kwargs"]
 
     if fn == "pls1_fit":
-        # `seed` is no longer accepted on pls1_fit (deterministic kernel — see
-        # 2026-04-30 remediation E3); strip it from corpus kwargs and skip the
-        # `seed` field check on the fixture.
-        fit_kwargs = {k: v for k, v in kwargs.items() if k not in ("seed",)}
-        fit_kwargs = _resolve_corpus_weights(case, fit_kwargs, inputs)
-        try:
-            r = plskit.pls1_fit(X, y, **fit_kwargs)
-        except plskit.PlsKitError as exc:
-            # E1 in 2026-04-30 remediation: pls1_fit(k="sequence") now raises
-            # when find_k_sequence rejects no component, where it previously
-            # fell back to K=1. Pre-E1 fixtures captured the K=1 fallback
-            # outputs and are stale for this case; the raise itself is the
-            # correct new behavior.
-            if exc.code == "sequence_no_rejection":
-                pytest.skip(
-                    f"fixture {case['name']} pre-dates E1 sequence_no_rejection "
-                    f"raise; regenerate testdata to refresh"
-                )
-            raise
+        # Every manifest kwarg goes through, `seed` included: with a string
+        # `k` ("sequence" / "optimal") pls1_fit forwards it to the K
+        # selection, which is how the generator selected K for those
+        # fixtures (the Rust corpus arm passes it the same way). With an
+        # int `k` the fit is deterministic and pls1_fit ignores `seed`.
+        # The generator refuses to write a "sequence" fixture whose
+        # selection rejects no component, so a `sequence_no_rejection`
+        # error here is a regression, not a stale fixture.
+        fit_kwargs = _resolve_corpus_weights(case, dict(kwargs), inputs)
+        r = plskit.pls1_fit(X, y, **fit_kwargs)
         for field in ["coef", "beta", "intercept", "k_used"]:
             if field in expected:
                 assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
@@ -214,37 +205,27 @@ def test_corpus_case(case):
             if key in expected:
                 assert_close(getattr(r, attr), expected[key], f"{case['name']}.{key}")
     elif fn == "pls1_perm_null":
+        # `d` / `n` describe the generated data, not the call. Everything
+        # else goes through, so a kwarg this arm does not know about fails
+        # the call instead of being dropped.
         kw = {k: v for k, v in kwargs.items() if k not in ("d", "n")}
+        kw = _resolve_corpus_weights(case, kw, inputs)
         k = int(kw.pop("k"))
-        n_perm = int(kw.pop("n_perm"))
-        seed = kw.pop("seed", None)
-        disable_parallelism = kw.pop("disable_parallelism", False)
-        r = plskit.pls1_perm_null(
-            inputs["X"], inputs["y"], k,
-            n_perm=n_perm,
-            seed=seed,
-            disable_parallelism=disable_parallelism,
-        )
+        kw["n_perm"] = int(kw["n_perm"])
+        r = plskit.pls1_perm_null(inputs["X"], inputs["y"], k, **kw)
         for field in ["beta_ref", "beta_perm_mean", "beta_perm_sd", "beta_perm_z",
                       "n_perm", "k", "seed", "n_eff"]:
             if field in expected:
                 assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
     elif fn == "pls1_rotation_stability":
+        # As for pls1_perm_null: only the data-shape keys are dropped.
         kw = {k: v for k, v in kwargs.items() if k not in ("d", "n")}
+        kw = _resolve_corpus_weights(case, kw, inputs)
         k = int(kw.pop("k"))
-        n_boot = int(kw.pop("n_boot"))
-        m_rate = float(kw.pop("m_rate"))
-        level = float(kw.pop("level"))
-        seed = kw.pop("seed", None)
-        disable_parallelism = kw.pop("disable_parallelism", False)
-        r = plskit.pls1_rotation_stability(
-            inputs["X"], inputs["y"], k,
-            n_boot=n_boot,
-            m_rate=m_rate,
-            level=level,
-            seed=seed,
-            disable_parallelism=disable_parallelism,
-        )
+        for key, conv in (("n_boot", int), ("m_rate", float), ("level", float)):
+            if key in kw:
+                kw[key] = conv(kw[key])
+        r = plskit.pls1_rotation_stability(inputs["X"], inputs["y"], k, **kw)
         # CIScalar bundle for variance_ratio (overall)
         for sub in ["point", "lower", "upper", "sd"]:
             key = f"variance_ratio_{sub}"
@@ -267,7 +248,8 @@ def test_corpus_case(case):
             assert bool(r.degenerate_baseline) == bool(int(expected["degenerate_baseline"])), \
                 f"{case['name']}.degenerate_baseline mismatch"
     elif fn == "spls1_fit":
-        # `seed` is not a spls1_fit parameter (deterministic kernel); strip it.
+        # `seed` here is the data-generation seed: spls1_fit is deterministic
+        # and takes none (the Rust corpus arm ignores it too).
         kw = {k: v for k, v in kwargs.items() if k not in ("seed",)}
         kw = _resolve_corpus_weights(case, kw, inputs)
         k_int = int(kw.pop("k"))
@@ -326,7 +308,7 @@ def test_corpus_case(case):
     elif fn == "pls3_fit":
         kw = dict(kwargs)
         k = kw.pop("k")
-        kw.pop("seed", None)          # pls3_fit is deterministic; no seed argument
+        kw.pop("seed", None)          # data-generation seed; pls3_fit takes none
         r = plskit.pls3_fit(X, inputs["Y"], k, **kw)
         for field in ["U", "V", "singular_values", "x_scores", "y_scores", "k_used"]:
             if field in expected:
@@ -339,6 +321,28 @@ def test_corpus_case(case):
         for field in ["x_scores", "y_scores"]:
             if field in expected:
                 assert_close(getattr(sc, field), expected[field], f"{case['name']}.{field}")
+    elif fn == "spls3_fit":
+        kw = dict(kwargs)
+        k = kw.pop("k")
+        keep_X = kw.pop("keep_X")
+        keep_Y = kw.pop("keep_Y")
+        r = plskit.spls3_fit(X, inputs["Y"], k, keep_X=keep_X, keep_Y=keep_Y, **kw)
+        for field in [
+            "U", "V", "singular_values", "x_scores", "y_scores", "k_used",
+            "keep_X", "keep_Y",
+        ]:
+            if field in expected:
+                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+        if "converged" in expected:
+            assert_close(
+                r.converged.astype(np.int64), expected["converged"],
+                f"{case['name']}.converged",
+            )
+        if "n_iter" in expected:
+            assert_close(
+                r.n_iter.astype(np.int64), expected["n_iter"],
+                f"{case['name']}.n_iter",
+            )
     elif fn == "pls3_confirmatory_test":
         kw = dict(kwargs)
         k = kw.pop("k")

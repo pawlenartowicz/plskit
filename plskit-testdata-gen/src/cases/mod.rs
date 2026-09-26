@@ -19,6 +19,7 @@ pub mod spls1_find_k_optimal;
 pub mod spls1_find_k_sequence;
 pub mod spls1_find_keep_optimal;
 pub mod spls1_fit;
+pub mod spls3_fit;
 
 /// Resolved relative and absolute paths for a fixture case's input/output files.
 ///
@@ -61,8 +62,8 @@ impl CasePaths {
 }
 
 pub(crate) use synth_helpers::{
-    faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64,
-    synth_data, synth_xy,
+    default_tolerance, faer_col_to_array, faer_mat_to_array, i64_vec, ndarray_to_faer_col,
+    ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data, synth_xy,
 };
 
 mod synth_helpers {
@@ -171,14 +172,35 @@ mod synth_helpers {
         ndarray::Array1::from_vec(v).into_dyn()
     }
 
+    /// Convert a 2-D `faer::Mat` to a dynamic `ndarray` for the npz writer.
+    ///
+    /// The single shared version: every case module imports this one.
+    pub fn faer_mat_to_array(m: &Mat<f64>) -> ndarray::ArrayD<f64> {
+        ndarray::Array2::from_shape_fn((m.nrows(), m.ncols()), |(i, j)| m[(i, j)]).into_dyn()
+    }
+
     /// Wrap a scalar `f64` as a 0-D `ndarray::ArrayD<f64>`.
     pub fn scalar_f64(v: f64) -> ndarray::ArrayD<f64> {
         ndarray::arr0(v).into_dyn()
     }
 
+    /// Convert a `Vec<i64>` to a 1-D `ndarray::ArrayD<i64>`.
+    pub fn i64_vec(v: Vec<i64>) -> ndarray::ArrayD<i64> {
+        ndarray::Array1::from_vec(v).into_dyn()
+    }
+
     /// Wrap a scalar `i64` as a 0-D `ndarray::ArrayD<i64>`.
     pub fn scalar_i64(v: i64) -> ndarray::ArrayD<i64> {
         ndarray::arr0(v).into_dyn()
+    }
+
+    /// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10.
+    ///
+    /// The single shared version, recorded as each `Case`'s `tolerance`
+    /// field in `manifest.json` and read by every wrapper's corpus test.
+    /// It never touches fixture bytes.
+    pub fn default_tolerance() -> serde_json::Value {
+        serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10})
     }
 }
 
@@ -224,11 +246,19 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_confirmatory_test::weighted_score(root)?);
     cases.push(pls1_confirmatory_test::weighted_e(root)?);
     cases.push(pls1_confirmatory_test::raw_perm_wide(root)?);
+    cases.push(pls1_confirmatory_test::raw_perm_wide_k2(root)?);
+    cases.push(pls1_confirmatory_test::split_exact_wide_k2(root)?);
+    cases.push(pls1_confirmatory_test::raw_perm_tall_k2(root)?);
 
     cases.push(pls1_predict::basic_n80_d6_k2(root)?);
     cases.push(rotate::varimax_d6_k2(root)?);
     cases.push(preprocess::n50_d10_with_weights(root)?);
     cases.push(pls1_perm_null::basic_n80_d6_k2(root)?);
+    cases.push(pls1_perm_null::weighted_n80_d6_k2(root)?);
+    cases.push(pls1_perm_null::wide_n60_d3000_k1(root)?);
+    cases.push(pls1_perm_null::wide_n60_d3000_k2(root)?);
+    cases.push(pls1_perm_null::tall_n2000_d50_k3(root)?);
+    cases.push(pls1_perm_null::tall_weighted_n2000_d50_k2(root)?);
     cases.push(pls1_rotation_stability::n80_d6_k2(root)?);
 
     cases.push(spls1_fit::wide_n30_d100_k2_keep8(root)?);
@@ -237,6 +267,8 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(spls1_find_k_optimal::r2_se_keep3(root)?);
     cases.push(spls1_find_k_sequence::split_nb_keep3(root)?);
     cases.push(spls1_find_k_sequence::split_nb_keep3_gated(root)?);
+    cases.push(spls1_find_k_sequence::split_exact_keep3(root)?);
+    cases.push(spls1_find_k_sequence::split_exact_tall_keep10(root)?);
 
     cases.push(pls3::fit_small_n50_p10_q4_k1(root)?);
     cases.push(pls3::fit_small_n50_p10_q4_k3(root)?);
@@ -245,6 +277,10 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls3::confirmatory_split_exact(root)?);
     cases.push(pls3::confirmatory_split_exact_wide(root)?);
     cases.push(pls3::confirmatory_split_nb(root)?);
+
+    cases.push(spls3_fit::small_n50_p10_q4_keep3_2_k2(root)?);
+    cases.push(spls3_fit::dense_endpoint_n50_p10_q4_k2(root)?);
+    cases.push(spls3_fit::wide_n30_p100_q3_keep10_2_k2(root)?);
 
     Ok(cases)
 }

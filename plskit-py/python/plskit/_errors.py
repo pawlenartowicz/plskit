@@ -27,7 +27,7 @@ class PlsKitInvalidWeights(PlsKitError):
 
 
 class PlsKitResamplingDegenerate(PlsKitError):
-    """Raised when too many resamples failed validation. Spec §6.3."""
+    """Raised when too many resamples failed validation. See `_docs/python/api.md` (Errors)."""
     def __init__(self, message: str = "",
                  skipped: int = 0, total: int = 0,
                  skip_rate: float = 0.0, threshold: float = 0.0) -> None:

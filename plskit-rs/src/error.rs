@@ -1,4 +1,4 @@
-//! Error type for plskit. All public functions return PlsKitResult<T>.
+//! Error type for plskit. All public functions return `PlsKitResult<T>`.
 
 use thiserror::Error;
 
@@ -76,7 +76,7 @@ pub enum PlsKitError {
     ShapeMismatch(String),
 
     /// Caller tried to rotate an already-rotated `PLS1Result`.
-    #[error("model already has a rotation_spec; v0.1.1 does not support re-rotation")]
+    #[error("model already has a rotation_spec; re-rotation is not supported")]
     AlreadyRotated,
 
     /// Observation weights vector is invalid (negative, all-zero, or too
@@ -154,6 +154,32 @@ pub enum PlsKitError {
         /// Total permutations attempted (== `n_perm`).
         total: usize,
     },
+
+    /// A fit at the K `pls1_find_k_optimal` selected was asked for, and the
+    /// selection returned `k_star = 0`: the full-data fit cannot extract a
+    /// first component. Returned by `FindKOptimalOutput::k_to_fit`, which a
+    /// wrapper's `pls1_fit(k = "optimal")` calls.
+    #[error(
+        "no component to fit: pls1_find_k_optimal returned k_star = 0 because the \
+         full-data fit cannot extract a first component (y is constant, or orthogonal \
+         to X up to rounding). Pass an explicit integer k to get the k_used = 0 zero \
+         model anyway."
+    )]
+    OptimalNoComponent,
+
+    /// A fit at the K `pls1_find_k_sequence` selected was asked for, and the
+    /// sequence rejected no component (`k_star = 0`). Returned by
+    /// `FindKSequenceOutput::k_to_fit`, which a wrapper's
+    /// `pls1_fit(k = "sequence")` calls.
+    #[error(
+        "no component to fit: pls1_find_k_sequence rejected no component at alpha \
+         {alpha} (all p-values >= alpha). Call pls1_find_k_sequence directly and pass \
+         an explicit integer k to fit anyway."
+    )]
+    SequenceNoRejection {
+        /// The significance threshold the sequence ran at.
+        alpha: f64,
+    },
 }
 
 impl From<procrustes::ProcrustesError> for PlsKitError {
@@ -191,11 +217,14 @@ impl PlsKitError {
             Self::ResamplingDegenerate { .. } => "resampling_degenerate",
             Self::ResampleFailureRateExceeded { .. } => "resample_failure_rate_exceeded",
             Self::PermNullDegenerate { .. } => "perm_null_degenerate",
+            Self::OptimalNoComponent => "optimal_no_component",
+            Self::SequenceNoRejection { .. } => "sequence_no_rejection",
         }
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
 mod tests {
     use super::*;
 

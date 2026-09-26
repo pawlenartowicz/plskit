@@ -1,0 +1,73 @@
+# faer's global parallelism defaults to `Par::rayon(0)`, whose degree is the
+# size of the Rayon pool at the call; the degree sets how faer splits a
+# reduction, so anything that reads it rounds differently per
+# `RAYON_NUM_THREADS`. Core code uses the explicit-`Par` helpers in
+# `plskit-rs/src/linalg.rs` instead. The list covers every faer 0.24
+# high-level entry that reads the global: the solver methods on
+# `mat::generic::Mat` (so `Mat`, `MatRef` and `MatMut` alike), the
+# decomposition constructors, the `Solve` / `SolveLstsq` / `DenseSolveCore`
+# trait methods, and `determinant`. Test oracles that keep a pre-change body
+# verbatim `#[allow(clippy::disallowed_methods)]`. Operator `*` on faer
+# matrices reads the global too but cannot be listed here (it is a trait
+# impl); `tests/thread_count_parity.rs` and `tests/corpus.rs` catch it at run
+# time by disabling the global.
+disallowed-methods = [
+    { path = "faer::get_global_parallelism", reason = "degree follows the Rayon pool size; pass an explicit Par (fit::par_fixed or Par::Seq)" },
+    { path = "faer::mat::generic::Mat::svd", reason = "reads faer's global parallelism; use linalg::thin_svd with an explicit Par" },
+    { path = "faer::mat::generic::Mat::thin_svd", reason = "reads faer's global parallelism; use linalg::thin_svd with an explicit Par" },
+    { path = "faer::mat::generic::Mat::singular_values", reason = "reads faer's global parallelism; use linalg::singular_values with an explicit Par" },
+    { path = "faer::mat::generic::Mat::self_adjoint_eigen", reason = "reads faer's global parallelism; use linalg::self_adjoint_eigen with an explicit Par" },
+    { path = "faer::mat::generic::Mat::self_adjoint_eigenvalues", reason = "reads faer's global parallelism; use linalg::self_adjoint_eigen with an explicit Par" },
+    { path = "faer::mat::generic::Mat::partial_piv_lu", reason = "reads faer's global parallelism; use linalg::lu_solve_in_place" },
+    { path = "faer::linalg::solvers::PartialPivLu::new", reason = "reads faer's global parallelism; use linalg::lu_solve_in_place" },
+    { path = "faer::mat::generic::Mat::qr", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::col_piv_qr", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::full_piv_lu", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::llt", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::ldlt", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::lblt", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::eigen", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::eigenvalues", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::generalized_eigen", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::determinant", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::solve_lower_triangular_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::solve_upper_triangular_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::solve_unit_lower_triangular_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::mat::generic::Mat::solve_unit_upper_triangular_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Svd::new", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Svd::new_thin", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::SelfAdjointEigen::new", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Qr::new", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::ColPivQr::new", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::FullPivLu::new", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Llt::new", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Ldlt::new", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Lblt::new", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Eigen::new", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Eigen::new_from_real", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::GeneralizedEigen::new", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::GeneralizedEigen::new_from_real", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::solve", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::solve_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::solve_transpose", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::solve_transpose_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::solve_conjugate", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::solve_conjugate_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::solve_adjoint", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::solve_adjoint_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::rsolve", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::rsolve_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::rsolve_transpose", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::rsolve_transpose_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::rsolve_conjugate", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::rsolve_conjugate_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::rsolve_adjoint", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Solve::rsolve_adjoint_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::SolveLstsq::solve_lstsq", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::SolveLstsq::solve_lstsq_in_place", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::DenseSolveCore::inverse", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::DenseSolveCore::reconstruct", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::Svd::pseudoinverse", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "faer::linalg::solvers::SelfAdjointEigen::pseudoinverse", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
+    { path = "procrustes::orthogonal", reason = "its SVD reads faer's global parallelism; use linalg::orthogonal_rotation" },
+]

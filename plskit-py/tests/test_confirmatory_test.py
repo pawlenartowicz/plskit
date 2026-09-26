@@ -55,6 +55,54 @@ def test_confirmatory_methods_run(method):
     assert 0.0 <= r.pvalue <= 1.0
 
 
+def test_raw_perm_rejects_leave_one_out_n_folds():
+    """n_folds == n through the `args` dict: every validation fold is a
+    single row, so the pooled CV R² is undefined."""
+    X, y = _data(n=12)
+    with pytest.raises(plskit.PlsKitError) as exc_info:
+        plskit.pls1_confirmatory_test(
+            X, y, k=1, method="raw_perm", args={"n_folds": 12}, seed=7,
+        )
+    assert exc_info.value.code == "invalid_argument"
+
+
+def test_raw_perm_rejects_n_folds_above_n():
+    """n_folds > n: linalg::fold_split gives n one-row folds plus
+    (n_folds - n) empty ones, still leave-one-out."""
+    X, y = _data(n=12)
+    with pytest.raises(plskit.PlsKitError) as exc_info:
+        plskit.pls1_confirmatory_test(
+            X, y, k=1, method="raw_perm", args={"n_folds": 13}, seed=7,
+        )
+    assert exc_info.value.code == "invalid_argument"
+
+
+@pytest.mark.parametrize("n", [3, 4, 5])
+def test_find_k_sequence_raw_perm_rejects_small_n(n):
+    """The sequential raw_perm step has no caller-facing n_folds (it is
+    fixed at 5), so this reaches the leave-one-out rejection with no
+    n_folds argument in sight. Asserting "n > 5" in the message (not just
+    the error code) pins the sequential check itself, not the core
+    `confirmatory_test_impl` `n_folds >= n` guard, which only fires at
+    n == 5 and would let n in (3, 4) through silently."""
+    X, y = _data(n=n)
+    with pytest.raises(plskit.PlsKitError) as exc_info:
+        plskit.pls1_find_k_sequence(X, y, k_max=1, test_method="raw_perm", seed=7)
+    assert exc_info.value.code == "invalid_argument"
+    assert "n > 5" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("n", [3, 4, 5])
+def test_find_k_optimal_raw_perm_diagnostic_rejects_small_n(n):
+    """Same sequential check, reached through pls1_find_k_optimal's
+    diagnostic path rather than pls1_find_k_sequence."""
+    X, y = _data(n=n)
+    with pytest.raises(plskit.PlsKitError) as exc_info:
+        plskit.pls1_find_k_optimal(X, y, k_max=1, diagnostic="raw_perm", seed=7)
+    assert exc_info.value.code == "invalid_argument"
+    assert "n > 5" in str(exc_info.value)
+
+
 def test_confirmatory_at_param_no_longer_accepted():
     X, y = _data()
     with pytest.raises(TypeError):

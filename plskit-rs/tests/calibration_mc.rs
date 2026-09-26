@@ -284,7 +284,7 @@ fn find_k_sequence_weighted_h0_fpr_within_band() {
 
 #[test]
 fn split_nb_sparse_h0_fpr_within_band() {
-    // Spec acceptance "inference reuse": split machinery is agnostic to the
+    // Inference reuse: split machinery is agnostic to the
     // fitter — sparse inner fits at keep=2 of d=4 stay calibrated under H0.
     assert_calibrated(
         40,

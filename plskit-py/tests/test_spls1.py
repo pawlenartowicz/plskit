@@ -74,6 +74,16 @@ def test_spls1_find_keep_optimal_rejects_unknown_args():
     assert ei.value.code == "invalid_args"
 
 
+def test_spls1_find_keep_optimal_rejects_leave_one_out_at_n_eq_2():
+    """n = 2: the shared CV layer's n_folds cap/floor pushes the effective
+    fold count back up to n, leave-one-out. The same degeneracy raw_perm
+    rejects."""
+    X, y = synth(2, 5, 1, 4.0, 8)
+    with pytest.raises(PlsKitError) as ei:
+        plskit.spls1_find_keep_optimal(X, y, 1, seed=7)
+    assert ei.value.code == "invalid_argument"
+
+
 def test_spls1_find_k_optimal_dense_endpoint_matches():
     X, y = synth(80, 5, 1, 5.0, 9)
     dense = plskit.pls1_find_k_optimal(X, y, 4, seed=7)
@@ -102,6 +112,14 @@ def test_spls1_find_k_sequence_runs_sparse():
     r = plskit.spls1_find_k_sequence(X, y, 4, 2, seed=7, args={"n_splits": 30})
     assert r.pvalues.shape == (4,)
     assert r.test_method == "split_nb"
+
+
+def test_spls1_find_k_sequence_none_alpha_is_recorded_as_resolved_value():
+    """None (the public default for alpha) must resolve to the engine's own
+    default and be recorded on result.alpha, never as None."""
+    X, y = synth(80, 6, 2, 5.0, 12)
+    r = plskit.spls1_find_k_sequence(X, y, 4, 2, seed=7, args={"n_splits": 30})
+    assert r.alpha == pytest.approx(0.05)
 
 
 def test_spls1_fit_weights_smoke():

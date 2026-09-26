@@ -1,24 +1,14 @@
 //! `preprocess` fixture cases.
 
-use crate::cases::{ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, synth_data, CasePaths};
+use crate::cases::{
+    default_tolerance, faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64,
+    synth_data, CasePaths,
+};
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
 use anyhow::Result;
-use faer::Col;
 use plskit::{preprocess, PreprocessInput};
 use std::path::Path;
-
-/// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10.
-fn default_tolerance() -> serde_json::Value {
-    serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10})
-}
-
-/// Convert a `faer::Col<f64>` to a 1-D `ndarray::ArrayD<f64>`.
-fn faer_col_to_array(col: &Col<f64>) -> ndarray::ArrayD<f64> {
-    let n = col.nrows();
-    let v: Vec<f64> = (0..n).map(|i| col[i]).collect();
-    ndarray::Array1::from_vec(v).into_dyn()
-}
 
 /// Case: `preprocess` on (n=50, d=10) data with non-uniform weights.
 ///

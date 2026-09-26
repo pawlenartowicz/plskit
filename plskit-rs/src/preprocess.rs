@@ -32,7 +32,8 @@ pub struct PreprocessResult {
 }
 
 /// Public preprocess helper. Validates weights (length, finiteness, non-negativity, Σ > 0)
-/// and standardizes (X, y) using the weighted formulas in spec §3.2.
+/// and standardizes (X, y) with weighted moments: weights are renormalized to mean 1
+/// (`w'`), then `mean = Σ w'x / n` and `var = Σ w'(x − mean)² / n` (population, ddof=0).
 ///
 /// Note: `n_eff ≥ k+1` is **not** validated here (k is unknown to `preprocess`); fit-side
 /// entry points perform that check via `validate_and_normalize_weights`.

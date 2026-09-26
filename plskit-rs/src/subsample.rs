@@ -1,24 +1,26 @@
-//! Politis–Romano subsampling engine for PLS1 inference. The engine entry
-//! points are internal (`pub(crate)`): callers are
+//! Resampling engine for PLS1 inference: Politis–Romano subsampling for β
+//! and `holdout_corr`, and an n-out-of-n bootstrap for leverage. The engine
+//! entry points are internal (`pub(crate)`): callers are
 //! `signal_test::pls1_confirmatory_test(CI=Some)` and
 //! `rotation_stability::pls1_rotation_stability`. Only the result types
 //! `CIScalar` and `ConfirmatoryCI` are public, re-exported from `lib.rs`.
 //!
 //! Reduction formulas are documented inline on `reduce_centered_scaled`
-//! (centered-scaled CI; Politis–Romano 1999 Ch. 3) and `reduce_holdout_corr`
-//! (Fisher z-transformed NB-Wald CI; variance via Nadeau–Bengio 2003 inflation
-//! applied on the variance-stabilized atanh scale).
+//! (centered-scaled CI; Politis–Romano 1999 Ch. 3), `reduce_leverage`
+//! (normal-theory bootstrap CI centered on the full-data leverage) and
+//! `reduce_holdout_corr` (Fisher z-transformed NB-Wald CI; variance via
+//! Nadeau–Bengio 2003 inflation applied on the variance-stabilized atanh
+//! scale).
 
-/// Centered-scaled subsampling CI for a scalar functional, plus its SD.
+/// Resampling CI for a scalar functional, plus its SD.
 /// Marshalled to a frozen dataclass on the Python side; fields must not be reordered.
 ///
 /// Scale convention: `point`, `lower`, `upper` are always reported on the natural
 /// (user-facing) scale of the statistic. `sd` is on the inference scale used to
-/// build the CI. For `reduce_centered_scaled` (used for leverage) the inference
-/// scale is the natural scale, so `point ± Φ⁻¹(1−α/2) · sd` reconstructs the CI.
-/// For `reduce_holdout_corr` the inference scale is Fisher z = atanh(r), so `sd`
-/// is on the z-scale and the CI is asymmetric on the r-scale; do not reconstruct
-/// it from `point ± sd`.
+/// build the CI. For the centered-scaled reductions the inference scale is the
+/// natural scale. For `reduce_holdout_corr` the inference scale is Fisher
+/// z = atanh(r), so `sd` is on the z-scale and the CI is asymmetric on the
+/// r-scale; do not reconstruct it from `point ± sd`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CIScalar {
     /// Full-data point estimate `θ̂_n`, on the natural scale of the statistic.
@@ -27,30 +29,42 @@ pub struct CIScalar {
     pub lower: f64,
     /// Upper endpoint of the CI at `level`, on the natural scale.
     pub upper: f64,
-    /// Subsampling SE on the inference scale (natural scale for centered-scaled
+    /// Resampling SE on the inference scale (natural scale for centered-scaled
     /// reductions; Fisher z-scale for `reduce_holdout_corr`). See struct doc.
     pub sd: f64,
 }
 
+/// Subsampling rate factor `√(m/(n − m))` that maps the spread of size-`m`
+/// replicates to the SE of the size-`n` statistic. Subsamples are drawn
+/// without replacement, so for an asymptotically linear statistic
+/// `Var(θ̂_m | data) ≈ σ²·(1/m − 1/n)` and
+/// `SE(θ̂_n) = σ/√n = √(m/(n − m)) · sd(θ̂_m)`. The textbook `√(m/n)` drops
+/// the finite-population factor `1 − m/n`, which does not vanish at the
+/// default `m_rate` (`m/n = 0.26` at `n = 100`, `0.10` at `n = 2000`). The
+/// argument uses only the linearization, not the form of the functional.
+/// Used by the β reduction; leverage is bootstrapped at size `n` and needs
+/// no rate (`reduce_leverage`). Caller guarantees `m < n`.
+#[allow(clippy::cast_precision_loss)]
+fn fpc_rate(n: usize, m: usize) -> f64 {
+    (m as f64 / (n - m) as f64).sqrt()
+}
+
 /// Reduce a per-resample B-vector of `θ̂_m,b` values to a `CIScalar` using
-/// centered-scaled subsampling (Politis–Romano 1999 Ch. 3):
+/// centered-scaled subsampling (Politis–Romano 1999 Ch. 3) at the rate
+/// factor `scale`:
 ///   Δ_b = θ̂_m,b − θ̂_n
-///   lower = θ̂_n − sqrt(m/n) · quantile(Δ, 1 − α/2)
-///   upper = θ̂_n − sqrt(m/n) · quantile(Δ, α/2)
-///   sd    = sqrt(m/n) · stddev(Δ)
-/// `level` is the CI level (e.g. 0.95 → α = 0.05).
+///   lower = θ̂_n − scale · quantile(Δ, 1 − α/2)
+///   upper = θ̂_n − scale · quantile(Δ, α/2)
+///   sd    = scale · stddev(Δ)
+/// `level` is the CI level (e.g. 0.95 → α = 0.05). `reduce_beta` passes the
+/// finite-population rate `fpc_rate(n, m)` for the κ̂-rescaled replicates,
+/// and 1 to read off the raw replicate spread for `κ̂`.
 ///
 /// NaN samples (produced by failed worker resamples) are filtered before
 /// building the deltas vector; all denominators use the finite count
 /// `b_finite`. If all samples are NaN, returns a degenerate CI at `point`.
-#[allow(clippy::doc_markdown)]
-pub(crate) fn reduce_centered_scaled(
-    samples_b: &[f64],
-    point: f64,
-    n: usize,
-    m: usize,
-    level: f64,
-) -> CIScalar {
+#[allow(clippy::cast_precision_loss, clippy::doc_markdown)]
+fn reduce_centered_scaled(samples_b: &[f64], point: f64, scale: f64, level: f64) -> CIScalar {
     let mut deltas: Vec<f64> = samples_b
         .iter()
         .filter(|v| !v.is_nan())
@@ -68,12 +82,11 @@ pub(crate) fn reduce_centered_scaled(
     deltas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Less));
 
     let alpha = 1.0 - level;
-    let scale = ((m as f64) / (n as f64)).sqrt();
 
     let q_lo = crate::linalg::empirical_quantile(&deltas, alpha / 2.0);
     let q_hi = crate::linalg::empirical_quantile(&deltas, 1.0 - alpha / 2.0);
 
-    // lower = θ̂_n − √(m/n) · q_{1−α/2};  upper = θ̂_n − √(m/n) · q_{α/2}.
+    // lower = θ̂_n − scale · q_{1−α/2};  upper = θ̂_n − scale · q_{α/2}.
     let lower = point - scale * q_hi;
     let upper = point - scale * q_lo;
 
@@ -90,6 +103,52 @@ pub(crate) fn reduce_centered_scaled(
         point,
         lower,
         upper,
+        sd,
+    }
+}
+
+/// Normal-theory bootstrap CI for one variable's leverage, centered on the
+/// full-data value `h` (`point`), from the n-out-of-n bootstrap replicates
+/// `h_b` (`samples_b`):
+///
+/// ```text
+/// sd    = stddev(h_b)
+/// lower = h − Φ⁻¹(1 − α/2) · sd
+/// upper = h + Φ⁻¹(1 − α/2) · sd
+/// ```
+///
+/// Targets `E[ĥ_n]`, the expected leverage of a size-`n` fit, under the
+/// assumption that `ĥ_n` is roughly normal around it with an SD the
+/// bootstrap spread estimates. There is deliberately no bias correction:
+/// the replicate mean sits below `h` for signal variables and above it for
+/// noise variables (a resample duplicates rows and spreads leverage
+/// further), and neither that offset nor its reflection moves the interval.
+/// Unlike the subsampling SE, `sd(h_b)` needs no rate factor, because the
+/// replicates are fits at the full size `n`.
+///
+/// NaN samples (failed worker resamples) are filtered. With fewer than two
+/// finite samples the CI is degenerate at `point` with `sd = 0`. The caller
+/// clamps the bounds to `[0, 1]`.
+#[allow(clippy::cast_precision_loss)]
+fn reduce_leverage(samples_b: &[f64], point: f64, level: f64) -> CIScalar {
+    let finite: Vec<f64> = samples_b.iter().copied().filter(|v| !v.is_nan()).collect();
+    let b_finite = finite.len();
+    if b_finite < 2 {
+        return CIScalar {
+            point,
+            lower: point,
+            upper: point,
+            sd: 0.0,
+        };
+    }
+    let mean = finite.iter().sum::<f64>() / b_finite as f64;
+    let var = finite.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (b_finite - 1) as f64;
+    let sd = var.sqrt();
+    let half = standard_normal_inv(1.0 - (1.0 - level) / 2.0) * sd;
+    CIScalar {
+        point,
+        lower: point - half,
+        upper: point + half,
         sd,
     }
 }
@@ -148,26 +207,25 @@ use faer::{Col, ColRef, Mat, MatRef};
 
 use crate::error::{PlsKitError, PlsKitResult};
 use crate::fit::{pls1_fit, FitOpts, KSpec};
-use crate::linalg::{col_row_subset, row_subset, standardize_apply};
+use crate::linalg::{col_row_subset, row_subset};
 
 /// Per-resample outputs for the confirmatory CI branch. Per-variable arrays
 /// only — composite scalars have been removed.
 ///
-/// Each row carries its own `beta_sign` vector (per-coordinate `+/−/0` tally
-/// for the resample); the reducer aggregates these into per-coordinate counts.
+/// Each row carries its own `beta` vector; the reducer turns these into the
+/// per-coordinate β CIs and the per-coordinate subsampling z (`beta_sign_z`).
 /// Storing per-row keeps the row-disjoint invariant (per-resample writes are
 /// independent — no shared counters across threads).
 #[derive(Debug)]
 pub(crate) struct ConfirmatoryWorkerRow {
-    /// Per-variable subspace leverage on `W_b`. Invariant under right-orthogonal
-    /// rotation of W (leverage = diag(W(WᵀW)⁻¹Wᵀ); W → W·R leaves the hat matrix
-    /// fixed), so computed on the unaligned `W_b` — no procrustes alignment needed. Length D.
+    /// Per-variable subspace leverage on the bootstrap fit's `W_b` (n-out-of-n,
+    /// with replacement; see `run_one_confirmatory`). Invariant under
+    /// right-orthogonal rotation of W (leverage = diag(W(WᵀW)⁻¹Wᵀ); W → W·R
+    /// leaves the hat matrix fixed), so computed on the unaligned `W_b`, with
+    /// no procrustes alignment. Length D.
     pub leverage: Vec<f64>,
     /// `corr(X[holdout] · β_b, y[holdout])`. NaN if undefined (e.g. constant holdout y).
     pub holdout_corr: f64,
-    /// Per-variable `+/−/0` tally for the resample, used by the sign-z reduction.
-    /// Length D; entries are `1` for positive `β_b`[j], `-1` for negative, `0` for exact zero.
-    pub beta_sign: Vec<i8>,
     /// Per-variable subsample regression coefficient `β_b`. Length D. PLS1-only:
     /// β is invariant under component sign flips and within-subspace rotations
     /// (the (Pᵀ W)⁻¹·Q product cancels both), so per-coordinate centered-scaled
@@ -175,13 +233,117 @@ pub(crate) struct ConfirmatoryWorkerRow {
     pub beta: Vec<f64>,
 }
 
-/// Run one confirmatory subsample: draw indices, fit, align, compute readouts.
-/// `w_ref` is the `(D, K)` reference weight matrix; leverage scores are
-/// computed internally via `crate::linalg::leverage_diag`.
-/// `pre_standardized` matches the user's flag.
+/// Draw an n-out-of-n bootstrap resample: `n` indices from `0..n` with
+/// replacement. Uses `rng` (a child RNG).
+pub(crate) fn bootstrap_indices(n: usize, rng: &mut crate::rng::Rng) -> Vec<usize> {
+    use rand::RngExt;
+    (0..n).map(|_| rng.random_range(0..n)).collect()
+}
+
+/// A fit on a row selection of `(x, y)`, with the column and target scales
+/// it was standardized with (unit / zero under `pre_standardized`).
+struct RowFit {
+    w: Mat<f64>,
+    beta: Col<f64>,
+    x_mean: Col<f64>,
+    x_scale: Col<f64>,
+    y_scale: f64,
+}
+
+/// Fit `k` components on the rows `idx` of `(x, y)` (repeats allowed) with
+/// the same standardization regime as the full-data fit: the rows are
+/// re-standardized with their own (weighted) moments unless
+/// `pre_standardized_x`. Weights are sliced to `idx` and re-validated, so an
+/// insufficient effective sample size surfaces as `InvalidWeights`.
+///
+/// A NIPALS short-circuit (`k_used < k`) is an error, so the caller's
+/// driver counts the resample as failed instead of reducing a truncated
+/// weight matrix against length-`k` references.
+fn fit_rows(
+    x: MatRef<'_, f64>,
+    y: ColRef<'_, f64>,
+    idx: &[usize],
+    k: usize,
+    pre_standardized_x: bool,
+    weights: Option<ColRef<'_, f64>>,
+) -> PlsKitResult<RowFit> {
+    let d = x.ncols();
+    let y_rows = col_row_subset(y, idx);
+
+    let w_sub: Option<faer::Col<f64>> = weights.map(|w| crate::linalg::col_row_subset(w, idx));
+    let (w_sub_norm, _, _) = crate::fit::validate_and_normalize_weights(
+        w_sub.as_ref().map(faer::Col::as_ref),
+        idx.len(),
+        k,
+    )?;
+
+    let (xs_sub, x_mean, x_scale, ys_sub, y_scale) = if pre_standardized_x {
+        // Caller asserts already standardized: the row subsets are the
+        // blocks. Mean/scale are no-ops (zeros / ones) for the holdout
+        // standardization and for the β back-projection (β_b stays on the
+        // standardized scale, matching β_ref which the caller's full-data fit
+        // also leaves on that scale).
+        (
+            row_subset(x, idx),
+            Col::<f64>::zeros(d),
+            Col::<f64>::from_fn(d, |_| 1.0),
+            y_rows,
+            1.0_f64,
+        )
+    } else {
+        let (xs, mu, sigma) = crate::linalg::standardize_rows(
+            x,
+            idx,
+            w_sub_norm.as_ref().map(faer::Col::as_ref),
+            None,
+        );
+        let (ys, _, ys_sigma) = crate::linalg::standardize1_weighted(
+            y_rows.as_ref(),
+            w_sub_norm.as_ref().map(faer::Col::as_ref),
+        );
+        (xs, mu, sigma, ys, ys_sigma)
+    };
+
+    let fit = pls1_fit(
+        xs_sub.as_ref(),
+        ys_sub.as_ref(),
+        KSpec::Fixed(k),
+        w_sub_norm.as_ref().map(faer::Col::as_ref),
+        FitOpts {
+            pre_standardized: true,
+            // Seq inside the per-resample worker: outer Rayon owns the threadpool.
+            par: crate::fit::ParChoice::Seq,
+            ..FitOpts::default()
+        },
+    )?;
+    if fit.w_star.ncols() != k {
+        return Err(PlsKitError::Internal(format!(
+            "resample fit truncated to {} of {k} components",
+            fit.w_star.ncols()
+        )));
+    }
+    Ok(RowFit {
+        w: fit.w_star,
+        beta: fit.beta,
+        x_mean,
+        x_scale,
+        y_scale,
+    })
+}
+
+/// Run one confirmatory replicate: a size-`m` subsample (without
+/// replacement) for β and `holdout_corr`, and an n-out-of-n bootstrap
+/// resample (with replacement) for leverage. Both index sets come from the
+/// same child `rng`, subsample first, so the subsample draw does not depend
+/// on the bootstrap one. `pre_standardized_x` matches the user's flag.
+///
+/// Leverage uses the bootstrap because its bias depends on the sample size
+/// (at small `n/D` a fit spreads leverage from signal onto noise
+/// variables, more so on fewer rows): a size-`m` fit measures the sampling
+/// distribution at the wrong size, while a size-`n` resample reproduces the
+/// spread of the full-data leverage. See `reduce_leverage`.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::many_single_char_names)]
-#[allow(clippy::too_many_lines)]
 #[allow(clippy::similar_names)]
 fn run_one_confirmatory(
     x: MatRef<'_, f64>,
@@ -196,106 +358,44 @@ fn run_one_confirmatory(
     let n = x.nrows();
     let d = x.ncols();
 
-    // 1. Index draw
+    // 1. Index draws: subsample, then bootstrap resample.
     let (sample_idx, holdout_idx) = subsample_indices(n, m, rng);
+    let boot_idx = bootstrap_indices(n, rng);
 
-    // 2. Fit on the subsample with the same standardization regime as the full-data fit.
-    let x_sub_view = row_subset(x, &sample_idx);
-    let y_sub_view = col_row_subset(y, &sample_idx);
+    // 2. Subsample fit (β, holdout_corr) and bootstrap fit (leverage).
+    let RowFit {
+        beta: beta_b,
+        x_mean,
+        x_scale,
+        y_scale,
+        ..
+    } = fit_rows(x, y, &sample_idx, k, pre_standardized_x, weights)?;
+    let boot = fit_rows(x, y, &boot_idx, k, pre_standardized_x, weights)?;
 
-    // Slice weights to the subsample and validate per-subsample effective n.
-    let w_sub: Option<faer::Col<f64>> =
-        weights.map(|w| crate::linalg::col_row_subset(w, &sample_idx));
-    let (w_sub_norm, _, _) =
-        crate::fit::validate_and_normalize_weights(w_sub.as_ref().map(faer::Col::as_ref), m, k)?;
+    // 3. Per-variable leverage on the bootstrap fit's unaligned W. Leverage
+    // is invariant under right-orthogonal rotation (leverage =
+    // diag(W(WᵀW)⁻¹Wᵀ); W → W·R leaves the hat matrix fixed), so no
+    // procrustes alignment is needed.
+    let leverage = crate::linalg::leverage_diag(boot.w.as_ref());
 
-    #[allow(clippy::cast_precision_loss)]
-    let (xs_sub, x_mean, x_scale, ys_sub, y_scale) = if pre_standardized_x {
-        // Caller asserts already standardized — pass through, but row_subset still
-        // copies. Mean/scale are no-ops (zeros / ones) for the holdout standardization
-        // and for the β back-projection below (β_b stays on the standardized scale,
-        // matching β_ref which the caller's full-data fit also leaves on that scale).
-        let xs = Mat::<f64>::from_fn(x_sub_view.nrows(), d, |i, j| x_sub_view[(i, j)]);
-        let ys = Col::<f64>::from_fn(y_sub_view.nrows(), |i| y_sub_view[i]);
-        (
-            xs,
-            Col::<f64>::zeros(d),
-            Col::<f64>::from_fn(d, |_| 1.0),
-            ys,
-            1.0_f64,
-        )
+    // 4. Holdout predictive correlation of the subsample fit.
+    // Pre-standardized: the holdout rows are the block. Otherwise they are
+    // gathered and standardized with the subsample's moments in one pass.
+    let ys_h_owned = col_row_subset(y, &holdout_idx);
+    let xs_h = if pre_standardized_x {
+        row_subset(x, &holdout_idx)
     } else {
-        let (xs, mu, sigma) = crate::linalg::standardize_weighted(
-            x_sub_view.as_ref(),
-            w_sub_norm.as_ref().map(faer::Col::as_ref),
-        );
-        let (ys, _, ys_sigma) = crate::linalg::standardize1_weighted(
-            y_sub_view.as_ref(),
-            w_sub_norm.as_ref().map(faer::Col::as_ref),
-        );
-        (xs, mu, sigma, ys, ys_sigma)
+        crate::linalg::standardize_apply_rows(
+            x,
+            &holdout_idx,
+            x_mean.as_ref(),
+            x_scale.as_ref(),
+            None,
+        )
     };
 
-    let fit_b = pls1_fit(
-        xs_sub.as_ref(),
-        ys_sub.as_ref(),
-        KSpec::Fixed(k),
-        w_sub_norm.as_ref().map(faer::Col::as_ref),
-        FitOpts {
-            pre_standardized: true,
-            // Seq inside the per-resample worker — outer Rayon owns the threadpool.
-            par: crate::fit::ParChoice::Seq,
-            ..FitOpts::default()
-        },
-    )?;
-
-    let w_b = fit_b.w_star;
-    let beta_b = fit_b.beta;
-
-    // 3. Leverage is invariant under right-orthogonal rotation (leverage =
-    // diag(W(WᵀW)⁻¹Wᵀ); W → W·R leaves the hat matrix fixed), so no procrustes
-    // alignment is needed — compute it on `w_b` directly.
-    //
-    // Guard the NIPALS short-circuit that procrustes' `?` used to catch: a
-    // truncated `w_b` (k_used < k) must still fail the resample (→
-    // WorkerOutcome::Failed via the outer driver), not silently produce a
-    // short leverage vector against a length-D reference.
-    if w_b.ncols() != k {
-        return Err(PlsKitError::Internal(format!(
-            "subsample fit truncated to {} of {k} components",
-            w_b.ncols()
-        )));
-    }
-
-    // 5. Per-variable leverage on the unaligned W_b.
-    let leverage = crate::linalg::leverage_diag(w_b.as_ref());
-
-    // 6. beta-sign tally
-    let mut beta_sign = vec![0_i8; d];
-    for i in 0..d {
-        beta_sign[i] = if beta_b[i] > 0.0 {
-            1
-        } else if beta_b[i] < 0.0 {
-            -1
-        } else {
-            0
-        };
-    }
-
-    // 7. Holdout predictive correlation
-    let x_h_view = row_subset(x, &holdout_idx);
-    let y_h_view = col_row_subset(y, &holdout_idx);
-    let (xs_h, ys_h_owned) = if pre_standardized_x {
-        (
-            Mat::<f64>::from_fn(x_h_view.nrows(), d, |i, j| x_h_view[(i, j)]),
-            Col::<f64>::from_fn(y_h_view.nrows(), |i| y_h_view[i]),
-        )
-    } else {
-        let xs_h = standardize_apply(x_h_view.as_ref(), x_mean.as_ref(), x_scale.as_ref());
-        (xs_h, Col::<f64>::from_fn(y_h_view.nrows(), |i| y_h_view[i]))
-    };
-
-    let y_pred: Col<f64> = &xs_h * &beta_b;
+    // Seq inside the replicate worker: outer Rayon owns the threadpool.
+    let y_pred = crate::linalg::mat_vec(xs_h.as_ref(), beta_b.as_ref(), faer::Par::Seq);
     let n_h = ys_h_owned.nrows();
     #[allow(clippy::cast_precision_loss)]
     let holdout_corr = if n_h >= 2 {
@@ -322,7 +422,7 @@ fn run_one_confirmatory(
         f64::NAN
     };
 
-    // Back-project β_b to the same scale as β_ref so deltas are meaningful.
+    // 5. Back-project β_b to the same scale as β_ref so deltas are meaningful.
     // Mirrors `pls1_fit`'s full-data back-projection (`fit.rs:143-147`):
     //   β_raw[j] = β_std[j] * y_scale / x_scale[j]
     // For pre_standardized_x, both scales are 1.0 → no-op (β_b stays standardized,
@@ -332,7 +432,6 @@ fn run_one_confirmatory(
     Ok(ConfirmatoryWorkerRow {
         leverage,
         holdout_corr,
-        beta_sign,
         beta: beta_vec,
     })
 }
@@ -390,7 +489,7 @@ mod tests_worker {
             );
         }
         assert!(row.holdout_corr.is_finite() || row.holdout_corr.is_nan());
-        assert_eq!(row.beta_sign.len(), 6);
+        assert_eq!(row.beta.len(), 6);
     }
 
     /// Regression for review-finding R4 (ticket #1, 2026-05-10): a
@@ -433,33 +532,56 @@ mod tests_worker {
 /// `ConfirmatoryCI` at the wrapper layer.
 #[derive(Debug, Clone)]
 pub struct ConfirmatoryCI {
-    /// Number of bootstrap resamples used.
+    /// Number of resampling replicates. Each replicate draws one size-`m`
+    /// subsample (β, `holdout_corr`) and one n-out-of-n bootstrap resample
+    /// (leverage).
     pub n_boot: usize,
-    /// Subsample size used for each resample.
+    /// Subsample size used for each subsample (β, `holdout_corr`).
     pub m: usize,
     /// Subsample rate `m_rate` such that `m = ceil(n^m_rate)`.
     pub m_rate: f64,
     /// Nominal CI level (e.g. 0.95).
     pub level: f64,
-    /// Per-variable sign-stability z (folded). Length D. Under H0: P(sign-match)=0.5.
+    /// Per-variable folded subsampling z for `β[j]`: `|z_j|` with
+    /// `z_j = β_ref[j] / beta_se[j]`, i.e. `β_ref[j]` over a subsampling SE
+    /// that carries the without-replacement finite-population correction
+    /// and the shrinkage factor `κ̂` of the subsample fits (see
+    /// `reduce_beta`). Length D. Approximately half-normal when the
+    /// population `β[j]` is 0 (K = 1; see `_docs/python/results.md`,
+    /// "Per-variable readouts", for the calibration range); does not grow
+    /// with `n_boot`. NaN when the subsample spread of `β_b[j]` is zero or
+    /// undefined and `β_ref[j] ≠ 0`.
     pub beta_sign_z: Vec<f64>,
-    /// Per-variable signed sign-stability z = `sign(β_ref[j]) · |beta_sign_z[j]|`. Length D.
-    /// Use for descriptive directional-stability maps (TFCE-style displays). Folded form is canonical for hypothesis testing.
+    /// Per-variable signed subsampling z = `z_j` above, so
+    /// `beta_sign_z_signed[j] = sign(β_ref[j]) · beta_sign_z[j]`. Length D.
+    /// Approximately `N(0, 1)` when the population `β[j]` is 0 (K = 1).
     pub beta_sign_z_signed: Vec<f64>,
-    /// Per-variable leverage centered-scaled CI lower bound. Length D.
+    /// Per-variable leverage CI lower bound, `h[j] − Φ⁻¹(1 − α/2) ·
+    /// leverage_se[j]` (normal-theory bootstrap interval centered on the
+    /// full-data leverage; see `reduce_leverage`), clamped to [0, 1]
+    /// (leverage is a diagonal entry of a projection matrix). Length D.
+    /// Covers the expected leverage of a size-`n` fit, not its large-`n`
+    /// limit. Reads 0 for weakly loaded variables.
     pub leverage_ci_lower: Vec<f64>,
-    /// Per-variable leverage centered-scaled CI upper bound. Length D.
+    /// Per-variable leverage CI upper bound, `h[j] + Φ⁻¹(1 − α/2) ·
+    /// leverage_se[j]`, clamped to [0, 1]. Length D. See `leverage_ci_lower`.
     pub leverage_ci_upper: Vec<f64>,
-    /// Per-variable leverage subsampling SE. Length D.
+    /// Per-variable leverage bootstrap SE = `sd(h_b[j])` over the leverages
+    /// `h_b[j]` of n-out-of-n bootstrap refits (rows drawn with
+    /// replacement). Length D.
     pub leverage_se: Vec<f64>,
-    /// Per-coordinate β centered-scaled CI lower bound. Length D. PLS1-only;
-    /// the centered-scaled formula treats shrinkage bias and sampling variance
-    /// as sharing a √(n/m) rate — well-calibrated in the easy regime, a
-    /// directional sanity check elsewhere. See `RESULTS_FORMAT.md` for caveats.
+    /// Per-coordinate β CI lower bound. Length D. PLS1-only. Centered-scaled
+    /// subsampling on the replicates rescaled by `1/κ̂`, at the
+    /// finite-population rate `√(m/(n − m))` (see `reduce_beta`), so the
+    /// shrinkage of the subsample fits neither moves the midpoint nor
+    /// narrows the interval. Calibrated at `K = 1`; at `K ≥ 2` a directional
+    /// sanity check. `(−∞, +∞)` when `κ̂ = 0`. See `_docs/python/results.md`
+    /// ("Per-coordinate β CIs — diagnostic, with caveats") for the full caveats.
     pub beta_ci_lower: Vec<f64>,
-    /// Per-coordinate β centered-scaled CI upper bound. Length D. See `beta_ci_lower`.
+    /// Per-coordinate β CI upper bound. Length D. See `beta_ci_lower`.
     pub beta_ci_upper: Vec<f64>,
-    /// Per-coordinate β subsampling SE = √(m/n) · `sd(β_b[j])`. Length D.
+    /// Per-coordinate β subsampling SE = `√(m/(n − m)) · sd(β_b[j]) / κ̂`,
+    /// the SE `beta_sign_z` divides by. Length D. `+∞` when `κ̂ = 0`.
     pub beta_se: Vec<f64>,
     /// Holdout predictive correlation. CI is built via Fisher z-transform
     /// (atanh) with NB inflation applied on the z-scale, then back-transformed
@@ -468,7 +590,7 @@ pub struct ConfirmatoryCI {
     /// z-scale (see `CIScalar` doc).
     pub holdout_corr: CIScalar,
     /// Number of resamples whose worker fit succeeded (contributors to
-    /// leverage, `beta_sign`). Equals `n_boot − n_worker_failed`.
+    /// leverage, `beta_sign_z`). Equals `n_boot − n_worker_failed`.
     pub n_boot_finite: usize,
     /// Number of resamples whose `holdout_corr` is finite (contributors to
     /// the `holdout_corr` CI). Strictly ≤ `n_boot_finite`.
@@ -564,8 +686,8 @@ fn reduce_holdout_corr(r_b: &[f64], n: usize, m: usize, level: f64) -> CIScalar 
 }
 
 /// Inverse standard-normal CDF (Acklam / Beasley-Springer / Wichura). Used
-/// only for NB-Wald CI on `holdout_corr` (level ∈ [0.5, 0.99] → no extreme tails).
-/// The NB-adjusted Wald form requires Φ⁻¹ once.
+/// for the NB-Wald CI on `holdout_corr` and the normal-theory leverage CI
+/// (level ∈ [0.5, 0.99] → no extreme tails).
 #[allow(unused_parens, clippy::unreadable_literal, clippy::excessive_precision)]
 fn standard_normal_inv(p: f64) -> f64 {
     // Wichura AS241. Reproduced from numerical-recipes idiom; tolerance better
@@ -706,9 +828,151 @@ pub(crate) fn reduce_with_failure_check(
     Ok(ci)
 }
 
+/// Per-coordinate β readouts from the subsample replicates `β_b[j]`: the CI
+/// bounds, the SE, and the signed subsampling z. Built by `reduce_beta`.
+struct BetaReduction {
+    ci_lower: Vec<f64>,
+    ci_upper: Vec<f64>,
+    se: Vec<f64>,
+    z_signed: Vec<f64>,
+}
+
+/// Per-coordinate β CI, SE and signed z (`beta_ci_*`, `beta_se`,
+/// `beta_sign_z_signed`), all resting on one corrected subsampling SE:
+///
+/// ```text
+/// se_j = √(m/(n − m)) · sd(β_b[j]) / κ̂
+/// z_j  = β_ref[j] / se_j
+/// CI_j = β_ref[j] − √(m/(n − m)) · [q_{1−α/2}, q_{α/2}] of (β_b[j]/κ̂ − β_ref[j])
+/// ```
+///
+/// Two corrections to textbook centered-scaled subsampling at `√(m/n)`:
+///
+/// 1. Finite-population correction: the rate `√(m/(n − m))` (`fpc_rate`).
+/// 2. Shrinkage factor `κ̂` (`shrinkage_kappa`). A PLS fit on `m < n` rows
+///    shrinks the whole coefficient vector toward 0 more than the full fit
+///    does (at `K = 1`, `β = w·(wᵀXᵀy)/(wᵀXᵀXw)` with `w ∝ Xᵀy`, and the
+///    scalar factor falls as `m` shrinks), so `β_b ≈ κ·β_ref + noise` with
+///    the noise shrunk by the same `κ`. Dividing the replicates by `κ̂`
+///    removes both effects: the `(κ − 1)·β_ref` offset that would move the
+///    CI midpoint away from 0, and the understated spread.
+///
+/// Calibrated at `K = 1` only: at `K ≥ 2` the shrinkage is per component,
+/// not one scalar, and neither the z nor the CI is calibrated.
+///
+/// If `κ̂ = 0` (the subsample fits do not reproduce the full fit) the SE is
+/// `+∞`, every CI is `(−∞, +∞)` and every `z_j` is 0. `z_j` is NaN when
+/// `β_ref[j]` is not finite, or when `se_j` is 0 or undefined while
+/// `β_ref[j] ≠ 0` (no subsample spread to scale by); it is 0 when
+/// `β_ref[j] = 0`. A coordinate with no finite replicate gets the degenerate
+/// CI at `β_ref[j]` and `se_j = 0`, as in `reduce_centered_scaled`.
+fn reduce_beta(
+    rows: &[ConfirmatoryWorkerRow],
+    beta_ref: &[f64],
+    n: usize,
+    m: usize,
+    level: f64,
+) -> BetaReduction {
+    let d = beta_ref.len();
+    // One replicate column at a time through a reused buffer, as the
+    // leverage reduction does: a `d × B` copy of the replicates would add
+    // `d·B` floats on top of the rows at voxel-scale `d`. κ̂ is a slope over
+    // all `d` coordinates, so pass 2 cannot start before pass 1 has seen
+    // every column; what it needs from pass 1 is only `beta_mean` and
+    // `beta_sd`, so each column is gathered twice rather than kept.
+    let mut col = vec![0.0_f64; rows.len()];
+
+    // Pass 1: raw replicate mean and sd (unit rate factor) for κ̂.
+    let mut beta_mean = vec![f64::NAN; d];
+    let mut beta_sd = vec![0.0_f64; d];
+    for j in 0..d {
+        for (c, r) in col.iter_mut().zip(rows) {
+            *c = r.beta[j];
+        }
+        beta_sd[j] = reduce_centered_scaled(&col, beta_ref[j], 1.0, level).sd;
+        let (sum, count) = col
+            .iter()
+            .filter(|v| !v.is_nan())
+            .fold((0.0_f64, 0_usize), |(s, c), &v| (s + v, c + 1));
+        if count > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let mean = sum / count as f64;
+            beta_mean[j] = mean;
+        }
+    }
+    let kappa = shrinkage_kappa(beta_ref, &beta_mean, &beta_sd);
+
+    // Pass 2: CI and SE on the κ̂-rescaled replicates at the FPC rate.
+    let scale = fpc_rate(n, m);
+    let mut ci_lower = vec![f64::NEG_INFINITY; d];
+    let mut ci_upper = vec![f64::INFINITY; d];
+    let mut se = vec![f64::INFINITY; d];
+    if kappa > 0.0 {
+        for j in 0..d {
+            for (c, r) in col.iter_mut().zip(rows) {
+                *c = r.beta[j] / kappa;
+            }
+            let r = reduce_centered_scaled(&col, beta_ref[j], scale, level);
+            ci_lower[j] = r.lower;
+            ci_upper[j] = r.upper;
+            se[j] = r.sd;
+        }
+    }
+    let z_signed = (0..d)
+        .map(|j| {
+            let b = beta_ref[j];
+            if !b.is_finite() {
+                f64::NAN
+            } else if b == 0.0 {
+                0.0
+            } else if se[j] > 0.0 {
+                // `+∞` (κ̂ = 0) gives 0; NaN fails the test above.
+                b / se[j]
+            } else {
+                f64::NAN
+            }
+        })
+        .collect();
+    BetaReduction {
+        ci_lower,
+        ci_upper,
+        se,
+        z_signed,
+    }
+}
+
+/// Shrinkage factor `κ̂` of the subsample fits relative to the full fit:
+/// the precision-weighted least-squares slope of the subsample means on
+/// `β_ref`, `κ̂ = Σ_j t̄_j·t_j / Σ_j t_j²` with `t_j = β_ref[j]/sd_j` and
+/// `t̄_j = mean(β_b[j])/sd_j`. Invariant to rescaling any column of X, and
+/// to a common factor on every `sd_j`. Clamped to `[0, 1]`: values above 1
+/// are estimation noise, and a non-positive slope means the subsample fits
+/// do not reproduce the full fit. If no coordinate has a positive finite
+/// `sd_j`, `κ̂ = 1`.
+fn shrinkage_kappa(beta_ref: &[f64], beta_mean: &[f64], beta_sd: &[f64]) -> f64 {
+    let mut num = 0.0_f64;
+    let mut den = 0.0_f64;
+    for j in 0..beta_ref.len() {
+        let sd = beta_sd[j];
+        if beta_ref[j].is_finite() && beta_mean[j].is_finite() && sd.is_finite() && sd > 0.0 {
+            let t = beta_ref[j] / sd;
+            let t_bar = beta_mean[j] / sd;
+            num += t_bar * t;
+            den += t * t;
+        }
+    }
+    if den > 0.0 && (num / den).is_finite() {
+        (num / den).clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
 /// Reduce per-resample worker rows into the final `ConfirmatoryCI` payload.
-/// Computes per-variable leverage CIs and per-variable sign-z statistics by
-/// tallying `+/−/0` signs from each row's `beta_sign` against `beta_ref`.
+/// Computes per-variable leverage CIs and SEs from the bootstrap replicates
+/// (`reduce_leverage`, bounds clamped to [0, 1]), per-coordinate β CIs, SEs
+/// and subsampling z (`reduce_beta`), and the `holdout_corr` CI
+/// (`reduce_holdout_corr`).
 #[allow(
     clippy::too_many_arguments,
     clippy::many_single_char_names,
@@ -735,64 +999,20 @@ pub(crate) fn reduce_confirmatory(
         for i in 0..b {
             col_buf[i] = rows[i].leverage[j];
         }
-        let r = reduce_centered_scaled(&col_buf, leverage_ref[j], n, m, level);
-        leverage_ci_lower[j] = r.lower;
-        leverage_ci_upper[j] = r.upper;
+        let r = reduce_leverage(&col_buf, leverage_ref[j], level);
+        // Leverage is a diagonal entry of a projection matrix, so it lies in
+        // [0, 1]. The normal interval does not know that: for a weakly
+        // loaded variable `h − 1.96·se` is below 0. Intersect with the
+        // parameter space; `leverage_se` is unchanged.
+        leverage_ci_lower[j] = r.lower.clamp(0.0, 1.0);
+        leverage_ci_upper[j] = r.upper.clamp(0.0, 1.0);
         leverage_se[j] = r.sd;
     }
 
-    // ── per-coordinate β CI (PLS1 only — β is rotation/sign invariant) ──
-    let mut beta_ci_lower = vec![0.0_f64; d];
-    let mut beta_ci_upper = vec![0.0_f64; d];
-    let mut beta_se = vec![0.0_f64; d];
-    for j in 0..d {
-        for i in 0..b {
-            col_buf[i] = rows[i].beta[j];
-        }
-        let r = reduce_centered_scaled(&col_buf, beta_ref[j], n, m, level);
-        beta_ci_lower[j] = r.lower;
-        beta_ci_upper[j] = r.upper;
-        beta_se[j] = r.sd;
-    }
-
-    // ── per-variable sign-z ──
-    let mut pos = vec![0_usize; d];
-    let mut zero = vec![0_usize; d];
-    for row in rows {
-        for j in 0..d {
-            match row.beta_sign[j] {
-                1 => pos[j] += 1,
-                0 => zero[j] += 1,
-                _ => {}
-            }
-        }
-    }
-    let mut beta_sign_z = vec![0.0_f64; d];
-    let mut beta_sign_z_signed = vec![0.0_f64; d];
-    for j in 0..d {
-        let neg = b.saturating_sub(pos[j] + zero[j]);
-        let s_ref = beta_ref[j];
-        #[allow(clippy::cast_precision_loss)]
-        let m_count: f64 = if s_ref > 0.0 {
-            pos[j] as f64
-        } else if s_ref < 0.0 {
-            neg as f64
-        } else {
-            pos[j].max(neg) as f64
-        };
-        #[allow(clippy::cast_precision_loss)]
-        let p_hat = m_count / b as f64;
-        #[allow(clippy::cast_precision_loss)]
-        let folded = (2.0 * p_hat - 1.0) * (b as f64).sqrt();
-        beta_sign_z[j] = folded;
-        beta_sign_z_signed[j] = if s_ref > 0.0 {
-            folded.abs()
-        } else if s_ref < 0.0 {
-            -folded.abs()
-        } else {
-            folded
-        };
-    }
+    // ── per-coordinate β CI, SE and z (PLS1 only: β is rotation/sign invariant) ──
+    let beta_ref_vec: Vec<f64> = (0..d).map(|j| beta_ref[j]).collect();
+    let beta = reduce_beta(rows, &beta_ref_vec, n, m, level);
+    let beta_sign_z: Vec<f64> = beta.z_signed.iter().map(|z| z.abs()).collect();
 
     // ── holdout_corr (NB-Wald CI) ──
     let mut hc_buf = vec![0.0_f64; b];
@@ -807,13 +1027,13 @@ pub(crate) fn reduce_confirmatory(
         m_rate,
         level,
         beta_sign_z,
-        beta_sign_z_signed,
+        beta_sign_z_signed: beta.z_signed,
         leverage_ci_lower,
         leverage_ci_upper,
         leverage_se,
-        beta_ci_lower,
-        beta_ci_upper,
-        beta_se,
+        beta_ci_lower: beta.ci_lower,
+        beta_ci_upper: beta.ci_upper,
+        beta_se: beta.se,
         holdout_corr,
         n_boot_finite: b,
         n_boot_finite_holdout_corr: b,
@@ -908,6 +1128,273 @@ mod tests_reduce {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp, clippy::needless_range_loop)]
+mod tests_beta_z_and_leverage_clamp {
+    use super::*;
+    use faer::Col;
+
+    fn row(leverage: Vec<f64>, beta: Vec<f64>) -> ConfirmatoryWorkerRow {
+        ConfirmatoryWorkerRow {
+            leverage,
+            holdout_corr: 0.5,
+            beta,
+        }
+    }
+
+    /// Evenly spaced deviations on `[-a, a]`: exact mean 0.
+    #[allow(clippy::cast_precision_loss)]
+    fn grid(b: usize, a: f64) -> Vec<f64> {
+        (0..b)
+            .map(|i| a * (2.0 * (i as f64 + 0.5) / b as f64 - 1.0))
+            .collect()
+    }
+
+    fn sd(v: &[f64]) -> f64 {
+        #[allow(clippy::cast_precision_loss)]
+        let nf = v.len() as f64;
+        let mean = v.iter().sum::<f64>() / nf;
+        (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nf - 1.0)).sqrt()
+    }
+
+    /// `beta_sign_z` is `β_ref / se` with the finite-population-corrected
+    /// subsampling SE, and it neither grows with the number of replicates nor
+    /// depends on a common shrinkage factor of the subsample fits. The former
+    /// `(2p̂ − 1)·√B` formula fails every assertion here: all replicates share
+    /// the sign of `β_ref`, so it returns `√B` (14.1 and 44.7).
+    #[test]
+    fn beta_sign_z_is_shrinkage_and_n_boot_invariant() {
+        let (n, m) = (100_usize, 26_usize);
+        let beta_ref = [0.3_f64, -0.3];
+        let a = 0.25; // |δ| ≤ a < |β_ref|: every replicate keeps β_ref's sign
+        let beta_ref_col = Col::<f64>::from_fn(2, |j| beta_ref[j]);
+        #[allow(clippy::cast_precision_loss)]
+        let c = ((m as f64) / ((n - m) as f64)).sqrt();
+        for &b in &[200_usize, 2000] {
+            let delta = grid(b, a);
+            let expected = [
+                beta_ref[0] / (c * sd(&delta)),
+                beta_ref[1] / (c * sd(&delta)),
+            ];
+            for &kappa in &[1.0_f64, 0.6] {
+                let rows: Vec<ConfirmatoryWorkerRow> = delta
+                    .iter()
+                    .map(|&dl| {
+                        row(
+                            vec![0.5, 0.5],
+                            vec![kappa * (beta_ref[0] + dl), kappa * (beta_ref[1] - dl)],
+                        )
+                    })
+                    .collect();
+                let ci =
+                    reduce_confirmatory(&rows, n, m, 0.7, 0.95, &[0.5, 0.5], beta_ref_col.as_ref());
+                for j in 0..2 {
+                    assert!(
+                        (ci.beta_sign_z_signed[j] - expected[j]).abs() < 1e-9,
+                        "b={b} kappa={kappa} j={j}: z={} expected={}",
+                        ci.beta_sign_z_signed[j],
+                        expected[j]
+                    );
+                    assert!((ci.beta_sign_z[j] - expected[j].abs()).abs() < 1e-9);
+                }
+            }
+        }
+    }
+
+    /// The β CI is built from the same corrected replicates as
+    /// `beta_sign_z`: replicates rescaled by `1/κ̂` (so the shrinkage offset
+    /// does not move the midpoint) and spread scaled by `√(m/(n − m))` (the
+    /// finite-population correction). With symmetric `δ` it is therefore
+    /// centered on `β_ref` for any common shrinkage `κ`, its half-width is
+    /// `√(m/(n − m))` times the `δ` quantile, `beta_se` is the SE the z
+    /// divides by, and `beta_sign_z_signed = β_ref / beta_se` exactly.
+    #[test]
+    fn beta_ci_is_shrinkage_corrected_and_fpc_scaled() {
+        let (n, m, b) = (100_usize, 26_usize, 2000_usize);
+        let beta_ref = [0.3_f64, -0.3];
+        let beta_ref_col = Col::<f64>::from_fn(2, |j| beta_ref[j]);
+        #[allow(clippy::cast_precision_loss)]
+        let c = ((m as f64) / ((n - m) as f64)).sqrt();
+        let delta = grid(b, 0.25);
+        let mut sorted = delta.clone();
+        sorted.sort_by(f64::total_cmp);
+        let half = c * crate::linalg::empirical_quantile(&sorted, 0.975);
+        for &kappa in &[1.0_f64, 0.6] {
+            let rows: Vec<ConfirmatoryWorkerRow> = delta
+                .iter()
+                .map(|&dl| {
+                    row(
+                        vec![0.5, 0.5],
+                        vec![kappa * (beta_ref[0] + dl), kappa * (beta_ref[1] - dl)],
+                    )
+                })
+                .collect();
+            let ci =
+                reduce_confirmatory(&rows, n, m, 0.7, 0.95, &[0.5, 0.5], beta_ref_col.as_ref());
+            for j in 0..2 {
+                let what = format!("kappa={kappa} j={j}");
+                let mid = f64::midpoint(ci.beta_ci_lower[j], ci.beta_ci_upper[j]);
+                let hw = 0.5 * (ci.beta_ci_upper[j] - ci.beta_ci_lower[j]);
+                assert!((mid - beta_ref[j]).abs() < 1e-9, "{what}: midpoint {mid}");
+                assert!(
+                    (hw - half).abs() < 1e-9,
+                    "{what}: half-width {hw} vs {half}"
+                );
+                assert!(
+                    (ci.beta_se[j] - c * sd(&delta)).abs() < 1e-9,
+                    "{what}: beta_se {} vs {}",
+                    ci.beta_se[j],
+                    c * sd(&delta)
+                );
+                assert!(
+                    (ci.beta_sign_z_signed[j] - beta_ref[j] / ci.beta_se[j]).abs() < 1e-12,
+                    "{what}: z {} vs β/se {}",
+                    ci.beta_sign_z_signed[j],
+                    beta_ref[j] / ci.beta_se[j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn beta_reduction_edge_cases() {
+        // κ̂ skips coordinates without a positive finite sd, clamps to
+        // [0, 1], and is 1 when no coordinate is usable.
+        assert_eq!(shrinkage_kappa(&[1.0, 1.0], &[1.0, 0.5], &[0.0, 0.5]), 0.5);
+        assert_eq!(
+            shrinkage_kappa(&[1.0, 2.0], &[-1.0, -2.0], &[0.5, 0.5]),
+            0.0
+        );
+        assert_eq!(shrinkage_kappa(&[1.0], &[3.0], &[0.5]), 1.0);
+        assert_eq!(shrinkage_kappa(&[1.0], &[1.0], &[0.0]), 1.0);
+
+        // β_ref = 0 → z = 0; zero spread with β_ref ≠ 0 → NaN (degenerate
+        // CI at β_ref, se = 0); an ordinary coordinate → z = β_ref / se.
+        let (n, m) = (100_usize, 26_usize);
+        let delta = grid(200, 0.25);
+        let beta_ref = [0.0_f64, 1.0, 1.0];
+        let rows: Vec<ConfirmatoryWorkerRow> = delta
+            .iter()
+            .map(|&dl| row(vec![0.5; 3], vec![dl, 1.0, 1.0 + dl]))
+            .collect();
+        let r = reduce_beta(&rows, &beta_ref, n, m, 0.95);
+        assert_eq!(r.z_signed[0], 0.0);
+        assert!(r.z_signed[1].is_nan());
+        assert_eq!((r.ci_lower[1], r.ci_upper[1], r.se[1]), (1.0, 1.0, 0.0));
+        assert!(r.se[2] > 0.0 && (r.z_signed[2] - 1.0 / r.se[2]).abs() < 1e-12);
+
+        // Subsample means anti-aligned with β_ref: κ̂ = 0, so the SE is
+        // infinite, every CI is the whole line and every z is 0.
+        let beta_ref = [1.0_f64, 2.0];
+        let rows: Vec<ConfirmatoryWorkerRow> = delta
+            .iter()
+            .map(|&dl| row(vec![0.5; 2], vec![-1.0 - dl, -2.0 + dl]))
+            .collect();
+        let r = reduce_beta(&rows, &beta_ref, n, m, 0.95);
+        for j in 0..2 {
+            assert_eq!(r.z_signed[j], 0.0);
+            assert_eq!(r.se[j], f64::INFINITY);
+            assert_eq!(
+                (r.ci_lower[j], r.ci_upper[j]),
+                (f64::NEG_INFINITY, f64::INFINITY)
+            );
+        }
+    }
+
+    /// Leverage lies in [0, 1]; the normal interval can leave it on either
+    /// side, and the reducer clamps it back.
+    #[test]
+    fn leverage_ci_is_clamped_to_unit_interval() {
+        let (n, m, b) = (100_usize, 26_usize, 200_usize);
+        let delta = grid(b, 1.0);
+        // Coordinate 0: h = 0.05 with a wide replicate spread (noise-like).
+        // Coordinate 1: h = 0.95 with the same spread.
+        let lev0: Vec<f64> = delta.iter().map(|dl| 0.05 + 0.3 * dl).collect();
+        let lev1: Vec<f64> = delta.iter().map(|dl| 0.95 + 0.3 * dl).collect();
+        let raw0 = reduce_leverage(&lev0, 0.05, 0.95);
+        let raw1 = reduce_leverage(&lev1, 0.95, 0.95);
+        assert!(
+            raw0.lower < 0.0 && raw1.upper > 1.0,
+            "fixture must leave [0, 1]"
+        );
+        let rows: Vec<ConfirmatoryWorkerRow> = (0..b)
+            .map(|i| row(vec![lev0[i], lev1[i]], vec![1.0, 1.0]))
+            .collect();
+        let beta_ref_col = Col::<f64>::from_fn(2, |_| 1.0);
+        let ci = reduce_confirmatory(&rows, n, m, 0.7, 0.95, &[0.05, 0.95], beta_ref_col.as_ref());
+        assert_eq!(ci.leverage_ci_lower[0], 0.0);
+        assert_eq!(ci.leverage_ci_upper[1], 1.0);
+        assert_eq!(ci.leverage_ci_upper[0], raw0.upper.clamp(0.0, 1.0));
+        assert_eq!(ci.leverage_ci_lower[1], raw1.lower.clamp(0.0, 1.0));
+        assert_eq!(ci.leverage_se[0], raw0.sd);
+        assert_eq!(ci.leverage_se[1], raw1.sd);
+        for j in 0..2 {
+            assert!((0.0..=1.0).contains(&ci.leverage_ci_lower[j]));
+            assert!((0.0..=1.0).contains(&ci.leverage_ci_upper[j]));
+            assert!(ci.leverage_ci_lower[j] <= ci.leverage_ci_upper[j]);
+        }
+    }
+
+    /// The leverage CI is the normal interval `h ± Φ⁻¹(1 − α/2)·sd(h_b)`
+    /// over the bootstrap replicates, with `leverage_se = sd(h_b)`: no
+    /// subsampling rate (the replicates are size-`n` fits, so `n` and `m`
+    /// do not enter), and centered on `h` whatever the replicate mean. A
+    /// common offset of the replicates (the resampling bias of leverage)
+    /// and the skew of their distribution leave the interval unchanged; the
+    /// former reflected subsampling interval moved by both.
+    #[test]
+    fn leverage_ci_is_normal_bootstrap_interval_centered_on_h() {
+        let b = 2000_usize;
+        let lev_ref = [0.4_f64, 0.3];
+        // Skewed replicate deviations (squared grid) so a quantile-based
+        // interval would be asymmetric; nothing touches the [0, 1] clamp.
+        let delta: Vec<f64> = grid(b, 1.0).iter().map(|v| 0.1 * v * v.abs()).collect();
+        let z = standard_normal_inv(0.975);
+        let beta_ref_col = Col::<f64>::from_fn(2, |_| 1.0);
+        let mut reference: Option<ConfirmatoryCI> = None;
+        for &(n, m) in &[(100_usize, 26_usize), (2000, 206)] {
+            for &offset in &[0.0_f64, -0.08] {
+                let rows: Vec<ConfirmatoryWorkerRow> = delta
+                    .iter()
+                    .map(|&dl| {
+                        row(
+                            vec![lev_ref[0] + offset + dl, lev_ref[1] + offset + dl],
+                            vec![1.0, 1.0],
+                        )
+                    })
+                    .collect();
+                let ci =
+                    reduce_confirmatory(&rows, n, m, 0.7, 0.95, &lev_ref, beta_ref_col.as_ref());
+                for j in 0..2 {
+                    let what = format!("n={n} offset={offset} j={j}");
+                    assert!((ci.leverage_se[j] - sd(&delta)).abs() < 1e-12, "{what}");
+                    let lo = lev_ref[j] - z * ci.leverage_se[j];
+                    let hi = lev_ref[j] + z * ci.leverage_se[j];
+                    assert!((ci.leverage_ci_lower[j] - lo).abs() < 1e-12, "{what}");
+                    assert!((ci.leverage_ci_upper[j] - hi).abs() < 1e-12, "{what}");
+                }
+                if let Some(r) = &reference {
+                    for j in 0..2 {
+                        assert!((ci.leverage_ci_lower[j] - r.leverage_ci_lower[j]).abs() < 1e-12);
+                        assert!((ci.leverage_ci_upper[j] - r.leverage_ci_upper[j]).abs() < 1e-12);
+                    }
+                } else {
+                    reference = Some(ci);
+                }
+            }
+        }
+    }
+
+    /// Fewer than two finite replicates give the degenerate CI at `h`.
+    #[test]
+    fn leverage_ci_degenerate_without_spread() {
+        let r = reduce_leverage(&[f64::NAN, 0.3, f64::NAN], 0.25, 0.95);
+        assert_eq!((r.lower, r.upper, r.sd), (0.25, 0.25, 0.0));
+        let r = reduce_leverage(&[0.375; 64], 0.25, 0.95);
+        assert_eq!((r.lower, r.upper, r.sd), (0.25, 0.25, 0.0));
+    }
+}
+
+#[cfg(test)]
 mod tests_failure_check {
     use super::*;
     use faer::Col;
@@ -916,7 +1403,6 @@ mod tests_failure_check {
         ConfirmatoryWorkerRow {
             leverage: vec![0.5_f64; 2],
             holdout_corr,
-            beta_sign: vec![1_i8, 1_i8],
             beta: vec![1.0_f64, 1.0_f64],
         }
     }
@@ -1069,7 +1555,7 @@ mod tests {
     fn reduce_centered_scaled_recovers_point_when_no_variation() {
         // All samples equal to point → Δ ≡ 0 → lower = upper = point, sd = 0.
         let samples = vec![3.0_f64; 100];
-        let r = reduce_centered_scaled(&samples, 3.0, 1000, 126, 0.95);
+        let r = reduce_centered_scaled(&samples, 3.0, fpc_rate(1000, 126), 0.95);
         assert!((r.point - 3.0).abs() < 1e-12);
         assert!((r.lower - 3.0).abs() < 1e-12);
         assert!((r.upper - 3.0).abs() < 1e-12);
@@ -1081,7 +1567,7 @@ mod tests {
         // Synthetic dispersed Δ around point=0; symmetric → ci is symmetric-ish.
         #[allow(clippy::cast_lossless)]
         let samples: Vec<f64> = (0..1000).map(|i| (i as f64 - 500.0) * 0.001).collect();
-        let r = reduce_centered_scaled(&samples, 0.0, 1000, 100, 0.95);
+        let r = reduce_centered_scaled(&samples, 0.0, fpc_rate(1000, 100), 0.95);
         assert!(r.lower < r.upper, "lower={} upper={}", r.lower, r.upper);
         assert!(r.sd > 0.0);
     }
@@ -1105,7 +1591,8 @@ pub(crate) struct SubsampleOpts {
     /// `0.0` is strict; `1.0` is the legacy permissive behaviour.
     /// Distinct from `max_skip_rate`: covers numerical/fit failures, not weight-validation skips.
     pub max_failure_rate: f64,
-    /// Spec §6.3 threshold for weight-validation skips. Default `0.01`. Range `[0.0, 1.0]`.
+    /// Threshold on the fraction of resamples skipped by weight validation.
+    /// Default `0.01`. Range `[0.0, 1.0]`.
     /// Distinct from `max_failure_rate` (numerical failures): when a subsample's `pls1_fit`
     /// returns `InvalidWeights { reason: "insufficient_effective_n" }` due to insufficient
     /// effective sample size after weight-based row selection, that's a *skip* rather than
@@ -1466,5 +1953,435 @@ mod tests_engine {
         assert_eq!(ci.n_boot_finite_holdout_corr, 200);
         assert!(ci.n_boot_finite_holdout_corr <= ci.n_boot_finite);
         assert!(ci.n_boot_finite <= ci.n_boot);
+    }
+
+    fn run_engine(
+        x: &Mat<f64>,
+        y: &Col<f64>,
+        k: usize,
+        n_boot: usize,
+        seed: u64,
+    ) -> ConfirmatoryCI {
+        let fit = pls1_fit(
+            x.as_ref(),
+            y.as_ref(),
+            KSpec::Fixed(k),
+            None,
+            FitOpts::default(),
+        )
+        .unwrap();
+        let leverage_ref = crate::linalg::leverage_diag(fit.w_star.as_ref());
+        let opts = SubsampleOpts {
+            n_boot,
+            m_rate: 0.7,
+            level: 0.95,
+            pre_standardized: false,
+            disable_parallelism: false,
+            max_failure_rate: 0.0,
+            max_skip_rate: 1.0,
+        };
+        let (_, mut rng) = resolve_seed(Some(seed)).unwrap();
+        pls1_subsample_inference_confirmatory(
+            x.as_ref(),
+            y.as_ref(),
+            k,
+            fit.w_star.as_ref(),
+            fit.beta.as_ref(),
+            &leverage_ref,
+            opts,
+            None,
+            &mut rng,
+        )
+        .unwrap()
+    }
+
+    /// Under a pure null (y independent of X, K = 1) every population β[j]
+    /// is 0, so `beta_sign_z` should be roughly half-normal: mean
+    /// √(2/π) ≈ 0.80 and about 5% above 1.96. The former `(2p̂ − 1)·√B`
+    /// formula averaged about 4.6 here with most values above 1.96.
+    #[test]
+    fn beta_sign_z_is_calibrated_under_pure_null() {
+        let (n, d, reps) = (200_usize, 8_usize, 60_u64);
+        let mut pooled = Vec::new();
+        let mut excluded = 0_usize;
+        for rep in 0..reps {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(5000 + rep);
+            let x = Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0));
+            let y = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
+            let ci = run_engine(&x, &y, 1, 200, 7000 + rep);
+            pooled.extend(ci.beta_sign_z.iter().copied());
+            excluded += (0..d)
+                .filter(|&j| ci.beta_ci_lower[j] > 0.0 || ci.beta_ci_upper[j] < 0.0)
+                .count();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let total = pooled.len() as f64;
+        let mean = pooled.iter().sum::<f64>() / total;
+        #[allow(clippy::cast_precision_loss)]
+        let share = pooled.iter().filter(|z| **z > 1.96).count() as f64 / total;
+        assert!(pooled.iter().all(|z| z.is_finite() && *z >= 0.0));
+        assert!((0.6..=1.0).contains(&mean), "mean |z| = {mean}");
+        assert!(share <= 0.10, "share |z| > 1.96 = {share}");
+        // The β CI rests on the same corrected SE, so it covers the null
+        // β[j] = 0 at roughly the nominal rate. Uncorrected (no FPC, no
+        // 1/κ̂) it was κ̂·√(1 − m/n) too narrow and missed 0 far more often.
+        #[allow(clippy::cast_precision_loss)]
+        let miss = excluded as f64 / total;
+        assert!(miss <= 0.10, "share of β CIs excluding 0 = {miss}");
+    }
+
+    /// The leverage CI covers the expected leverage of a size-`n` fit in
+    /// the regime that exposed the reflected subsampling interval: `D = 20`,
+    /// `n = 100`, `K = 1`, where a fit on `m = 26` rows puts much less
+    /// leverage on the signal variables than the full fit. The target
+    /// `E[ĥ_n]` is the mean full-data leverage over fresh datasets. The
+    /// former interval covered it about half the time here (0.51 over 1000
+    /// datasets); the bootstrap interval about 0.93.
+    #[test]
+    #[allow(clippy::cast_precision_loss, clippy::many_single_char_names)]
+    fn leverage_ci_covers_expected_leverage_at_small_n_over_d() {
+        let (n, d, snr) = (100_usize, 20_usize, 1.0_f64);
+        let (n_oracle, reps) = (400_u64, 100_u64);
+        let mut target = [0.0_f64; 2];
+        for o in 0..n_oracle {
+            let (x, y) = synth(n, d, snr, 90_000 + o);
+            let fit = pls1_fit(
+                x.as_ref(),
+                y.as_ref(),
+                KSpec::Fixed(1),
+                None,
+                FitOpts::default(),
+            )
+            .unwrap();
+            let h = crate::linalg::leverage_diag(fit.w_star.as_ref());
+            target[0] += h[0] / n_oracle as f64;
+            target[1] += h[1] / n_oracle as f64;
+        }
+        let mut covered = 0_usize;
+        for rep in 0..reps {
+            let (x, y) = synth(n, d, snr, 10_000 + rep);
+            let ci = run_engine(&x, &y, 1, 200, 20_000 + rep);
+            covered += (0..2)
+                .filter(|&j| {
+                    ci.leverage_ci_lower[j] <= target[j] && target[j] <= ci.leverage_ci_upper[j]
+                })
+                .count();
+        }
+        let coverage = covered as f64 / (2 * reps) as f64;
+        assert!(coverage >= 0.85, "signal leverage coverage {coverage}");
+    }
+
+    /// Signal coordinates keep large z, noise coordinates stay in the
+    /// half-normal range, and the leverage CI stays inside [0, 1].
+    #[test]
+    fn beta_sign_z_separates_signal_and_leverage_ci_in_unit_interval() {
+        let (x, y) = synth(200, 8, 4.0, 42);
+        let ci = run_engine(&x, &y, 1, 300, 2026);
+        for j in 0..2 {
+            assert!(
+                ci.beta_sign_z[j] > 5.0,
+                "signal j={j}: {}",
+                ci.beta_sign_z[j]
+            );
+        }
+        for j in 2..8 {
+            assert!(
+                ci.beta_sign_z[j] < 4.0,
+                "noise j={j}: {}",
+                ci.beta_sign_z[j]
+            );
+        }
+        for j in 0..8 {
+            assert!((0.0..=1.0).contains(&ci.leverage_ci_lower[j]));
+            assert!((0.0..=1.0).contains(&ci.leverage_ci_upper[j]));
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::many_single_char_names,
+    clippy::too_many_lines,
+    clippy::too_many_arguments
+)]
+mod copy_free_reference {
+    use super::*;
+    use crate::linalg::{col_row_subset, row_subset, standardize_apply};
+    use crate::signal_test::with_new_routes_disabled;
+    use crate::test_support::{assert_bits_eq, col_vals, copy_free_families, mat_vals, Layouts};
+
+    /// Pre-change body, verbatim.
+    fn fit_rows_reference(
+        x: MatRef<'_, f64>,
+        y: ColRef<'_, f64>,
+        idx: &[usize],
+        k: usize,
+        pre_standardized_x: bool,
+        weights: Option<ColRef<'_, f64>>,
+    ) -> PlsKitResult<RowFit> {
+        let d = x.ncols();
+        let x_rows = row_subset(x, idx);
+        let y_rows = col_row_subset(y, idx);
+
+        let w_sub: Option<faer::Col<f64>> = weights.map(|w| crate::linalg::col_row_subset(w, idx));
+        let (w_sub_norm, _, _) = crate::fit::validate_and_normalize_weights(
+            w_sub.as_ref().map(faer::Col::as_ref),
+            idx.len(),
+            k,
+        )?;
+
+        let (xs_sub, x_mean, x_scale, ys_sub, y_scale) = if pre_standardized_x {
+            // Caller asserts already standardized: the row subsets are the
+            // blocks, moved rather than copied. Mean/scale are no-ops (zeros /
+            // ones) for the holdout standardization and for the β
+            // back-projection (β_b stays on the standardized scale, matching
+            // β_ref which the caller's full-data fit also leaves on that scale).
+            (
+                x_rows,
+                Col::<f64>::zeros(d),
+                Col::<f64>::from_fn(d, |_| 1.0),
+                y_rows,
+                1.0_f64,
+            )
+        } else {
+            let (xs, mu, sigma) = crate::linalg::standardize_weighted(
+                x_rows.as_ref(),
+                w_sub_norm.as_ref().map(faer::Col::as_ref),
+            );
+            let (ys, _, ys_sigma) = crate::linalg::standardize1_weighted(
+                y_rows.as_ref(),
+                w_sub_norm.as_ref().map(faer::Col::as_ref),
+            );
+            (xs, mu, sigma, ys, ys_sigma)
+        };
+
+        let fit = pls1_fit(
+            xs_sub.as_ref(),
+            ys_sub.as_ref(),
+            KSpec::Fixed(k),
+            w_sub_norm.as_ref().map(faer::Col::as_ref),
+            FitOpts {
+                pre_standardized: true,
+                // Seq inside the per-resample worker: outer Rayon owns the threadpool.
+                par: crate::fit::ParChoice::Seq,
+                ..FitOpts::default()
+            },
+        )?;
+        if fit.w_star.ncols() != k {
+            return Err(PlsKitError::Internal(format!(
+                "resample fit truncated to {} of {k} components",
+                fit.w_star.ncols()
+            )));
+        }
+        Ok(RowFit {
+            w: fit.w_star,
+            beta: fit.beta,
+            x_mean,
+            x_scale,
+            y_scale,
+        })
+    }
+
+    /// Pre-change body, verbatim.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::many_single_char_names)]
+    #[allow(clippy::similar_names)]
+    fn run_one_confirmatory_reference(
+        x: MatRef<'_, f64>,
+        y: ColRef<'_, f64>,
+        k: usize,
+        m: usize,
+        _w_ref: MatRef<'_, f64>, // retained for call-site shape parity; leverage no longer uses it
+        pre_standardized_x: bool,
+        weights: Option<ColRef<'_, f64>>,
+        rng: &mut crate::rng::Rng,
+    ) -> PlsKitResult<ConfirmatoryWorkerRow> {
+        let n = x.nrows();
+        let d = x.ncols();
+
+        // 1. Index draws: subsample, then bootstrap resample.
+        let (sample_idx, holdout_idx) = subsample_indices(n, m, rng);
+        let boot_idx = bootstrap_indices(n, rng);
+
+        // 2. Subsample fit (β, holdout_corr) and bootstrap fit (leverage).
+        let RowFit {
+            beta: beta_b,
+            x_mean,
+            x_scale,
+            y_scale,
+            ..
+        } = fit_rows_reference(x, y, &sample_idx, k, pre_standardized_x, weights)?;
+        let boot = fit_rows_reference(x, y, &boot_idx, k, pre_standardized_x, weights)?;
+
+        // 3. Per-variable leverage on the bootstrap fit's unaligned W. Leverage
+        // is invariant under right-orthogonal rotation (leverage =
+        // diag(W(WᵀW)⁻¹Wᵀ); W → W·R leaves the hat matrix fixed), so no
+        // procrustes alignment is needed.
+        let leverage = crate::linalg::leverage_diag(boot.w.as_ref());
+
+        // 4. Holdout predictive correlation of the subsample fit.
+        let x_h_view = row_subset(x, &holdout_idx);
+        let y_h_view = col_row_subset(y, &holdout_idx);
+        let (xs_h, ys_h_owned) = if pre_standardized_x {
+            (
+                Mat::<f64>::from_fn(x_h_view.nrows(), d, |i, j| x_h_view[(i, j)]),
+                Col::<f64>::from_fn(y_h_view.nrows(), |i| y_h_view[i]),
+            )
+        } else {
+            let xs_h = standardize_apply(x_h_view.as_ref(), x_mean.as_ref(), x_scale.as_ref());
+            (xs_h, Col::<f64>::from_fn(y_h_view.nrows(), |i| y_h_view[i]))
+        };
+
+        let y_pred: Col<f64> = &xs_h * &beta_b;
+        let n_h = ys_h_owned.nrows();
+        #[allow(clippy::cast_precision_loss)]
+        let holdout_corr = if n_h >= 2 {
+            let yp_mean: f64 = (0..n_h).map(|i| y_pred[i]).sum::<f64>() / n_h as f64;
+            let yh_mean: f64 = (0..n_h).map(|i| ys_h_owned[i]).sum::<f64>() / n_h as f64;
+            let mut s_pp = 0.0_f64;
+            let mut s_yy = 0.0_f64;
+            let mut s_py = 0.0_f64;
+            for i in 0..n_h {
+                #[allow(clippy::many_single_char_names)]
+                let dp = y_pred[i] - yp_mean;
+                #[allow(clippy::many_single_char_names)]
+                let dy = ys_h_owned[i] - yh_mean;
+                s_pp += dp * dp;
+                s_yy += dy * dy;
+                s_py += dp * dy;
+            }
+            if s_pp > 1e-30 && s_yy > 1e-30 {
+                (s_py / (s_pp * s_yy).sqrt()).clamp(-1.0, 1.0)
+            } else {
+                f64::NAN
+            }
+        } else {
+            f64::NAN
+        };
+
+        // 5. Back-project β_b to the same scale as β_ref so deltas are meaningful.
+        // Mirrors `pls1_fit`'s full-data back-projection (`fit.rs:143-147`):
+        //   β_raw[j] = β_std[j] * y_scale / x_scale[j]
+        // For pre_standardized_x, both scales are 1.0 → no-op (β_b stays standardized,
+        // matching β_ref which the caller's full-data fit also leaves on that scale).
+        let beta_vec: Vec<f64> = (0..d).map(|j| beta_b[j] * y_scale / x_scale[j]).collect();
+
+        Ok(ConfirmatoryWorkerRow {
+            leverage,
+            holdout_corr,
+            beta: beta_vec,
+        })
+    }
+
+    fn row_fit_bits(a: &RowFit, b: &RowFit, what: &str) {
+        assert_bits_eq(
+            &mat_vals(a.w.as_ref()),
+            &mat_vals(b.w.as_ref()),
+            &format!("{what}.w"),
+        );
+        assert_bits_eq(
+            &col_vals(a.beta.as_ref()),
+            &col_vals(b.beta.as_ref()),
+            &format!("{what}.beta"),
+        );
+        assert_bits_eq(
+            &col_vals(a.x_mean.as_ref()),
+            &col_vals(b.x_mean.as_ref()),
+            &format!("{what}.x_mean"),
+        );
+        assert_bits_eq(
+            &col_vals(a.x_scale.as_ref()),
+            &col_vals(b.x_scale.as_ref()),
+            &format!("{what}.x_scale"),
+        );
+        assert_eq!(a.y_scale.to_bits(), b.y_scale.to_bits(), "{what}.y_scale");
+    }
+
+    // Per-unit body: no parallel axis; serial vs parallel is covered by
+    // byte_parity (confirmatory_ci_bundle_byte_parity).
+    #[test]
+    fn fit_rows_and_the_confirmatory_worker_match_reference() {
+        with_new_routes_disabled(|| {
+            for f in copy_free_families() {
+                let n = f.x.nrows();
+                let w =
+                    f.w.as_ref()
+                        .map(|w| crate::linalg::normalize_weights(w.as_ref()).unwrap());
+                let wr = w.as_ref().map(Col::as_ref);
+                let (xs, _, _) = crate::linalg::standardize(f.x.as_ref());
+                let (ys, _, _) = crate::linalg::standardize1(f.y.as_ref());
+                let (_, mut rng) = crate::rng::resolve_seed(Some(3)).unwrap();
+                // Bootstrap indices repeat rows.
+                let boot = bootstrap_indices(n, &mut rng);
+                let (sub, _) = subsample_indices(n, n * 2 / 3, &mut rng);
+                for pre in [false, true] {
+                    let (x0, y0) = if pre { (&xs, &ys) } else { (&f.x, &f.y) };
+                    let lay = Layouts::new(x0.as_ref());
+                    for (view, xv) in lay.all(x0) {
+                        for (label, idx) in [("boot", &boot), ("subsample", &sub)] {
+                            for k in [1_usize, 2] {
+                                let what = format!("{} {view} {label} pre={pre} k={k}", f.name);
+                                match (
+                                    fit_rows(xv, y0.as_ref(), idx, k, pre, wr),
+                                    fit_rows_reference(xv, y0.as_ref(), idx, k, pre, wr),
+                                ) {
+                                    (Ok(a), Ok(b)) => row_fit_bits(&a, &b, &what),
+                                    (Err(a), Err(b)) => {
+                                        assert_eq!(a.to_string(), b.to_string(), "{what}");
+                                    }
+                                    (a, b) => panic!("{what}: ok {} vs {}", a.is_ok(), b.is_ok()),
+                                }
+                            }
+                        }
+                        for seed in [1_u64, 2, 3] {
+                            let (_, mut r1) = crate::rng::resolve_seed(Some(seed)).unwrap();
+                            let (_, mut r2) = crate::rng::resolve_seed(Some(seed)).unwrap();
+                            let w_ref = Mat::<f64>::zeros(f.x.ncols(), 2);
+                            let what = format!("{} {view} pre={pre} worker seed {seed}", f.name);
+                            match (
+                                run_one_confirmatory(
+                                    xv,
+                                    y0.as_ref(),
+                                    2,
+                                    n * 2 / 3,
+                                    w_ref.as_ref(),
+                                    pre,
+                                    wr,
+                                    &mut r1,
+                                ),
+                                run_one_confirmatory_reference(
+                                    xv,
+                                    y0.as_ref(),
+                                    2,
+                                    n * 2 / 3,
+                                    w_ref.as_ref(),
+                                    pre,
+                                    wr,
+                                    &mut r2,
+                                ),
+                            ) {
+                                (Ok(a), Ok(b)) => {
+                                    assert_bits_eq(
+                                        &a.leverage,
+                                        &b.leverage,
+                                        &format!("{what}.leverage"),
+                                    );
+                                    assert_bits_eq(&a.beta, &b.beta, &format!("{what}.beta"));
+                                    assert_eq!(
+                                        a.holdout_corr.to_bits(),
+                                        b.holdout_corr.to_bits(),
+                                        "{what}.holdout_corr"
+                                    );
+                                }
+                                (Err(a), Err(b)) => {
+                                    assert_eq!(a.to_string(), b.to_string(), "{what}");
+                                }
+                                (a, b) => panic!("{what}: ok {} vs {}", a.is_ok(), b.is_ok()),
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 }

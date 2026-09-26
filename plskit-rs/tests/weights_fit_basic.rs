@@ -162,7 +162,7 @@ fn pls1_model_records_n_eff_and_weights() {
     assert!(m.weights.is_some());
     assert!((m.n_eff - plskit::linalg::compute_n_eff(w.as_ref())).abs() < 1e-12);
 
-    // Uniform weights → echo as None (per spec §3.6 / open issue #2 recommended resolution).
+    // Uniform weights → echo as None (uniform-weight invariance: all-equal weights fit as none).
     let w_uniform = Col::<f64>::from_fn(n, |_| 1.0);
     let m_u = pls1_fit(
         x.as_ref(),

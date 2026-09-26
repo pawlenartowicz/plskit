@@ -222,3 +222,33 @@ def test_split_nb_unknown_arg_key_is_rejected():
             X, Y, k=1, method="split_nb", args={"n_perm": 100}, seed=1
         )
     assert ei.value.code == "invalid_args"
+
+
+def _orthogonal_Y(n=60, p=6, q=3, seed=4):
+    # Y residualized on [1, X]: orthogonal to the standardized columns of X
+    # up to rounding, so X'Y is rounding noise, sigma_1 included.
+    rng = np.random.default_rng(seed)
+    X = rng.normal(size=(n, p))
+    E = rng.normal(size=(n, q))
+    A = np.column_stack([np.ones(n), X])
+    Y = E - A @ np.linalg.lstsq(A, E, rcond=None)[0]
+    return X, Y
+
+
+@pytest.mark.parametrize("k", [1, 3])
+def test_orthogonal_Y_keeps_no_component_like_pls1(k):
+    X, Y = _orthogonal_Y()
+    m = plskit.pls3_fit(X, Y, k=k)
+    assert m.k_used == 0
+    assert m.U.shape == (6, 0)
+    assert m.V.shape == (3, 0)
+    assert m.singular_values.shape == (0,)
+    assert m.x_scores.shape == (60, 0)
+    # Same policy as PLS1 on each column of Y.
+    assert plskit.pls1_fit(X, Y[:, 0], k=1).k_used == 0
+    # The sparse fit applies the same floor to its first component.
+    assert plskit.spls3_fit(X, Y, k=k, keep_X=3, keep_Y=2).k_used == 0
+    # And the zero model still transforms, to empty score matrices.
+    s = plskit.pls3_transform(m, X_new=X, Y_new=Y)
+    assert s.x_scores.shape == (60, 0)
+    assert s.y_scores.shape == (60, 0)

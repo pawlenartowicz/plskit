@@ -1,4 +1,4 @@
-//! Simple-structure rotation of PLS weights. v0.1.1 ships varimax via
+//! Simple-structure rotation of PLS weights. Varimax is implemented via
 //! pairwise Kaiser sweeps; the `RotationMethod` enum is parameterized so
 //! promax / oblimin / geomin can land later without changing the surface.
 //!
@@ -21,7 +21,7 @@ use crate::error::{PlsKitError, PlsKitResult};
 pub enum RotationMethod {
     /// Varimax via pairwise Kaiser sweeps.
     Varimax(VarimaxArgs),
-    // Promax(PromaxArgs), Oblimin(ObliminArgs), Geomin(GeominArgs) — v0.2+.
+    // Planned: Promax(PromaxArgs), Oblimin(ObliminArgs), Geomin(GeominArgs).
 }
 
 /// Resolved varimax parameters. Defaults match SSDLite's

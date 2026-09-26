@@ -4,9 +4,12 @@
 // the workspace `missing_docs = "warn"` lint can't be applied to macro output.
 #![allow(missing_docs)]
 
-use faer::{Col, Mat};
-use ndarray::{Array1, Array2};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use faer::{Col, Mat, MatRef};
+use ndarray::{Array1, Array2, Dimension};
+use numpy::{
+    IntoPyArray, PyArray1, PyArray2, PyReadonlyArray, PyReadonlyArray1, PyReadonlyArray2,
+    PyUntypedArrayMethods,
+};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -23,29 +26,93 @@ use plskit::{
     split_nb_gate as core_split_nb_gate, spls1_find_k_optimal as core_spls1_find_k_optimal,
     spls1_find_k_sequence as core_spls1_find_k_sequence,
     spls1_find_keep_optimal as core_spls1_find_keep_optimal, spls1_fit as core_spls1_fit,
-    ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
-    FindKOptimalOpts, FindKOptimalOutput, FindKSequenceOpts, FindKSequenceOutput,
-    FindKeepOptimalOpts, FitOpts, KSpec, Pls1Model, Pls3ConfirmatoryTestOpts, Pls3FitOpts,
-    Pls3Model, RotateOutput, RotationMethod, Selector, TransformWhich, VarimaxArgs,
+    spls3_fit as core_spls3_fit, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput,
+    ConfirmatoryTestOpts, FindKOptimalOpts, FindKOptimalOutput, FindKSequenceOpts,
+    FindKSequenceOutput, FindKeepOptimalOpts, FitOpts, KSpec, Pls1Model, Pls3ConfirmatoryTestOpts,
+    Pls3FitOpts, Pls3Model, RotateOutput, RotationMethod, Selector, TransformWhich, VarimaxArgs,
 };
 use plskit::{pls1_perm_null as core_pls1_perm_null, PermNullOpts, PermNullOutput};
 
 // ── numpy ↔ faer bridge ─────────────────────────────────────────────────
 // The only place ndarray and faer touch in the repo. Inputs copy +
-// transpose row-major numpy → column-major faer in one pass; outputs
-// copy back the same way.
+// transpose row-major numpy → column-major faer in one pass (except the
+// `pls1_x` view of `X` for the PLS1 fits); outputs copy back the same way.
+// Every input goes through `aligned` first: these helpers are the only
+// places the seam reads a numpy array's data (`as_array` / `as_slice`).
 
-#[allow(clippy::needless_pass_by_value)]
-fn np_mat_to_faer(arr: PyReadonlyArray2<'_, f64>) -> Mat<f64> {
-    let v = arr.as_array();
-    let (n, d) = v.dim();
-    Mat::<f64>::from_fn(n, d, |i, j| v[(i, j)])
+/// `arr` itself when numpy flags its data aligned; otherwise an aligned
+/// copy made by numpy (`arr.copy()`). A byte-offset view of a buffer
+/// (`buf[1:].view(np.float64)`) can be contiguous and still misaligned,
+/// and Rust may not read `f64` data through a slice or ndarray view over
+/// misaligned memory; numpy's own copy has no such requirement. The copy
+/// holds the same values, so every result is unchanged.
+fn aligned<D: Dimension>(
+    arr: PyReadonlyArray<'_, f64, D>,
+) -> PyResult<PyReadonlyArray<'_, f64, D>> {
+    if arr.is_aligned() {
+        return Ok(arr);
+    }
+    let copy: PyReadonlyArray<'_, f64, D> = arr.call_method0("copy")?.extract()?;
+    if copy.is_aligned() {
+        Ok(copy)
+    } else {
+        Err(invalid_args_err(
+            "could not make an aligned float64 copy of a misaligned input array",
+        ))
+    }
 }
 
-#[allow(clippy::needless_pass_by_value)]
-fn np_col_to_faer(arr: PyReadonlyArray1<'_, f64>) -> Col<f64> {
+fn np_mat_to_faer(arr: PyReadonlyArray2<'_, f64>) -> PyResult<Mat<f64>> {
+    let arr = aligned(arr)?;
     let v = arr.as_array();
-    Col::<f64>::from_fn(v.len(), |i| v[i])
+    let (n, d) = v.dim();
+    Ok(Mat::<f64>::from_fn(n, d, |i, j| v[(i, j)]))
+}
+
+/// A copy-free faer view of a contiguous, aligned numpy matrix: row-major
+/// for a C-ordered array, column-major for a Fortran-ordered one; `None`
+/// for any other layout, and for misaligned data. Only for engine entries
+/// whose result does not depend on the layout of `X` (see `pls1_x`).
+fn np_mat_view<'a>(arr: &'a PyReadonlyArray2<'_, f64>) -> Option<MatRef<'a, f64>> {
+    if !arr.is_aligned() {
+        return None;
+    }
+    let (n, d) = (arr.shape()[0], arr.shape()[1]);
+    let slice = arr.as_slice().ok()?;
+    if arr.is_c_contiguous() {
+        Some(MatRef::from_row_major_slice(slice, n, d))
+    } else if arr.is_fortran_contiguous() {
+        Some(MatRef::from_column_major_slice(slice, n, d))
+    } else {
+        None
+    }
+}
+
+/// `X` for `pls1_fit` / `spls1_fit`. With `pre_standardized = false` the
+/// engine only checks `X` for finite values and standardizes it into a
+/// fresh column-major matrix, and both give the same bits on any layout,
+/// so a contiguous array is read in place instead of being copied first
+/// (a full pass over `X` and an `n x d` allocation saved). A
+/// pre-standardized `X` goes to the kernel as given, whose products can
+/// round differently on another layout, so it is still copied, as is a
+/// misaligned one (through `np_mat_to_faer`, which aligns it first).
+fn pls1_x<'a>(
+    arr: &'a PyReadonlyArray2<'_, f64>,
+    pre_standardized: bool,
+    copy: &'a mut Option<Mat<f64>>,
+) -> PyResult<MatRef<'a, f64>> {
+    if !pre_standardized {
+        if let Some(view) = np_mat_view(arr) {
+            return Ok(view);
+        }
+    }
+    Ok(copy.insert(np_mat_to_faer(arr.clone())?).as_ref())
+}
+
+fn np_col_to_faer(arr: PyReadonlyArray1<'_, f64>) -> PyResult<Col<f64>> {
+    let arr = aligned(arr)?;
+    let v = arr.as_array();
+    Ok(Col::<f64>::from_fn(v.len(), |i| v[i]))
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -284,13 +351,21 @@ fn parse_confirmatory_args(
             if let Some(a) = args {
                 validate_keys("raw_perm", a, allowed)?;
             }
+            // Absent keys fall back to the engine's own defaults.
+            let ConfirmatoryArgs::RawPerm {
+                n_perm: d_perm,
+                n_folds: d_folds,
+            } = ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::RawPerm)
+            else {
+                unreachable!("defaults_for(RawPerm) is RawPerm")
+            };
             let n_perm = match args.and_then(|a| a.get_item("n_perm").ok().flatten()) {
                 Some(v) => v.extract::<usize>()?,
-                None => 1000,
+                None => d_perm,
             };
             let n_folds = match args.and_then(|a| a.get_item("n_folds").ok().flatten()) {
                 Some(v) => v.extract::<usize>()?,
-                None => 5,
+                None => d_folds,
             };
             Ok(ConfirmatoryArgs::RawPerm { n_perm, n_folds })
         }
@@ -299,15 +374,22 @@ fn parse_confirmatory_args(
             if let Some(a) = args {
                 validate_keys("split_nb", a, allowed)?;
             }
+            let ConfirmatoryArgs::SplitNb {
+                n_splits: d_splits,
+                force: d_force,
+            } = ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::SplitNb)
+            else {
+                unreachable!("defaults_for(SplitNb) is SplitNb")
+            };
             let n_splits = match args.and_then(|a| a.get_item("n_splits").ok().flatten()) {
                 Some(v) => v.extract::<usize>()?,
-                None => 50,
+                None => d_splits,
             };
             let force = match args.and_then(|a| a.get_item("force").ok().flatten()) {
                 Some(v) => v.extract::<bool>().map_err(|_| {
                     invalid_args_err("args['force'] for method='split_nb' must be a bool")
                 })?,
-                None => false,
+                None => d_force,
             };
             Ok(ConfirmatoryArgs::SplitNb { n_splits, force })
         }
@@ -316,13 +398,20 @@ fn parse_confirmatory_args(
             if let Some(a) = args {
                 validate_keys("split_exact", a, allowed)?;
             }
+            let ConfirmatoryArgs::SplitExact {
+                n_perm: d_perm,
+                n_splits: d_splits,
+            } = ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::SplitExact)
+            else {
+                unreachable!("defaults_for(SplitExact) is SplitExact")
+            };
             let n_perm = match args.and_then(|a| a.get_item("n_perm").ok().flatten()) {
                 Some(v) => v.extract::<usize>()?,
-                None => 1000,
+                None => d_perm,
             };
             let n_splits = match args.and_then(|a| a.get_item("n_splits").ok().flatten()) {
                 Some(v) => v.extract::<usize>()?,
-                None => 50,
+                None => d_splits,
             };
             Ok(ConfirmatoryArgs::SplitExact { n_perm, n_splits })
         }
@@ -428,11 +517,12 @@ fn pls1_fit<'py>(
         ..FitOpts::default()
     };
     // Bridge numpy → faer at the entry seam.
-    let xf = np_mat_to_faer(x);
-    let yf = np_col_to_faer(y);
-    let wf = weights.map(np_col_to_faer);
+    let mut x_copy = None;
+    let xf = pls1_x(&x, pre_standardized, &mut x_copy)?;
+    let yf = np_col_to_faer(y)?;
+    let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
-    let m = map_res(core_pls1_fit(xf.as_ref(), yf.as_ref(), kspec, wref, opts))?;
+    let m = map_res(core_pls1_fit(xf, yf.as_ref(), kspec, wref, opts))?;
     Ok(pls1_model_to_dict(py, m))
 }
 
@@ -452,12 +542,13 @@ fn spls1_fit<'py>(
         pre_standardized,
         ..FitOpts::default()
     };
-    let xf = np_mat_to_faer(x);
-    let yf = np_col_to_faer(y);
-    let wf = weights.map(np_col_to_faer);
+    let mut x_copy = None;
+    let xf = pls1_x(&x, pre_standardized, &mut x_copy)?;
+    let yf = np_col_to_faer(y)?;
+    let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
     let m = map_res(core_spls1_fit(
-        xf.as_ref(),
+        xf,
         yf.as_ref(),
         KSpec::Fixed(k),
         keep,
@@ -476,9 +567,24 @@ fn pls1_predict<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     // Reconstruct a Pls1Model from the dict's fields — bridge ndarray view → faer Mat.
     let m = pls1_model_from_dict(py, &model)?;
-    let x_faer = np_mat_to_faer(x_new);
+    let x_faer = np_mat_to_faer(x_new)?;
     let yhat = map_res(core_pls1_predict(&m, x_faer.as_ref()))?;
     Ok(faer_col_to_np(py, yhat))
+}
+
+/// Optional-`usize` field of a model dict, shared by the PLS1 and PLS3
+/// readers.
+///
+/// Optional on read for back-compat: a missing key (a dict written before
+/// the sparse fields existed, or hand-built by a caller who only set the
+/// numeric fields) and an explicit Python `None` both mean "dense", so both
+/// map to `None` and the model must still transform / predict.
+fn get_opt_usize(d: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<usize>> {
+    match d.get_item(key)? {
+        None => Ok(None),
+        Some(v) if v.is_none() => Ok(None),
+        Some(v) => Ok(Some(v.extract()?)),
+    }
 }
 
 fn pls1_model_from_dict(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Pls1Model> {
@@ -487,14 +593,14 @@ fn pls1_model_from_dict(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Pls1M
             .get_item(k)?
             .ok_or_else(|| PlsKitException::new_err(format!("missing field {k}")))?
             .extract()?;
-        Ok(np_mat_to_faer(v))
+        np_mat_to_faer(v)
     };
     let get_col = |k: &str| -> PyResult<Col<f64>> {
         let v: PyReadonlyArray1<'_, f64> = d
             .get_item(k)?
             .ok_or_else(|| PlsKitException::new_err(format!("missing field {k}")))?
             .extract()?;
-        Ok(np_col_to_faer(v))
+        np_col_to_faer(v)
     };
     let intercept: f64 = d.get_item("intercept")?.unwrap().extract()?;
     let k_used: usize = d.get_item("k_used")?.unwrap().extract()?;
@@ -515,16 +621,13 @@ fn pls1_model_from_dict(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Pls1M
     let weights: Option<Col<f64>> = match d.get_item("weights")? {
         Some(v) if !v.is_none() => {
             let arr: PyReadonlyArray1<'_, f64> = v.extract()?;
-            Some(np_col_to_faer(arr))
+            Some(np_col_to_faer(arr)?)
         }
         _ => None,
     };
     // "keep" — present in dicts written by the spls1 family; default None
     // for back-compat with dicts from older fits.
-    let keep: Option<usize> = match d.get_item("keep")? {
-        Some(v) if !v.is_none() => Some(v.extract()?),
-        _ => None,
-    };
+    let keep: Option<usize> = get_opt_usize(d, "keep")?;
     let _ = py;
     Ok(Pls1Model {
         // Dict keys are short (Python-facing); Rust fields are long snake_case.
@@ -567,6 +670,22 @@ fn pls3_model_to_dict(py: Python<'_>, m: Pls3Model) -> Bound<'_, PyDict> {
         .unwrap();
     d.set_item("pre_standardized_Y", m.pre_standardized_y)
         .unwrap();
+    d.set_item("keep_X", m.keep_x).unwrap();
+    d.set_item("keep_Y", m.keep_y).unwrap();
+    d.set_item("converged", m.converged.map(|c| PyArray1::from_vec(py, c)))
+        .unwrap();
+    d.set_item(
+        "n_iter",
+        m.n_iter.map(|v| {
+            PyArray1::from_vec(
+                py,
+                v.into_iter()
+                    .map(|x| i64::try_from(x).unwrap_or(i64::MAX))
+                    .collect::<Vec<i64>>(),
+            )
+        }),
+    )
+    .unwrap();
     d
 }
 
@@ -576,14 +695,14 @@ fn pls3_model_from_dict(d: &Bound<'_, PyDict>) -> PyResult<Pls3Model> {
             .get_item(k)?
             .ok_or_else(|| PlsKitException::new_err(format!("missing field {k}")))?
             .extract()?;
-        Ok(np_mat_to_faer(v))
+        np_mat_to_faer(v)
     };
     let get_col = |k: &str| -> PyResult<Col<f64>> {
         let v: PyReadonlyArray1<'_, f64> = d
             .get_item(k)?
             .ok_or_else(|| PlsKitException::new_err(format!("missing field {k}")))?
             .extract()?;
-        Ok(np_col_to_faer(v))
+        np_col_to_faer(v)
     };
     Ok(Pls3Model {
         u_saliences: get_mat("U")?,
@@ -607,6 +726,15 @@ fn pls3_model_from_dict(d: &Bound<'_, PyDict>) -> PyResult<Pls3Model> {
             .get_item("pre_standardized_Y")?
             .ok_or_else(|| PlsKitException::new_err("missing field pre_standardized_Y"))?
             .extract()?,
+        keep_x: get_opt_usize(d, "keep_X")?,
+        keep_y: get_opt_usize(d, "keep_Y")?,
+        // `converged` / `n_iter` are dropped on the way back in: the only
+        // consumer of a reconstructed model is `pls3_transform`, which
+        // reads the saliences and the moments and never these two, so
+        // round-tripping them would cost an allocation for nothing. The
+        // Python-side `PLS3Result` keeps its own copies regardless.
+        converged: None,
+        n_iter: None,
     })
 }
 
@@ -656,11 +784,54 @@ fn pls3_fit<'py>(
         pre_standardized_y: pre_standardized_Y,
         ..Pls3FitOpts::default()
     };
-    let xf = np_mat_to_faer(x);
-    let yf = np_mat_to_faer(y);
-    let wf = weights.map(np_col_to_faer);
+    let xf = np_mat_to_faer(x)?;
+    let yf = np_mat_to_faer(y)?;
+    let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
     let m = map_res(core_pls3_fit(xf.as_ref(), yf.as_ref(), k, wref, opts))?;
+    Ok(pls3_model_to_dict(py, m))
+}
+
+#[pyfunction]
+#[pyo3(signature = (x, y, k, keep_X, keep_Y, *, pre_standardized_X=false, pre_standardized_Y=false, max_iter=None, tol=None, weights=None))]
+#[allow(clippy::needless_pass_by_value)]
+#[allow(non_snake_case)] // keep_X/_Y and pre_standardized_X/_Y are the cross-language argument names
+#[allow(clippy::too_many_arguments)]
+fn spls3_fit<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray2<'_, f64>,
+    y: PyReadonlyArray2<'_, f64>,
+    k: usize,
+    keep_X: usize,
+    keep_Y: usize,
+    pre_standardized_X: bool,
+    pre_standardized_Y: bool,
+    max_iter: Option<usize>,
+    tol: Option<f64>,
+    weights: Option<PyReadonlyArray1<'_, f64>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    // `None` is the engine's own default, so no wrapper carries a copy of it.
+    let defaults = Pls3FitOpts::default();
+    let opts = Pls3FitOpts {
+        pre_standardized_x: pre_standardized_X,
+        pre_standardized_y: pre_standardized_Y,
+        max_iter: max_iter.unwrap_or(defaults.max_iter),
+        tol: tol.unwrap_or(defaults.tol),
+        ..defaults
+    };
+    let xf = np_mat_to_faer(x)?;
+    let yf = np_mat_to_faer(y)?;
+    let wf = weights.map(np_col_to_faer).transpose()?;
+    let wref = wf.as_ref().map(Col::as_ref);
+    let m = map_res(core_spls3_fit(
+        xf.as_ref(),
+        yf.as_ref(),
+        k,
+        keep_X,
+        keep_Y,
+        wref,
+        opts,
+    ))?;
     Ok(pls3_model_to_dict(py, m))
 }
 
@@ -676,8 +847,8 @@ fn pls3_transform<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let m = pls3_model_from_dict(&model)?;
     let w = parse_transform_which(which)?;
-    let xf = x_new.map(np_mat_to_faer);
-    let yf = y_new.map(np_mat_to_faer);
+    let xf = x_new.map(np_mat_to_faer).transpose()?;
+    let yf = y_new.map(np_mat_to_faer).transpose()?;
     let s = map_res(core_pls3_transform(
         &m,
         xf.as_ref().map(Mat::as_ref),
@@ -719,9 +890,13 @@ fn pls3_confirmatory_test_raw<'py>(
         seed,
         disable_parallelism,
         verbose,
+        // Sparse selection (`keep_x` / `keep_y`) is not exposed on the Python
+        // surface yet; the core defaults keep this call the dense one it has
+        // always been, along with the `max_iter` / `tol` the core picks.
+        ..Pls3ConfirmatoryTestOpts::default()
     };
-    let xf = np_mat_to_faer(x);
-    let yf = np_mat_to_faer(y);
+    let xf = np_mat_to_faer(x)?;
+    let yf = np_mat_to_faer(y)?;
     let r = map_res(core_pls3_confirmatory_test(
         xf.as_ref(),
         yf.as_ref(),
@@ -754,8 +929,8 @@ fn rotate<'py>(
     l: Option<PyReadonlyArray2<'_, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let rot_method = parse_rotation_method(method, args.as_ref())?;
-    let wf = np_mat_to_faer(w);
-    let lf_storage = l.map(np_mat_to_faer);
+    let wf = np_mat_to_faer(w)?;
+    let lf_storage = l.map(np_mat_to_faer).transpose()?;
     let lf_ref = lf_storage.as_ref().map(faer::Mat::as_ref);
     let out: RotateOutput = map_res(core_rotate(wf.as_ref(), rot_method, lf_ref))?;
     // PyO3 0.26: `PyDict::new` (was `new_bound` in 0.22).
@@ -769,11 +944,11 @@ fn rotate<'py>(
 
 #[pyfunction]
 #[pyo3(signature = (x, y, k, *, method, args=None,
-                    ci=false, n_boot=1000, m_rate=0.7, level=0.95,
-                    max_failure_rate=0.01,
+                    ci=false, n_boot=None, m_rate=None, level=None,
+                    max_failure_rate=None,
                     pre_standardized=false, seed=None,
                     disable_parallelism=false, verbose=false,
-                    weights=None, max_skip_rate=0.01))]
+                    weights=None, max_skip_rate=None))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::fn_params_excessive_bools)]
@@ -786,27 +961,30 @@ fn pls1_confirmatory_test_raw<'py>(
     method: &str,
     args: Option<Bound<'_, PyDict>>,
     ci: bool,
-    n_boot: usize,
-    m_rate: f64,
-    level: f64,
-    max_failure_rate: f64,
+    n_boot: Option<usize>,
+    m_rate: Option<f64>,
+    level: Option<f64>,
+    max_failure_rate: Option<f64>,
     pre_standardized: bool,
     seed: Option<u64>,
     disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
-    max_skip_rate: f64,
+    max_skip_rate: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
+    // `None` is the engine's own default, so no wrapper carries a copy of it.
+    let ci_defaults = plskit::CIOpts::default();
     let ci_opts = if ci {
         Some(plskit::CIOpts {
-            n_boot,
-            m_rate,
-            level,
-            max_failure_rate,
+            n_boot: n_boot.unwrap_or(ci_defaults.n_boot),
+            m_rate: m_rate.unwrap_or(ci_defaults.m_rate),
+            level: level.unwrap_or(ci_defaults.level),
+            max_failure_rate: max_failure_rate.unwrap_or(ci_defaults.max_failure_rate),
         })
     } else {
         None
     };
+    let opts_defaults = ConfirmatoryTestOpts::default();
     let opts = ConfirmatoryTestOpts {
         args: parse_confirmatory_args(method, args.as_ref())?,
         pre_standardized,
@@ -814,13 +992,13 @@ fn pls1_confirmatory_test_raw<'py>(
         disable_parallelism,
         verbose,
         ci: ci_opts,
-        max_skip_rate,
+        max_skip_rate: max_skip_rate.unwrap_or(opts_defaults.max_skip_rate),
         // Dense wrapper surface — `keep` is reserved for the spls1 family.
         keep: None,
     };
-    let xf = np_mat_to_faer(x);
-    let yf = np_col_to_faer(y);
-    let wf = weights.map(np_col_to_faer);
+    let xf = np_mat_to_faer(x)?;
+    let yf = np_col_to_faer(y)?;
+    let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
     let r = map_res(core_pls1_confirmatory_test(
         ConfirmatoryTestInput::Raw {
@@ -854,8 +1032,8 @@ fn split_nb_gate<'py>(
     x: PyReadonlyArray2<'py, f64>,
     weights: Option<PyReadonlyArray1<'py, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let xf = np_mat_to_faer(x);
-    let wf = weights.map(np_col_to_faer);
+    let xf = np_mat_to_faer(x)?;
+    let wf = weights.map(np_col_to_faer).transpose()?;
     let r = map_res(core_split_nb_gate(
         xf.as_ref(),
         wf.as_ref().map(Col::as_ref),
@@ -873,17 +1051,19 @@ fn parse_varimax_args(args: Option<&Bound<'_, PyDict>>) -> PyResult<plskit::Vari
     if let Some(a) = args {
         validate_keys("varimax", a, allowed)?;
     }
+    // Absent keys fall back to the engine's own defaults.
+    let defaults = VarimaxArgs::default();
     let max_iter = match args.and_then(|a| a.get_item("max_iter").ok().flatten()) {
         Some(v) => v.extract::<usize>()?,
-        None => 50,
+        None => defaults.max_iter,
     };
     let tol = match args.and_then(|a| a.get_item("tol").ok().flatten()) {
         Some(v) => v.extract::<f64>()?,
-        None => 1e-8,
+        None => defaults.tol,
     };
     let kaiser_normalize = match args.and_then(|a| a.get_item("kaiser_normalize").ok().flatten()) {
         Some(v) => v.extract::<bool>()?,
-        None => true,
+        None => defaults.kaiser_normalize,
     };
     Ok(VarimaxArgs {
         max_iter,
@@ -898,13 +1078,13 @@ fn parse_varimax_args(args: Option<&Bound<'_, PyDict>>) -> PyResult<plskit::Vari
     rotation_method = "varimax",
     rotation_args = None,
     l = None,
-    n_boot = 1000, m_rate = 0.7, level = 0.95,
+    n_boot = None, m_rate = None, level = None,
     pre_standardized = false,
     seed = None,
     disable_parallelism = false,
     verbose = false,
     weights = None,
-    max_skip_rate = 0.01,
+    max_skip_rate = None,
 ))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
@@ -916,18 +1096,18 @@ fn pls1_rotation_stability_raw<'py>(
     rotation_method: &str,
     rotation_args: Option<&Bound<'_, PyDict>>,
     l: Option<PyReadonlyArray2<'_, f64>>,
-    n_boot: usize,
-    m_rate: f64,
-    level: f64,
+    n_boot: Option<usize>,
+    m_rate: Option<f64>,
+    level: Option<f64>,
     pre_standardized: bool,
     seed: Option<u64>,
     disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
-    max_skip_rate: f64,
+    max_skip_rate: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let xm = np_mat_to_faer(x);
-    let yc = np_col_to_faer(y);
+    let xm = np_mat_to_faer(x)?;
+    let yc = np_col_to_faer(y)?;
 
     let method = match rotation_method {
         "varimax" => {
@@ -949,19 +1129,21 @@ fn pls1_rotation_stability_raw<'py>(
         }
     };
 
-    let l_mat: Option<Mat<f64>> = l.map(np_mat_to_faer);
-    let wf = weights.map(np_col_to_faer);
+    let l_mat: Option<Mat<f64>> = l.map(np_mat_to_faer).transpose()?;
+    let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
 
+    // `None` is the engine's own default, so no wrapper carries a copy of it.
+    let defaults = plskit::RotationStabilityOpts::default();
     let opts = plskit::RotationStabilityOpts {
-        n_boot,
-        m_rate,
-        level,
+        n_boot: n_boot.unwrap_or(defaults.n_boot),
+        m_rate: m_rate.unwrap_or(defaults.m_rate),
+        level: level.unwrap_or(defaults.level),
         pre_standardized,
         seed,
         disable_parallelism,
         verbose,
-        max_skip_rate,
+        max_skip_rate: max_skip_rate.unwrap_or(defaults.max_skip_rate),
     };
 
     let out = map_res(core_pls1_rotation_stability(
@@ -995,7 +1177,10 @@ fn run_find_k_optimal<'py>(
     disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
+    for_fit: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
+    // Absent `args` keys fall back to the engine's own defaults.
+    let defaults = FindKOptimalOpts::default();
     let sel = parse_optimal_selector(selector)?;
     let diag_method: Option<ConfirmatoryMethod> = match diagnostic {
         Some(s) => Some(parse_confirmatory_method(s)?),
@@ -1010,7 +1195,7 @@ fn run_find_k_optimal<'py>(
         .and_then(|a| a.get_item("n_folds").ok().flatten())
     {
         Some(v) => v.extract::<usize>()?,
-        None => 5,
+        None => defaults.n_folds,
     };
     // Reject n_folds with bic.
     if matches!(sel, Selector::Bic)
@@ -1043,7 +1228,7 @@ fn run_find_k_optimal<'py>(
             }
             v.extract::<usize>()?
         }
-        None => 1000,
+        None => defaults.n_perm,
     };
     let n_splits = match args
         .as_ref()
@@ -1065,7 +1250,7 @@ fn run_find_k_optimal<'py>(
             }
             v.extract::<usize>()?
         }
-        None => 50,
+        None => defaults.n_splits,
     };
     let force = match args
         .as_ref()
@@ -1086,7 +1271,7 @@ fn run_find_k_optimal<'py>(
                 invalid_args_err("args['force'] for diagnostic='split_nb' must be a bool")
             })?
         }
-        None => false,
+        None => defaults.force,
     };
     let opts = FindKOptimalOpts {
         selector: sel,
@@ -1100,9 +1285,9 @@ fn run_find_k_optimal<'py>(
         disable_parallelism,
         verbose,
     };
-    let xf = np_mat_to_faer(x);
-    let yf = np_col_to_faer(y);
-    let wf = weights.map(np_col_to_faer);
+    let xf = np_mat_to_faer(x)?;
+    let yf = np_col_to_faer(y)?;
+    let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
     let r: FindKOptimalOutput = match keep {
         None => map_res(core_pls1_find_k_optimal(
@@ -1121,6 +1306,10 @@ fn run_find_k_optimal<'py>(
             opts,
         ))?,
     };
+    // `pls1_fit(k="optimal")`: the core decides whether there is a K to fit.
+    if for_fit {
+        map_res(r.k_to_fit())?;
+    }
     let d = PyDict::new(py);
     d.set_item("k_star", r.k_star)?;
     d.set_item("selector", r.selector)?;
@@ -1144,12 +1333,15 @@ fn run_find_k_optimal<'py>(
     Ok(d)
 }
 
+/// `for_fit` is the seam half of `pls1_fit(k="optimal")`: set, a selection
+/// with no component to fit raises the core's `OptimalNoComponent` (through
+/// `FindKOptimalOutput::k_to_fit`) instead of returning `k_star = 0`.
 #[pyfunction]
 #[pyo3(signature = (x, y, k_max, *, selector="r2_se", diagnostic=None,
                     args=None,
                     pre_standardized=false, seed=None,
                     disable_parallelism=false, verbose=false,
-                    weights=None))]
+                    weights=None, for_fit=false))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::fn_params_excessive_bools)]
@@ -1166,6 +1358,7 @@ fn pls1_find_k_optimal<'py>(
     disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
+    for_fit: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     run_find_k_optimal(
         py,
@@ -1181,6 +1374,7 @@ fn pls1_find_k_optimal<'py>(
         disable_parallelism,
         verbose,
         weights,
+        for_fit,
     )
 }
 
@@ -1222,6 +1416,7 @@ fn spls1_find_k_optimal<'py>(
         disable_parallelism,
         verbose,
         weights,
+        false,
     )
 }
 
@@ -1235,14 +1430,18 @@ fn run_find_k_sequence<'py>(
     k_max: usize,
     keep: Option<usize>,
     test_method: &str,
-    alpha: f64,
+    alpha: Option<f64>,
     args: Option<Bound<'_, PyDict>>,
     pre_standardized: bool,
     seed: Option<u64>,
     disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
+    for_fit: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
+    // `None` is the engine's own default, so no wrapper carries a copy of
+    // it; absent `args` keys fall back the same way.
+    let defaults = FindKSequenceOpts::default();
     let tm = parse_confirmatory_method(test_method)?;
     let allowed: &[&str] = match tm {
         ConfirmatoryMethod::RawPerm => &["n_perm"],
@@ -1266,14 +1465,14 @@ fn run_find_k_sequence<'py>(
         .and_then(|a| a.get_item("n_perm").ok().flatten())
     {
         Some(v) => v.extract::<usize>()?,
-        None => 1000,
+        None => defaults.n_perm,
     };
     let n_splits = match args
         .as_ref()
         .and_then(|a| a.get_item("n_splits").ok().flatten())
     {
         Some(v) => v.extract::<usize>()?,
-        None => 50,
+        None => defaults.n_splits,
     };
     let force = match args
         .as_ref()
@@ -1282,11 +1481,11 @@ fn run_find_k_sequence<'py>(
         Some(v) => v.extract::<bool>().map_err(|_| {
             invalid_args_err("args['force'] for test_method='split_nb' must be a bool")
         })?,
-        None => false,
+        None => defaults.force,
     };
     let opts = FindKSequenceOpts {
         test_method: tm,
-        alpha,
+        alpha: alpha.unwrap_or(defaults.alpha),
         n_perm,
         n_splits,
         force,
@@ -1295,9 +1494,9 @@ fn run_find_k_sequence<'py>(
         disable_parallelism,
         verbose,
     };
-    let xf = np_mat_to_faer(x);
-    let yf = np_col_to_faer(y);
-    let wf = weights.map(np_col_to_faer);
+    let xf = np_mat_to_faer(x)?;
+    let yf = np_col_to_faer(y)?;
+    let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
     let r: FindKSequenceOutput = match keep {
         None => map_res(core_pls1_find_k_sequence(
@@ -1316,6 +1515,10 @@ fn run_find_k_sequence<'py>(
             opts,
         ))?,
     };
+    // `pls1_fit(k="sequence")`: the core decides whether there is a K to fit.
+    if for_fit {
+        map_res(r.k_to_fit())?;
+    }
     let d = PyDict::new(py);
     d.set_item("k_star", r.k_star)?;
     d.set_item("pvalues", faer_col_to_np(py, r.pvalues))?;
@@ -1327,12 +1530,16 @@ fn run_find_k_sequence<'py>(
     Ok(d)
 }
 
+/// `for_fit` is the seam half of `pls1_fit(k="sequence")`: set, a sequence
+/// that rejects no component raises the core's `SequenceNoRejection`
+/// (through `FindKSequenceOutput::k_to_fit`) instead of returning
+/// `k_star = 0`.
 #[pyfunction]
-#[pyo3(signature = (x, y, k_max, *, test_method="split_nb", alpha=0.05,
+#[pyo3(signature = (x, y, k_max, *, test_method="split_nb", alpha=None,
                     args=None,
                     pre_standardized=false, seed=None,
                     disable_parallelism=false, verbose=false,
-                    weights=None))]
+                    weights=None, for_fit=false))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::fn_params_excessive_bools)]
@@ -1342,13 +1549,14 @@ fn pls1_find_k_sequence<'py>(
     y: PyReadonlyArray1<'_, f64>,
     k_max: usize,
     test_method: &str,
-    alpha: f64,
+    alpha: Option<f64>,
     args: Option<Bound<'_, PyDict>>,
     pre_standardized: bool,
     seed: Option<u64>,
     disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
+    for_fit: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     run_find_k_sequence(
         py,
@@ -1364,11 +1572,12 @@ fn pls1_find_k_sequence<'py>(
         disable_parallelism,
         verbose,
         weights,
+        for_fit,
     )
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y, k_max, keep, *, test_method="split_nb", alpha=0.05,
+#[pyo3(signature = (x, y, k_max, keep, *, test_method="split_nb", alpha=None,
                     args=None,
                     pre_standardized=false, seed=None,
                     disable_parallelism=false, verbose=false,
@@ -1383,7 +1592,7 @@ fn spls1_find_k_sequence<'py>(
     k_max: usize,
     keep: usize,
     test_method: &str,
-    alpha: f64,
+    alpha: Option<f64>,
     args: Option<Bound<'_, PyDict>>,
     pre_standardized: bool,
     seed: Option<u64>,
@@ -1405,11 +1614,12 @@ fn spls1_find_k_sequence<'py>(
         disable_parallelism,
         verbose,
         weights,
+        false,
     )
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y, k, *, n_perm=1000, return_perm_matrix=false,
+#[pyo3(signature = (x, y, k, *, n_perm=None, return_perm_matrix=false,
                     pre_standardized=false, seed=None,
                     disable_parallelism=false, verbose=false,
                     weights=None))]
@@ -1422,7 +1632,7 @@ fn pls1_perm_null_raw<'py>(
     x: PyReadonlyArray2<'_, f64>,
     y: PyReadonlyArray1<'_, f64>,
     k: usize,
-    n_perm: usize,
+    n_perm: Option<usize>,
     return_perm_matrix: bool,
     pre_standardized: bool,
     seed: Option<u64>,
@@ -1430,16 +1640,18 @@ fn pls1_perm_null_raw<'py>(
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
+    // `None` is the engine's own default, so no wrapper carries a copy of it.
+    let defaults = PermNullOpts::default();
     let opts = PermNullOpts {
-        n_perm,
+        n_perm: n_perm.unwrap_or(defaults.n_perm),
         return_perm_matrix,
         pre_standardized,
         disable_parallelism,
         verbose,
     };
-    let xf = np_mat_to_faer(x);
-    let yf = np_col_to_faer(y);
-    let wf = weights.map(np_col_to_faer);
+    let xf = np_mat_to_faer(x)?;
+    let yf = np_col_to_faer(y)?;
+    let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
     let out: PermNullOutput = map_res(core_pls1_perm_null(
         xf.as_ref(),
@@ -1491,20 +1703,20 @@ fn preprocess<'py>(
     weights: Option<PyReadonlyArray1<'_, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     // Bridge X (2-D, optional).
-    let xf = x.map(np_mat_to_faer);
+    let xf = x.map(np_mat_to_faer).transpose()?;
     let xref = xf.as_ref().map(faer::Mat::as_ref);
 
-    // Y is shape-polymorphic (spec §5.1). Detect 1-D vs 2-D up front.
+    // Y is shape-polymorphic (1-D or 2-D; see `PreprocessResult`). Detect 1-D vs 2-D up front.
     let mut y_was_2d = false;
     let yf_1d: Option<faer::Col<f64>>;
     let yf_2d: Option<faer::Mat<f64>>;
     if let Some(yobj) = y {
         if let Ok(arr1) = yobj.extract::<PyReadonlyArray1<'_, f64>>() {
-            yf_1d = Some(np_col_to_faer(arr1));
+            yf_1d = Some(np_col_to_faer(arr1)?);
             yf_2d = None;
         } else {
             let arr2: PyReadonlyArray2<'_, f64> = yobj.extract()?;
-            yf_2d = Some(np_mat_to_faer(arr2));
+            yf_2d = Some(np_mat_to_faer(arr2)?);
             yf_1d = None;
             y_was_2d = true;
         }
@@ -1515,11 +1727,30 @@ fn preprocess<'py>(
     let y_ref_1d = yf_1d.as_ref().map(faer::Col::as_ref);
 
     // Bridge weights.
-    let wf = weights.map(np_col_to_faer);
+    let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(faer::Col::as_ref);
 
     let d = PyDict::new(py);
     if y_was_2d {
+        // Core preprocess never sees the 2-D Y (it only takes a 1-D y), so it
+        // cannot check Y's row count against X or weights the way it does for
+        // the 1-D path. Do that check here before standardizing Y by hand.
+        let yref2d_for_check = yf_2d.as_ref().unwrap().as_ref();
+        if let Some(x) = xref {
+            if x.nrows() != yref2d_for_check.nrows() {
+                map_res::<()>(Err(PlsKitError::DimensionMismatch {
+                    x: (x.nrows(), x.ncols()),
+                    y: yref2d_for_check.nrows(),
+                }))?;
+            }
+        }
+        if let Some(w) = wref {
+            if w.nrows() != yref2d_for_check.nrows() {
+                map_res::<()>(Err(PlsKitError::InvalidWeights {
+                    reason: "length_mismatch",
+                }))?;
+            }
+        }
         // Run core preprocess WITHOUT y so it normalizes weights and standardizes X.
         let core_in = PreprocessInput {
             x: xref,
@@ -1611,7 +1842,7 @@ fn spls1_find_keep_optimal<'py>(
         .and_then(|a| a.get_item("n_folds").ok().flatten())
     {
         Some(v) => v.extract::<usize>()?,
-        None => 5,
+        None => FindKeepOptimalOpts::default().n_folds,
     };
     let opts = FindKeepOptimalOpts {
         n_folds,
@@ -1619,9 +1850,9 @@ fn spls1_find_keep_optimal<'py>(
         disable_parallelism,
         verbose,
     };
-    let xf = np_mat_to_faer(x);
-    let yf = np_col_to_faer(y);
-    let wf = weights.map(np_col_to_faer);
+    let xf = np_mat_to_faer(x)?;
+    let yf = np_col_to_faer(y)?;
+    let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
     let r = map_res(core_spls1_find_keep_optimal(
         xf.as_ref(),
@@ -1644,6 +1875,19 @@ fn spls1_find_keep_optimal<'py>(
 #[pymodule]
 fn _plskit(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PlsKitException", py.get_type::<PlsKitException>())?;
+    // The split_nb -> split_exact reroute's permutation budget, read straight
+    // off the engine constant so `_api.py`'s reroute warning never keeps its
+    // own copy that could drift from the value the Rust reroute sites use.
+    m.add("SPLIT_NB_REROUTE_N_PERM", plskit::SPLIT_NB_REROUTE_N_PERM)?;
+    // `rotate()`'s varimax args default from the engine's own
+    // `VarimaxArgs::default()` instead of `_api.py` keeping a second,
+    // hand-maintained copy of the same three numbers.
+    let varimax_defaults = PyDict::new(py);
+    let vd = plskit::VarimaxArgs::default();
+    varimax_defaults.set_item("max_iter", vd.max_iter)?;
+    varimax_defaults.set_item("tol", vd.tol)?;
+    varimax_defaults.set_item("kaiser_normalize", vd.kaiser_normalize)?;
+    m.add("VARIMAX_DEFAULTS", varimax_defaults)?;
     m.add_function(wrap_pyfunction!(preprocess, m)?)?;
     m.add_function(wrap_pyfunction!(pls1_fit, m)?)?;
     m.add_function(wrap_pyfunction!(pls1_predict, m)?)?;
@@ -1659,6 +1903,7 @@ fn _plskit(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spls1_find_k_optimal, m)?)?;
     m.add_function(wrap_pyfunction!(spls1_find_k_sequence, m)?)?;
     m.add_function(wrap_pyfunction!(pls3_fit, m)?)?;
+    m.add_function(wrap_pyfunction!(spls3_fit, m)?)?;
     m.add_function(wrap_pyfunction!(pls3_transform, m)?)?;
     m.add_function(wrap_pyfunction!(pls3_confirmatory_test_raw, m)?)?;
     Ok(())

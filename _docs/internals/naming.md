@@ -43,7 +43,7 @@ Format: `name` | description | functions where used.
 
 | name | description | functions |
 |---|---|---|
-| `X` | predictor matrix `(n, p)`, float64 | `pls1_fit`, `pls2_fit`, `pls3_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_confirmatory_test`, `nested_cv_r2_ci`, `anisotropic_null`, `bootstrap_saliences`, `grassmannian_alignment_test` |
+| `X` | predictor matrix `(n, p)`, float64 | `pls1_fit`, `pls2_fit`, `pls3_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_confirmatory_test`, `split_nb_gate`, `nested_cv_r2_ci`, `anisotropic_null`, `bootstrap_saliences`, `grassmannian_alignment_test` |
 | `y` | target vector `(n,)`, float64 | `pls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_confirmatory_test`, `nested_cv_r2_ci`, `grassmannian_alignment_test` |
 | `Y` | target matrix `(n, q)`, float64 | `pls2_fit`, `pls3_fit`, `bootstrap_saliences` (PLS2/3 path) |
 | `X_new` | held-out predictor matrix | `pls1_predict`, `pls2_predict`, `pls3_transform` |
@@ -54,6 +54,9 @@ Format: `name` | description | functions where used.
 | `L` | loading basis on which simple-structure is computed (default identity) | `rotate`, `pls1_rotation_stability` |
 | `v0` | target direction `(p,)` for direction-level test | `grassmannian_alignment_test` |
 | `weights` | length-n float64 vector; optional; default `None` = uniform; row-scales `(X, y/Y)` by `√w` (WLS-style precision/sampling weights) | `pls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_rotation_stability`, `pls1_perm_null`, `split_nb_gate` |
+| `keep` | sparse keep-count (spls1 family): number of nonzero `\|w\|` coordinates retained per component, hard-thresholded; `keep = n_features` reproduces the dense fit bit-exactly | `spls1_fit`, `spls1_find_k_optimal`, `spls1_find_k_sequence` |
+| `keep_X` | sparse X-side keep-count (spls3 family): non-zeros per column of `U`; `keep_X = n_features` reproduces the dense fit bit-exactly | `spls3_fit` |
+| `keep_Y` | sparse Y-side keep-count (spls3 family): non-zeros per column of `V` | `spls3_fit` |
 
 `split_nb_gate(X, weights=None)` is the one entry point that takes `X`
 without `y`: the `split_nb` auto-gate rule reads only the design.
@@ -67,7 +70,7 @@ without `y`: the `split_nb` auto-gate rule reads only the design.
 | name | description | functions |
 |---|---|---|
 | `k` | number of components to fit/test, or `"optimal"` / `"sequence"` (string modes on `pls1_fit` only) | `pls1_fit`, `pls2_fit`, `pls3_fit`, `pls1_confirmatory_test` |
-| `k_max` | upper bound on k for K-selection | `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_fit(k="optimal" \| "sequence")`, `nested_cv_r2_ci` |
+| `k_max` | upper bound on k for K-selection | `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_fit(k="optimal" \| "sequence")`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `nested_cv_r2_ci` *(planned)* |
 
 ### 3. Resampling counts
 
@@ -119,15 +122,15 @@ There is no `at` argument (legacy `"fitted_k"` / `"first_k"` / `"postselection"`
 | name | description | functions |
 |---|---|---|
 | `pre_standardized` | skip X+Y centering/scaling AND weight normalization (unified PLS1 flag) | `pls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_rotation_stability`, `pls1_perm_null` |
-| `pre_standardized_X` | skip X centering/scaling | `pls2_fit`, `pls3_fit` |
-| `pre_standardized_Y` | skip Y centering/scaling | `pls2_fit`, `pls3_fit` |
+| `pre_standardized_X` | skip X centering/scaling | `pls2_fit`, `pls3_fit`, `spls3_fit` |
+| `pre_standardized_Y` | skip Y centering/scaling | `pls2_fit`, `pls3_fit`, `spls3_fit` |
 
 ### 8. Algorithm internals
 
 | name | description | functions |
 |---|---|---|
-| `tol` | convergence tolerance | `pls1_fit`, `pls2_fit`, `rotate` (`varimax` args) |
-| `max_iter` | iteration cap | `pls1_fit`, `pls2_fit`, `rotate` (`varimax` args) |
+| `tol` | convergence tolerance | `pls1_fit`, `pls2_fit`, `spls3_fit`, `rotate` (`varimax` args) |
+| `max_iter` | iteration cap | `pls1_fit`, `pls2_fit`, `spls3_fit`, `rotate` (`varimax` args) |
 | `kaiser_normalize` | Kaiser row-normalize before varimax | `rotate` (`varimax` args) |
 | `estimator` | CI estimator (`"percentile"` / `"bca"`) | `percentile_ci` |
 
@@ -135,11 +138,18 @@ There is no `at` argument (legacy `"fitted_k"` / `"first_k"` / `"postselection"`
 
 | name | description | functions |
 |---|---|---|
-| `disable_parallelism` | force serial execution | every long-running core function |
+| `disable_parallelism` | force serial execution of the replicate loops; single top-level products (a reference fit under `Auto`, a one-off scoring product or decomposition) keep the crate's fixed parallel split, so results match the parallel run | every long-running core function |
 | `verbose` | progress to stderr | every long-running core function |
 | `max_skip_rate` | float in [0, 1]; default `0.01`; subsample loop raises `PlsKitResamplingDegenerate` if the fraction of skipped resamples exceeds this threshold | `pls1_confirmatory_test(ci=True)`, `pls1_rotation_stability` |
 
-### 10. Rotation-invariant subsample readouts (result-only; not args)
+Wrapper signatures default engine-owned numeric options to `None` (R
+`NULL`, Julia `nothing`), resolved from the core `Opts::default()` at the
+seam. The resolved value, never `None`, is recorded on results that carry
+the field. This applies to `n_boot`, `m_rate`, `level`, `max_skip_rate`,
+`max_failure_rate`, `n_perm`, `alpha`, and `spls3_fit`'s `max_iter` /
+`tol`.
+
+### 10. Rotation-invariant resampling readouts (result-only; not args)
 
 These names appear only on result objects (`ConfirmatoryCI`,
 `RotationStabilityResult`); the user does not pass them in. They are
@@ -149,15 +159,17 @@ computed in Rust core and surface verbatim across wrappers.
 | name | shape / type | description |
 |---|---|---|
 | `m` | `int` | resolved subsample size, `m = ceil(n^m_rate)` |
-| `agreement` | `CIScalar` | scalar summary of post-procrustes Frobenius agreement (rotation-stability output) |
-| `subspace_cos` | `CIScalar` | composite: cosine of subspace angle between resampled and full-fit `W` |
-| `cos_beta` | `CIScalar` | composite: cosine between resampled and full-fit `β` |
-| `beta_norm` | `CIScalar` | composite: `‖β_resample‖` distribution |
-| `holdout_corr` | `CIScalar` | composite: NB-adjusted Wald CI on out-of-sample correlation |
-| `beta_sign_z` | `(D,)` array | per-variable: uncorrected sign-stability z |
-| `leverage_ci_lower` | `(D,)` array | per-variable: subsampling CI lower bound on leverage |
-| `leverage_ci_upper` | `(D,)` array | per-variable: subsampling CI upper bound on leverage |
-| `leverage_se` | `(D,)` array | per-variable: subsampling SE of leverage |
+| `variance_ratio` | `CIScalar` | rotation-stability headline: `V_rot / V_unrot` on signed-permutation-aligned weights, paired-bootstrap percentile CI |
+| `variance_ratio_per_axis` | list of `CIScalar` | per-axis version of `variance_ratio` |
+| `holdout_corr` | `CIScalar` | composite: Fisher-z NB-adjusted Wald CI on out-of-sample correlation |
+| `beta_sign_z` | `(D,)` array | per-variable: folded subsampling z for β, `\|β_ref\| / se` (finite-population and shrinkage corrected SE) |
+| `beta_sign_z_signed` | `(D,)` array | per-variable: signed z, `sign(β_ref) · beta_sign_z` |
+| `beta_ci_lower` | `(D,)` array | per-variable: centered-scaled subsampling CI lower bound on β (PLS1 only) |
+| `beta_ci_upper` | `(D,)` array | per-variable: centered-scaled subsampling CI upper bound on β (PLS1 only) |
+| `beta_se` | `(D,)` array | per-variable: subsampling SE of β |
+| `leverage_ci_lower` | `(D,)` array | per-variable: bootstrap CI lower bound on leverage, clamped to [0, 1] |
+| `leverage_ci_upper` | `(D,)` array | per-variable: bootstrap CI upper bound on leverage, clamped to [0, 1] |
+| `leverage_se` | `(D,)` array | per-variable: bootstrap SE of leverage |
 
 ### Preprocess helper output (`PreprocessResult` fields)
 
@@ -193,19 +205,31 @@ in the implemented surface (`pls1_fit`, `pls1_predict`,
 uses `pre_standardized` (not `pre_standardized_X`) for all PLS1 entry
 points and added `weights`, `max_skip_rate`, and `plskit.preprocess`.
 
+What ships today, on both the Rust core (`lib.rs`) and the Python wrapper
+(`__init__.py`), beyond the PLS1 confirmatory-vs-exploratory surface above:
+
+- **PLS3 / PLSSVD**, one family under two names: `pls3_fit` / `pls3_transform`
+  and their `plssvd_fit` / `plssvd_transform` aliases (same function, same
+  arguments, same result; PLSSVD is the alignment-literature name for the
+  same SVD-on-`X'Y` fit), plus `pls3_confirmatory_test`.
+- **sPLS1**, the sparse keep-count family: `spls1_fit`,
+  `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`.
+- **sPLS3**, the two-sided sparse keep-count family: `spls3_fit`.
+- **`split_nb_gate`**, a standalone read of the `split_nb` auto-gate rule
+  (`X` only, no `y`).
+
 What is **not yet implemented**, and where this convention is
 forward-looking, is the Pillar-1 / Pillar-3 surface: `bootstrap_saliences`,
 `percentile_ci`, `bsr`, `nested_cv_r2_ci`, `grassmannian_alignment_test`,
-`anisotropic_null`, `rotation_stability`, plus `pls2_fit`, `pls3_fit`,
-`pls2_predict`, `pls3_transform`. The argument names listed for those
-functions in the tables above are binding on first implementation; gate
-via PR review.
+`anisotropic_null`, plus `pls2_fit` / `pls2_predict`. The argument names
+listed for those functions in the tables above are binding on first
+implementation; gate via PR review.
 
 ---
 
 ## Live tensions
 
-The four points where this convention chose against an alternative.
+The five points where this convention chose against an alternative.
 Override by editing the table; do not ship code that mixes both.
 
 1. **`n_perm` / `n_splits` / `n_boot` over `B_perm` / `J` / `B_boot`.**

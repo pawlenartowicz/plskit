@@ -27,6 +27,7 @@ from plskit._api import (
     spls1_find_keep_optimal,
     spls1_find_k_optimal,
     spls1_find_k_sequence,
+    spls3_fit,
 )
 from plskit._errors import PlsKitError, PlsKitInvalidWeights, PlsKitResamplingDegenerate
 from plskit._results import (
@@ -60,6 +61,7 @@ __all__ = [
     "pls3_transform", "plssvd_transform",
     "pls3_confirmatory_test",
     "PLS3Result", "PLS3Scores",
+    "spls3_fit",
     "spls1_fit",
     "spls1_find_keep_optimal",
     "spls1_find_k_optimal", "spls1_find_k_sequence",

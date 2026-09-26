@@ -12,8 +12,8 @@ fn all_cases_produces_full_corpus() {
     let cases = all_cases(dir.path()).unwrap();
     assert_eq!(
         cases.len(),
-        46,
-        "expected exactly 46 cases, got {}",
+        59,
+        "expected exactly 59 cases, got {}",
         cases.len()
     );
     let functions: HashSet<_> = cases.iter().map(|c| c.function.clone()).collect();
@@ -34,6 +34,7 @@ fn all_cases_produces_full_corpus() {
         "pls3_fit",
         "pls3_transform",
         "pls3_confirmatory_test",
+        "spls3_fit",
     ] {
         assert!(functions.contains(f), "missing function family: {f}");
     }
@@ -53,6 +54,20 @@ fn all_cases_produces_full_corpus() {
     assert!(names.contains("pls3_confirmatory_split_exact"));
     assert!(names.contains("pls1_confirmatory_raw_perm_wide"));
     assert!(names.contains("pls3_confirmatory_split_exact_wide"));
+    for name in [
+        "pls1_perm_null_weighted_n80_d6_k2",
+        "pls1_perm_null_wide_n60_d3000_k1",
+        "pls1_perm_null_wide_n60_d3000_k2",
+        "pls1_confirmatory_raw_perm_wide_k2",
+        "pls1_confirmatory_split_exact_wide_k2",
+        "spls1_find_k_sequence_split_exact_keep3",
+    ] {
+        assert!(names.contains(name), "missing fixture {name}");
+    }
+    assert!(names.contains("pls1_perm_null_tall_n2000_d50_k3"));
+    assert!(names.contains("pls1_perm_null_tall_weighted_n2000_d50_k2"));
+    assert!(names.contains("pls1_confirmatory_raw_perm_tall_k2"));
+    assert!(names.contains("spls1_find_k_sequence_split_exact_tall_keep10"));
     for c in &cases {
         assert_eq!(
             c.hashes.inputs_sha256.len(),

@@ -1,4 +1,4 @@
-"""Tests for plskit.rotate (varimax, v0.1.1)."""
+"""Tests for plskit.rotate (varimax)."""
 
 from __future__ import annotations
 
@@ -37,6 +37,45 @@ def test_rotate_array_K1_is_noop():
     np.testing.assert_allclose(r.spec.R, np.eye(1), atol=1e-15)
     np.testing.assert_allclose(r.W_rot, W, atol=1e-15)
     assert r.spec.sweeps == 0
+
+
+def test_rotate_array_defaults_come_from_the_engine_and_are_recorded():
+    """The varimax defaults `_api.py` fills in for omitted `args` keys must
+    match the engine's own `VarimaxArgs::default()` (read through
+    `plskit._plskit.VARIMAX_DEFAULTS`), and the resolved values (not
+    whatever `_api.py` might otherwise hard-code) must be what
+    `spec.args` records."""
+    from plskit import _plskit
+
+    W = np.random.default_rng(4).normal(size=(20, 2))
+    r = plskit.rotate(W, method="varimax")
+    assert r.spec.args["max_iter"] == _plskit.VARIMAX_DEFAULTS["max_iter"]
+    assert r.spec.args["tol"] == _plskit.VARIMAX_DEFAULTS["tol"]
+    assert (
+        r.spec.args["kaiser_normalize"]
+        == _plskit.VARIMAX_DEFAULTS["kaiser_normalize"]
+    )
+    # Pinned values too, so a change to the engine default is visible here.
+    assert _plskit.VARIMAX_DEFAULTS["max_iter"] == 50
+    assert _plskit.VARIMAX_DEFAULTS["tol"] == pytest.approx(1e-8)
+    assert _plskit.VARIMAX_DEFAULTS["kaiser_normalize"] is True
+
+
+def test_rotate_array_reads_varimax_defaults_live_from_the_seam(monkeypatch):
+    """Comparing spec.args against VARIMAX_DEFAULTS (the test above) cannot
+    tell a real seam read apart from `_api.py` hard-coding the same three
+    literals again: both would make that comparison pass. Mutate the engine
+    default in place and check it actually flows into both the fitted
+    model (`spec.sweeps` bounded by the patched `max_iter`) and the
+    recorded args, which only happens if `rotate()` reads the dict fresh on
+    every call rather than caching a copy of the old literals."""
+    from plskit import _plskit
+
+    monkeypatch.setitem(_plskit.VARIMAX_DEFAULTS, "max_iter", 7)
+    W = np.random.default_rng(5).normal(size=(30, 4))
+    r = plskit.rotate(W, method="varimax")
+    assert r.spec.args["max_iter"] == 7
+    assert r.spec.sweeps <= 7
 
 
 def test_rotate_array_idempotent_on_converged_solution():

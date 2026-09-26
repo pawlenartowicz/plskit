@@ -6,9 +6,9 @@
 The Python wrapper exposes the PLS1, sparse PLS1, and PLS3 / PLSSVD
 families of plskit. Every function
 listed here is reachable from `import plskit`. Each entry documents
-what the function does, what it takes, and what it returns; brief
-design rationale is omitted here and lives in the internal API surface
-contract (maintainer-facing).
+what the function does, what it takes, and what it returns. Design
+rationale is kept short and appears only where it changes how you call
+a function or read its result.
 
 ## Conventions
 
@@ -51,7 +51,7 @@ the standardized arrays to subsequent calls with `pre_standardized=True`.
 ### 2.1 Fit
 
 **function:** `pls1_fit`
-**need:** NIPALS PLS1 — single continuous `y`, asymmetric X→y predictive.
+**need:** the PLS1 (NIPALS) model: single continuous `y`, asymmetric X→y predictive.
 **arguments:** `X`, `y`, `k` (`int | "optimal" | "sequence"`, default `1`)
 **options:** `k_max` (required when `k` is a string); `find_k_args`
 (dict of method-specific kwargs forwarded to `pls1_find_k_optimal` /
@@ -59,15 +59,22 @@ the standardized arrays to subsequent calls with `pre_standardized=True`.
 target function except `seed` / `pre_standardized` / `weights` /
 `disable_parallelism` / `verbose`, which live on `pls1_fit` itself;
 unknown keys raise `PlsKitError(code="invalid_args")`);
-`pre_standardized` (bool, default `False`); `tol` (float, default
-`1e-9`); `max_iter` (int, default `500`); `seed` (`int | None`);
-`weights` (length-`n` vector; default `None` = uniform).
+`pre_standardized` (bool, default `False`); `seed` (`int | None`,
+forwarded to the k-selection call when `k` is a string);
+`weights` (length-`n` vector; default `None` = uniform). There is no
+convergence tolerance or iteration cap to set: each component of the
+PLS1 (NIPALS) model comes from a single pass.
 Rotation is post-fit; see `rotate`.
 **returns:** `PLS1Result`. When `k="sequence"` and
 `pls1_find_k_sequence` returns `k_star=0` (no component rejected at
 `alpha`), raises `PlsKitError(code="sequence_no_rejection")`. Callers
 that want to fit anyway must call `pls1_find_k_sequence` directly,
-inspect the result, and pass an explicit `int` k.
+inspect the result, and pass an explicit `int` k. Likewise, when
+`k="optimal"` and `pls1_find_k_optimal` returns `k_star=0` (`y` is
+constant or orthogonal to `X`, so no first component exists; at `n >=
+3`, since the CV selectors reject `n <= 2` first), raises
+`PlsKitError(code="optimal_no_component")`; an explicit `int` k returns
+the `k_used=0` zero model.
 
 ### 2.2 Predict
 
@@ -96,6 +103,13 @@ selector key `n_folds`; diagnostic keys `n_perm` for `raw_perm` /
 `split_nb`. Diagnostic keys require `diagnostic` to be set.);
 `pre_standardized`; `weights`; `seed`; `disable_parallelism`;
 `verbose`.
+`diagnostic="raw_perm"` uses a fixed 5-fold CV at every step and needs
+`n > 5`; below that it raises `invalid_argument` (leave-one-out would
+otherwise make every validation fold a single row). For `selector`
+`"r2_se"` / `"r2_max"`, the CV layer's own `n_folds` (`args`, default 5)
+is capped at `n - 2` and floored at 2; at very small `n` (`n <= 2`) that
+floor pushes the effective fold count back up to `n`, which is the same
+leave-one-out degeneracy and also raises `invalid_argument`.
 **returns:** `FindKOptimalResult`. A `"split_nb"` diagnostic the
 auto-gate flags reroutes to `"split_exact"`; `result.diagnostic` says
 so and Python warns. Pass `args={'force': True}` to run `"split_nb"`
@@ -103,7 +117,12 @@ anyway. When `diagnostic` is set, the `pvalues` and `diagnostic`
 fields are populated; selection and the diagnostic reuse the same
 data, so the pvalues are a robustness check, not honest inference. The `diagnostic=` parameter name (vs.
 `test_method=` on `pls1_find_k_sequence`) is the structural signal —
-same enum, different inferential weight.
+same enum, different inferential weight. When the full-data fit
+cannot extract a first component (`y` constant, or orthogonal to `X` up
+to rounding), every selector returns `k_star=0` with an empty score
+dict, matching `pls1_find_k_sequence` (for `r2_se` / `r2_max` only at
+`n >= 3`, since those CV selectors reject `n <= 2` first; `bic` is
+unaffected).
 
 **function:** `pls1_find_k_sequence`
 **need:** sequential closed-test on nested hypotheses — "how many
@@ -112,9 +131,12 @@ components carry signal at α?" with exact FWER control.
 **options:** `test_method` (`"raw_perm"` | `"split_nb"` |
 `"split_exact"` | `"e"`; default `"split_nb"`); `args` (dict of
 method-specific kwargs: `n_perm`, `n_splits`, and `force` for
-`split_nb`); `alpha` (default
+`split_nb`); `alpha` (default `None`: the engine default,
 `0.05`); `pre_standardized`; `weights`; `seed`;
-`disable_parallelism`; `verbose`. Stop-early at the first
+`disable_parallelism`; `verbose`. `test_method="raw_perm"` uses a
+fixed 5-fold CV at every step and needs `n > 5`; below that it raises
+`invalid_argument` (leave-one-out would otherwise make every
+validation fold a single row). Stop-early at the first
 non-rejection is hard-coded on; `K*` is the count of components that
 rejected before the first failure. The `split_nb` auto-gate is
 evaluated once for the whole sequence: a flagged request runs
@@ -127,6 +149,8 @@ sequence. To recover the path-max p-value, compute
 ---
 
 ## 2b. Sparse PLS1 (sPLS1)
+
+Concepts: [sPLS1](../concepts/sPLS1/index.md).
 
 Sparse PLS1 fits a NIPALS model with a hard keep-count constraint: each
 latent direction loads on at most `keep` X variables. `keep` is a scalar
@@ -144,8 +168,8 @@ post-selection inference and are deferred to a separate spec.
 ### 2b.1 Sparse fit
 
 **function:** `spls1_fit`
-**need:** NIPALS PLS1 with hard keep-count selection — each LV direction
-retains the `keep` largest-magnitude X loadings and zeros the rest.
+**need:** the PLS1 (NIPALS) model with hard keep-count selection: each LV
+direction retains the `keep` largest-magnitude X loadings and zeros the rest.
 **arguments:** `X`, `y`, `k`, `keep`
 **options:** `pre_standardized` (bool, default `False`);
 `weights` (length-`n` vector; default `None` = uniform).
@@ -163,13 +187,19 @@ axis.
 **arguments:** `X`, `y`, `k` (fixed component count for every fit in the
 sweep)
 **options:** `args` (`{'n_folds': int}`, default 5); `seed`;
-`disable_parallelism`; `verbose`; `weights`.
+`disable_parallelism`; `verbose`; `weights`. `n_folds` is capped at
+`n - 2` and floored at 2; at very small `n` (`n <= 2`) that floor pushes
+the effective fold count back up to `n`, leave-one-out (every validation
+fold a single row), which raises `invalid_argument`.
 **selection method:** logged geometric grid over `[1, n_features]`
 (powers of two, endpoints always included); the swept grid is reported on
 `result.keep_grid`. Sparsest-within-1-SE selection on mean CV R²; ties
 broken toward sparser. Sparsity is tuned inside the training split, never
 on test data.
-**returns:** `FindKeepOptimalResult`.
+**returns:** `FindKeepOptimalResult`. When `y` admits no first component
+(constant, or orthogonal to `X` up to rounding), `keep_star` is `0` and
+the score maps and `keep_grid` are empty, the same `0` convention as
+`k_star` on `spls1_find_k_optimal`.
 
 ### 2b.3 K-selection at fixed keep
 
@@ -196,7 +226,9 @@ residual and tests the sparse marginal component — a coherent sequential
 test. `keep = n_features` reproduces the dense function bit-exactly.
 **arguments:** `X`, `y`, `k_max`, `keep`
 **options:** `test_method` (`"raw_perm"` | `"split_nb"` | `"split_exact"`
-| `"e"`; default `"split_nb"`); `alpha` (default `0.05`); `args`;
+| `"e"`; default `"split_nb"`; `"raw_perm"` uses a fixed 5-fold CV at
+every step and needs `n > 5`, else `invalid_argument`); `alpha`
+(default `None`: the engine default, `0.05`); `args`;
 `pre_standardized`; `seed`; `disable_parallelism`; `verbose`; `weights`.
 **returns:** `FindKSequenceResult` (same type as `pls1_find_k_sequence`).
 
@@ -240,6 +272,24 @@ agree exactly.
 **returns:** `PLS3Scores`; a field is `None` exactly when `which` did not
 ask for it.
 
+### 2c.3 Sparse fit
+
+**function:** `spls3_fit`
+**need:** PLS3 with a hard keep-count on each side. `keep_Y < q` is the
+reason it exists: it forces each latent dimension onto a few outcomes, so
+the outcomes separate into groups.
+**arguments:** `X`, `Y`, `k`, `keep_X`, `keep_Y`
+**options:** `pre_standardized_X` / `pre_standardized_Y` (bool, default
+`False`); `max_iter` (default `None`: the engine default, 100); `tol`
+(default `None`: the engine default, 1e-8); `weights` (refused by this
+family). Unless both keeps are at their full
+dimension, `max_iter = 0` and a NaN, infinite or negative `tol` raise
+`invalid_argument`; at the dense endpoint neither is read.
+**returns:** `PLS3Result` with `keep_X`, `keep_Y`, `converged` and
+`n_iter` populated. `keep_X = p` and `keep_Y = q` reproduce `pls3_fit`
+bit for bit. The saliences are **not** orthogonal and `singular_values`
+are not singular values of `X'Y`.
+
 ---
 
 ## 3. Inference
@@ -250,7 +300,7 @@ ask for it.
 predictive-validity split-resampling family (`split_exact` is the same
 held-out-correlation statistic as `split_nb`, calibrated by permutation
 instead of the Fisher-z t approximation, so it holds its level on any
-design — it is the recommended default at `k=1`);
+design; it is the recommended method at `k=1`);
 `score` is closed-form on `T = ‖X′y‖²` (generalized χ² under Gaussian
 y, anisotropy-aware by construction, K-free); `e` is universal
 inference (split-LR e-value, calibration-free, non-asymptotic α bound
@@ -272,31 +322,48 @@ Call `split_nb_gate` (§3.2) to ask the same question in advance.
 
 **function:** `pls1_confirmatory_test`
 **need:** omnibus null test at a pre-specified `k` ("is there signal
-at K?"). Optionally runs an independent subsample pass for
+at K?"). Optionally runs an independent resampling pass for
 rotation-invariant CIs.
 **arguments:** `X`, `y`, `k` (default `1`)
 **options:**
 
 - `method` (`"raw_perm"` | `"split_nb"` | `"split_exact"` |
-  `"score"` | `"e"`)
+  `"score"` | `"e"`; keyword-only and required, with no default;
+  `"split_exact"` is recommended)
 - `args` (dict of method-specific kwargs)
 - `ci` (bool, default `False`) — when `True`, runs an independent
-  subsample pass after the headline test and populates `result.ci`.
-- `n_boot` (int, default `1000`; must be `≥ 100`); `m_rate` (float,
-  default `0.7`; `0.5 < m_rate < 0.95`); `level` (float, default
-  `0.95`; `0.5 ≤ level ≤ 0.99`); `max_skip_rate` (float, default
-  `0.01`); `max_failure_rate` (float, default `0.01`).
+  resampling pass after the headline test and populates `result.ci`.
+  Each of the `n_boot` replicates refits on a size-`m` subsample (for
+  `holdout_corr` and β) and on an n-out-of-n bootstrap resample (for
+  leverage).
+- `n_boot` (int, default `None`: the engine default, `1000`; must be
+  `≥ 100`); `m_rate` (float, default `None`: the engine default, `0.7`;
+  `0.5 < m_rate < 0.95`); `level` (float, default `None`: the engine
+  default, `0.95`; `0.5 ≤ level ≤ 0.99`); `max_skip_rate` (float,
+  default `None`: the engine default, `0.01`); `max_failure_rate`
+  (float, default `None`: the engine default, `0.01`). Every one of
+  these five is inert when `ci=False`. When `ci=True`, `n_boot`,
+  `m_rate` and `level` are recorded on `result.ci` as the resolved
+  value, not `None`; `max_skip_rate` and `max_failure_rate` are not
+  carried on any result field (they only gate the resampling loop).
 - `pre_standardized`; `weights`; `seed`; `disable_parallelism`;
   `verbose`.
 
 **args by method:**
 
-- `"raw_perm"` — `n_perm`, `n_folds`
-- `"split_nb"` — `n_splits`, `force` (bool, default `False`; run `split_nb`
+- `"raw_perm"`: `n_perm`, `n_folds` (default `5`; must be `≥ 2` and
+  `< n`: `n_folds >= n` is leave-one-out (an `n_folds` above `n` adds
+  empty folds on top of the one-row folds, still leave-one-out), where
+  every validation fold is a single row with zero spread, so the
+  pooled CV R² is undefined; raises `invalid_argument`. `n/2 < n_folds
+  < n` is not rejected: some folds hold a single row, which weakens
+  power but keeps the permutation p-value valid since the same
+  statistic is used on the nulls.)
+- `"split_nb"`: `n_splits`, `force` (bool, default `False`; run `split_nb`
   even on a design the auto-gate flags)
-- `"split_exact"` — `n_perm`, `n_splits`
-- `"score"` — none (anisotropy handled internally by Welch–Satterthwaite)
-- `"e"` — none
+- `"split_exact"`: `n_perm`, `n_splits`
+- `"score"`: none (anisotropy handled internally by Welch–Satterthwaite)
+- `"e"`: none
 
 **default `k=1`:** the omnibus question "is there *any* signal?" is
 power-optimized at `k=1`. All `k ≥ 1` are exact under the null, but
@@ -311,16 +378,26 @@ holding out a fresh sample.
 
 **returns:** `ConfirmatoryTestResult`. When `ci=True`, the `.ci` field
 is a `ConfirmatoryCI` bundle: a Fisher z-transformed Wald CI on
-holdout correlation (`holdout_corr`, a `CIScalar`), per-variable
-sign-stability z (`beta_sign_z` / `beta_sign_z_signed`), per-variable
-leverage CI (`leverage_ci_lower` / `leverage_ci_upper` /
-`leverage_ci_se`), and per-coordinate β CIs (`beta_ci_lower` /
-`beta_ci_upper` / `beta_ci_se`). The per-coordinate `beta_ci_*` arrays
-are a regression-style diagnostic; canonical inference is
-`beta_sign_z` + `leverage_ci_*` + `holdout_corr`. See
-[results](results.md) for field shapes and the
-shrinkage / multiplicity / standardization caveats that apply to
-`beta_ci_*`.
+holdout correlation (`holdout_corr`, a `CIScalar`), a per-variable
+subsampling z for β (`beta_sign_z` / `beta_sign_z_signed`), per-variable
+bootstrap leverage CI (`leverage_ci_lower` / `leverage_ci_upper` /
+`leverage_se`, bounds clamped to `[0, 1]`), and per-coordinate β CIs
+(`beta_ci_lower` / `beta_ci_upper` / `beta_se`). The per-coordinate
+`beta_ci_*` arrays are a regression-style diagnostic. `holdout_corr` is
+the calibrated composite readout. `beta_sign_z` is `|β_ref[j]| / beta_se[j]`
+with a subsampling SE corrected for sampling without replacement and
+for the shrinkage of subsample fits, and `beta_ci_*` is built from the
+same corrected replicates; at `k=1` it is roughly half-normal
+for a variable whose population PLS coefficient is 0, so it can be read
+against 1.96, without multiplicity correction. It is not calibrated at
+`k ≥ 2`; `pls1_perm_null` (§3.3) gives permutation-calibrated
+per-variable tests at any `k`. `leverage_ci_*` describes how much each
+variable contributes to the fitted subspace; it brackets the expected
+leverage of a size-`n` fit, which at small `n/D` sits below the
+large-sample leverage of signal variables. See [results](results.md)
+for field shapes, the leverage and z definitions with their simulated
+calibration, and the shrinkage / multiplicity / standardization caveats
+that apply to `beta_ci_*`.
 
 ### 3.2 Auto-gate query
 
@@ -342,11 +419,13 @@ request reroute?), plus the `stable_rank` and `n_eff` the rule read.
 for downstream FWER correction (TFCE / max-stat / cluster-mass) at
 fMRI / NIRS scale.
 **arguments:** `X`, `y`, `k`
-**options:** `n_perm` (int, default `1000`); `return_perm_matrix`
+**options:** `n_perm` (int, default `None`: the engine default,
+`1000`; must be `≥ 100`, recorded on `result.n_perm` as the resolved
+value, not `None`); `return_perm_matrix`
 (bool, default `False`); `pre_standardized`; `seed`;
 `disable_parallelism`; `verbose`; `weights`.
 **returns:** `PermNullResult`. Pair with
-`pls1_confirmatory_test(method="split_nb")` as an omnibus gate before
+`pls1_confirmatory_test(method="split_exact")` as an omnibus gate before
 spending the `n_perm` permutation budget.
 
 ### 3.4 Confirmatory PLS3 omnibus test
@@ -356,7 +435,8 @@ spending the `n_perm` permutation budget.
 latent-variable correlation, calibrated by permutation or against a t
 reference.
 **arguments:** `X`, `Y`, `k` (must be `1`)
-**options:** `method` (`"split_exact"` | `"split_nb"`); `args`
+**options:** `method` (`"split_exact"` | `"split_nb"`; keyword-only and
+required, with no default; `"split_exact"` is recommended); `args`
 (`"split_exact"`: `{"n_perm": int, "n_splits": int}`, defaults `1000` / `50`;
 `"split_nb"`: `{"n_splits": int, "force": bool}`, defaults `50` / `False`);
 `pre_standardized_X`; `pre_standardized_Y`; `seed`; `disable_parallelism`;
@@ -370,6 +450,8 @@ equals `n`. `rho_hat` is populated for `split_nb` only (and only when the
 test half has at least 4 rows); `stable_rank` is populated whenever
 `split_nb` was requested; `n_perm` is `None` for `split_nb`.
 
+Concepts: [PLS3 inference](../concepts/PLS3/inference.md).
+
 **The statistic.** Fit PLS3 on the training half for `(u1, v1)`, then take
 `r = cor(X_te @ u1, Y_te @ v1)` on the held-out half. Fisher-z average
 across the splits; the reported `statistic` is `tanh(z_bar)`, matching what
@@ -381,16 +463,24 @@ splits drawn once and held fixed across all permutations.
 simultaneous flip, and a flip negates both held-out score vectors at once,
 so `r` is unchanged. No alignment step is needed.
 
-**Which method.** `split_exact` is the recommendation: it holds its level on
-any design. `split_nb` compares the same statistic against a t reference
+**Which method.** `split_exact` is the recommendation: it is exact whenever
+the rows are exchangeable under the null. `split_nb` compares the same statistic against a t reference
 instead of permuting, costing `n_splits` fits in total rather than
 `n_perm * n_splits`. Both sides of the correlation are estimated on the
-training half, where PLS1 has an observed outcome on one side, but that
-costs the t reference nothing — conditional on the training half the two
+training half, where PLS1 has an observed outcome on one side. The
+per-split null still carries over: conditional on the training half the two
 held-out score vectors are fixed linear combinations of independent
-test-half rows, so under the null `r` follows the ordinary null correlation
-law. Measured on Gaussian, heavy-tailed, low-stable-rank and real two-block
-designs, `split_nb` came out conservative, never anti-conservative.
+test-half rows, so under the null `r` on one split follows the ordinary
+null correlation law. The between-split correction behind the p-value is
+PLS1's Nadeau-Bengio heuristic, not derived for two blocks, so its transfer
+is supported empirically only. Measured on Gaussian, heavy-tailed,
+low-stable-rank and real two-block designs, `split_nb` came out
+conservative, never anti-conservative.
+
+**Clustered rows.** Neither method is valid when rows are clustered (e.g.
+repeated scans per subject): random splits leak subjects across the halves,
+and permuting Y rows individually breaks within-subject exchangeability.
+Blocked splits and blocked permutation are not implemented.
 
 **The `split_nb` auto-gate.** Identical to `pls1_confirmatory_test`'s and
 applied to X only: a flagged design runs `split_exact` instead
@@ -402,7 +492,10 @@ design.
 
 **The three methods that are not available.** `raw_perm` needs a
 cross-validated R², which a method with no `predict` does not have. `score`
-is single-`y` by construction and `e` has no symmetric formulation.
+is not implemented: its symmetric analog is an RV-type test on `‖X'Y‖_F²`,
+which tests a different estimand from the LV1 held-out correlation. `e`
+needs a generative model that symmetric cross-decomposition does not
+supply.
 
 **Why only `k=1`.** Above LV1 neither the component ordering nor the
 individual directions need survive to the test half when singular values
@@ -435,23 +528,29 @@ computed. Default identity rotates `W` directly; passing an alternative
 **returns:** `RotateResult` when called on `np.ndarray`; a new
 `PLS1Result` (with `.rotation_spec` populated) when called on
 `PLS1Result`. Re-rotation of an already-rotated `PLS1Result` raises
-`PlsKitError(code="already_rotated")` in v0.1.x.
+`PlsKitError(code="already_rotated")`; re-rotation is not supported.
 
 ### 4.2 Rotation-stability diagnostic
 
 **function:** `pls1_rotation_stability`
-**need:** standalone subsampling diagnostic — does the chosen rotation
-converge to the same axis permutation across resamples? Output is a
-single post-procrustes Frobenius `CIScalar` summarizing whether
-rotated-basis labels are stable.
+**need:** standalone subsampling diagnostic: does rotating `W` make the
+axes more or less replicable across resamples? Each resample's `W`
+(unrotated, and rotated) is aligned to the full-data reference by a
+signed permutation of its columns, and the squared residuals give an
+axis variance `V_unrot` and `V_rot`. The headline is
+`variance_ratio = V_rot / V_unrot` (a `CIScalar` with a paired-bootstrap
+percentile CI), plus one ratio per axis in `variance_ratio_per_axis`.
+A ratio below 1 means rotation made the axes more stable.
 **arguments:** `X`, `y`, `k`
 **options:** `rotation_method` (`"varimax"`; default `"varimax"`);
 `rotation_args` (dict); `L` (loading basis; default identity);
-`n_boot` (int, default `1000`, `≥ 100`); `m_rate` (float, default
-`0.7`, `0.5 < m_rate < 0.95`); `level` (float, default `0.95`,
-`0.5 ≤ level ≤ 0.99`); `pre_standardized`; `weights`;
-`max_skip_rate` (float, default `0.01`); `seed`;
-`disable_parallelism`; `verbose`.
+`n_boot` (int, default `None`: the engine default, `1000`, `≥ 100`);
+`m_rate` (float, default `None`: the engine default, `0.7`,
+`0.5 < m_rate < 0.95`); `level` (float, default `None`: the engine
+default, `0.95`, `0.5 ≤ level ≤ 0.99`); `pre_standardized`; `weights`;
+`max_skip_rate` (float, default `None`: the engine default, `0.01`);
+`seed`; `disable_parallelism`; `verbose`. `n_boot`, `m_rate` and
+`level` are recorded on the result as the resolved value, not `None`.
 
 **Constraints on k:** `2 ≤ k ≤ 7`. `k = 1` is rejected because
 rotation is the identity on a 1-D subspace, making the diagnostic
@@ -470,7 +569,9 @@ See [results](results.md) for full field shapes:
 
 - `PreprocessResult`
 - `PLS1Result` (`keep: int | None` — populated by `spls1_fit`, `None` for dense fits)
+- `PLS3Result`, `PLS3Scores`
 - `ConfirmatoryTestResult` (with optional `ConfirmatoryCI`)
+- `SplitNbGateResult`
 - `FindKOptimalResult`, `FindKSequenceResult`
 - `FindKeepOptimalResult` — returned by `spls1_find_keep_optimal`
 - `PermNullResult`
@@ -480,7 +581,43 @@ See [results](results.md) for full field shapes:
 
 ## Errors
 
-- `PlsKitError` — base error, with `code` for programmatic handling.
-- `PlsKitInvalidWeights` — weights vector failed validation.
-- `PlsKitResamplingDegenerate` — subsample loop exceeded
-  `max_skip_rate` or `max_failure_rate`.
+- `PlsKitError`: base error, with `code` for programmatic handling.
+- `PlsKitInvalidWeights` (`code="invalid_weights"`): weights vector failed
+  validation; `reason` is `"negative"`, `"all_zero"` or
+  `"insufficient_effective_n"`.
+- `PlsKitResamplingDegenerate` (`code="resampling_degenerate"`): the
+  resampling loop skipped more than `max_skip_rate` of its draws. Carries
+  `skipped`, `total`, `skip_rate`, `threshold`.
+
+**`invalid_args` vs. `invalid_argument`.** Two different codes, easy to
+confuse:
+
+- `invalid_args`: a method-specific args dict (`args=`, `rotation_args=`,
+  `find_k_args=`) had an unknown key, a missing key, or a value of the
+  wrong type. Raised when the extension parses the dict for the chosen
+  `method`, and on the Python side for `find_k_args` on `pls1_fit`.
+- `invalid_argument`: a top-level argument has a bad value (for example
+  `k="optimal"` without `k_max`, an array with the wrong number of
+  dimensions, or `weights` passed to a PLS3 function).
+
+**All codes.** `PlsKitError.code` is one of:
+
+| `code` | Meaning |
+|---|---|
+| `dimension_mismatch` | `X` and `y` have different row counts |
+| `k_exceeds_max` | requested `k` exceeds the maximum for this data |
+| `non_finite_input` | an input contains NaN or infinity |
+| `convergence_failure` | reserved; no current code path raises it |
+| `invalid_argument` | bad value for a top-level argument (see above) |
+| `invalid_args` | bad method-specific args dict (see above) |
+| `invalid_input` | invalid input content (shape, finiteness, `K = 0`, ...) |
+| `shape_mismatch` | two arrays have incompatible shapes |
+| `rotation_method_not_implemented` | the requested rotation method does not exist in this version |
+| `already_rotated` | `rotate` was called on a `PLS1Result` that already has a `rotation_spec` |
+| `invalid_weights` | raised as `PlsKitInvalidWeights` |
+| `resampling_degenerate` | raised as `PlsKitResamplingDegenerate` |
+| `resample_failure_rate_exceeded` | the `ci=True` resampling pass had more failed replicates than `max_failure_rate` allows |
+| `perm_null_degenerate` | more than half the permutation null fits failed |
+| `internal` | a plskit bug; please report it |
+| `sequence_no_rejection` | `pls1_fit(k="sequence")` found no component at `alpha` (raised by the engine: `FindKSequenceOutput::k_to_fit`) |
+| `optimal_no_component` | `pls1_fit(k="optimal")` got `k_star=0`, no first component can be extracted (raised by the engine: `FindKOptimalOutput::k_to_fit`) |

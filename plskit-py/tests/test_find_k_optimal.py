@@ -34,6 +34,17 @@ def test_optimal_r2_max_returns_cv_scores_no_se():
     assert r.bic_scores is None
 
 
+@pytest.mark.parametrize("selector", ["r2_se", "r2_max"])
+def test_optimal_rejects_leave_one_out_at_n_eq_2(selector):
+    """n = 2: the CV layer's own n_folds cap/floor (max(2, n - 2)) pushes
+    the effective fold count back up to n, leave-one-out (every validation
+    fold a single row). The same degeneracy raw_perm rejects."""
+    X, y = _data(n=2, d=3, k_signal=1, seed=6)
+    with pytest.raises(plskit.PlsKitError) as exc_info:
+        plskit.pls1_find_k_optimal(X, y, k_max=1, selector=selector, seed=7)
+    assert exc_info.value.code == "invalid_argument"
+
+
 def test_optimal_bic_returns_bic_scores_only():
     X, y = _data()
     r = plskit.pls1_find_k_optimal(X, y, k_max=4, selector="bic", seed=7)

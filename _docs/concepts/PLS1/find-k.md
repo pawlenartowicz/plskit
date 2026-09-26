@@ -19,6 +19,17 @@ distinct K-selection paths, each appropriate to a different question.
 - Strong control over the family-wise error rate by closed testing
 - When to use: hypothesis-driven workflows where the question is "how many components are statistically supported"
 
+## When no component exists
+
+If `y` is constant, or orthogonal to the columns of `X` up to rounding
+(for example an outcome residualized on covariates that span `X`), the
+full-data fit cannot extract even a first component: `pls1_fit` returns
+the `k_used = 0` zero model, which predicts the mean of `y`. Both paths
+then report `k_star = 0`. `pls1_find_k_optimal` returns empty score maps
+for every selector rather than recommending a component the fit cannot
+produce; `pls1_find_k_sequence` does not reject at the first step. The
+sparse `spls1_find_k_*` entry points behave the same way.
+
 ## Cross-references
 
 - Confirmatory testing at a fixed `k` (no data reuse): see [inference](inference.md)

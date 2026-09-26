@@ -46,13 +46,12 @@ class PLS1Result:
 
 @dataclass(frozen=True)
 class CIScalar:
-    """Subsampling CI for a scalar functional, plus its SE.
+    """Resampling CI for a scalar functional, plus its SE.
 
     `point`, `lower`, `upper` are on the natural scale of the statistic.
     `sd` is on the *inference scale* used to build the CI:
 
-    * leverage / variance_ratio (centered-scaled): inference scale = natural scale,
-      so ``point ± Φ⁻¹(1−α/2) · sd`` reconstructs the CI.
+    * variance_ratio: inference scale = natural scale.
     * holdout_corr (Fisher-transformed NB-Wald): inference scale = atanh(r)
       (z-scale). The r-scale CI is asymmetric and cannot be reconstructed from
       ``point ± sd``; bounds are guaranteed to lie in (−1, 1).
@@ -72,14 +71,14 @@ class ConfirmatoryCI:
     level: float
 
     # per-variable
-    beta_sign_z: np.ndarray            # shape (D,); folded — canonical for hypothesis tests
-    beta_sign_z_signed: np.ndarray     # shape (D,); = sign(β_ref) · |beta_sign_z|; descriptive directional map
-    leverage_ci_lower: np.ndarray      # shape (D,)
-    leverage_ci_upper: np.ndarray      # shape (D,)
-    leverage_se: np.ndarray            # shape (D,)
-    beta_ci_lower: np.ndarray          # shape (D,); per-coordinate centered-scaled CI (PLS1 only); diagnostic — see RESULTS_FORMAT.md caveats
+    beta_sign_z: np.ndarray            # shape (D,); |β_ref| / beta_se; ~half-normal if β_j = 0 at K = 1
+    beta_sign_z_signed: np.ndarray     # shape (D,); signed z = sign(β_ref) · beta_sign_z; ~N(0, 1) if β_j = 0 at K = 1
+    leverage_ci_lower: np.ndarray      # shape (D,); h − Φ⁻¹(1−α/2)·leverage_se, clamped to [0, 1]
+    leverage_ci_upper: np.ndarray      # shape (D,); h + Φ⁻¹(1−α/2)·leverage_se, clamped to [0, 1]
+    leverage_se: np.ndarray            # shape (D,); sd of leverage over n-out-of-n bootstrap refits
+    beta_ci_lower: np.ndarray          # shape (D,); per-coordinate CI, shrinkage-corrected and FPC-scaled (PLS1 only; calibrated at K = 1), see _docs/python/results.md caveats
     beta_ci_upper: np.ndarray          # shape (D,)
-    beta_se: np.ndarray                # shape (D,); = √(m/n) · sd(β_b[j])
+    beta_se: np.ndarray                # shape (D,); = √(m/(n − m)) · sd(β_b[j]) / κ̂
 
     # composite
     holdout_corr: CIScalar             # Fisher z-transformed NB-Wald CI; bounds in (−1, 1), asymmetric on r-scale
@@ -192,11 +191,11 @@ class SplitNbGateResult:
 @dataclass(frozen=True)
 class FindKeepOptimalResult:
     """Output of `spls1_find_keep_optimal` (keep-count tuning at fixed k)."""
-    keep_star: int            # sparsest keep within 1 SE of the best mean CV R²
+    keep_star: int            # sparsest keep within 1 SE of the best mean CV R²; 0 = no first component
     k: int                    # the fixed component count the sweep ran at
     cv_scores: dict[int, float]      # keep → mean CV R²
     cv_scores_se: dict[int, float]   # keep → SE of CV R²
-    keep_grid: list[int]      # the grid actually swept (geometric, endpoints 1 and n_features)
+    keep_grid: list[int]      # the grid actually swept (geometric, endpoints 1 and n_features); [] when keep_star == 0
     seed: int
     n_eff: float = float("nan")
 
@@ -226,7 +225,7 @@ class PermNullResult:
 
 @dataclass(frozen=True)
 class PreprocessResult:
-    """Return type of `plskit.preprocess(...)`. Spec §5.2.
+    """Return type of `plskit.preprocess(...)`.
 
     Each field is populated only if the matching input was passed.
     ``Y_std`` is shape-polymorphic — matches the input shape (1-D or 2-D).
@@ -245,19 +244,24 @@ class PreprocessResult:
 
 @dataclass(frozen=True)
 class PLS3Result:
-    """Output of `pls3_fit` / `plssvd_fit`.
+    """Output of ``pls3_fit`` / ``plssvd_fit`` / ``spls3_fit``.
 
     PLS3 is symmetric: neither block is the outcome, so there is no `beta`,
     no `coef` and no `predict`. Use `pls3_transform` to project new data.
 
-    `U` and `V` have orthonormal columns and their signs are pinned by the
-    engine (largest-magnitude entry of each `U` column positive, flipped
-    jointly with the matching `V` column), so repeated fits on the same data
-    agree exactly.
+    On a dense fit `U` and `V` have orthonormal columns. On a sparse fit
+    (``spls3_fit``) the columns are unit-norm but not orthogonal, and
+    ``singular_values`` are the per-component `u'Av` on the deflated `A`,
+    not singular values of `X'Y`: they need not descend and their squares
+    do not partition anything.
+
+    Signs are pinned by the engine either way (largest-magnitude entry of
+    each `U` column positive, flipped jointly with the matching `V`
+    column), so repeated fits on the same data agree exactly.
     """
     U: np.ndarray                  # (p, k_used) X-side saliences
     V: np.ndarray                  # (q, k_used) Y-side saliences
-    singular_values: np.ndarray    # (k_used,) descending
+    singular_values: np.ndarray    # (k_used,) descending on a dense fit only
     x_scores: np.ndarray           # (n, k_used) in-sample X-side LV scores
     y_scores: np.ndarray           # (n, k_used) in-sample Y-side LV scores
     X_mean: np.ndarray             # (p,); zeros when pre_standardized_X
@@ -267,6 +271,10 @@ class PLS3Result:
     k_used: int
     pre_standardized_X: bool
     pre_standardized_Y: bool
+    keep_X: int | None = None          # X-side keep-count; None on a dense fit
+    keep_Y: int | None = None          # Y-side keep-count; None on a dense fit
+    converged: np.ndarray | None = None  # (k_used,) bool; None on a dense fit
+    n_iter: np.ndarray | None = None     # (k_used,) int; None on a dense fit
 
 
 @dataclass(frozen=True)

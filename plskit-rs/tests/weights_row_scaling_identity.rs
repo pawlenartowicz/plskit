@@ -1,5 +1,6 @@
-//! Spec §9 test 5: weighted fit ≡ unweighted fit on row-scaled standardized inputs
-//! when both go through `pre_standardized=true` (the cache pattern of §5.5).
+//! Weighted fit ≡ unweighted fit on row-scaled standardized inputs when both
+//! go through `pre_standardized=true` (the `preprocess` cache pattern; see
+//! `_docs/concepts/PLS1/weights.md`).
 
 #![allow(clippy::many_single_char_names)]
 #![allow(clippy::cast_precision_loss)]

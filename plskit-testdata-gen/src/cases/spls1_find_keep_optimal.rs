@@ -5,15 +5,12 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::cases::pls1_find_k_optimal::write_btreemap;
-use crate::cases::{ndarray_to_faer_col, ndarray_to_faer_mat, scalar_i64, synth_data, CasePaths};
+use crate::cases::{
+    default_tolerance, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_i64, synth_data, CasePaths,
+};
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
 use plskit::{spls1_find_keep_optimal, FindKeepOptimalOpts};
-
-/// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10.
-fn default_tolerance() -> serde_json::Value {
-    serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10})
-}
 
 /// Case: keep sweep at fixed k=1 on (n=80, d=6), seed=42.
 ///

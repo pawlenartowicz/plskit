@@ -1,7 +1,8 @@
 //! `pls1_rotation_stability` fixture cases.
 
 use crate::cases::{
-    ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data, CasePaths,
+    default_tolerance, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64,
+    synth_data, CasePaths,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
@@ -10,11 +11,6 @@ use plskit::{
     pls1_rotation_stability, CIScalar, RotationStabilityMethod, RotationStabilityOpts, VarimaxArgs,
 };
 use std::path::Path;
-
-/// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10.
-fn default_tolerance() -> serde_json::Value {
-    serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10})
-}
 
 /// Write the four scalar fields of a `CIScalar` under a given prefix.
 fn write_ci_scalar(w: &mut crate::npz::NpzWriter, prefix: &str, ci: &CIScalar) -> Result<()> {

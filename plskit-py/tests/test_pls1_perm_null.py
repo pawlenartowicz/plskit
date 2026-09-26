@@ -26,6 +26,14 @@ def test_returns_perm_null_result():
     assert r.beta_perm_matrix is None
 
 
+def test_none_n_perm_is_recorded_as_resolved_value():
+    """None (the public default for n_perm) must resolve to the engine's
+    own default and be recorded on result.n_perm, never as None."""
+    x, y = _synth()
+    r = pls1_perm_null(x, y, k=2, seed=7)
+    assert r.n_perm == 1000
+
+
 def test_return_perm_matrix_shape():
     x, y = _synth()
     r = pls1_perm_null(x, y, k=2, n_perm=200, return_perm_matrix=True, seed=7)
