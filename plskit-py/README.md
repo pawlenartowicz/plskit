@@ -13,6 +13,25 @@ by a Rust engine.
 > the Rust core, sibling wrappers (R and Julia, planned), shared test
 > corpus, issues, and PRs all live there.
 
+## What is plskit?
+
+plskit is a Partial Least Squares (PLS) library built around three ideas:
+
+- **Modern inference.** Confirmatory tests use split-half held-out
+  prediction: `split_exact` is calibrated by permutation, and
+  `split_nb` is its faster Fisher-z approximation. Confidence
+  intervals are taken on rotation-invariant quantities (held-out
+  correlation, per-variable leverage, a subsampling z for β), so no
+  Procrustes alignment is needed. The tests are introduced in our
+  [NeurIPS 2026 paper](https://openreview.net/forum?id=xb6CB7d9LO).
+- **Same results in every language.** All numerical work runs in one
+  Rust engine. Python (and the planned R and Julia wrappers) call
+  into it, so a fixed `(version, seed, X, y)` gives the same results,
+  within a bit-near tolerance, in every language and on every
+  supported platform.
+- **Speed.** The engine is written in Rust with parallel resampling,
+  which makes plskit probably the fastest PLS package available.
+
 ## Install
 
 ```
@@ -83,8 +102,15 @@ result. Bug reports and feature requests belong on the
 
 ## Citation
 
-Lenartowicz, P., Plisiecki, H. (2026). *Cheap Per-Component Testing for
-PLS, Stable Under Rotation* (Under Review).
+```bibtex
+@inproceedings{lenartowicz2026cheap,
+  title     = {Cheap and Powerful Tests for Supervised Subspaces: Per-Component Inference for {PLS}},
+  author    = {Lenartowicz, Pawe{\l} and Plisiecki, Hubert},
+  booktitle = {The Fortieth Annual Conference on Neural Information Processing Systems},
+  year      = {2026},
+  url       = {https://openreview.net/forum?id=xb6CB7d9LO}
+}
+```
 
 ## License
 

@@ -72,7 +72,7 @@ fn np_mat_to_faer(arr: PyReadonlyArray2<'_, f64>) -> PyResult<Mat<f64>> {
 /// A copy-free faer view of a contiguous, aligned numpy matrix: row-major
 /// for a C-ordered array, column-major for a Fortran-ordered one; `None`
 /// for any other layout, and for misaligned data. Only for engine entries
-/// whose result does not depend on the layout of `X` (see `pls1_x`).
+/// that accept `X` in any layout (see `pls1_x`).
 fn np_mat_view<'a>(arr: &'a PyReadonlyArray2<'_, f64>) -> Option<MatRef<'a, f64>> {
     if !arr.is_aligned() {
         return None;
@@ -88,23 +88,20 @@ fn np_mat_view<'a>(arr: &'a PyReadonlyArray2<'_, f64>) -> Option<MatRef<'a, f64>
     }
 }
 
-/// `X` for `pls1_fit` / `spls1_fit`. With `pre_standardized = false` the
-/// engine only checks `X` for finite values and standardizes it into a
-/// fresh column-major matrix, and both give the same bits on any layout,
-/// so a contiguous array is read in place instead of being copied first
-/// (a full pass over `X` and an `n x d` allocation saved). A
-/// pre-standardized `X` goes to the kernel as given, whose products can
-/// round differently on another layout, so it is still copied, as is a
-/// misaligned one (through `np_mat_to_faer`, which aligns it first).
+/// `X` for `pls1_fit` / `spls1_fit`: a contiguous, aligned array is read in
+/// place (row-major for C order, column-major for Fortran order), anything
+/// else is copied column-major by `np_mat_to_faer`. The engine standardizes
+/// into X's own layout, or with `pre_standardized` runs its kernel on X as
+/// given, so the last bits of a fit depend on the layout of X, within the
+/// crate's tolerance. Callers pass `arr` through [`aligned`] first: numpy's
+/// copy of a misaligned C-ordered array is C-ordered, so it is read
+/// row-major and fits to the bits of the same values passed aligned.
 fn pls1_x<'a>(
     arr: &'a PyReadonlyArray2<'_, f64>,
-    pre_standardized: bool,
     copy: &'a mut Option<Mat<f64>>,
 ) -> PyResult<MatRef<'a, f64>> {
-    if !pre_standardized {
-        if let Some(view) = np_mat_view(arr) {
-            return Ok(view);
-        }
+    if let Some(view) = np_mat_view(arr) {
+        return Ok(view);
     }
     Ok(copy.insert(np_mat_to_faer(arr.clone())?).as_ref())
 }
@@ -517,8 +514,9 @@ fn pls1_fit<'py>(
         ..FitOpts::default()
     };
     // Bridge numpy → faer at the entry seam.
+    let x = aligned(x)?;
     let mut x_copy = None;
-    let xf = pls1_x(&x, pre_standardized, &mut x_copy)?;
+    let xf = pls1_x(&x, &mut x_copy)?;
     let yf = np_col_to_faer(y)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
@@ -542,8 +540,9 @@ fn spls1_fit<'py>(
         pre_standardized,
         ..FitOpts::default()
     };
+    let x = aligned(x)?;
     let mut x_copy = None;
-    let xf = pls1_x(&x, pre_standardized, &mut x_copy)?;
+    let xf = pls1_x(&x, &mut x_copy)?;
     let yf = np_col_to_faer(y)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);

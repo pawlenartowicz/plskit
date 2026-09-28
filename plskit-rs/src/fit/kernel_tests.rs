@@ -284,7 +284,15 @@ fn kernel_k1_is_bit_identical_to_reference() {
                         "n={n} d={d} weighted={} keep={keep:?} par={par:?}",
                         weights.is_some()
                     );
-                    let new = pls1_kernel(inp.xs.as_ref(), inp.ys.as_ref(), 1, keep, par).unwrap();
+                    let new = pls1_kernel(
+                        inp.xs.as_ref(),
+                        inp.ys.as_ref(),
+                        1,
+                        keep,
+                        par,
+                        inp.xs.norm_l2(),
+                    )
+                    .unwrap();
                     let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 1, keep, par)
                         .unwrap();
                     assert_mat_bits(&new.0, &old.0, &format!("{what} T"));
@@ -311,7 +319,15 @@ fn kernel_matches_reference_at_k5() {
         let inp = kernel_inputs(x.as_ref(), y.as_ref(), weights);
         for keep in [None, Some(9)] {
             let what = format!("weighted={} keep={keep:?}", weights.is_some());
-            let new = pls1_kernel(inp.xs.as_ref(), inp.ys.as_ref(), 5, keep, Par::Seq).unwrap();
+            let new = pls1_kernel(
+                inp.xs.as_ref(),
+                inp.ys.as_ref(),
+                5,
+                keep,
+                Par::Seq,
+                inp.xs.norm_l2(),
+            )
+            .unwrap();
             let old =
                 nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 5, keep, Par::Seq).unwrap();
             assert_eq!(new.2.ncols(), 5, "{what}: all five components are real");
@@ -403,7 +419,15 @@ fn loop_returns_unresolved_when_a_gate_says_so() {
     let LoopOutcome::Done { t, p, w, q } = pls1_component_loop(&mut b, s0, w_floor, 5, None) else {
         panic!("expected Done");
     };
-    let direct = pls1_kernel(inp.xs.as_ref(), inp.ys.as_ref(), 5, None, Par::Seq).unwrap();
+    let direct = pls1_kernel(
+        inp.xs.as_ref(),
+        inp.ys.as_ref(),
+        5,
+        None,
+        Par::Seq,
+        inp.xs.norm_l2(),
+    )
+    .unwrap();
     assert_mat_bits(&t.expect("the X backend forms T"), &direct.0, "T");
     assert_mat_bits(&p, &direct.1, "P");
     assert_mat_bits(&w, &direct.2, "W");
@@ -482,7 +506,15 @@ fn zero_component_fit_returns_empty_factor_matrices() {
     assert_eq!(m.q_loadings.nrows(), 0, "Q");
     // Straight from the kernel, the same shapes as the reference's.
     let inp = kernel_inputs(x.as_ref(), y.as_ref(), None);
-    let new = pls1_kernel(inp.xs.as_ref(), inp.ys.as_ref(), 2, None, Par::Seq).unwrap();
+    let new = pls1_kernel(
+        inp.xs.as_ref(),
+        inp.ys.as_ref(),
+        2,
+        None,
+        Par::Seq,
+        inp.xs.norm_l2(),
+    )
+    .unwrap();
     let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 2, None, Par::Seq).unwrap();
     assert_factors_close(&new, &old, &[], "zero-component");
 }
@@ -491,7 +523,15 @@ fn zero_component_fit_returns_empty_factor_matrices() {
 fn truncated_fit_matches_reference_on_the_exhausted_design() {
     let (x, y) = exhausted_design(2000, 11);
     let inp = kernel_inputs(x.as_ref(), y.as_ref(), None);
-    let new = pls1_kernel(inp.xs.as_ref(), inp.ys.as_ref(), 40, None, Par::Seq).unwrap();
+    let new = pls1_kernel(
+        inp.xs.as_ref(),
+        inp.ys.as_ref(),
+        40,
+        None,
+        Par::Seq,
+        inp.xs.norm_l2(),
+    )
+    .unwrap();
     let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 40, None, Par::Seq).unwrap();
     let k_used = new.2.ncols();
     assert!((5..=20).contains(&k_used), "k_used = {k_used}");
@@ -666,8 +706,15 @@ fn first_support_split(new: &Parts, old: &Parts) -> Option<usize> {
 /// and `beta` drift.
 fn compare_with_reference(ds: &Design) -> Option<[f64; 3]> {
     let inp = kernel_inputs(ds.x.as_ref(), ds.y.as_ref(), ds.w.as_ref().map(Col::as_ref));
-    let new =
-        pls1_kernel(inp.xs.as_ref(), inp.ys.as_ref(), ds.k, ds.keep, Par::Seq).expect("kernel");
+    let new = pls1_kernel(
+        inp.xs.as_ref(),
+        inp.ys.as_ref(),
+        ds.k,
+        ds.keep,
+        Par::Seq,
+        inp.xs.norm_l2(),
+    )
+    .expect("kernel");
     let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), ds.k, ds.keep, Par::Seq)
         .expect("reference");
     if let Some(keep) = ds.keep {
@@ -855,7 +902,15 @@ fn sparse_exact_ties_pick_the_reference_support_at_every_component() {
     });
     let inp = kernel_inputs(x.as_ref(), y.as_ref(), None);
     for keep in [1_usize, 3, 5] {
-        let new = pls1_kernel(inp.xs.as_ref(), inp.ys.as_ref(), 3, Some(keep), Par::Seq).unwrap();
+        let new = pls1_kernel(
+            inp.xs.as_ref(),
+            inp.ys.as_ref(),
+            3,
+            Some(keep),
+            Par::Seq,
+            inp.xs.norm_l2(),
+        )
+        .unwrap();
         let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 3, Some(keep), Par::Seq)
             .unwrap();
         assert_eq!(new.2.ncols(), old.2.ncols(), "keep={keep}: k_used");
@@ -883,7 +938,15 @@ fn half_zero_weights_match_reference_dense_and_sparse() {
     let inp = kernel_inputs(x.as_ref(), y.as_ref(), Some(w.as_ref()));
     for keep in [None, Some(7)] {
         let what = format!("half-zero weights keep={keep:?}");
-        let new = pls1_kernel(inp.xs.as_ref(), inp.ys.as_ref(), 6, keep, Par::Seq).unwrap();
+        let new = pls1_kernel(
+            inp.xs.as_ref(),
+            inp.ys.as_ref(),
+            6,
+            keep,
+            Par::Seq,
+            inp.xs.norm_l2(),
+        )
+        .unwrap();
         let old =
             nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 6, keep, Par::Seq).unwrap();
         let tols = factor_tolerances(&inp, &old, keep, 1e-10);
@@ -1020,10 +1083,17 @@ impl Margins {
             // unfloored run's first `k_floored` components exactly. Counted
             // down to the smallest unfloored `‖s_a‖` before the noise index,
             // past which the unfloored run is rounding noise.
-            let k_floored = pls1_kernel(inp.xs.as_ref(), inp.ys.as_ref(), k, keep, Par::Seq)
-                .expect("kernel")
-                .3
-                .nrows();
+            let k_floored = pls1_kernel(
+                inp.xs.as_ref(),
+                inp.ys.as_ref(),
+                k,
+                keep,
+                Par::Seq,
+                inp.xs.norm_l2(),
+            )
+            .expect("kernel")
+            .3
+            .nrows();
             if k_floored < real_end {
                 let bottom = (k_floored..real_end)
                     .min_by(|&a, &b| tr.w_norm[a].total_cmp(&tr.w_norm[b]))

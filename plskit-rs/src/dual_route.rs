@@ -213,11 +213,12 @@ pub(crate) const SCORE_BAND: f64 = 1e-3;
 /// clear `ABS_BAND` times the `1e-14` exits. Past those gates the true
 /// `‖X̃'z‖` and `t't` lie within a factor 2 of the dual values, so the
 /// primal route keeps the component too. Every other column (inside a band, or a
-/// NaN) is recomputed for this fold by `pls1_fit` on the same `X̃_tr` and `z`,
-/// exactly as `signal_test::cv_fold_contribution` does, so its contribution is
-/// the primal route's to the bit, truncation decision included. The one
-/// exception is `z` exactly zero (a constant training `y`): `X̃'z` is then an
-/// exact zero on both routes, and the zero prediction is written directly.
+/// NaN) is recomputed for this fold by `fit::pls1_fit_prepared_fro` on the same
+/// `X̃_tr`, `z` and `‖X̃_tr‖_F`, exactly as `signal_test::cv_fold_contribution`
+/// does, so its contribution is the primal route's to the bit, truncation
+/// decision included. The one exception is `z` exactly zero (a constant
+/// training `y`): `X̃'z` is then an exact zero on both routes, and the zero
+/// prediction is written directly.
 ///
 /// The gates cost nothing on ordinary data: when `p ≥ n_tr`,
 /// `z'Gz / (‖z‖²·‖X̃‖_F²)` is of order `1/n_tr` and
@@ -333,25 +334,20 @@ pub(crate) fn pls1_cv_r2_columns(
                 let mz = crate::linalg::mat_vec(m.as_ref(), z.as_ref(), seq);
                 Col::<f64>::from_fn(n_val, |i| c * mz[i])
             } else {
-                // The primal fold fit, call for call as in
+                // The primal fold fit, bit for bit as in
                 // `signal_test::cv_fold_contribution` (change together).
-                match crate::fit::pls1_fit(
+                match crate::fit::pls1_fit_prepared_fro(
                     xs_tr.as_ref(),
                     z.as_ref(),
-                    crate::fit::KSpec::Fixed(1),
+                    1,
                     None,
-                    crate::fit::FitOpts {
-                        pre_standardized: true,
-                        check_n_eff: false,
-                        par: crate::fit::ParChoice::Seq,
-                        keep: None,
-                    },
+                    crate::fit::ParChoice::Seq,
+                    x_fro,
                 ) {
                     Ok(fit) => crate::linalg::mat_vec(xs_val.as_ref(), fit.coef.as_ref(), seq),
-                    // Unreachable: `pls1_fit` fails only on shape, `k` and
-                    // non-finite input, and `X̃_tr`, `z` are finite and
-                    // conformable. NaN rather than a panic, which
-                    // `run_raw_perm` counts as an exceedance.
+                    // Unreachable: the prepared kernel has no error path.
+                    // NaN rather than a panic, which `run_raw_perm` counts
+                    // as an exceedance.
                     Err(_) => Col::<f64>::from_fn(n_val, |_| f64::NAN),
                 }
             };
@@ -1119,25 +1115,20 @@ mod copy_free_reference {
                     let mz: Col<f64> = m.as_ref() * z.as_ref();
                     Col::<f64>::from_fn(n_val, |i| c * mz[i])
                 } else {
-                    // The primal fold fit, call for call as in
+                    // The primal fold fit, bit for bit as in
                     // `signal_test::pls1_cv_r2` (change together).
-                    match crate::fit::pls1_fit(
+                    match crate::fit::pls1_fit_prepared_fro(
                         xs_tr.as_ref(),
                         z.as_ref(),
-                        crate::fit::KSpec::Fixed(1),
+                        1,
                         None,
-                        crate::fit::FitOpts {
-                            pre_standardized: true,
-                            check_n_eff: false,
-                            par: crate::fit::ParChoice::Seq,
-                            keep: None,
-                        },
+                        crate::fit::ParChoice::Seq,
+                        x_fro,
                     ) {
                         Ok(fit) => &xs_val * &fit.coef,
-                        // Unreachable: `pls1_fit` fails only on shape, `k` and
-                        // non-finite input, and `X̃_tr`, `z` are finite and
-                        // conformable. NaN rather than a panic, which
-                        // `run_raw_perm` counts as an exceedance.
+                        // Unreachable: the prepared kernel has no error path.
+                        // NaN rather than a panic, which `run_raw_perm` counts
+                        // as an exceedance.
                         Err(_) => Col::<f64>::from_fn(n_val, |_| f64::NAN),
                     }
                 };

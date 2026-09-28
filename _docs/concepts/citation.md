@@ -6,8 +6,15 @@ reproduce the numbers exactly.
 
 ## Citing plskit
 
-Lenartowicz, P., Plisiecki, H. (2026). *Cheap Per-Component Testing for PLS,
-Stable Under Rotation* (Under Review).
+```bibtex
+@inproceedings{lenartowicz2026cheap,
+  title     = {Cheap and Powerful Tests for Supervised Subspaces: Per-Component Inference for {PLS}},
+  author    = {Lenartowicz, Pawe{\l} and Plisiecki, Hubert},
+  booktitle = {The Fortieth Annual Conference on Neural Information Processing Systems},
+  year      = {2026},
+  url       = {https://openreview.net/forum?id=xb6CB7d9LO}
+}
+```
 
 ## Reproducibility
 

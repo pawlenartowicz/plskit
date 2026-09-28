@@ -11,8 +11,10 @@ name: Release
 # Each tag publishes exactly one artifact. Wrapper tags require X.Y.Z ≤ workspace
 # version.
 #
-# Required repo secrets:
-#   CARGO_REGISTRY_TOKEN — for vX.Y.Z   (engine)
+# crates.io Trusted Publishing (OIDC) is used for vX.Y.Z — no long-lived token.
+# One-time setup required: add a GitHub trusted publisher on crates.io
+# (https://crates.io/crates/plskit/settings) with owner pawlenartowicz,
+# repo plskit, workflow release.yml.
 #
 # PyPI Trusted Publishing (OIDC) is used for vX.Y.Z-py — no long-lived token.
 # One-time setup required: configure Trusted Publishing on PyPI's project
@@ -39,6 +41,9 @@ jobs:
        && !endsWith(github.ref_name, '-r')
        && !endsWith(github.ref_name, '-jl') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # crates.io Trusted Publishing (OIDC)
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -58,7 +63,13 @@ jobs:
             exit 1
           fi
       - run: cargo publish -p plskit --locked --dry-run
-      - run: cargo publish -p plskit --locked --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+      # The OIDC-issued token expires after 30 minutes, so fetch it after the
+      # dry-run build rather than at job start.
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish -p plskit --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   # ─── vX.Y.Z-py (Python) ─────────────────────────────────────────────
   build-py-wheels:

@@ -11,6 +11,25 @@ powerful statistical tests for PLS models, introduced in our
 [NeurIPS 2026 paper](PAPER_URL): the `split_exact` and `split_nb`
 confirmatory tests, plus rotation-invariant subsampling CIs.
 
+## What is plskit?
+
+plskit is a Partial Least Squares (PLS) library built around three ideas:
+
+- **Modern inference.** Confirmatory tests use split-half held-out
+  prediction: `split_exact` is calibrated by permutation, and
+  `split_nb` is its faster Fisher-z approximation. Confidence
+  intervals are taken on rotation-invariant quantities (held-out
+  correlation, per-variable leverage, a subsampling z for β), so no
+  Procrustes alignment is needed. The tests are introduced in our
+  [NeurIPS 2026 paper](https://openreview.net/forum?id=xb6CB7d9LO).
+- **Same results in every language.** All numerical work runs in one
+  Rust engine. Python (and the planned R and Julia wrappers) call
+  into it, so a fixed `(version, seed, X, y)` gives the same results,
+  within a bit-near tolerance, in every language and on every
+  supported platform.
+- **Speed.** The engine is written in Rust with parallel resampling,
+  which makes plskit probably the fastest PLS package available.
+
 ## Wrappers
 
 | Language | Package              | Status                                          |
@@ -47,21 +66,6 @@ floored at `1/(n_perm + 1)`). `split_nb` is the faster asymptotic
 alternative. See the [Python API](_docs/python/api.md) (§3.1) for all
 five methods.
 
-## Why plskit?
-
-- **Modern inference is canonical.** Confirmatory tests use
-  split-half held-out prediction (`split_exact`, calibrated by
-  permutation, or `split_nb`, its faster Fisher-z approximation).
-  `ci=True` adds resampling readouts on rotation-invariant quantities
-  (a CI on held-out correlation, per-variable bootstrap leverage CIs and
-  a per-variable subsampling z for β), so no Procrustes alignment is
-  needed.
-- **One Rust engine, identical results across wrappers.** All
-  numerical computation lives in `plskit-rs`. Python (and the
-  forthcoming R and Julia wrappers) call into it via FFI, so a fixed
-  `(version, seed, X, y)` reproduces within a bit-near tolerance on
-  every supported platform.
-
 ## Repository layout
 
 ```
@@ -91,7 +95,15 @@ may shift outputs between releases.
 
 ## Citation
 
-Lenartowicz, P., Plisiecki, H. (2026). (Under Review).
+```bibtex
+@inproceedings{lenartowicz2026cheap,
+  title     = {Cheap and Powerful Tests for Supervised Subspaces: Per-Component Inference for {PLS}},
+  author    = {Lenartowicz, Pawe{\l} and Plisiecki, Hubert},
+  booktitle = {The Fortieth Annual Conference on Neural Information Processing Systems},
+  year      = {2026},
+  url       = {https://openreview.net/forum?id=xb6CB7d9LO}
+}
+```
 
 ## License
 

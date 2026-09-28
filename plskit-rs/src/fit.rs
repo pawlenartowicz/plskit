@@ -341,35 +341,8 @@ pub(crate) fn validate_keep(keep: usize, n_features: usize) -> PlsKitResult<()> 
     validate_keep_arg(keep, n_features, "keep", "n_features")
 }
 
-/// The argument checks `pls1_fit` makes before it reads the weights, in its
-/// order: shapes, finite X, then [`check_fit_y_and_k`]. A caller that runs
-/// the kernel through [`pls1_fit_prepared`] on arrays it prepared itself
-/// calls this first, so a replicate fails exactly where `pls1_fit` would
-/// have failed, with the same error.
-///
-/// # Errors
-/// `DimensionMismatch`, `NonFiniteInput`, `InvalidArgument` (for `k = 0` or
-/// a bad `keep`) or `KExceedsMax`, as `pls1_fit` documents.
-pub(crate) fn check_fit_inputs(
-    x: MatRef<'_, f64>,
-    y: ColRef<'_, f64>,
-    k: usize,
-    keep: Option<usize>,
-) -> PlsKitResult<()> {
-    let n_samples = x.nrows();
-    let n_features = x.ncols();
-    if y.nrows() != n_samples {
-        return Err(PlsKitError::DimensionMismatch {
-            x: (n_samples, n_features),
-            y: y.nrows(),
-        });
-    }
-    check_finite_mat(x)?;
-    check_fit_y_and_k(n_features, y, k, keep)
-}
-
-/// The checks of [`check_fit_inputs`] after the X side, in its order:
-/// finite y, `k ≥ 1`, `k ≤ n_features`, `keep`. A replicate loop that
+/// The argument checks `pls1_fit` makes after the shapes and before the
+/// weights, in its order: finite y, `k ≥ 1`, `k ≤ n_features`, `keep`. A replicate loop that
 /// checked its prepared X once (per fold or per split) runs only these per
 /// outcome column, and fails with the error `pls1_fit` would return.
 ///
@@ -418,7 +391,7 @@ pub(crate) fn check_fit_y_and_k(
 ///
 /// # Panics
 /// Never (all internal indexing guarded by validated shapes).
-#[allow(clippy::many_single_char_names)]
+#[allow(clippy::many_single_char_names, clippy::too_many_lines)]
 pub fn pls1_fit(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -429,40 +402,50 @@ pub fn pls1_fit(
     let n_samples = x.nrows();
     let n_features = x.ncols();
     let KSpec::Fixed(k_requested) = k;
-    check_fit_inputs(x, y, k_requested, opts.keep)?;
-
-    // Validate weights (finite, non-negative, Σw > 0) and normalize to mean 1.
-    let (w_norm, n_eff_val, all_uniform) =
-        validate_and_normalize_weights(weights, n_samples, k_requested)?;
-    if opts.check_n_eff {
-        check_n_eff_for_k(n_eff_val, k_requested, weights.is_some())?;
+    if y.nrows() != n_samples {
+        return Err(PlsKitError::DimensionMismatch {
+            x: (n_samples, n_features),
+            y: y.nrows(),
+        });
     }
+    // X's finiteness is read from the standardization moments or the
+    // sum-of-squares screen below. When a later check fails first, the exact
+    // scan runs before its error is returned, so a non-finite X is still
+    // reported ahead of y, k, keep and the weights, as the replicate loops
+    // (which check X first) report it.
+    // Weights: finite, non-negative, Σw > 0, normalized to mean 1.
+    let checked = check_fit_y_and_k(n_features, y, k_requested, opts.keep)
+        .and_then(|()| validate_and_normalize_weights(weights, n_samples, k_requested))
+        .and_then(|v| {
+            if opts.check_n_eff {
+                check_n_eff_for_k(v.1, k_requested, weights.is_some())?;
+            }
+            Ok(v)
+        });
+    let (w_norm, n_eff_val, all_uniform) = match checked {
+        Ok(v) => v,
+        Err(e) => {
+            check_finite_mat(x)?;
+            return Err(e);
+        }
+    };
     let wref: Option<ColRef<'_, f64>> = w_norm.as_ref().map(Col::as_ref);
 
     // √w' row factor. Row-scaling is the Cholesky factor of diag(w'),
     // *not* preprocessing, so it applies even when pre_standardized=true.
     let sqw: Option<Col<f64>> = wref.map(crate::linalg::sqrt_col);
 
-    // Standardize, or skip when pre_standardized. Use weighted versions when
-    // weights is Some. Standardizing writes X's rows already scaled by √w'
-    // (`(x - mean) / scale * √w'ᵢ`, the product `scale_rows` forms, so the
-    // same bits) instead of scaling a standardized copy in a second pass.
-    let (xs_owned, x_mean, x_scale, ys_owned, y_mean, y_scale) = if opts.pre_standardized {
-        (
-            None,
-            Col::<f64>::zeros(n_features),
-            Col::<f64>::from_fn(n_features, |_| 1.0),
-            None,
-            0.0,
-            1.0,
-        )
+    // Standardize, or skip when pre_standardized, with weighted moments when
+    // weights is Some. The standardized X keeps X's layout and has its rows
+    // already scaled by √w' (`standardize_fit_x`).
+    let fx: Option<crate::linalg::FitX> = (!opts.pre_standardized)
+        .then(|| crate::linalg::standardize_fit_x(x, wref, sqw.as_ref().map(Col::as_ref)));
+    let (ys_owned, y_mean, y_scale) = if opts.pre_standardized {
+        (None, 0.0, 1.0)
     } else {
-        let (xs, m, s) =
-            crate::linalg::standardize_weighted_scaled(x, wref, sqw.as_ref().map(Col::as_ref));
         let (zs, ym, ysc) = crate::linalg::standardize1_weighted(y, wref);
-        (Some(xs), m, s, Some(zs), ym, ysc)
+        (Some(zs), ym, ysc)
     };
-
     let ys_view: ColRef<'_, f64> = match &ys_owned {
         Some(a) => a.as_ref(),
         None => y,
@@ -470,22 +453,57 @@ pub fn pls1_fit(
 
     // A pre-standardized X is still to be row-scaled; a standardized one
     // already is.
-    let x_scaled_owned: Option<Mat<f64>> = match (&xs_owned, &sqw) {
+    let x_scaled_owned: Option<Mat<f64>> = match (&fx, &sqw) {
         (None, Some(s)) => Some(scale_rows(x, s.as_ref())),
-        _ => xs_owned,
+        _ => None,
     };
     let y_scaled_owned: Option<Col<f64>> = sqw.as_ref().map(|s| scale_col(ys_view, s.as_ref()));
 
-    let x_for_nipals: MatRef<'_, f64> = match &x_scaled_owned {
-        Some(a) => a.as_ref(),
-        None => x,
+    let x_for_nipals: MatRef<'_, f64> = match (&fx, &x_scaled_owned) {
+        (Some(f), _) => f.xs(),
+        (None, Some(a)) => a.as_ref(),
+        (None, None) => x,
     };
     let y_for_nipals: ColRef<'_, f64> = match &y_scaled_owned {
         Some(a) => a.as_ref(),
         None => ys_view,
     };
 
-    let fit = pls1_fit_prepared(x_for_nipals, y_for_nipals, k_requested, opts.keep, opts.par)?;
+    // X's finiteness and ‖X‖_F (for the kernel's truncation floor) come from
+    // the pass already made: a non-finite entry makes its column's mean
+    // non-finite, and the pre-standardized sum of squares is non-finite for a
+    // non-finite entry or an overflowing square. A non-finite verdict is
+    // confirmed by the exact scan, so a finite X is never rejected.
+    let x_fro = if let Some(f) = &fx {
+        if !f.mean.iter().chain(f.scale.iter()).all(|v| v.is_finite()) {
+            check_finite_mat(x)?;
+        }
+        f.fro
+    } else {
+        let ss = crate::linalg::sum_of_squares(x_for_nipals);
+        if ss.is_finite() {
+            ss.sqrt()
+        } else {
+            check_finite_mat(x)?;
+            x_for_nipals.norm_l2()
+        }
+    };
+    let (x_mean, x_scale) = match &fx {
+        Some(f) => (f.mean.clone(), f.scale.clone()),
+        None => (
+            Col::<f64>::zeros(n_features),
+            Col::<f64>::from_fn(n_features, |_| 1.0),
+        ),
+    };
+
+    let fit = pls1_fit_prepared_fro(
+        x_for_nipals,
+        y_for_nipals,
+        k_requested,
+        opts.keep,
+        opts.par,
+        x_fro,
+    )?;
     let k_used = fit.k_used;
     if opts.pre_standardized && opts.check_n_eff && k_used < k_requested {
         return Err(PlsKitError::InvalidInput(format!(
@@ -569,10 +587,11 @@ pub fn spls1_fit(
 }
 
 /// The kernel-and-coefficient tail of `pls1_fit`, on arrays that are
-/// already standardized and already √w-scaled: `pls1_fit` calls it after
-/// its validation, standardization and √w scaling, so both produce the
-/// same bits. Callers that prepare the arrays once for many replicates run
-/// [`check_fit_inputs`] first when their inputs can fail it.
+/// already standardized and already √w-scaled: `pls1_fit` runs it (as
+/// [`pls1_fit_prepared_fro`]) after its validation, standardization and √w
+/// scaling. Callers that prepare the arrays once for many replicates run
+/// [`check_finite_mat`] on X and [`check_fit_y_and_k`] first when their
+/// inputs can fail them.
 pub(crate) struct PreparedFit {
     /// X-scores `T` of the matrix the kernel ran on; `(n, k_used)`.
     pub(crate) t_scores: Mat<f64>,
@@ -601,8 +620,25 @@ pub(crate) fn pls1_fit_prepared(
     keep: Option<usize>,
     par: ParChoice,
 ) -> PlsKitResult<PreparedFit> {
+    pls1_fit_prepared_fro(xs, ys, k, keep, par, xs.norm_l2())
+}
+
+/// [`pls1_fit_prepared`] with `‖xs‖_F` supplied as `x_fro` by a caller that
+/// already has it (see [`pls1_kernel`]).
+///
+/// # Errors
+/// None today (the kernel has no error path); the `Result` is kept so a
+/// kernel error can surface without a signature change.
+pub(crate) fn pls1_fit_prepared_fro(
+    xs: MatRef<'_, f64>,
+    ys: ColRef<'_, f64>,
+    k: usize,
+    keep: Option<usize>,
+    par: ParChoice,
+    x_fro: f64,
+) -> PlsKitResult<PreparedFit> {
     let par = resolve_par(par, xs.nrows(), xs.ncols(), k);
-    let (t_mat, p_mat, w_mat, q_vec) = pls1_kernel(xs, ys, k, keep, par)?;
+    let (t_mat, p_mat, w_mat, q_vec) = pls1_kernel(xs, ys, k, keep, par, x_fro)?;
     let k_used = w_mat.ncols();
     let coef = pls1_coef_at_k(&w_mat, &p_mat, &q_vec, k_used, par);
     Ok(PreparedFit {
@@ -1040,8 +1076,8 @@ impl ComponentBackend for XBackend<'_> {
 ///    combination of `t_1 … t_{a−1}`, orthogonal to `t_a`, and
 ///    `y_a't_a = y_a'X_a w_a = s_a'w_a`.
 ///
-/// So the floors test the same quantities as before (`‖s_a‖`, the
-/// undeflated `‖Xs‖_F`, `‖ys‖`, and `t't`), and at `a = 1` every step is the
+/// So the floors test `‖s_a‖`, the undeflated `‖Xs‖_F` (passed in as
+/// `x_fro`), `‖ys‖`, and `t't`, and at `a = 1` every step is the
 /// same operation on the same inputs as the explicit-deflation kernel: a
 /// K = 1 fit on a column-major `Xs` is bit-identical to it. At `a ≥ 2` the
 /// two differ in rounding only; `fit::kernel_tests` bounds the difference.
@@ -1062,6 +1098,7 @@ pub(crate) fn pls1_kernel(
     k: usize,
     keep: Option<usize>,
     par: Par,
+    x_fro: f64,
 ) -> PlsKitResult<(Mat<f64>, Mat<f64>, Mat<f64>, Col<f64>)> {
     let n = xs.nrows();
     let d = xs.ncols();
@@ -1075,10 +1112,11 @@ pub(crate) fn pls1_kernel(
         1.0,
         par,
     );
-    // From the undeflated inputs, once, on the view the caller passed. It
-    // only ever gates a `break`, so no output bit depends on it unless it
-    // truncates.
-    let w_floor = w_rel_floor(n, d, xs.norm_l2(), ys.norm_l2());
+    // `x_fro` is `‖xs‖_F`, supplied by the caller: `pls1_fit` forms it from
+    // its standardization moments or its sum-of-squares screen, the other
+    // callers take `xs.norm_l2()`. It only ever gates a `break`, so no output
+    // bit depends on it unless it truncates.
+    let w_floor = w_rel_floor(n, d, x_fro, ys.norm_l2());
     let mut backend = XBackend { xs, ys, par };
     match pls1_component_loop(&mut backend, s0, w_floor, k, keep) {
         LoopOutcome::Done { t, p, w, q } => {
@@ -1968,8 +2006,14 @@ mod copy_free_reference {
 
         let par = resolve_par(opts.par, n_samples, n_features, k_requested);
         // The production kernel, so everything around it stays pinned bit for bit.
-        let (t_mat, p_mat, w_mat, q_vec) =
-            pls1_kernel(x_for_nipals, y_for_nipals, k_requested, opts.keep, par)?;
+        let (t_mat, p_mat, w_mat, q_vec) = pls1_kernel(
+            x_for_nipals,
+            y_for_nipals,
+            k_requested,
+            opts.keep,
+            par,
+            x_for_nipals.norm_l2(),
+        )?;
 
         let k_used = w_mat.ncols();
         if opts.pre_standardized && opts.check_n_eff && k_used < k_requested {
@@ -2070,6 +2114,55 @@ mod copy_free_reference {
         }
     }
 
+    /// `a` and `b` agree entry by entry to `tol` relative to `1 + |b|`: the
+    /// check for fits whose only difference is the layout the kernel read.
+    fn assert_model_close(a: &Pls1Model, b: &Pls1Model, tol: f64, what: &str) {
+        assert_eq!(a.k_used, b.k_used, "{what}.k_used");
+        let pairs = [
+            (
+                "t_scores",
+                mat_vals(a.t_scores.as_ref()),
+                mat_vals(b.t_scores.as_ref()),
+            ),
+            (
+                "p_loadings",
+                mat_vals(a.p_loadings.as_ref()),
+                mat_vals(b.p_loadings.as_ref()),
+            ),
+            (
+                "w_star",
+                mat_vals(a.w_star.as_ref()),
+                mat_vals(b.w_star.as_ref()),
+            ),
+            (
+                "q",
+                col_vals(a.q_loadings.as_ref()),
+                col_vals(b.q_loadings.as_ref()),
+            ),
+            ("coef", col_vals(a.coef.as_ref()), col_vals(b.coef.as_ref())),
+            ("beta", col_vals(a.beta.as_ref()), col_vals(b.beta.as_ref())),
+            (
+                "scalars",
+                vec![a.intercept, a.n_eff],
+                vec![b.intercept, b.n_eff],
+            ),
+        ];
+        for (name, x, y) in pairs {
+            assert_eq!(x.len(), y.len(), "{what}.{name} length");
+            for (i, (u, v)) in x.iter().zip(&y).enumerate() {
+                assert!(
+                    (u - v).abs() <= tol * (1.0 + v.abs()),
+                    "{what}.{name}[{i}]: {u} vs {v}"
+                );
+            }
+        }
+        assert_eq!(
+            (a.pre_standardized, a.keep),
+            (b.pre_standardized, b.keep),
+            "{what}.flags"
+        );
+    }
+
     #[test]
     fn pls1_fit_matches_reference() {
         with_new_routes_disabled(|| {
@@ -2100,14 +2193,17 @@ mod copy_free_reference {
                                         opts,
                                     )
                                     .unwrap();
-                                    assert_model_bits(
-                                        &a,
-                                        &b,
-                                        &format!(
-                                            "{} {view} pre={pre} k={k} keep={keep:?} {par:?}",
-                                            f.name
-                                        ),
+                                    let what = format!(
+                                        "{} {view} pre={pre} k={k} keep={keep:?} {par:?}",
+                                        f.name
                                     );
+                                    // The standardized X keeps a row-major input's
+                                    // layout; the reference standardizes column-major.
+                                    if view == "row_major" && !pre {
+                                        assert_model_close(&a, &b, 1e-10, &what);
+                                    } else {
+                                        assert_model_bits(&a, &b, &what);
+                                    }
                                 }
                             }
                         }
@@ -2129,13 +2225,15 @@ mod copy_free_reference {
         });
     }
 
-    /// With `pre_standardized = false`, `pls1_fit` only checks `X` and
-    /// standardizes it into a fresh column-major matrix, so every layout
-    /// of the same values fits to the bits of the owned column-major
-    /// matrix. `plskit-py` relies on this to read a C-ordered array in
-    /// place instead of copying it.
+    /// With `pre_standardized = false`, `pls1_fit` standardizes X into a
+    /// fresh matrix in X's own layout: every column-major layout fits to the
+    /// bits of the owned column-major matrix, and a row-major one (a
+    /// C-ordered array that `plskit-py` reads in place) to within 1e-10,
+    /// since the kernel's products round differently on it. A non-finite
+    /// entry is found on every layout, on both paths, weighted or not, also
+    /// when its row has weight zero.
     #[test]
-    fn standardizing_fit_is_layout_invariant() {
+    fn standardizing_fit_layouts_agree() {
         let fit = |x: MatRef<'_, f64>, f: &Family, k: usize, keep, par| {
             let opts = FitOpts {
                 par,
@@ -2163,23 +2261,56 @@ mod copy_free_reference {
                             let a = fit(xv, f, k, keep, par).unwrap();
                             let b = fit(f.x.as_ref(), f, k, keep, par).unwrap();
                             let what = format!("{} {view} k={k} keep={keep:?} {par:?}", f.name);
-                            assert_model_bits(&a, &b, &what);
+                            if view == "row_major" {
+                                assert_model_close(&a, &b, 1e-10, &what);
+                            } else {
+                                assert_model_bits(&a, &b, &what);
+                            }
                         }
                     }
                 }
             }
-            // A non-finite entry is found whatever the layout.
+            let n = f.x.nrows();
             let mut bad = f.x.clone();
-            bad[(f.x.nrows() - 1, f.x.ncols() - 1)] = f64::INFINITY;
+            bad[(n - 1, f.x.ncols() - 1)] = f64::INFINITY;
+            let zero_last = Col::<f64>::from_fn(n, |i| if i + 1 == n { 0.0 } else { 1.0 });
             let bad_lay = Layouts::new(bad.as_ref());
             for (view, xv) in bad_lay.all(&bad) {
-                let r = fit(xv, f, 1, None, ParChoice::Seq);
-                assert!(
-                    matches!(r, Err(PlsKitError::NonFiniteInput)),
-                    "{} {view}",
-                    f.name
-                );
+                for pre in [false, true] {
+                    for w in [None, Some(zero_last.as_ref())] {
+                        let opts = FitOpts {
+                            pre_standardized: pre,
+                            ..FitOpts::default()
+                        };
+                        let r = pls1_fit(xv, f.y.as_ref(), KSpec::Fixed(1), w, opts);
+                        assert!(
+                            matches!(r, Err(PlsKitError::NonFiniteInput)),
+                            "{} {view} pre={pre} weighted={}",
+                            f.name,
+                            w.is_some()
+                        );
+                    }
+                }
             }
+        }
+    }
+
+    /// A pre-standardized X of finite entries whose squares overflow is not
+    /// reported as non-finite: the sum-of-squares screen falls back to the
+    /// exact scan and `norm_l2`.
+    #[test]
+    fn pre_standardized_huge_finite_x_is_not_non_finite() {
+        let (x, y) = signal_data(40, 6, 3);
+        let big = Mat::<f64>::from_fn(40, 6, |i, j| x[(i, j)] * 1e200);
+        let (ys, _, _) = standardize1(y.as_ref());
+        for check_n_eff in [true, false] {
+            let opts = FitOpts {
+                pre_standardized: true,
+                check_n_eff,
+                ..FitOpts::default()
+            };
+            let r = pls1_fit(big.as_ref(), ys.as_ref(), KSpec::Fixed(1), None, opts);
+            assert!(!matches!(r, Err(PlsKitError::NonFiniteInput)), "{r:?}");
         }
     }
 

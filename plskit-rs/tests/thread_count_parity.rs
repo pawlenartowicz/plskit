@@ -42,11 +42,54 @@ use plskit::{
     pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_null,
     pls1_rotation_stability, pls3_confirmatory_test, pls3_fit, split_nb_gate, spls1_fit, spls3_fit,
     CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
-    FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, PermNullOpts, Pls3ConfirmatoryTestOpts,
-    Pls3FitOpts, RotationStabilityMethod, RotationStabilityOpts, Selector, VarimaxArgs,
+    FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, PermNullOpts, Pls1Model,
+    Pls3ConfirmatoryTestOpts, Pls3FitOpts, RotationStabilityMethod, RotationStabilityOpts,
+    Selector, VarimaxArgs,
 };
 
 const POOL_SIZES: [usize; 3] = [1, 3, 5];
+
+/// `a` and `b` agree entry by entry to `tol` relative to `1 + |b|`, with
+/// the same `k_used` and flags: the check for two fits whose only
+/// difference is the memory layout of `X`.
+fn assert_fit_close(a: &Pls1Model, b: &Pls1Model, tol: f64, what: &str) {
+    fn mat(m: &Mat<f64>) -> Vec<f64> {
+        (0..m.ncols())
+            .flat_map(|j| (0..m.nrows()).map(move |i| m[(i, j)]))
+            .collect()
+    }
+    fn col(c: &Col<f64>) -> Vec<f64> {
+        (0..c.nrows()).map(|i| c[i]).collect()
+    }
+    assert_eq!(a.k_used, b.k_used, "{what}: k_used");
+    assert_eq!(
+        (a.pre_standardized, a.keep),
+        (b.pre_standardized, b.keep),
+        "{what}: flags"
+    );
+    let pairs = [
+        ("t_scores", mat(&a.t_scores), mat(&b.t_scores)),
+        ("p_loadings", mat(&a.p_loadings), mat(&b.p_loadings)),
+        ("w_star", mat(&a.w_star), mat(&b.w_star)),
+        ("q", col(&a.q_loadings), col(&b.q_loadings)),
+        ("coef", col(&a.coef), col(&b.coef)),
+        ("beta", col(&a.beta), col(&b.beta)),
+        (
+            "scalars",
+            vec![a.intercept, a.n_eff],
+            vec![b.intercept, b.n_eff],
+        ),
+    ];
+    for (name, x, y) in pairs {
+        assert_eq!(x.len(), y.len(), "{what}: {name} length");
+        for (i, (u, v)) in x.iter().zip(&y).enumerate() {
+            assert!(
+                (u - v).abs() <= tol * (1.0 + v.abs()),
+                "{what}: {name}[{i}] {u} vs {v}"
+            );
+        }
+    }
+}
 
 fn synth(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
     use rand::{RngExt, SeedableRng};
@@ -158,10 +201,11 @@ fn pls1_fit_auto_is_pool_size_invariant() {
     }
     // M5: the Python seam hands the kernel a row-major *view* of `X`
     // (`np_mat_view`, `MatRef::from_row_major_slice`) instead of a
-    // column-major copy. That view must give the same bits as the
-    // column-major case above, not merely be pool-invariant on its own:
-    // a future change could make the row-major path layout- or
-    // pool-sensitive while each half-test still passes in isolation.
+    // column-major copy. The standardized X keeps a row-major input's
+    // layout, so that view agrees with the column-major case above to
+    // 1e-10 (not bit for bit), and must be pool-invariant on its own: a
+    // future change could make the row-major path pool-sensitive while
+    // each half-test still passes in isolation.
     let (x_col_major, y5) = synth(2000, 600, 1.0, 3);
     let mut x_row_major: Vec<f64> = Vec::with_capacity(2000 * 600);
     for i in 0..2000 {
@@ -171,35 +215,30 @@ fn pls1_fit_auto_is_pool_size_invariant() {
     }
     let x_row_view = MatRef::from_row_major_slice(&x_row_major, 2000, 600);
     let col_major_out = pool(1).install(|| {
-        format!(
-            "{:?}",
-            pls1_fit(
-                x_col_major.as_ref(),
-                y5.as_ref(),
-                KSpec::Fixed(5),
-                None,
-                FitOpts::default(),
-            )
-            .unwrap()
+        pls1_fit(
+            x_col_major.as_ref(),
+            y5.as_ref(),
+            KSpec::Fixed(5),
+            None,
+            FitOpts::default(),
         )
+        .unwrap()
     });
     let row_major_out = pool(1).install(|| {
-        format!(
-            "{:?}",
-            pls1_fit(
-                x_row_view,
-                y5.as_ref(),
-                KSpec::Fixed(5),
-                None,
-                FitOpts::default()
-            )
-            .unwrap()
+        pls1_fit(
+            x_row_view,
+            y5.as_ref(),
+            KSpec::Fixed(5),
+            None,
+            FitOpts::default(),
         )
+        .unwrap()
     });
-    assert_eq!(
-        col_major_out, row_major_out,
-        "pls1_fit 2000x600 k=5: a row-major view of X must give the same \
-         bits as the column-major copy"
+    assert_fit_close(
+        &row_major_out,
+        &col_major_out,
+        1e-10,
+        "pls1_fit 2000x600 k=5: row-major view vs column-major copy",
     );
     c.check("pls1_fit row-major view 2000x600 k=5", || {
         pls1_fit(

@@ -149,9 +149,12 @@ def test_fit_find_k_args_threaded_through():
     assert 1 <= m.k_used <= 4
 
 
-# The seam reads a contiguous X in place (no copy) when the engine
-# standardizes it, and copies any other layout; every layout must give the
-# same bits, and the same error where the fit fails.
+# The seam reads an aligned C- or F-contiguous X in place, reads a misaligned
+# X through numpy's C-ordered copy, and copies any other layout column-major.
+# X read row-major gives the bits of the C-ordered reference, and other layouts
+# agree to rounding. The public API C-orders every X, so its fits are the
+# reference bits on every layout. Every layout gives the same error where the
+# fit fails.
 _FIT_FIELDS = ("T", "P", "W", "Q", "coef", "beta", "intercept", "n_eff")
 
 
@@ -199,6 +202,23 @@ def _same(got, ref):
         np.array_equal(got[f], ref[f]) for f in _FIT_FIELDS)
 
 
+def _close(got, ref, tol=1e-10):
+    if isinstance(ref, tuple) or isinstance(got, tuple):
+        return got == ref
+    return got["shape"] == ref["shape"] and all(
+        np.allclose(got[f].view(np.float64), ref[f].view(np.float64),
+                    rtol=tol, atol=tol, equal_nan=True)
+        for f in _FIT_FIELDS)
+
+
+def _read_row_major(Xl):
+    """The extension reads a C-contiguous array row-major, and any misaligned
+    array through numpy's aligned copy, which is C-ordered; both give the bits
+    of the C-ordered reference. Any other layout is read column-major and
+    agrees within tolerance."""
+    return Xl.flags.c_contiguous or not Xl.flags.aligned
+
+
 def _fitters(y, sparse, kw, k=3, keep=9):
     def raw(Xl):
         if sparse:
@@ -216,7 +236,7 @@ def _fitters(y, sparse, kw, k=3, keep=9):
 @pytest.mark.parametrize("weighted", [False, True])
 @pytest.mark.parametrize("pre_standardized", [False, True])
 @pytest.mark.parametrize("sparse", [False, True])
-def test_fit_bits_do_not_depend_on_x_layout(weighted, pre_standardized, sparse):
+def test_fit_x_layouts_agree(weighted, pre_standardized, sparse):
     X, y = _data(n=40, d=21, seed=5)
     X[:, 3] = 2.5  # a constant column
     if pre_standardized:
@@ -230,18 +250,18 @@ def test_fit_bits_do_not_depend_on_x_layout(weighted, pre_standardized, sparse):
     ref = _outcome(lambda: raw(np.ascontiguousarray(X)))
     assert not isinstance(ref, tuple)
     for name, Xl in _layouts(X).items():
-        for call in (raw, public):
-            assert _same(_outcome(lambda: call(Xl)), ref), (name, call.__name__)
-    # float32 input: the public API's float64 cast (then read in place)
-    # against the raw extension's copy path on a strided float64 cast.
+        same = _same if _read_row_major(Xl) else _close
+        assert same(_outcome(lambda: raw(Xl)), ref), (name, "raw")
+        assert _same(_outcome(lambda: public(Xl)), ref), (name, "public")
+    # float32 input: the public API's float64 cast is C-ordered and read in place.
     X64 = X.astype(np.float32).astype(np.float64)
-    ref32 = _outcome(lambda: raw(_layouts(X64)["strided"]))
+    ref32 = _outcome(lambda: raw(np.ascontiguousarray(X64)))
     assert _same(_outcome(lambda: public(X.astype(np.float32))), ref32)
 
 
 @pytest.mark.parametrize("shape", [(0, 0), (0, 3), (3, 0), (1, 1), (1, 4), (4, 1), (5, 2)])
 @pytest.mark.parametrize("pre_standardized", [False, True])
-def test_fit_edge_shapes_do_not_depend_on_x_layout(shape, pre_standardized):
+def test_fit_edge_shapes_x_layouts_agree(shape, pre_standardized):
     n, p = shape
     rng = np.random.default_rng(7)
     X = rng.normal(size=shape)
@@ -250,4 +270,22 @@ def test_fit_edge_shapes_do_not_depend_on_x_layout(shape, pre_standardized):
     for call in (raw, public):  # the two raise different exception types
         ref = _outcome(lambda: call(np.ascontiguousarray(X)))
         for name, Xl in _layouts(X).items():
-            assert _same(_outcome(lambda: call(Xl)), ref), (name, call.__name__)
+            same = _same if (call is public or _read_row_major(Xl)) else _close
+            assert same(_outcome(lambda: call(Xl)), ref), (name, call.__name__)
+
+
+@pytest.mark.parametrize("order", ["C", "F"])
+@pytest.mark.parametrize("pre_standardized", [False, True])
+@pytest.mark.parametrize("weighted", [False, True])
+def test_fit_non_finite_x_raises_on_every_layout(order, pre_standardized, weighted):
+    X, y = _data(n=30, d=5, seed=3)
+    X[7, 2] = np.inf
+    w = None
+    if weighted:
+        w = np.ones(30)
+        w[7] = 0.0  # a zero weight does not hide the non-finite entry
+    # The raw extension: the public API passes every X on in C order.
+    with pytest.raises(plskit._plskit.PlsKitException) as ei:
+        plskit._plskit.pls1_fit(np.asarray(X, order=order), y, 2,
+                                pre_standardized=pre_standardized, weights=w)
+    assert ei.value.code == "non_finite_input"
