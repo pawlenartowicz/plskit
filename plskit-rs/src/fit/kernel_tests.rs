@@ -787,6 +787,11 @@ fn k1_public_fit_is_bit_identical_to_reference() {
     // (2000, 600): n·d·k ≥ 1e6, so ParChoice::Auto resolves to `par_fixed()`.
     for (n, d) in [(60, 12), (2000, 600)] {
         let (x, y) = signal_design(n, d, 3, 0.1, 17);
+        // The offset puts |mean|/scale past `IMPLICIT_MAX_MEAN_RATIO`, so the
+        // public fit runs the kernel on the standardized copy that the
+        // reference gets; the implicit route is checked to 1e-10 in
+        // `fit::copy_free_reference`.
+        let x = Mat::<f64>::from_fn(n, d, |i, j| x[(i, j)] + 1e6);
         let w = mixed_weights(n);
         for weights in [None, Some(w.as_ref())] {
             let inp = kernel_inputs(x.as_ref(), y.as_ref(), weights);
@@ -957,7 +962,8 @@ fn half_zero_weights_match_reference_dense_and_sparse() {
             coef_drift(&beta_of(&cn, &inp), &beta_of(&co, &inp)) <= 1e-10,
             "{what}: beta"
         );
-        // The public path runs exactly this kernel on exactly these inputs.
+        // The public path forms the same products from the raw X (the
+        // implicit backend), so it agrees to rounding.
         // n·d·k = 36000 < 1e6, so ParChoice::Auto resolves to Par::Seq.
         let m = pls1_fit(
             x.as_ref(),
@@ -970,7 +976,7 @@ fn half_zero_weights_match_reference_dense_and_sparse() {
             },
         )
         .unwrap();
-        assert_col_bits(&m.coef, &cn, &format!("{what}: pls1_fit coef"));
+        assert!(coef_drift(&m.coef, &cn) <= 1e-10, "{what}: pls1_fit coef");
     }
 }
 

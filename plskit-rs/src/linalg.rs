@@ -257,7 +257,7 @@ pub fn standardize_weighted(
 ) -> (Mat<f64>, Col<f64>, Col<f64>) {
     let w_prime: Option<Col<f64>> = weights.map(|w| renormalize_mean_one_n(w, x.nrows()));
     let (xs, mean, scale, _) =
-        standardize_columns(x, None, w_prime.as_ref().map(owned_col_slice), None);
+        standardize_columns(x, None, w_prime.as_ref().map(owned_col_slice), None, true);
     (xs, mean, scale)
 }
 
@@ -309,6 +309,7 @@ pub(crate) fn standardize_rows(
         Some(idx),
         w_prime.as_ref().map(owned_col_slice),
         row_scale.as_deref(),
+        true,
     );
     (xs, mean, scale)
 }
@@ -446,7 +447,7 @@ fn mean_and_scale(n: usize, v: impl Fn(usize) -> f64, w: Option<ColRef<'_, f64>>
 /// `(mean, scale)` of a length-`n` column from its [`ScaledMoments`]:
 /// scale 1 when [`constant_to_rounding`] reads it as constant, else
 /// `s·sqrt(ss/n)`, and mean `s·mean`. The tail of [`mean_and_scale`],
-/// shared with [`standardize_columns`] and [`standardize_row_major`].
+/// shared with [`standardize_columns`] and [`row_major_moments`].
 #[allow(clippy::cast_precision_loss)]
 fn mean_and_scale_from(m: &ScaledMoments, n: usize) -> (f64, f64) {
     let scale = if m.is_constant(n) {
@@ -458,7 +459,7 @@ fn mean_and_scale_from(m: &ScaledMoments, n: usize) -> (f64, f64) {
 }
 
 /// The body of [`standardize_weighted`], [`standardize_rows`] and the
-/// column-major arm of [`standardize_fit_x`] once the weights are mean-one (`w`, one per
+/// column-major arm of [`fit_x_moments`] once the weights are mean-one (`w`, one per
 /// output row; `None` for unit weights). The input is `x` itself
 /// (`rows = None`) or its rows `idx` in that order (`rows = Some(idx)`,
 /// repeats allowed). Columns go through [`scaled_moments_block`]
@@ -473,12 +474,15 @@ fn mean_and_scale_from(m: &ScaledMoments, n: usize) -> (f64, f64) {
 /// helpers byte-identical to standardizing a gathered copy, and what makes
 /// every layout of `x` give the same bits. The fourth value is
 /// [`fro_from_terms`] of the columns' [`fro_term`]s: the Frobenius norm of
-/// the result when `row_scale` is `None` or `row_scale[i]² = w[i]`.
+/// the result when `row_scale` is `None` or `row_scale[i]² = w[i]`. With
+/// `write` false only the moments are formed, and the matrix returned is
+/// `n_rows × 0`.
 fn standardize_columns(
     x: MatRef<'_, f64>,
     rows: Option<&[usize]>,
     w: Option<&[f64]>,
     row_scale: Option<&[f64]>,
+    write: bool,
 ) -> (Mat<f64>, Col<f64>, Col<f64>, f64) {
     let n_rows = rows.map_or(x.nrows(), <[usize]>::len);
     let n_cols = x.ncols();
@@ -501,7 +505,7 @@ fn standardize_columns(
     // Columns are appended one block at a time, each written once: no
     // zero-fill pass. Same capacity request, so the same column stride and
     // alignment as `Mat::zeros(n_rows, n_cols)`.
-    let mut xs = Mat::<f64>::with_capacity(n_rows, n_cols);
+    let mut xs = Mat::<f64>::with_capacity(n_rows, if write { n_cols } else { 0 });
     // Set the row count now (no entry is created), so that an input with
     // no columns still gives an `n_rows × 0` result.
     xs.resize_with(n_rows, 0, |_, _| 0.0);
@@ -552,6 +556,9 @@ fn standardize_columns(
             scale[j0 + b] = col_scale;
             stats[b] = (col_mean, col_scale);
             fro.push(fro_term(moments, col_scale));
+        }
+        if !write {
+            continue;
         }
         // The element expression of every standardizer, times the row
         // factor when given.
@@ -613,11 +620,14 @@ fn fro_from_terms(r: &[f64]) -> f64 {
     big * sq.sqrt()
 }
 
-/// A standardized `X` for `pls1_fit`, stored in the input's own layout.
+/// The standardization of `X` for `pls1_fit`: its moments, and the
+/// standardized matrix itself once [`FitX::materialize`] has written it, in the
+/// input's own layout.
 pub(crate) struct FitX {
     /// The `n × d` result; for a row-major result its `d × n` transpose, so
     /// that row `i` of the result is the contiguous storage column `i`.
-    storage: Mat<f64>,
+    /// `None` until materialized.
+    storage: Option<Mat<f64>>,
     row_major: bool,
     /// Column means, the bits of [`standardize_weighted`]'s.
     pub(crate) mean: Col<f64>,
@@ -632,37 +642,113 @@ pub(crate) struct FitX {
 
 impl FitX {
     /// The `n × d` result.
+    ///
+    /// # Panics
+    /// When the result has not been materialized.
     pub(crate) fn xs(&self) -> MatRef<'_, f64> {
+        let storage = self.storage.as_ref().expect("FitX::xs before materialize");
         if self.row_major {
-            self.storage.as_ref().transpose()
+            storage.as_ref().transpose()
         } else {
-            self.storage.as_ref()
+            storage.as_ref()
         }
+    }
+
+    /// `max_j |mean_j| / scale_j`: how far the columns sit from zero in units
+    /// of their scale, which bounds the cancellation in products formed from
+    /// the raw `x` instead of the standardized matrix.
+    pub(crate) fn max_mean_ratio(&self) -> f64 {
+        let (mean, scale) = (owned_col_slice(&self.mean), owned_col_slice(&self.scale));
+        mean.iter()
+            .zip(scale)
+            .fold(0.0_f64, |m, (&mu, &s)| m.max(mu.abs() / s))
+    }
+
+    /// Writes the standardized matrix from `x` (the matrix the moments were
+    /// taken of): each entry is `(x − mean) / scale · row_scale[i]`, the
+    /// element expression of every standardizer, so the bits do not depend
+    /// on the order it is written in. A row-major `x` gives a row-major
+    /// result, written one contiguous row at a time; any other layout gives
+    /// a column-major one.
+    pub(crate) fn materialize(&mut self, x: MatRef<'_, f64>, row_scale: Option<ColRef<'_, f64>>) {
+        let (n, d) = (x.nrows(), x.ncols());
+        let factor: Option<Vec<f64>> = row_scale.map(|r| (0..r.nrows()).map(|i| r[i]).collect());
+        let (mean, scale) = (owned_col_slice(&self.mean), owned_col_slice(&self.scale));
+        let storage = if self.row_major {
+            let xr = x
+                .try_as_row_major()
+                .expect("the moments were read row-major");
+            let mut storage = Mat::<f64>::zeros(d, n);
+            for i in 0..n {
+                let terms = storage
+                    .col_as_slice_mut(i)
+                    .iter_mut()
+                    .zip(xr.row(i).as_slice())
+                    .zip(mean)
+                    .zip(scale);
+                match &factor {
+                    None => {
+                        for (((o, &v), &m), &s) in terms {
+                            *o = standardized(v, m, s);
+                        }
+                    }
+                    Some(f) => {
+                        let fi = f[i];
+                        for (((o, &v), &m), &s) in terms {
+                            *o = standardized(v, m, s) * fi;
+                        }
+                    }
+                }
+            }
+            storage
+        } else {
+            // Same capacity request as `standardize_columns`, so the same
+            // column stride and alignment.
+            let mut xs = Mat::<f64>::with_capacity(n, d);
+            match &factor {
+                None => xs.resize_with(n, d, |i, j| standardized(x[(i, j)], mean[j], scale[j])),
+                Some(f) => {
+                    xs.resize_with(n, d, |i, j| {
+                        standardized(x[(i, j)], mean[j], scale[j]) * f[i]
+                    });
+                }
+            }
+            xs
+        };
+        self.storage = Some(storage);
     }
 }
 
-/// `standardize_weighted(x, weights)` with output row `i` multiplied by
-/// `row_scale[i]` when given: each entry is `(x − mean) / scale · row_scale[i]`,
-/// with `mean` and `scale` those of [`standardize_weighted`], bit for bit. The
-/// result keeps `x`'s layout: a row-major `x` (a C-ordered host array read in
-/// place) gives a row-major result, so no pass transposes it; any other
-/// layout gives the column-major result of [`standardize_columns`]. The
-/// kernel's products round differently on the two layouts, so a fit's last
-/// bits depend on the layout of `x`, within the crate's tolerance.
+/// [`fit_x_moments`] then [`FitX::materialize`]: `standardize_weighted(x,
+/// weights)` with output row `i` multiplied by `row_scale[i]`, in `x`'s layout.
+#[cfg(test)]
 pub(crate) fn standardize_fit_x(
     x: MatRef<'_, f64>,
     weights: Option<ColRef<'_, f64>>,
     row_scale: Option<ColRef<'_, f64>>,
 ) -> FitX {
+    let mut f = fit_x_moments(x, weights);
+    f.materialize(x, row_scale);
+    f
+}
+
+/// The moments of `standardize_weighted(x, weights)`: its `mean` and `scale`,
+/// bit for bit, and `fro`, with nothing written. A row-major `x` (a C-ordered
+/// host array read in place) is read one contiguous row at a time
+/// ([`row_major_moments`]); any other layout through [`standardize_columns`].
+/// [`FitX::materialize`] then writes the standardized matrix in `x`'s layout
+/// when the caller needs it. The kernel's products round differently on the
+/// two layouts, so a fit's last bits depend on the layout of `x`, within the
+/// crate's tolerance.
+pub(crate) fn fit_x_moments(x: MatRef<'_, f64>, weights: Option<ColRef<'_, f64>>) -> FitX {
     let w_prime: Option<Col<f64>> = weights.map(|w| renormalize_mean_one_n(w, x.nrows()));
     let w = w_prime.as_ref().map(owned_col_slice);
-    let row_scale: Option<Vec<f64>> = row_scale.map(|r| (0..r.nrows()).map(|i| r[i]).collect());
     if x.try_as_col_major().is_none() && x.try_as_row_major().is_some() {
-        return standardize_row_major(x, w, row_scale.as_deref());
+        return row_major_moments(x, w);
     }
-    let (storage, mean, scale, fro) = standardize_columns(x, None, w, row_scale.as_deref());
+    let (_, mean, scale, fro) = standardize_columns(x, None, w, None, false);
     FitX {
-        storage,
+        storage: None,
         row_major: false,
         mean,
         scale,
@@ -670,19 +756,19 @@ pub(crate) fn standardize_fit_x(
     }
 }
 
-/// The row-major arm of [`standardize_fit_x`]. The moments are those of
+/// The row-major arm of [`fit_x_moments`]. The moments are those of
 /// [`scaled_moments_block`] (the same terms, in the same row order, from the
 /// same start, so the same bits), each column's sums advancing together over
-/// one contiguous row at a time; change the two together. Four passes over
-/// `x`: `max |x|`, the mean sum and `Σu²` together, `Σ(u − mean)²`, and the
-/// write, with `u = x·(1/s)`.
+/// one contiguous row at a time; change the two together. Three passes over
+/// `x`: `max |x|`, the mean sum and `Σu²` together, and `Σ(u − mean)²`, with
+/// `u = x·(1/s)`.
 #[allow(
     clippy::cast_precision_loss,
     clippy::many_single_char_names,
     clippy::similar_names,
     clippy::too_many_lines
 )]
-fn standardize_row_major(x: MatRef<'_, f64>, w: Option<&[f64]>, row_scale: Option<&[f64]>) -> FitX {
+fn row_major_moments(x: MatRef<'_, f64>, w: Option<&[f64]>) -> FitX {
     let xr = x.try_as_row_major().expect("the caller checked the layout");
     let (n, d) = (x.nrows(), x.ncols());
     let row = |i: usize| xr.row(i).as_slice();
@@ -759,33 +845,8 @@ fn standardize_row_major(x: MatRef<'_, f64>, w: Option<&[f64]>, row_scale: Optio
         scale[j] = col_scale;
         fro.push(fro_term(&m, col_scale));
     }
-
-    // Row `i` of the result is storage column `i`, written once from row `i` of `x`.
-    let mut storage = Mat::<f64>::zeros(d, n);
-    let (mean_s, scale_s) = (owned_col_slice(&mean), owned_col_slice(&scale));
-    for i in 0..n {
-        let terms = storage
-            .col_as_slice_mut(i)
-            .iter_mut()
-            .zip(row(i))
-            .zip(mean_s)
-            .zip(scale_s);
-        match row_scale {
-            None => {
-                for (((o, &v), &m), &s) in terms {
-                    *o = standardized(v, m, s);
-                }
-            }
-            Some(f) => {
-                let fi = f[i];
-                for (((o, &v), &m), &s) in terms {
-                    *o = standardized(v, m, s) * fi;
-                }
-            }
-        }
-    }
     FitX {
-        storage,
+        storage: None,
         row_major: true,
         mean,
         scale,
@@ -833,7 +894,7 @@ pub(crate) fn sum_of_squares(x: MatRef<'_, f64>) -> f64 {
 }
 
 /// An owned column's entries as a slice (an owned `Col` is contiguous).
-fn owned_col_slice(c: &Col<f64>) -> &[f64] {
+pub(crate) fn owned_col_slice(c: &Col<f64>) -> &[f64] {
     c.try_as_col_major()
         .expect("an owned Col is contiguous")
         .as_slice()
@@ -936,7 +997,7 @@ const STD_BLOCK: usize = 8;
 /// then the mean sum and `Σu²` together, then `Σ(u − mean)²`, with
 /// `u = x·(1/s)`. `w` holds the mean-one weights (one per row), `None`
 /// for unit weights; a weighted term is `wᵢ·u` / `wᵢ·(u·u)` /
-/// `wᵢ·(d·d)` as in [`scaled_moments`]. [`standardize_row_major`] repeats
+/// `wᵢ·(d·d)` as in [`scaled_moments`]. [`row_major_moments`] repeats
 /// these loops over the rows of a row-major matrix for the same bits:
 /// change the two together.
 // Row `i` addresses all `B` columns, so the loops index rather than iterate.

@@ -529,7 +529,7 @@ impl GramPBlock<'_> {
 /// Dense (`None`, or `keep ≥ p`): the full norm and an infinite gap. Order
 /// statistics are exact values, so a partial selection reads the numbers a
 /// full sort would.
-fn selected_norm_and_gap(s: &Col<f64>, keep: Option<usize>) -> (f64, f64) {
+pub(crate) fn selected_norm_and_gap(s: &Col<f64>, keep: Option<usize>) -> (f64, f64) {
     let p = s.nrows();
     match keep {
         Some(kp) if kp < p => {

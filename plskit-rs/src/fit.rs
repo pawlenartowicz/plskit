@@ -435,11 +435,11 @@ pub fn pls1_fit(
     // *not* preprocessing, so it applies even when pre_standardized=true.
     let sqw: Option<Col<f64>> = wref.map(crate::linalg::sqrt_col);
 
-    // Standardize, or skip when pre_standardized, with weighted moments when
-    // weights is Some. The standardized X keeps X's layout and has its rows
-    // already scaled by √w' (`standardize_fit_x`).
-    let fx: Option<crate::linalg::FitX> = (!opts.pre_standardized)
-        .then(|| crate::linalg::standardize_fit_x(x, wref, sqw.as_ref().map(Col::as_ref)));
+    // Standardization moments, or none when pre_standardized, weighted when
+    // weights is Some. The standardized X itself is written only when its
+    // columns' means are too large for the implicit products (below).
+    let mut fx: Option<crate::linalg::FitX> =
+        (!opts.pre_standardized).then(|| crate::linalg::fit_x_moments(x, wref));
     let (ys_owned, y_mean, y_scale) = if opts.pre_standardized {
         (None, 0.0, 1.0)
     } else {
@@ -451,18 +451,18 @@ pub fn pls1_fit(
         None => y,
     };
 
-    // A pre-standardized X is still to be row-scaled; a standardized one
-    // already is.
+    // A pre-standardized X is still to be row-scaled; the implicit kernel
+    // applies √w' itself.
     let x_scaled_owned: Option<Mat<f64>> = match (&fx, &sqw) {
         (None, Some(s)) => Some(scale_rows(x, s.as_ref())),
         _ => None,
     };
     let y_scaled_owned: Option<Col<f64>> = sqw.as_ref().map(|s| scale_col(ys_view, s.as_ref()));
 
-    let x_for_nipals: MatRef<'_, f64> = match (&fx, &x_scaled_owned) {
-        (Some(f), _) => f.xs(),
-        (None, Some(a)) => a.as_ref(),
-        (None, None) => x,
+    // The pre-standardized path's kernel input.
+    let x_for_nipals: MatRef<'_, f64> = match &x_scaled_owned {
+        Some(a) => a.as_ref(),
+        None => x,
     };
     let y_for_nipals: ColRef<'_, f64> = match &y_scaled_owned {
         Some(a) => a.as_ref(),
@@ -496,14 +496,54 @@ pub fn pls1_fit(
         ),
     };
 
-    let fit = pls1_fit_prepared_fro(
-        x_for_nipals,
-        y_for_nipals,
-        k_requested,
-        opts.keep,
-        opts.par,
-        x_fro,
-    )?;
+    // Within `IMPLICIT_MAX_MEAN_RATIO` the kernel forms the standardized
+    // products from the raw X. Past it, or when the implicit fit cannot decide
+    // where to stop, X is standardized into a copy (its layout, rows scaled
+    // by √w'), and the fit is the copy's to the bit.
+    let implicit_fit = match &fx {
+        Some(f) => {
+            let ratio = f.max_mean_ratio();
+            if ratio > IMPLICIT_MAX_MEAN_RATIO {
+                None
+            } else {
+                pls1_fit_implicit(
+                    x,
+                    y_for_nipals,
+                    crate::linalg::owned_col_slice(&f.mean),
+                    crate::linalg::owned_col_slice(&f.scale),
+                    sqw.as_ref().map(crate::linalg::owned_col_slice),
+                    k_requested,
+                    opts.keep,
+                    opts.par,
+                    x_fro,
+                    ratio,
+                )
+            }
+        }
+        None => None,
+    };
+    let fit = match (implicit_fit, fx.as_mut()) {
+        (Some(fit), _) => fit,
+        (None, Some(f)) => {
+            f.materialize(x, sqw.as_ref().map(Col::as_ref));
+            pls1_fit_prepared_fro(
+                f.xs(),
+                y_for_nipals,
+                k_requested,
+                opts.keep,
+                opts.par,
+                x_fro,
+            )?
+        }
+        (None, None) => pls1_fit_prepared_fro(
+            x_for_nipals,
+            y_for_nipals,
+            k_requested,
+            opts.keep,
+            opts.par,
+            x_fro,
+        )?,
+    };
     let k_used = fit.k_used;
     if opts.pre_standardized && opts.check_n_eff && k_used < k_requested {
         return Err(PlsKitError::InvalidInput(format!(
@@ -587,9 +627,11 @@ pub fn spls1_fit(
 }
 
 /// The kernel-and-coefficient tail of `pls1_fit`, on arrays that are
-/// already standardized and already √w-scaled: `pls1_fit` runs it (as
-/// [`pls1_fit_prepared_fro`]) after its validation, standardization and √w
-/// scaling. Callers that prepare the arrays once for many replicates run
+/// already standardized and already √w-scaled. `pls1_fit` runs it as
+/// [`pls1_fit_prepared_fro`] when it does not standardize, or when it
+/// standardizes X into a copy (past [`IMPLICIT_MAX_MEAN_RATIO`]); otherwise
+/// it runs [`pls1_fit_implicit`] on the raw X, which returns this struct
+/// too. Callers that prepare the arrays once for many replicates run
 /// [`check_finite_mat`] on X and [`check_fit_y_and_k`] first when their
 /// inputs can fail them.
 pub(crate) struct PreparedFit {
@@ -646,6 +688,53 @@ pub(crate) fn pls1_fit_prepared_fro(
         p_loadings: p_mat,
         w_star: w_mat,
         q_loadings: q_vec,
+        coef,
+        k_used,
+    })
+}
+
+/// [`pls1_fit_prepared_fro`] on `Xs = diag(sqw)·(x − 1·mean')·diag(1/scale)`
+/// through [`ImplicitXBackend`], without writing `Xs`. `x_fro` is `‖Xs‖_F`;
+/// `mean_ratio` is `max_j |mean_j| / scale_j`. `None` when a component's
+/// stop decision falls in the backend's rounding band; the caller then fits
+/// the standardized copy.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pls1_fit_implicit(
+    x: MatRef<'_, f64>,
+    ys: ColRef<'_, f64>,
+    mean: &[f64],
+    scale: &[f64],
+    sqw: Option<&[f64]>,
+    k: usize,
+    keep: Option<usize>,
+    par: ParChoice,
+    x_fro: f64,
+    mean_ratio: f64,
+) -> Option<PreparedFit> {
+    let par = resolve_par(par, x.nrows(), x.ncols(), k);
+    let w_floor = w_rel_floor(x.nrows(), x.ncols(), x_fro, ys.norm_l2());
+    let mut backend = ImplicitXBackend {
+        x,
+        ys,
+        mean,
+        scale,
+        sqw,
+        par,
+        band: 2.0 * (1.0 + mean_ratio) * NIPALS_ABS_FLOOR.max(w_floor),
+    };
+    let s0 = backend.xs_t_mul(ys, 1.0);
+    let LoopOutcome::Done { t, p, w, q } = pls1_component_loop(&mut backend, s0, w_floor, k, keep)
+    else {
+        return None;
+    };
+    let t = t.unwrap_or_else(|| Mat::<f64>::zeros(x.nrows(), 0));
+    let k_used = w.ncols();
+    let coef = pls1_coef_at_k(&w, &p, &q, k_used, par);
+    Some(PreparedFit {
+        t_scores: t,
+        p_loadings: p,
+        w_star: w,
+        q_loadings: q,
         coef,
         k_used,
     })
@@ -1046,7 +1135,136 @@ impl ComponentBackend for XBackend<'_> {
     fn q(&mut self, _s: &Col<f64>, _w: &Col<f64>, t: Option<&Col<f64>>, inv_tt: f64) -> f64 {
         // The explicit-deflation kernel's expression, on the undeflated ys:
         // a scalar sum in ascending i, times the same 1/tt.
+        // `ImplicitXBackend::q` repeats it; change the two together.
         let t = t.expect("the X backend always forms t");
+        let n = self.ys.nrows();
+        (0..n).map(|i| self.ys[i] * t[i]).sum::<f64>() * inv_tt
+    }
+}
+
+/// Largest `max_j |mean_j| / scale_j` for which `pls1_fit` forms the
+/// standardized products from the raw X ([`ImplicitXBackend`]); above it the
+/// standardized X is written into a copy. The implicit products lose about
+/// `log10(1 + |mean_j| / scale_j)` digits to cancellation: on Gaussian designs
+/// with a common offset the coefficients moved by about `ratio·1e-16`, at most
+/// `6·ratio·1e-16` at `k = 5`, so this bound keeps them within about `1e-12` of
+/// the copy's.
+pub(crate) const IMPLICIT_MAX_MEAN_RATIO: f64 = 1e3;
+
+/// The X backend on `Xs = diag(sqw)·(X − 1·mean')·diag(1/scale)` formed from
+/// the raw `X` on the fly, so the standardized matrix is never written: the
+/// kernel only multiplies by `Xs` and `Xs'`, and each product is the raw one
+/// plus a rank-one correction,
+///
+/// - `Xs·v  = sqw ⊙ (X·u − 1·(mean'u))`, with `u = v / scale`;
+/// - `Xs'·t = (X'·t̃ − mean·Σt̃) / scale`, with `t̃ = sqw ⊙ t`.
+///
+/// Same float model as [`XBackend`] on a materialized `Xs` up to rounding, but
+/// the correction subtracts two terms of size `|mean_j|·|u_j|`, so column `j`
+/// loses about `log10(1 + |mean_j| / scale_j)` digits to cancellation that
+/// the materialized `x − mean` does not.
+///
+/// That cancellation also lifts the rounding noise in `s`, which the
+/// truncation floor ([`w_rel_floor`]) is sized for on the materialized `Xs`:
+/// with `y` orthogonal to `X`, the implicit first `‖s‖` reached `27×` the floor
+/// (`n = 8`, ratio 900), where the materialized one stays below it; without a
+/// gate the fit keeps a noise component. So `gate_s` hands every stop decision
+/// on the `w` floor to the caller: a selected `‖s‖` below `band =
+/// 2·(1 + max_j |mean_j| / scale_j)·floor` is `Unresolved`. On orthogonal-`y`
+/// sweeps (`n` from 8 to 1000, ratio up to 900) the implicit noise sat at most
+/// at `0.03·(1 + ratio)·floor` and the materialized at `0.58·floor`, so the
+/// factor 2 also covers the copy's own rounding at a ratio near 0.
+struct ImplicitXBackend<'a> {
+    x: MatRef<'a, f64>,
+    ys: ColRef<'a, f64>,
+    mean: &'a [f64],
+    scale: &'a [f64],
+    sqw: Option<&'a [f64]>,
+    par: Par,
+    band: f64,
+}
+
+impl ImplicitXBackend<'_> {
+    /// `Xs·v`, `(n,)`.
+    fn xs_mul(&self, v: &Col<f64>) -> Col<f64> {
+        let d = self.x.ncols();
+        let u = Col::<f64>::from_fn(d, |j| v[j] / self.scale[j]);
+        let c: f64 = (0..d).map(|j| self.mean[j] * u[j]).sum();
+        let mut xu = Col::<f64>::zeros(self.x.nrows());
+        matmul(
+            xu.as_mut().as_mat_mut(),
+            Accum::Replace,
+            self.x,
+            u.as_ref().as_mat(),
+            1.0,
+            self.par,
+        );
+        match self.sqw {
+            None => {
+                for i in 0..xu.nrows() {
+                    xu[i] -= c;
+                }
+            }
+            Some(sqw) => {
+                for i in 0..xu.nrows() {
+                    xu[i] = (xu[i] - c) * sqw[i];
+                }
+            }
+        }
+        xu
+    }
+
+    /// `alpha·Xs'·t`, `(d,)`.
+    fn xs_t_mul(&self, t: ColRef<'_, f64>, alpha: f64) -> Col<f64> {
+        let n = self.x.nrows();
+        let tw_owned: Option<Col<f64>> = self
+            .sqw
+            .map(|sqw| Col::<f64>::from_fn(n, |i| t[i] * sqw[i]));
+        let tw = tw_owned.as_ref().map_or(t, Col::as_ref);
+        let sum_tw: f64 = (0..n).map(|i| tw[i]).sum();
+        let mut g = Col::<f64>::zeros(self.x.ncols());
+        matmul(
+            g.as_mut().as_mat_mut(),
+            Accum::Replace,
+            self.x.transpose(),
+            tw.as_mat(),
+            1.0,
+            self.par,
+        );
+        for j in 0..g.nrows() {
+            g[j] = (g[j] - self.mean[j] * sum_tw) / self.scale[j] * alpha;
+        }
+        g
+    }
+}
+
+impl ComponentBackend for ImplicitXBackend<'_> {
+    fn gate_s(&mut self, _a: usize, s: &Col<f64>, keep: Option<usize>) -> Gate {
+        if crate::gram_p::selected_norm_and_gap(s, keep).0 < self.band {
+            Gate::Unresolved
+        } else {
+            Gate::Continue
+        }
+    }
+
+    fn score(&mut self, r: &Col<f64>) -> Scored {
+        let t = self.xs_mul(r);
+        let tt = t.squared_norm_l2();
+        Scored { tt, t: Some(t) }
+    }
+
+    fn gate_tt(&mut self, _a: usize, _r: &Col<f64>, _tt: f64) -> Gate {
+        Gate::Continue
+    }
+
+    fn loading(&mut self, _r: &Col<f64>, t: Option<&Col<f64>>, inv_tt: f64) -> Col<f64> {
+        let t = t.expect("the implicit X backend always forms t");
+        self.xs_t_mul(t.as_ref(), inv_tt)
+    }
+
+    fn q(&mut self, _s: &Col<f64>, _w: &Col<f64>, t: Option<&Col<f64>>, inv_tt: f64) -> f64 {
+        // As in `XBackend::q`; change the two together.
+        let t = t.expect("the implicit X backend always forms t");
         let n = self.ys.nrows();
         (0..n).map(|i| self.ys[i] * t[i]).sum::<f64>() * inv_tt
     }
@@ -2197,12 +2415,12 @@ mod copy_free_reference {
                                         "{} {view} pre={pre} k={k} keep={keep:?} {par:?}",
                                         f.name
                                     );
-                                    // The standardized X keeps a row-major input's
-                                    // layout; the reference standardizes column-major.
-                                    if view == "row_major" && !pre {
-                                        assert_model_close(&a, &b, 1e-10, &what);
-                                    } else {
+                                    // Standardizing, the fit forms its products from
+                                    // the raw X; the reference from a standardized copy.
+                                    if pre {
                                         assert_model_bits(&a, &b, &what);
+                                    } else {
+                                        assert_model_close(&a, &b, 1e-10, &what);
                                     }
                                 }
                             }
@@ -2220,18 +2438,120 @@ mod copy_free_reference {
                 let a = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(3), None, opts).unwrap();
                 let b = pls1_fit_reference(x.as_ref(), y.as_ref(), KSpec::Fixed(3), None, opts)
                     .unwrap();
-                assert_model_bits(&a, &b, &format!("large {par:?}"));
+                assert_model_close(&a, &b, 1e-10, &format!("large {par:?}"));
             }
         });
     }
 
-    /// With `pre_standardized = false`, `pls1_fit` standardizes X into a
-    /// fresh matrix in X's own layout: every column-major layout fits to the
-    /// bits of the owned column-major matrix, and a row-major one (a
-    /// C-ordered array that `plskit-py` reads in place) to within 1e-10,
-    /// since the kernel's products round differently on it. A non-finite
-    /// entry is found on every layout, on both paths, weighted or not, also
-    /// when its row has weight zero.
+    /// Past `IMPLICIT_MAX_MEAN_RATIO` the fit standardizes X into a copy in
+    /// X's layout: every column-major layout fits to the reference's bits, a
+    /// row-major one to within 1e-10.
+    #[test]
+    fn mean_heavy_x_fits_the_standardized_copy() {
+        with_new_routes_disabled(|| {
+            for f in copy_free_families() {
+                let x = Mat::<f64>::from_fn(f.x.nrows(), f.x.ncols(), |i, j| f.x[(i, j)] + 1e6);
+                let lay = Layouts::new(x.as_ref());
+                for (view, xv) in lay.all(&x) {
+                    for k in [1_usize, 3] {
+                        let opts = FitOpts {
+                            check_n_eff: false,
+                            ..FitOpts::default()
+                        };
+                        let wr = f.w.as_ref().map(Col::as_ref);
+                        let a = pls1_fit(xv, f.y.as_ref(), KSpec::Fixed(k), wr, opts).unwrap();
+                        let b = pls1_fit_reference(xv, f.y.as_ref(), KSpec::Fixed(k), wr, opts)
+                            .unwrap();
+                        let what = format!("{} {view} k={k}", f.name);
+                        if view == "row_major" {
+                            assert_model_close(&a, &b, 1e-10, &what);
+                        } else {
+                            assert_model_bits(&a, &b, &what);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Below `IMPLICIT_MAX_MEAN_RATIO` the fit forms its products from the raw
+    /// X. A common offset of 300 puts every family's largest `|mean_j| / scale_j`
+    /// between about 580 and 770, and every layout stays within 1e-10 of the
+    /// reference's standardized copy.
+    #[test]
+    fn offset_x_below_the_ratio_bound_matches_the_copy() {
+        with_new_routes_disabled(|| {
+            for f in copy_free_families() {
+                let x = Mat::<f64>::from_fn(f.x.nrows(), f.x.ncols(), |i, j| f.x[(i, j)] + 300.0);
+                let wr = f.w.as_ref().map(Col::as_ref);
+                let ratio = crate::linalg::fit_x_moments(x.as_ref(), wr).max_mean_ratio();
+                assert!(
+                    ratio > 100.0 && ratio < IMPLICIT_MAX_MEAN_RATIO,
+                    "{} ratio {ratio}",
+                    f.name
+                );
+                let lay = Layouts::new(x.as_ref());
+                for (view, xv) in lay.all(&x) {
+                    for k in [1_usize, 3] {
+                        let opts = FitOpts {
+                            check_n_eff: false,
+                            ..FitOpts::default()
+                        };
+                        let a = pls1_fit(xv, f.y.as_ref(), KSpec::Fixed(k), wr, opts).unwrap();
+                        let b = pls1_fit_reference(xv, f.y.as_ref(), KSpec::Fixed(k), wr, opts)
+                            .unwrap();
+                        assert_model_close(&a, &b, 1e-10, &format!("{} {view} k={k}", f.name));
+                    }
+                }
+            }
+        });
+    }
+
+    /// A `y` orthogonal to an offset X, below `IMPLICIT_MAX_MEAN_RATIO`: two
+    /// offset columns (largest `|mean_j| / scale_j` about 270), and a centered
+    /// column beside a constant 999.3 (ratio 999.3). The implicit products put
+    /// the first `‖X'y‖` above the floor, where the copy puts it below. The
+    /// fit decides on the copy and returns `k_used = 0`, to the reference's
+    /// bits.
+    #[test]
+    fn orthogonal_y_on_offset_x_keeps_no_component() {
+        use rand::{RngExt, SeedableRng};
+        with_new_routes_disabled(|| {
+            let designs = [[0.37, 99.7, -1.3, 89.73], [0.37, 0.0, 0.0, 999.3]];
+            for (c, n) in designs
+                .iter()
+                .flat_map(|c| [8_usize, 12, 16].map(|n| (c, n)))
+            {
+                // Column j is `c[2j]·a + c[2j + 1]`, `a = ±1` alternating.
+                let x = Mat::<f64>::from_fn(n, 2, |i, j| {
+                    let a = if i % 2 == 0 { 1.0 } else { -1.0 };
+                    c[2 * j] * a + c[2 * j + 1]
+                });
+                let ones = Col::<f64>::from_fn(n, |_| 1.0);
+                let basis =
+                    crate::test_support::orthonormal_basis(ones.as_ref(), x.as_ref(), 1e-12);
+                for seed in 0..20_u64 {
+                    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+                    let mut y = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
+                    crate::test_support::project_off(&basis, &mut y);
+                    let opts = FitOpts::default();
+                    let a = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(1), None, opts).unwrap();
+                    let b = pls1_fit_reference(x.as_ref(), y.as_ref(), KSpec::Fixed(1), None, opts)
+                        .unwrap();
+                    let what = format!("{c:?} n={n} seed={seed}");
+                    assert_eq!(b.k_used, 0, "{what}: reference");
+                    assert_model_bits(&a, &b, &what);
+                }
+            }
+        });
+    }
+
+    /// With `pre_standardized = false`, `pls1_fit` forms its products from X
+    /// in X's own layout, so every layout (including a C-ordered array that
+    /// `plskit-py` reads in place) fits to within 1e-10 of the owned
+    /// column-major matrix: the products round differently per layout. A
+    /// non-finite entry is found on every layout, on both paths, weighted or
+    /// not, also when its row has weight zero.
     #[test]
     fn standardizing_fit_layouts_agree() {
         let fit = |x: MatRef<'_, f64>, f: &Family, k: usize, keep, par| {
@@ -2261,11 +2581,7 @@ mod copy_free_reference {
                             let a = fit(xv, f, k, keep, par).unwrap();
                             let b = fit(f.x.as_ref(), f, k, keep, par).unwrap();
                             let what = format!("{} {view} k={k} keep={keep:?} {par:?}", f.name);
-                            if view == "row_major" {
-                                assert_model_close(&a, &b, 1e-10, &what);
-                            } else {
-                                assert_model_bits(&a, &b, &what);
-                            }
+                            assert_model_close(&a, &b, 1e-10, &what);
                         }
                     }
                 }

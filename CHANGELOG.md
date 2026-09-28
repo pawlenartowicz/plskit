@@ -4,12 +4,20 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
-- Changed (performance): `pls1_fit` / `spls1_fit` standardize `X` in its own
-  memory layout, so a C-ordered NumPy array is read in place with no
-  transpose, and `pre_standardized=True` no longer copies `X` into
-  column-major order (a weighted fit still forms its √w-scaled `X`). The
-  truncation floor takes `‖X‖_F` from the standardization moments, and the
-  finiteness check from the same pass.
+## [0.6.1] - 2026-09-29
+
+- Changed (performance): `pls1_fit` / `spls1_fit` no longer write a
+  standardized copy of `X`: the kernel forms its products from the raw `X`,
+  read in its own memory layout (a C-ordered NumPy array in place), with the
+  centering and scaling applied inline. When a column's |mean| exceeds 1000
+  times its scale, `X` is standardized into a copy as before, since the
+  inline form would lose digits to cancellation. A fit that stops before `k`
+  components on its truncation floor, or keeps one within
+  `2·(1 + max |mean| / scale)` times that floor, is refitted on a
+  standardized copy, which costs about two fits and the copy's memory.
+  `pre_standardized=True` no longer copies `X` into column-major order (a
+  weighted fit still forms its √w-scaled `X`). The truncation floor takes `‖X‖_F` from the standardization
+  moments, and the finiteness check from the same pass.
 - Changed (numerics): `pls1_fit` / `spls1_fit` results from Rust are no
   longer bit-identical across memory layouts of `X`; row- and column-major
   inputs agree to rounding, except that a fit sitting on its truncation
@@ -18,7 +26,11 @@ All notable changes to this project will be documented here.
   order, so its results do not depend on the input's layout; a
   `pre_standardized=True` fit of a C-ordered array is now read row-major
   rather than copied column-major, so its last bits (and, on the floor, its
-  `k_used`) can differ from 0.6.0.
+  `k_used`) can differ from 0.6.0. A standardizing fit forms its products from
+  the raw `X`, so its coefficients differ from 0.6.0 by about
+  `max |mean| / scale · 1e-16` relative; a stop on the truncation floor
+  (`k_used`) is decided on the standardized copy whenever it is close enough
+  that the raw-`X` products could decide it differently.
 
 ## [0.6.0] - 2026-09-27
 
