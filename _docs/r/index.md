@@ -1,10 +1,19 @@
 # R
 
-The R wrapper is planned but not yet implemented. It will be installable
-via `devtools::install_github("pawlenartowicz/plskit", subdir="plskit-r")`
-and ultimately published to CRAN, exposing the same public surface as
-the Python and Rust APIs.
+The R package `plskit` wraps the Rust engine through
+[extendr](https://extendr.github.io/). Every function has the name and the
+arguments of its Python counterpart (RULE 1), and results carry the same
+field names, so the canonical reference is the Python one:
+[API](../python/api.md) and [result objects](../python/results.md). These
+pages cover only what is specific to R.
 
-> Status: planned; no release scheduled.
+> Status: implemented, not yet released. Until the first release the
+> package builds from a checkout of the monorepo only; see
+> [Installation](installation.md).
 
-Track progress on the project tracker in the `plskit` GitHub repo.
+## Pages
+
+- [Installation](installation.md): requirements and the dev-mode build
+- [Quickstart](quickstart.md): a first session
+- [Differences from Python](differences.md): type mapping, seeds,
+  conditions, and the few places where R differs

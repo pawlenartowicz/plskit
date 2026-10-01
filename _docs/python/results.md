@@ -15,7 +15,7 @@ language wrappers.
 | `Y_mean` | `float \| np.ndarray \| None` | scalar for 1-D `Y`, one entry per column for 2-D `Y`; populated when `Y` was passed |
 | `Y_scale` | `float \| np.ndarray \| None` | scalar for 1-D `Y`, one entry per column for 2-D `Y`; populated when `Y` was passed |
 | `weights_normalized` | `np.ndarray \| None` | weights normalized to mean 1; populated when `weights` was passed |
-| `n_eff` | `float \| None` | Kish's effective sample size; populated when `weights` was passed |
+| `n_eff` | `float \| None` | Kish's effective sample size; populated when `weights` was passed; exactly `n` when the weights are all equal, as every fit reports |
 
 ## `PLS1Result` — what `pls1_fit` returns
 
@@ -169,7 +169,7 @@ input gives `k_star = 0` from `spls1_find_k_optimal`.
 | `n_splits` | `int \| None` | not None for `split_*` methods, None for `raw_perm` / `score` / `e` |
 | `seed` | `int` | always |
 | `n_eff` | `float` | always; Kish effective sample size, equals `n` for uniform/absent weights |
-| `rho_hat` | `float \| None` | `split_nb` only, and only when unweighted with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
+| `rho_hat` | `float \| None` | `split_nb` only, and only when unweighted (no weights, or all-equal weights) with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
 | `stable_rank` | `float \| None` | stable rank of the standardized `X`, as seen by the `split_nb` auto-gate; populated whenever `"split_nb"` was requested (fired or not, including under `force`), `None` for every other requested method |
 | `ci` | `ConfirmatoryCI \| None` | not None when called with `ci=True`; carries the rotation-invariant resampling CIs (subsampling for β and `holdout_corr`, bootstrap for leverage) |
 
@@ -473,7 +473,7 @@ z-map output) instead of the confirmatory CI bundle.
 | `variance_rot` | `float` | aggregate `V_rot = (1/B) Σ_b Σ_k α²_rot,b,k` |
 | `variance_unrot_per_axis` | `np.ndarray` | per-axis `V_unrot,k`, length K, reference-axis order |
 | `variance_rot_per_axis` | `np.ndarray` | per-axis `V_rot,k`, length K, reference-axis order |
-| `degenerate_baseline` | `bool` | `True` iff `V_unrot = 0` on the engine pass or more than 5% of bootstrap iterations had `V_unrot* = 0`; when set, `variance_ratio.point` is `NaN` |
+| `degenerate_baseline` | `bool` | `True` iff `V_unrot = 0` on the engine pass or more than 5% of bootstrap iterations had `V_unrot* = 0`; only the first trigger makes `variance_ratio.point` `NaN`, under the second alone the point stays the finite `V_rot / V_unrot` |
 | `n_boot_finite` | `int` | number of resamples that produced finite per-axis squared residuals (≤ `n_boot`) |
 | `n_eff` | `float` | effective sample size `(Σ wᵢ)² / Σ wᵢ²` from the full normalized weight vector; equals `n` for uniform weights |
 
@@ -488,7 +488,7 @@ suspect a local-optimum varimax convergence issue).
 | Field | Python type | Notes |
 |---|---|---|
 | `method` | `str` | `"varimax"` today; future `"promax"` / `"oblimin"` / `"geomin"` |
-| `args` | `Mapping` (frozen via `MappingProxyType`) | method-specific kwargs used at rotate-time |
+| `args` | `Mapping` (frozen via `MappingProxyType`) | method-specific kwargs as the engine resolved them (defaults filled, counts as `int`) |
 | `R` | `np.ndarray` `(K, K)` | rotation matrix; `W_rot = W @ R` |
 | `sweeps` | `int` | varimax iterations to convergence |
 | `V_converged` | `float` | final varimax criterion value |

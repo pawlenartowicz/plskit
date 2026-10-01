@@ -68,9 +68,18 @@ applies, per column on `X` and as a scalar on `y`:
     standardized = (raw − mean) / sqrt(var, ddof=0)
 
 (Population variance, not the unbiased sample variance.) A column that
-is constant up to floating-point rounding keeps scale `1.0` and is only
-centered, so it becomes a column of zeros (up to rounding) instead of
-rounding noise blown up to unit variance. "Constant up to rounding"
+is constant up to floating-point rounding gets scale `max(1, |mean|)`
+and is only centered, so it becomes a column of zeros up to rounding
+(root mean square below about `2nε`) at any magnitude, instead of
+rounding noise blown up to unit variance. A constant of magnitude at
+most 1 (an all-zero column included) keeps scale `1.0`; a larger one
+reports its `|mean|` as its scale: in `X_scale` / `Y_scale` from
+`preprocess` (for a constant column of `X`, or a constant `y` or column
+of `Y`) and in the PLS3 fit's `X_scale` / `Y_scale` (`x_scale` /
+`y_scale` in Rust). A column whose standard deviation would fall below
+the smallest normal double (about `2.2e-308`, e.g. a single `5e-324`
+among zeros) cannot be rescaled accurately and is treated the same way.
+"Constant up to rounding"
 means the column's centered sum of squares is at most `(2nε)²` times its
 uncentered sum of squares (`ε` the machine epsilon; with weights, both
 sums are weighted by `w'`), which bounds what centering leaves of an

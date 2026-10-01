@@ -146,9 +146,6 @@ pub(crate) struct IncrementalSequenceOutput {
     /// Reports what actually RAN: a `split_nb` request that the hoisted gate
     /// flagged reads `"split_exact"` here.
     pub(crate) method: String,
-    /// Significance threshold alpha used.
-    #[allow(dead_code)]
-    pub(crate) alpha: f64,
     /// RNG seed actually used.
     pub(crate) seed: u64,
     /// Stable rank of the standardized X, as the hoisted gate saw it.
@@ -165,11 +162,12 @@ pub(crate) struct IncrementalSequenceOutput {
 /// `weights` and `n_eff` are the validated pair
 /// `fit::validate_and_normalize_weights` returns (normalized weights, and the
 /// Kish `n_eff` of the weights as the public caller handed them; the row
-/// count when `weights` is `None`). `n_eff` feeds the `split_nb` gate, so the
+/// count when the weights are absent or all-equal). `n_eff` feeds the `split_nb` gate, so the
 /// sequence decides on the same number its result reports.
 ///
 /// # Errors
-/// `PlsKitError::KExceedsMax` when `k_max == 0` or `k_max > n_features`.
+/// `PlsKitError::InvalidArgument` when `k_max == 0`, `PlsKitError::KExceedsMax`
+/// when `k_max > n_features`.
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn run_incremental_sequence(
     x: MatRef<'_, f64>,
@@ -179,8 +177,11 @@ pub(crate) fn run_incremental_sequence(
     n_eff: f64,
     mut opts: IncrementalSequenceOpts,
 ) -> PlsKitResult<IncrementalSequenceOutput> {
+    if k_max == 0 {
+        return Err(PlsKitError::InvalidArgument("k_max must be >= 1".into()));
+    }
     let max_allowed = x.ncols();
-    if k_max == 0 || k_max > max_allowed {
+    if k_max > max_allowed {
         return Err(crate::error::PlsKitError::KExceedsMax {
             k: k_max,
             k_max: max_allowed,
@@ -254,7 +255,6 @@ pub(crate) fn run_incremental_sequence(
         pvalues,
         last_significant_k: last_sig,
         method: opts.args.method().as_str().to_owned(),
-        alpha: opts.alpha,
         seed: seed_used,
         stable_rank: stable_rank_out,
     })
@@ -402,184 +402,6 @@ fn p_for_incremental(
     p_for_confirmatory_at_k(xs_def, ys_def, 1, weights, &sub_opts, rng)
 }
 
-#[cfg(test)]
-#[allow(clippy::many_single_char_names, clippy::similar_names)]
-mod copy_free_reference {
-    use super::*;
-    use crate::signal_test::with_new_routes_disabled;
-    use crate::test_support::{copy_free_families, Layouts};
-
-    /// Pre-change body, verbatim.
-    fn p_for_incremental_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        h: usize,
-        weights: Option<ColRef<'_, f64>>,
-        opts: &IncrementalSequenceOpts,
-        rng: &mut crate::rng::Rng,
-    ) -> PlsKitResult<f64> {
-        use crate::fit::{pls1_fit, FitOpts, KSpec};
-        use crate::linalg::{
-            standardize, standardize1, standardize1_weighted, standardize_weighted,
-        };
-
-        // Standardize the same way the per-step fit will: weighted moments when
-        // weights are present, and skip standardization entirely when the caller
-        // asserts pre-standardized inputs (IncrementalSequenceOpts.pre_standardized
-        // contract). The weights=None, pre_standardized=false path must stay
-        // bit-identical — it resolves to the plain standardize/standardize1 calls.
-        let (xs_full, ys_full) = if opts.pre_standardized {
-            (
-                Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| x[(i, j)]),
-                Col::<f64>::from_fn(y.nrows(), |i| y[i]),
-            )
-        } else if weights.is_some() {
-            let (xs, _, _) = standardize_weighted(x, weights);
-            let (ys, _, _) = standardize1_weighted(y, weights);
-            (xs, ys)
-        } else {
-            let (xs, _, _) = standardize(x);
-            let (ys, _, _) = standardize1(y);
-            (xs, ys)
-        };
-
-        let (xs_def, ys_def) = if h == 1 {
-            (xs_full, ys_full)
-        } else {
-            // Deflation components are fit with the same weights as the per-step
-            // test so that the deflated residual matches the weighted model.
-            let prev = pls1_fit(
-                xs_full.as_ref(),
-                ys_full.as_ref(),
-                KSpec::Fixed(h - 1),
-                weights,
-                FitOpts {
-                    pre_standardized: true,
-                    // check_n_eff: false — internal deflation refit; n_eff was
-                    // already validated at the top-level entry, and truncation is
-                    // tolerated by design (deflate by whatever was extracted).
-                    check_n_eff: false,
-                    keep: opts.keep,
-                    ..FitOpts::default()
-                },
-            )?;
-            let tp: Mat<f64> = prev.t_scores.as_ref() * prev.p_loadings.transpose();
-            let tq: Col<f64> = prev.t_scores.as_ref() * prev.q_loadings.as_ref();
-            // T, P′, q live on the √w′-row-scaled problem (see `pls1_fit` in fit.rs:
-            // row-scaling runs even at pre_standardized=true), so T·P′ ≈ √W·Xs.
-            // Deflate the UNscaled standardized data: Xs_d = Xs − √W⁻¹·T·P′ (same
-            // for y). prev.weights holds the exact normalized weights the fit
-            // row-scaled with (None when absent or uniform — that branch must stay
-            // bit-identical to the historical unweighted path). A zero weight
-            // zeroes the score row (t = √w·xs·w_vec), so its deflation
-            // contribution is 0, not 0·∞.
-            let (xs_d, ys_d) = match prev.weights.as_ref() {
-                None => (
-                    Mat::<f64>::from_fn(xs_full.nrows(), xs_full.ncols(), |i, j| {
-                        xs_full[(i, j)] - tp[(i, j)]
-                    }),
-                    Col::<f64>::from_fn(ys_full.nrows(), |i| ys_full[i] - tq[i]),
-                ),
-                Some(w) => {
-                    let inv_sqw: Vec<f64> = (0..xs_full.nrows())
-                        .map(|i| if w[i] > 0.0 { 1.0 / w[i].sqrt() } else { 0.0 })
-                        .collect();
-                    (
-                        Mat::<f64>::from_fn(xs_full.nrows(), xs_full.ncols(), |i, j| {
-                            xs_full[(i, j)] - inv_sqw[i] * tp[(i, j)]
-                        }),
-                        Col::<f64>::from_fn(ys_full.nrows(), |i| ys_full[i] - inv_sqw[i] * tq[i]),
-                    )
-                }
-            };
-            (xs_d, ys_d)
-        };
-        let mut sub_opts = *opts;
-        sub_opts.pre_standardized = true;
-        p_for_confirmatory_at_k(xs_def.as_ref(), ys_def.as_ref(), 1, weights, &sub_opts, rng)
-    }
-
-    #[test]
-    fn p_for_incremental_matches_reference() {
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let w =
-                    f.w.as_ref()
-                        .map(|w| crate::linalg::normalize_weights(w.as_ref()).unwrap());
-                let wr = w.as_ref().map(Col::as_ref);
-                let (xs, _, _) = crate::linalg::standardize(f.x.as_ref());
-                let (ys, _, _) = crate::linalg::standardize1(f.y.as_ref());
-                for pre in [false, true] {
-                    let (x0, y0) = if pre { (&xs, &ys) } else { (&f.x, &f.y) };
-                    let lay = Layouts::new(x0.as_ref());
-                    for (view, xv) in lay.all(x0) {
-                        for args in [
-                            SequentialArgs::RawPerm { n_perm: 19 },
-                            SequentialArgs::SplitExact {
-                                n_perm: 9,
-                                n_splits: 4,
-                            },
-                            SequentialArgs::E,
-                        ] {
-                            for keep in [None, Some(3)] {
-                                for h in [1_usize, 2] {
-                                    for dp in [true, false] {
-                                        let opts = IncrementalSequenceOpts {
-                                            args,
-                                            alpha: 0.05,
-                                            stop_early_override: false,
-                                            pre_standardized: pre,
-                                            seed: None,
-                                            disable_parallelism: dp,
-                                            verbose: false,
-                                            keep,
-                                        };
-                                        let (_, mut r1) =
-                                            crate::rng::resolve_seed(Some(23)).unwrap();
-                                        let (_, mut r2) =
-                                            crate::rng::resolve_seed(Some(23)).unwrap();
-                                        let what = format!(
-                                            "{} {view} pre={pre} {} keep={keep:?} h={h} dp={dp}",
-                                            f.name,
-                                            args.method().as_str()
-                                        );
-                                        match (
-                                            p_for_incremental(
-                                                xv,
-                                                y0.as_ref(),
-                                                h,
-                                                wr,
-                                                &opts,
-                                                &mut r1,
-                                            ),
-                                            p_for_incremental_reference(
-                                                xv,
-                                                y0.as_ref(),
-                                                h,
-                                                wr,
-                                                &opts,
-                                                &mut r2,
-                                            ),
-                                        ) {
-                                            (Ok(a), Ok(b)) => {
-                                                assert_eq!(a.to_bits(), b.to_bits(), "{what}");
-                                            }
-                                            (Err(a), Err(b)) => {
-                                                assert_eq!(a.to_string(), b.to_string(), "{what}");
-                                            }
-                                            (a, b) => panic!("{what}: {a:?} vs {b:?}"),
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
@@ -600,11 +422,6 @@ mod tests {
         let signal: Col<f64> = &x * &beta;
         let y = Col::<f64>::from_fn(n, |i| signal[i] * snr + rng.random_range(-1.0..1.0));
         (x, y)
-    }
-
-    #[test]
-    fn score_unrepresentable() {
-        assert!(SequentialArgs::defaults_for(ConfirmatoryMethod::Score).is_none());
     }
 
     /// `test_method="raw_perm"` uses a fixed 5-fold CV at every step, so
@@ -643,60 +460,12 @@ mod tests {
 
     // ── hoisted split_nb auto-gate ───────────────────────────────────────────
 
-    /// `stop_early_override: true` so the whole p-value vector is filled —
-    /// these tests read every step, not just the first.
-    fn seq_run(
-        x: &faer::Mat<f64>,
-        y: &Col<f64>,
-        k_max: usize,
-        args: SequentialArgs,
-    ) -> IncrementalSequenceOutput {
-        run_incremental_sequence(
-            x.as_ref(),
-            y.as_ref(),
-            k_max,
-            None,
-            x.nrows() as f64,
-            IncrementalSequenceOpts {
-                args,
-                alpha: 0.05,
-                stop_early_override: true,
-                pre_standardized: false,
-                seed: Some(99),
-                disable_parallelism: false,
-                verbose: false,
-                keep: None,
-            },
-        )
-        .unwrap()
-    }
-
-    /// n = 20 sits below the gate's effective-sample floor of 25 while the
-    /// iid-uniform spectrum stays well clear of the rank floor, so the size
-    /// half of the rule is what fires here.
+    /// `pre_standardized = true` still evaluates (and here fires) the hoisted
+    /// gate; n = 20 fires on the `n_eff` floor, which does not depend on
+    /// standardization, so this pins that the gate is not skipped, not what
+    /// it restandardizes.
     #[test]
-    fn gate_reroutes_whole_sequence_on_flagged_design() {
-        let (x, y) = synth(20, 5, 1, 4.0, 5);
-        let r = seq_run(
-            &x,
-            &y,
-            2,
-            SequentialArgs::SplitNb {
-                n_splits: 10,
-                force: false,
-            },
-        );
-        assert_eq!(r.method, "split_exact");
-        // Every step ran: the reroute rewrites `opts.args` once, before the
-        // loop, so there is no per-step branch that could disagree.
-        assert!((0..2).all(|i| !r.pvalues[i].is_nan()), "{:?}", r.pvalues);
-    }
-
-    /// The gate restandardizes regardless of `pre_standardized`. Feeding it an
-    /// already-standardized flagged design and asserting the same reroute pins
-    /// that restandardizing standardized data is the identity for the gate.
-    #[test]
-    fn gate_reroutes_on_pre_standardized_input() {
+    fn gate_runs_under_pre_standardized() {
         use crate::linalg::{standardize, standardize1};
         let (x, y) = synth(20, 5, 1, 4.0, 5);
         let (xs, _, _) = standardize(x.as_ref());
@@ -723,53 +492,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.method, "split_exact");
-    }
-
-    /// `force` suppresses the reroute only — the rule is still evaluated, so
-    /// the caller can see what it would have decided. Same as
-    /// `pls1_confirmatory_test` under `force`.
-    #[test]
-    fn gate_force_keeps_nb_on_flagged_design() {
-        let (x, y) = synth(20, 5, 1, 4.0, 5);
-        let r = seq_run(
-            &x,
-            &y,
-            2,
-            SequentialArgs::SplitNb {
-                n_splits: 10,
-                force: true,
-            },
-        );
-        assert_eq!(r.method, "split_nb");
         assert!(r.stable_rank.is_some());
-    }
-
-    #[test]
-    fn gate_clears_on_adequate_design() {
-        let (x, y) = synth(60, 5, 1, 4.0, 2);
-        let r = seq_run(
-            &x,
-            &y,
-            3,
-            SequentialArgs::SplitNb {
-                n_splits: 10,
-                force: false,
-            },
-        );
-        assert_eq!(r.method, "split_nb");
-        // Populated on the pass path too — it reports what the gate saw, not
-        // whether it fired.
-        assert!(r.stable_rank.is_some());
-    }
-
-    /// Only a `split_nb` request evaluates the rule, so nothing else has a
-    /// rank to report.
-    #[test]
-    fn gate_not_evaluated_for_other_methods() {
-        let (x, y) = synth(60, 5, 1, 4.0, 2);
-        let r = seq_run(&x, &y, 2, SequentialArgs::RawPerm { n_perm: 20 });
-        assert_eq!(r.method, "raw_perm");
-        assert!(r.stable_rank.is_none());
     }
 
     /// The no-per-step-re-gate guarantee is structural, so pin the structure
@@ -807,62 +530,6 @@ mod tests {
     }
 
     #[test]
-    fn split_exact_runs_as_a_sequential_method() {
-        let (x, y) = synth(60, 5, 1, 4.0, 2);
-        let r = seq_run(
-            &x,
-            &y,
-            3,
-            SequentialArgs::SplitExact {
-                n_perm: 199,
-                n_splits: 10,
-            },
-        );
-        assert_eq!(r.method, "split_exact");
-        assert!(
-            (0..3).all(|i| r.pvalues[i] >= 0.0 && r.pvalues[i] <= 1.0),
-            "{:?}",
-            r.pvalues
-        );
-        assert!(r.pvalues[0] < 0.05, "signal component not detected");
-    }
-
-    #[test]
-    fn incremental_stops_early_at_first_nonrejection() {
-        let (x, y) = synth(60, 5, 1, 4.0, 2);
-        let r = run_incremental_sequence(
-            x.as_ref(),
-            y.as_ref(),
-            5,
-            None,
-            x.nrows() as f64,
-            IncrementalSequenceOpts {
-                args: SequentialArgs::SplitNb {
-                    n_splits: 30,
-                    force: false,
-                },
-                alpha: 0.05,
-                stop_early_override: false,
-                pre_standardized: false,
-                seed: Some(11),
-                disable_parallelism: false,
-                verbose: false,
-                keep: None,
-            },
-        )
-        .unwrap();
-        let n_filled = (0..r.pvalues.nrows())
-            .filter(|i| !r.pvalues[*i].is_nan())
-            .count();
-        assert!(
-            n_filled < 5,
-            "stop-early did not trigger; pvalues={:?}",
-            r.pvalues
-        );
-        assert!(r.pvalues[0] < 0.05);
-    }
-
-    #[test]
     fn override_runs_all_k() {
         let (x, y) = synth(60, 5, 1, 4.0, 1);
         let r = run_incremental_sequence(
@@ -888,5 +555,66 @@ mod tests {
         .unwrap();
         assert_eq!(r.pvalues.nrows(), 3);
         assert!((0..3).all(|i| !r.pvalues[i].is_nan()));
+    }
+
+    /// Layout invariance (D1): every step reads X through `standardize` /
+    /// `col_major_or_copy`, so padded, row-major and reversed-column views
+    /// give bit-identical p-values to the owned matrix, for all four
+    /// sequential methods, dense and `keep = 3`, over the copy-free families
+    /// with and without `pre_standardized`. `stop_early_override` runs
+    /// h = 1, 2, 3 everywhere, so the deflation (weighted branch included) is
+    /// exercised under every layout.
+    #[test]
+    fn incremental_sequence_is_layout_invariant() {
+        crate::test_support::assert_families_layout_invariant(
+            "incremental_sequence",
+            |c| {
+                let (w_norm, n_eff) =
+                    crate::fit::validate_and_normalize_weights(c.w, c.x.nrows(), 3)?;
+                let wr = w_norm.as_ref().map(Col::as_ref);
+                let mut v = Vec::new();
+                for args in [
+                    SequentialArgs::SplitNb {
+                        n_splits: 10,
+                        force: false,
+                    },
+                    SequentialArgs::SplitExact {
+                        n_perm: 49,
+                        n_splits: 10,
+                    },
+                    SequentialArgs::RawPerm { n_perm: 19 },
+                    SequentialArgs::E,
+                ] {
+                    for keep in [None, Some(3)] {
+                        let r = run_incremental_sequence(
+                            c.x,
+                            c.y,
+                            3,
+                            wr,
+                            n_eff,
+                            IncrementalSequenceOpts {
+                                args,
+                                alpha: 0.05,
+                                stop_early_override: true,
+                                pre_standardized: c.pre,
+                                seed: Some(23),
+                                disable_parallelism: false,
+                                verbose: false,
+                                keep,
+                            },
+                        )?;
+                        v.extend((0..3).map(|i| r.pvalues[i]));
+                        v.push(r.stable_rank.unwrap_or(f64::NAN));
+                        v.push(if r.method == args.method().as_str() {
+                            0.0
+                        } else {
+                            1.0
+                        });
+                    }
+                }
+                Ok(v)
+            },
+            Vec::clone,
+        );
     }
 }

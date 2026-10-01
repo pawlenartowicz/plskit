@@ -66,6 +66,153 @@ pub(crate) use synth_helpers::{
     ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data, synth_xy,
 };
 
+/// A case's input arrays: `X`, `y` and, for weighted cases, `weights`.
+///
+/// [`Xyw::write`] stores them in that order, the order every single-response
+/// case writes, so two cases that share an inputs file write the same bytes.
+pub(crate) struct Xyw {
+    pub x: ndarray::Array2<f64>,
+    pub y: ndarray::Array1<f64>,
+    pub w: Option<ndarray::Array1<f64>>,
+}
+
+impl Xyw {
+    /// Write `X`, `y` (and `weights` when present) to `path`.
+    pub(crate) fn write(&self, path: &Path) -> Result<()> {
+        let mut w = crate::npz::NpzWriter::create(path)?;
+        w.add_f64("X", &self.x.clone().into_dyn())?;
+        w.add_f64("y", &self.y.clone().into_dyn())?;
+        if let Some(wt) = &self.w {
+            w.add_f64("weights", &wt.clone().into_dyn())?;
+        }
+        w.finish()
+    }
+
+    pub(crate) fn x_faer(&self) -> faer::Mat<f64> {
+        ndarray_to_faer_mat(&self.x)
+    }
+
+    pub(crate) fn y_faer(&self) -> faer::Col<f64> {
+        ndarray_to_faer_col(&self.y)
+    }
+
+    pub(crate) fn w_faer(&self) -> Option<faer::Col<f64>> {
+        self.w.as_ref().map(ndarray_to_faer_col)
+    }
+}
+
+/// Weights of the weighted n = 80, d = 6 fixtures: uneven, mean not one, and
+/// zero on every tenth row. The entry points renormalize them, so the
+/// fixtures pin the √w row scaling, zero-weight rows included.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn perm_null_weights(n: usize) -> ndarray::Array1<f64> {
+    ndarray::Array1::from_shape_fn(n, |i| {
+        if i % 10 == 9 {
+            0.0
+        } else {
+            1.0 + (i % 4) as f64 * 0.5
+        }
+    })
+}
+
+/// Inputs stem of [`weighted_n80_d6`]: the file
+/// `pls1_perm_null::weighted_n80_d6_k2` writes, shared by every case on it.
+pub(crate) const WEIGHTED_N80_D6_INPUTS: &str = "pls1_perm_null_weighted_n80_d6_k2";
+
+/// `synth_data(80, 6, 2, 4.0, 42)` with [`perm_null_weights`]`(80)`.
+pub(crate) fn weighted_n80_d6() -> Xyw {
+    let (x, y) = synth_data(80, 6, 2, 4.0, 42);
+    Xyw {
+        x,
+        y,
+        w: Some(perm_null_weights(80)),
+    }
+}
+
+/// Inputs stem of [`weighted_prestd_n80_d6`].
+pub(crate) const WEIGHTED_PRESTD_N80_D6_INPUTS: &str = "pls1_weighted_prestd_n80_d6_inputs";
+
+/// [`weighted_n80_d6`] with X and y standardized by their unweighted moments,
+/// same weights. Run weighted with `pre_standardized = true`, the call keeps
+/// these unweighted-standardized columns; with `pre_standardized = false` it
+/// restandardizes by the weighted moments. So a fixture on these inputs moves
+/// when the `pre_standardized` flag is dropped.
+pub(crate) fn weighted_prestd_n80_d6() -> Xyw {
+    let raw = weighted_n80_d6();
+    let (xs, _, _) = plskit::linalg::standardize(raw.x_faer().as_ref());
+    let (ys, _, _) = plskit::linalg::standardize1(raw.y_faer().as_ref());
+    Xyw {
+        x: ndarray::Array2::from_shape_fn((xs.nrows(), xs.ncols()), |(i, j)| xs[(i, j)]),
+        y: ndarray::Array1::from_shape_fn(ys.nrows(), |i| ys[i]),
+        w: raw.w,
+    }
+}
+
+/// Create the parent directories of `root/rel_inputs` and `root/rel_outputs`
+/// and return both absolute paths.
+pub(crate) fn case_files(
+    root: &Path,
+    rel_inputs: &str,
+    rel_outputs: &str,
+) -> std::io::Result<(PathBuf, PathBuf)> {
+    let (abs_inputs, abs_outputs) = (root.join(rel_inputs), root.join(rel_outputs));
+    for dir in [abs_inputs.parent(), abs_outputs.parent()]
+        .into_iter()
+        .flatten()
+    {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok((abs_inputs, abs_outputs))
+}
+
+/// Generator guard for a fixture meant to discriminate an option: fail unless
+/// `with` and `without` (the same call with and without it) differ somewhere
+/// by more than `1e-6`, far outside the corpus tolerances, so a consumer that
+/// drops the option fails the fixture.
+///
+/// # Errors
+/// Returns an error when the two outputs agree to `1e-6`.
+pub(crate) fn ensure_moved(case: &str, field: &str, with: &[f64], without: &[f64]) -> Result<()> {
+    let moved = with.len() != without.len()
+        || with
+            .iter()
+            .zip(without)
+            .any(|(a, b)| a.is_nan() != b.is_nan() || (a - b).abs() > 1e-6);
+    anyhow::ensure!(
+        moved,
+        "{case}: {field} does not move with the option ({with:?} vs {without:?}); the fixture would not discriminate it"
+    );
+    Ok(())
+}
+
+/// The manifest entry of a case whose files are already written under `root`,
+/// at the default tolerance.
+///
+/// # Errors
+/// Returns an error if either file cannot be hashed.
+pub(crate) fn manifest_case(
+    root: &Path,
+    name: &str,
+    function: &str,
+    rel_inputs: String,
+    rel_outputs: String,
+    kwargs: serde_json::Value,
+) -> Result<Case> {
+    let hashes = crate::manifest::Hashes {
+        inputs_sha256: crate::npz::sha256_of_file(&root.join(&rel_inputs))?,
+        outputs_sha256: crate::npz::sha256_of_file(&root.join(&rel_outputs))?,
+    };
+    Ok(Case {
+        name: name.to_string(),
+        function: function.to_string(),
+        inputs: rel_inputs,
+        outputs: rel_outputs,
+        kwargs,
+        hashes,
+        tolerance: Some(default_tolerance()),
+    })
+}
+
 mod synth_helpers {
     use faer::{Col, Mat};
     use ndarray::{Array1, Array2};
@@ -194,13 +341,15 @@ mod synth_helpers {
         ndarray::arr0(v).into_dyn()
     }
 
-    /// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10.
+    /// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10,
+    /// rtol=1e-14 (`|a − e| ≤ atol + rtol·|e|`; `testdata/README.md`
+    /// "Tolerance").
     ///
     /// The single shared version, recorded as each `Case`'s `tolerance`
-    /// field in `manifest.json` and read by every wrapper's corpus test.
-    /// It never touches fixture bytes.
+    /// field in `manifest.json` and read by the settle step. The wrappers'
+    /// corpus tests hard-code the same numbers. It never touches fixture bytes.
     pub fn default_tolerance() -> serde_json::Value {
-        serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10})
+        serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10, "rtol": 1e-14})
     }
 }
 
@@ -222,6 +371,9 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_fit::wide_n30_d100_k3(root)?);
     cases.push(pls1_fit::skinny_n200_d5_k1(root)?);
     cases.push(pls1_fit::weighted_n50_d10_k2(root)?);
+    cases.push(pls1_fit::pre_standardized_weighted_n50_d10_k3(root)?);
+    cases.push(pls1_fit::offset_n50_d10_k3(root)?);
+    cases.push(pls1_fit::mean_heavy_weighted_n50_d10_k3(root)?);
 
     cases.push(pls1_find_k_optimal::r2_se(root)?);
     cases.push(pls1_find_k_optimal::r2_max(root)?);
@@ -240,6 +392,7 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_confirmatory_test::score(root)?);
     cases.push(pls1_confirmatory_test::e(root)?);
     cases.push(pls1_confirmatory_test::split_nb_ci(root)?);
+    cases.push(pls1_confirmatory_test::split_nb_ci_level80(root)?);
     cases.push(pls1_confirmatory_test::weighted_raw_perm(root)?);
     cases.push(pls1_confirmatory_test::weighted_split_nb(root)?);
     cases.push(pls1_confirmatory_test::weighted_split_exact(root)?);
@@ -249,6 +402,12 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_confirmatory_test::raw_perm_wide_k2(root)?);
     cases.push(pls1_confirmatory_test::split_exact_wide_k2(root)?);
     cases.push(pls1_confirmatory_test::raw_perm_tall_k2(root)?);
+    cases.push(pls1_confirmatory_test::score_wide_pre_standardized(root)?);
+    cases.push(pls1_confirmatory_test::weighted_split_exact_k2(root)?);
+    cases.push(pls1_confirmatory_test::split_exact_wide_k1(root)?);
+    cases.push(pls1_confirmatory_test::weighted_split_nb_ci(root)?);
+    cases.push(pls1_confirmatory_test::weighted_prestd_split_nb_ci(root)?);
+    cases.push(pls1_confirmatory_test::weighted_score_wide_pre_standardized(root)?);
 
     cases.push(pls1_predict::basic_n80_d6_k2(root)?);
     cases.push(rotate::varimax_d6_k2(root)?);
@@ -259,16 +418,27 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_perm_null::wide_n60_d3000_k2(root)?);
     cases.push(pls1_perm_null::tall_n2000_d50_k3(root)?);
     cases.push(pls1_perm_null::tall_weighted_n2000_d50_k2(root)?);
+    cases.push(pls1_perm_null::pre_standardized_n80_d6_k2(root)?);
+    cases.push(pls1_perm_null::weighted_n40_d1_k1(root)?);
+    cases.push(pls1_perm_null::weighted_prestd_n80_d6_k2(root)?);
     cases.push(pls1_rotation_stability::n80_d6_k2(root)?);
+    cases.push(pls1_rotation_stability::weighted_n80_d6_k2(root)?);
+    cases.push(pls1_rotation_stability::weighted_prestd_n80_d6_k2(root)?);
 
     cases.push(spls1_fit::wide_n30_d100_k2_keep8(root)?);
     cases.push(spls1_fit::small_n50_d10_k2_keep3(root)?);
     cases.push(spls1_find_keep_optimal::k1(root)?);
     cases.push(spls1_find_k_optimal::r2_se_keep3(root)?);
+    cases.push(spls1_find_k_optimal::r2_se_keep3_weighted(root)?);
     cases.push(spls1_find_k_sequence::split_nb_keep3(root)?);
     cases.push(spls1_find_k_sequence::split_nb_keep3_gated(root)?);
     cases.push(spls1_find_k_sequence::split_exact_keep3(root)?);
     cases.push(spls1_find_k_sequence::split_exact_tall_keep10(root)?);
+    cases.push(spls1_find_k_sequence::raw_perm_keep3(root)?);
+    cases.push(spls1_find_k_sequence::e_keep3(root)?);
+    cases.push(spls1_find_k_sequence::split_exact_keep3_weighted_prestd(
+        root,
+    )?);
 
     cases.push(pls3::fit_small_n50_p10_q4_k1(root)?);
     cases.push(pls3::fit_small_n50_p10_q4_k3(root)?);

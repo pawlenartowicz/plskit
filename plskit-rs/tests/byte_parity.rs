@@ -7,10 +7,10 @@
 use faer::{Col, Mat};
 use plskit::{
     pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, pls1_perm_null,
-    pls1_rotation_stability, pls3_confirmatory_test, CIOpts, ConfirmatoryArgs, ConfirmatoryMethod,
-    ConfirmatoryTestInput, ConfirmatoryTestOpts, FindKOptimalOpts, FindKSequenceOpts, ParChoice,
-    PermNullOpts, Pls3ConfirmatoryTestOpts, Pls3FitOpts, RotationStabilityMethod,
-    RotationStabilityOpts, Selector, VarimaxArgs,
+    pls1_rotation_stability, pls3_confirmatory_test, spls1_find_k_sequence, CIOpts,
+    ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
+    FindKOptimalOpts, FindKSequenceOpts, ParChoice, PermNullOpts, Pls3ConfirmatoryTestOpts,
+    Pls3FitOpts, RotationStabilityMethod, RotationStabilityOpts, Selector, VarimaxArgs,
 };
 
 fn synth(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
@@ -62,9 +62,6 @@ fn confirmatory_raw_perm_byte_parity() {
         disable_parallelism: dp,
         ..Default::default()
     };
-    // weights_none_parity: the assertions below are the byte-for-byte parity
-    // contract between pls1_fit(weights=None) and the unweighted fit that
-    // predates observation weights. Do not relax these tolerances.
     let serial = pls1_confirmatory_test(
         ConfirmatoryTestInput::Raw {
             x: x.as_ref(),
@@ -89,76 +86,104 @@ fn confirmatory_raw_perm_byte_parity() {
 }
 
 #[test]
+#[allow(clippy::cast_precision_loss)]
 fn confirmatory_split_exact_byte_parity() {
-    // k = 2, dense (no `keep`): takes the refit route.
+    // (k, keep, weighted, pre_standardized) on the refit route: k = 2 dense,
+    // and k = 2 sparse under weights and pre_standardized. The unweighted
+    // k = 1 no-refit route is confirmatory_ci_bundle_byte_parity's; keep and
+    // weights without pre_standardized are
+    // confirmatory_keep_and_weights_byte_parity's.
     let (x, y) = synth(40, 5, 3.0, 1);
-    let opts = |dp: bool| ConfirmatoryTestOpts {
-        args: ConfirmatoryArgs::SplitExact {
-            n_perm: 50,
-            n_splits: 20,
-        },
-        seed: Some(11),
-        disable_parallelism: dp,
-        ..Default::default()
-    };
-    let serial = pls1_confirmatory_test(
-        ConfirmatoryTestInput::Raw {
-            x: x.as_ref(),
-            y: y.as_ref(),
-            k: 2,
-            weights: None,
-        },
-        opts(true),
-    )
-    .unwrap();
-    let par = pls1_confirmatory_test(
-        ConfirmatoryTestInput::Raw {
-            x: x.as_ref(),
-            y: y.as_ref(),
-            k: 2,
-            weights: None,
-        },
-        opts(false),
-    )
-    .unwrap();
-    assert_confirmatory_byte_eq(&serial, &par, "confirmatory_split_exact");
+    let w = Col::<f64>::from_fn(40, |i| {
+        if i % 7 == 6 {
+            0.0
+        } else {
+            0.5 + (i % 3) as f64 * 0.5
+        }
+    });
+    for (k, keep, weighted, pre) in [(2, None, false, false), (2, Some(3), true, true)] {
+        let run = |dp: bool| {
+            pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k,
+                    weights: weighted.then(|| w.as_ref()),
+                },
+                ConfirmatoryTestOpts {
+                    args: ConfirmatoryArgs::SplitExact {
+                        n_perm: 50,
+                        n_splits: 20,
+                    },
+                    seed: Some(11),
+                    disable_parallelism: dp,
+                    keep,
+                    pre_standardized: pre,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        assert_confirmatory_byte_eq(
+            &run(true),
+            &run(false),
+            &format!("split_exact k={k} keep={keep:?} weighted={weighted} pre={pre}"),
+        );
+    }
 }
 
 #[test]
-fn confirmatory_split_exact_no_refit_byte_parity() {
-    // k = 1, dense (no `keep`): takes the no-refit route (see signal_test.rs
-    // for the K = 1 linear-map identity that makes this an exact shortcut).
+#[allow(clippy::cast_precision_loss)]
+fn confirmatory_keep_and_weights_byte_parity() {
+    // The primal raw_perm with sparse fold fits, the sparse weighted refit
+    // and the weighted no-refit (K = 1) route.
     let (x, y) = synth(40, 5, 3.0, 1);
-    let opts = |dp: bool| ConfirmatoryTestOpts {
-        args: ConfirmatoryArgs::SplitExact {
-            n_perm: 50,
-            n_splits: 20,
-        },
-        seed: Some(12),
-        disable_parallelism: dp,
-        ..Default::default()
+    let w = Col::<f64>::from_fn(40, |i| {
+        if i % 7 == 6 {
+            0.0
+        } else {
+            0.5 + (i % 3) as f64 * 0.5
+        }
+    });
+    let raw_perm = ConfirmatoryArgs::RawPerm {
+        n_perm: 100,
+        n_folds: 5,
     };
-    let serial = pls1_confirmatory_test(
-        ConfirmatoryTestInput::Raw {
-            x: x.as_ref(),
-            y: y.as_ref(),
-            k: 1,
-            weights: None,
-        },
-        opts(true),
-    )
-    .unwrap();
-    let par = pls1_confirmatory_test(
-        ConfirmatoryTestInput::Raw {
-            x: x.as_ref(),
-            y: y.as_ref(),
-            k: 1,
-            weights: None,
-        },
-        opts(false),
-    )
-    .unwrap();
-    assert_confirmatory_byte_eq(&serial, &par, "confirmatory_split_exact_no_refit");
+    let split_exact = ConfirmatoryArgs::SplitExact {
+        n_perm: 50,
+        n_splits: 10,
+    };
+    for (name, args, k, keep, weighted) in [
+        ("raw_perm k=2 keep=3", raw_perm, 2, Some(3), false),
+        (
+            "split_exact k=2 keep=3 weighted",
+            split_exact,
+            2,
+            Some(3),
+            true,
+        ),
+        ("split_exact k=1 weighted", split_exact, 1, None, true),
+    ] {
+        let run = |dp: bool| {
+            pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k,
+                    weights: weighted.then(|| w.as_ref()),
+                },
+                ConfirmatoryTestOpts {
+                    args,
+                    seed: Some(11),
+                    disable_parallelism: dp,
+                    keep,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        assert_confirmatory_byte_eq(&run(true), &run(false), name);
+    }
 }
 
 #[test]
@@ -263,6 +288,50 @@ fn sequence_byte_parity() {
     }
     assert_eq!(serial.k_star, par.k_star, "k_star");
     assert_eq!(serial.seed, par.seed, "seed");
+}
+
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn sparse_weighted_sequence_byte_parity() {
+    // The sequence step (deflation, then one confirmatory test per k) under
+    // weights, keep and pre_standardized, on the two refitting engines. A
+    // weak signal and alpha = 0.95 keep every step running, with p-values
+    // off the 1 / (n_perm + 1) floor.
+    let (x, y) = synth(60, 8, 0.5, 4);
+    let w = Col::<f64>::from_fn(60, |i| {
+        if i % 9 == 8 {
+            0.0
+        } else {
+            0.5 + (i % 5) as f64 * 0.25
+        }
+    });
+    for test_method in [ConfirmatoryMethod::RawPerm, ConfirmatoryMethod::SplitExact] {
+        let run = |dp: bool| {
+            let opts = FindKSequenceOpts {
+                test_method,
+                n_perm: 50,
+                n_splits: 4,
+                alpha: 0.95,
+                pre_standardized: true,
+                seed: Some(31),
+                disable_parallelism: dp,
+                ..Default::default()
+            };
+            spls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, 3, Some(w.as_ref()), opts).unwrap()
+        };
+        let (serial, par) = (run(true), run(false));
+        let pv = |c: &Col<f64>| bits(&(0..c.nrows()).map(|i| c[i]).collect::<Vec<_>>());
+        assert_eq!(
+            pv(&serial.pvalues),
+            pv(&par.pvalues),
+            "{test_method:?} pvalues"
+        );
+        assert_eq!(
+            (serial.k_star, serial.seed),
+            (par.k_star, par.seed),
+            "{test_method:?}"
+        );
+    }
 }
 
 #[test]
@@ -477,30 +546,25 @@ fn rotation_stability_byte_parity() {
 
 #[test]
 fn perm_null_byte_parity() {
+    // Unweighted, streaming and retained; pre_standardized = true has the
+    // workers read the caller's borrowed X instead of a standardized copy.
     let (x, y) = synth(60, 5, 1.0, 41);
-    let opts = |dp: bool| PermNullOpts {
-        n_perm: 200,
-        return_perm_matrix: false,
-        pre_standardized: false,
-        disable_parallelism: dp,
-        verbose: false,
-    };
-    let r1 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts(true), Some(2026)).unwrap();
-    let r2 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts(false), Some(2026)).unwrap();
-    assert_eq!(r1.beta_ref, r2.beta_ref, "beta_ref");
-    assert_eq!(r1.beta_perm_mean, r2.beta_perm_mean, "beta_perm_mean");
-    assert_eq!(r1.beta_perm_sd, r2.beta_perm_sd, "beta_perm_sd");
-    assert_eq!(r1.beta_perm_z, r2.beta_perm_z, "beta_perm_z");
-    assert_eq!(r1.seed, r2.seed, "seed");
-
-    // Retained-matrix path.
-    let opts_m = |dp: bool| PermNullOpts {
-        return_perm_matrix: true,
-        ..opts(dp)
-    };
-    let m1 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts_m(true), Some(2027)).unwrap();
-    let m2 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts_m(false), Some(2027)).unwrap();
-    assert_eq!(m1.beta_perm_matrix, m2.beta_perm_matrix, "beta_perm_matrix");
+    for pre in [false, true] {
+        for retain in [false, true] {
+            let opts = |dp: bool| PermNullOpts {
+                n_perm: 200,
+                return_perm_matrix: retain,
+                pre_standardized: pre,
+                disable_parallelism: dp,
+                verbose: false,
+            };
+            let r1 =
+                pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts(true), Some(2026)).unwrap();
+            let r2 =
+                pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts(false), Some(2026)).unwrap();
+            assert_perm_null_bits_eq(&r1, &r2, &format!("perm_null pre={pre} retain={retain}"));
+        }
+    }
 }
 
 #[test]
@@ -640,7 +704,8 @@ fn spls3_fit_is_byte_identical_serial_vs_parallel() {
 #[allow(clippy::cast_precision_loss)]
 fn confirmatory_raw_perm_weighted_byte_parity() {
     // Weighted primal raw_perm: folds prepared once, √w-scaled once per
-    // fold, replicate columns mapped in parallel inside each fold.
+    // fold, replicate columns mapped in parallel inside each fold; dense,
+    // and sparse on pre_standardized input.
     let (x, y) = synth(40, 5, 3.0, 2);
     let w = Col::<f64>::from_fn(40, |i| {
         if i % 7 == 6 {
@@ -649,27 +714,35 @@ fn confirmatory_raw_perm_weighted_byte_parity() {
             0.5 + (i % 3) as f64 * 0.5
         }
     });
-    let run = |dp: bool| {
-        pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 2,
-                weights: Some(w.as_ref()),
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::RawPerm {
-                    n_perm: 100,
-                    n_folds: 5,
+    for (keep, pre) in [(None, false), (Some(3), true)] {
+        let run = |dp: bool| {
+            pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k: 2,
+                    weights: Some(w.as_ref()),
                 },
-                seed: Some(9),
-                disable_parallelism: dp,
-                ..Default::default()
-            },
-        )
-        .unwrap()
-    };
-    assert_confirmatory_byte_eq(&run(true), &run(false), "confirmatory_raw_perm_weighted");
+                ConfirmatoryTestOpts {
+                    args: ConfirmatoryArgs::RawPerm {
+                        n_perm: 100,
+                        n_folds: 5,
+                    },
+                    seed: Some(9),
+                    disable_parallelism: dp,
+                    keep,
+                    pre_standardized: pre,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        assert_confirmatory_byte_eq(
+            &run(true),
+            &run(false),
+            &format!("confirmatory_raw_perm_weighted keep={keep:?} pre={pre}"),
+        );
+    }
 }
 
 #[test]
@@ -705,7 +778,7 @@ fn bits(v: &[f64]) -> Vec<u64> {
 fn perm_null_wide_nspace_byte_parity() {
     // n = 40, d = 2000, n_perm = 100 at k = 1 and 2: dense and unweighted,
     // so both take the n-space Gram route (pinned by
-    // `dual_route::multi_k::tests::byte_parity_wide_shapes_take_the_nspace_route`).
+    // `fixture_route_pins::byte_parity_shapes_take_their_routes`).
     let (x, y) = synth(40, 2000, 1.0, 43);
     let opts = |dp: bool| PermNullOpts {
         n_perm: 100,
@@ -761,7 +834,7 @@ fn raw_perm_parity(n_folds: usize, what: &str) {
 fn confirmatory_raw_perm_wide_k2_byte_parity() {
     // n = 40, d = 2000, n_folds = 5, n_perm = 50, k = 2: dense and
     // unweighted, so raw_perm takes the n-space Gram route (pinned by
-    // `dual_route::multi_k::tests::byte_parity_wide_shapes_take_the_nspace_route`).
+    // `fixture_route_pins::byte_parity_shapes_take_their_routes`).
     raw_perm_parity(5, "confirmatory_raw_perm_wide_k2");
 }
 
@@ -773,10 +846,9 @@ fn confirmatory_raw_perm_wide_many_folds_k2_byte_parity() {
     // admits this shape (k = 2 < n_tr), so it also keeps the n-space route
     // under test, the same way `confirmatory_raw_perm_wide_k2_byte_parity`
     // does at n_folds = 5. `n_folds == n` (leave-one-out) is rejected by
-    // `pls1_confirmatory_test` and covered directly by
-    // `signal_test::tests::raw_perm_rejects_leave_one_out_folds` /
-    // `raw_perm_rejects_n_folds_greater_than_n`, not by byte parity: a
-    // rejected call has no result to compare bit for bit.
+    // `pls1_confirmatory_test` (as is `n_folds > n`) and covered directly by
+    // `signal_test::tests::raw_perm_rejects_leave_one_out_folds`, not by
+    // byte parity: a rejected call has no result to compare bit for bit.
     raw_perm_parity(20, "confirmatory_raw_perm_wide_many_folds_k2");
 }
 
@@ -784,8 +856,12 @@ fn confirmatory_raw_perm_wide_many_folds_k2_byte_parity() {
 fn confirmatory_split_exact_wide_k2_byte_parity() {
     // n = 40, d = 2000, n_splits = 20, n_perm = 50, k = 2: dense and
     // unweighted, so the refit route takes the n-space Gram route (pinned by
-    // `dual_route::multi_k::tests::byte_parity_wide_shapes_take_the_nspace_route`).
+    // `fixture_route_pins::byte_parity_shapes_take_their_routes`). The
+    // rank-1 X exceeds its rank at k = 2, so every column leaves the kernel
+    // unresolved and runs the primal fallback map.
     let (x, y) = synth(40, 2000, 1.0, 5);
+    let (left, right) = (synth(40, 2, 0.0, 33).0, synth(2000, 2, 0.0, 34).0);
+    let x1 = Mat::<f64>::from_fn(40, 2000, |i, j| left[(i, 0)] * right[(j, 0)]);
     let opts = |dp: bool| ConfirmatoryTestOpts {
         args: ConfirmatoryArgs::SplitExact {
             n_perm: 50,
@@ -795,7 +871,7 @@ fn confirmatory_split_exact_wide_k2_byte_parity() {
         disable_parallelism: dp,
         ..Default::default()
     };
-    let run = |dp: bool| {
+    let run = |x: &Mat<f64>, dp: bool| {
         pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
@@ -807,7 +883,16 @@ fn confirmatory_split_exact_wide_k2_byte_parity() {
         )
         .unwrap()
     };
-    assert_confirmatory_byte_eq(&run(true), &run(false), "confirmatory_split_exact_wide_k2");
+    assert_confirmatory_byte_eq(
+        &run(&x, true),
+        &run(&x, false),
+        "confirmatory_split_exact_wide_k2",
+    );
+    assert_confirmatory_byte_eq(
+        &run(&x1, true),
+        &run(&x1, false),
+        "confirmatory_split_exact_wide_k2 rank-1",
+    );
 }
 
 /// Bit-for-bit comparison of two `perm_null` outputs, NaN included.
@@ -839,7 +924,7 @@ fn assert_perm_null_bits_eq(a: &plskit::PermNullOutput, b: &plskit::PermNullOutp
 
 /// n = 2000, d = 50, k = 2, `n_perm = 300` takes the p-space Gram route,
 /// dense and weighted (pinned by
-/// `gram_p::tests_site_route::byte_parity_shapes_take_the_gram_p_route`).
+/// `fixture_route_pins::byte_parity_shapes_take_their_routes`).
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn perm_null_gram_p_byte_parity() {
@@ -868,7 +953,7 @@ fn perm_null_gram_p_byte_parity() {
 
 /// `raw_perm` at K = 2, n = 2000, d = 50, `n_perm = 300` takes the p-space
 /// Gram route (pinned by
-/// `gram_p::tests_site_route::byte_parity_shapes_take_the_gram_p_route`).
+/// `fixture_route_pins::byte_parity_shapes_take_their_routes`).
 #[test]
 fn confirmatory_raw_perm_gram_p_byte_parity() {
     let (x, y) = synth(2000, 50, 0.3, 62);
@@ -898,7 +983,7 @@ fn confirmatory_raw_perm_gram_p_byte_parity() {
 
 /// `split_exact` refit route with `keep`, k = 1, n = 2000, d = 200,
 /// `n_perm = 400` takes the p-space Gram route (pinned by
-/// `gram_p::tests_site_route::byte_parity_shapes_take_the_gram_p_route`).
+/// `fixture_route_pins::byte_parity_shapes_take_their_routes`).
 #[test]
 fn confirmatory_split_exact_gram_p_keep_byte_parity() {
     let (x, y) = synth(2000, 200, 0.3, 63);

@@ -182,7 +182,8 @@ fn dual_route_eligible(
 ///
 /// # Errors
 /// - `PlsKitError::DimensionMismatch` when row counts disagree
-/// - `PlsKitError::InvalidArgument` for `k != 1`, for any method other than
+/// - `PlsKitError::InvalidArgument` for `k != 1` (`k = 0` with the
+///   message every entry gives it, "k must be >= 1"), for any method other than
 ///   `split_exact` or `split_nb`, for `n_splits < 2`, for `n_perm < 1`, for
 ///   `n < k + 5` (the split floor `draw_splits` enforces), for a `keep_x` /
 ///   `keep_y` of `0` or above its dimension, or, when either keep-count
@@ -220,6 +221,11 @@ pub fn pls3_confirmatory_test(
     crate::fit::check_finite_mat(x)?;
     crate::fit::check_finite_mat(y)?;
 
+    // k = 0 gets the message every other entry gives it, not the k = 1
+    // restriction below.
+    if k == 0 {
+        return Err(PlsKitError::InvalidArgument("k must be >= 1".into()));
+    }
     if k != 1 {
         return Err(PlsKitError::InvalidArgument(format!(
             "pls3_confirmatory_test supports k = 1 only (got k={k}): above LV1 neither the \
@@ -740,24 +746,76 @@ mod tests {
         assert!(r.pvalue >= grid_step - 1e-12);
     }
 
-    #[test]
-    fn same_seed_reproduces_bit_for_bit() {
-        let (x, y) = linked_blocks(60, 6, 3, 2.0, 5);
-        let a = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, opts(99, 8, 7)).unwrap();
-        let b = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, opts(99, 8, 7)).unwrap();
-        assert_eq!(a.pvalue.to_bits(), b.pvalue.to_bits());
-        assert_eq!(a.statistic.to_bits(), b.statistic.to_bits());
-    }
-
+    /// Dense and sparse (60x6 is primal; `keep_x` forces primal anyway).
     #[test]
     fn serial_and_parallel_are_byte_identical() {
         let (x, y) = linked_blocks(60, 6, 3, 2.0, 5);
-        let mut serial_opts = opts(99, 8, 7);
-        serial_opts.disable_parallelism = true;
-        let a = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, opts(99, 8, 7)).unwrap();
-        let b = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, serial_opts).unwrap();
-        assert_eq!(a.pvalue.to_bits(), b.pvalue.to_bits());
-        assert_eq!(a.statistic.to_bits(), b.statistic.to_bits());
+        for (keep_x, keep_y) in [(None, None), (Some(3), Some(2))] {
+            let par = Pls3ConfirmatoryTestOpts {
+                keep_x,
+                keep_y,
+                ..opts(99, 8, 7)
+            };
+            let serial = Pls3ConfirmatoryTestOpts {
+                disable_parallelism: true,
+                ..par
+            };
+            let a = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, par).unwrap();
+            let b = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, serial).unwrap();
+            let what = format!("keep=({keep_x:?},{keep_y:?})");
+            assert_eq!(a.pvalue.to_bits(), b.pvalue.to_bits(), "{what}");
+            assert_eq!(a.statistic.to_bits(), b.statistic.to_bits(), "{what}");
+        }
+    }
+
+    /// Both split routes read X and Y only through row-subset
+    /// standardization into owned matrices, so a padded submatrix, a
+    /// row-major view and a negative-stride view of X, or of Y, give the
+    /// owned matrix's result to the bit, on the primal route (dense 48x7,
+    /// or any `keep_x`) and the Gram route (wide 30x400, `keep_x` None).
+    #[test]
+    fn confirmatory_output_is_bit_identical_across_x_and_y_layouts() {
+        use crate::test_support::{assert_layout_invariant, copy_free_families};
+        assert!(
+            crate::dual_route::use_dual_route(crate::resample::split_sizes(30, 1).0, 400, 10, 4),
+            "test premise: the wide family must take the Gram route"
+        );
+        for f in copy_free_families().into_iter().filter(|f| f.w.is_none()) {
+            let n = f.x.nrows();
+            let y = Mat::<f64>::from_fn(n, 4, |i, j| f.x[(i, j)] + 0.5 * f.y[(i + 3 * j) % n]);
+            for args in [
+                ConfirmatoryArgs::SplitExact {
+                    n_perm: 9,
+                    n_splits: 4,
+                },
+                ConfirmatoryArgs::SplitNb {
+                    n_splits: 4,
+                    force: true,
+                },
+            ] {
+                for (keep_x, keep_y) in [
+                    (None, None),
+                    (Some(3), None),
+                    (None, Some(2)),
+                    (Some(3), Some(2)),
+                ] {
+                    let o = Pls3ConfirmatoryTestOpts {
+                        args,
+                        keep_x,
+                        keep_y,
+                        seed: Some(6),
+                        ..Pls3ConfirmatoryTestOpts::default()
+                    };
+                    let what = format!("{} {args:?} keep=({keep_x:?},{keep_y:?})", f.name);
+                    assert_layout_invariant(&f.x, &format!("X {what}"), |xv| {
+                        pls3_confirmatory_test(xv, y.as_ref(), 1, o).unwrap()
+                    });
+                    assert_layout_invariant(&y, &format!("Y {what}"), |yv| {
+                        pls3_confirmatory_test(f.x.as_ref(), yv, 1, o).unwrap()
+                    });
+                }
+            }
+        }
     }
 
     #[test]
@@ -852,6 +910,10 @@ mod tests {
             pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, bad_perm),
             Err(PlsKitError::InvalidArgument(_))
         ));
+        assert!(matches!(
+            pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(1, false, 1)),
+            Err(PlsKitError::InvalidArgument(_))
+        ));
     }
 
     #[test]
@@ -872,40 +934,13 @@ mod tests {
         assert!(r.statistic.abs() < 1e-12, "statistic = {}", r.statistic);
     }
 
-    /// The guard is relative to each vector's own magnitude, as in PLS1's
-    /// `constant_to_rounding`: rescaling either input cannot switch it. An
-    /// absolute `ss < 1e-15` read a score vector of standard deviation
-    /// `1e-9` as constant.
-    #[test]
-    #[allow(clippy::many_single_char_names)]
-    fn pearson_guard_is_invariant_to_scale() {
-        let (a, b) = linked_blocks(30, 1, 1, 1.0, 9);
-        let (a, b) = (a.col(0).to_owned(), b.col(0).to_owned());
-        let r = pearson_r_guarded(&a, &b);
-        assert!(r.abs() > 0.1, "r = {r}");
-        for factor in [1e-9, 1e-150, 1e150, 1e-200, 1e200, 1e-300, 1e300] {
-            let a_s = Col::<f64>::from_fn(a.nrows(), |i| a[i] * factor);
-            let b_s = Col::<f64>::from_fn(b.nrows(), |i| b[i] * factor);
-            for (label, got) in [
-                ("a scaled", pearson_r_guarded(&a_s, &b)),
-                ("b scaled", pearson_r_guarded(&a, &b_s)),
-            ] {
-                assert!((got - r).abs() < 1e-12, "{label} ×{factor:e}: {got} vs {r}");
-            }
-        }
-        // Constant-to-rounding and all-zero inputs still read as constant.
-        let c = Col::<f64>::from_fn(a.nrows(), |_| 0.1);
-        let z = Col::<f64>::zeros(a.nrows());
-        assert_eq!(pearson_r_guarded(&c, &b).to_bits(), 0.0_f64.to_bits());
-        assert_eq!(pearson_r_guarded(&z, &b).to_bits(), 0.0_f64.to_bits());
-    }
-
     // ── split_nb tests ──────────────────────────────────────────────────
 
     #[test]
     fn split_nb_runs_and_reports_its_own_method() {
         // 6 columns and n = 60 clear the gate's column, n_eff and stable-rank
-        // floors, so the request is not rerouted.
+        // floors, so the request is not rerouted. q = 3 is inside the gate's
+        // 4-column precheck, so this also fails if Y were ever gated.
         let (x, y) = linked_blocks(60, 6, 3, 2.0, 5);
         let r = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(10, false, 7)).unwrap();
         assert_eq!(r.method, "split_nb");
@@ -933,36 +968,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::many_single_char_names)]
-    fn split_nb_statistic_matches_split_exact_on_the_dual_route_to_tolerance() {
-        // p ≫ n sends split_exact down the Gram route, where z̄_obs comes from
-        // `pls3_split_zbars_columns` while split_nb always refits on the
-        // primal route. So the agreement is to the route tolerance, not
-        // bit-for-bit. `force` keeps the gate from deciding what runs.
-        let (n, p, q) = (60_usize, 100_usize, 3_usize);
-        let (n_perm, n_splits) = (49_usize, 6_usize);
-        let (n_tr, _) = crate::resample::split_sizes(n, 1);
-        assert!(
-            crate::dual_route::use_dual_route(n_tr, p, n_perm + 1, q),
-            "test premise: this shape must take the dual route"
-        );
-        let (x, y) = linked_blocks(n, p, q, 3.0, 7);
-        let nb =
-            pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(n_splits, true, 11)).unwrap();
-        let ex =
-            pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, opts(n_perm, n_splits, 11)).unwrap();
-        assert_eq!(nb.method, "split_nb");
-        assert_eq!(ex.method, "split_exact");
-        let rel = (nb.statistic - ex.statistic).abs() / ex.statistic.abs().max(1e-300);
-        assert!(
-            rel < 1e-10,
-            "split_nb={} split_exact(dual)={} rel={rel}",
-            nb.statistic,
-            ex.statistic
-        );
-    }
-
-    #[test]
     fn split_nb_gate_reroutes_a_flagged_design() {
         // 3 columns trips the gate's column precheck, so the run is rerouted
         // to split_exact at that method's own default n_perm.
@@ -980,37 +985,6 @@ mod tests {
         let r = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(4, true, 7)).unwrap();
         assert_eq!(r.method, "split_nb");
         assert!(r.n_perm.is_none());
-    }
-
-    #[test]
-    fn split_nb_is_not_gated_on_y() {
-        // q = 3 sits on the stable-rank floor the gate applies to X. Y is
-        // never gated, so a design that clears the floor on X must run.
-        let (x, y) = linked_blocks(60, 8, 3, 2.0, 5);
-        let r = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(8, false, 7)).unwrap();
-        assert_eq!(r.method, "split_nb");
-    }
-
-    #[test]
-    fn split_nb_same_seed_reproduces_bit_for_bit() {
-        let (x, y) = linked_blocks(60, 6, 3, 2.0, 5);
-        let a = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(8, false, 7)).unwrap();
-        let b = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(8, false, 7)).unwrap();
-        assert_eq!(a.pvalue.to_bits(), b.pvalue.to_bits());
-        assert_eq!(a.statistic.to_bits(), b.statistic.to_bits());
-    }
-
-    #[test]
-    fn split_nb_rejects_k_above_one_and_tiny_n_splits() {
-        let (x, y) = linked_blocks(60, 6, 3, 2.0, 5);
-        assert!(matches!(
-            pls3_confirmatory_test(x.as_ref(), y.as_ref(), 2, nb_opts(8, false, 7)),
-            Err(PlsKitError::InvalidArgument(_))
-        ));
-        assert!(matches!(
-            pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(1, false, 7)),
-            Err(PlsKitError::InvalidArgument(_))
-        ));
     }
 
     #[test]
@@ -1489,17 +1463,17 @@ mod tests {
     /// must return exactly the p-value and statistic the primal branch
     /// would have returned at the same seed.
     ///
-    /// Same reasoning as `raw_perm_dual_route_runner_matches_the_primal_reference`
-    /// in `signal_test.rs` (change together): the kernel-level equivalence
-    /// test hands both routes the same locally-built permutations, so it
-    /// cannot catch a column-0 convention slip or a child-seed derivation
-    /// that drifts from what `parallel_for_each_seeded` actually draws.
-    /// Here the reference comes from the runner's own primal machinery, so
-    /// both of those separate the two p-values. A wrong routing argument
-    /// (`n_tr`, `n_perm + 1`, `q`) flips the runner to primal instead,
-    /// which the precondition assert below covers.
-    // See the `float_cmp` note on the raw_perm wiring test — the p-value is
-    // a count over a fixed denominator and must match exactly.
+    /// The kernel-level equivalence test hands both routes the same
+    /// locally-built permutations, so it cannot catch a column-0 convention
+    /// slip or a child-seed derivation that drifts from what
+    /// `parallel_for_each_seeded` actually draws. Here the reference comes
+    /// from the runner's own primal machinery, so both of those separate the
+    /// two p-values. A wrong routing argument (`n_tr`, `n_perm + 1`, `q`)
+    /// flips the runner to primal instead, which the precondition assert
+    /// below covers. The same input also runs `split_nb` (always primal),
+    /// whose statistic must equal the dual `split_exact` one to the route
+    /// tolerance.
+    // The p-value is a count over a fixed denominator and must match exactly.
     #[allow(clippy::float_cmp)]
     #[allow(clippy::many_single_char_names)]
     #[test]
@@ -1568,6 +1542,19 @@ mod tests {
         assert!(
             rel < 1e-10,
             "statistic: dual={} primal={expected_stat} rel={rel}",
+            r.statistic
+        );
+
+        // split_nb always refits on the primal route; `force` keeps the gate
+        // from deciding what runs.
+        let nb = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(n_splits, true, seed))
+            .unwrap();
+        assert_eq!(nb.method, "split_nb");
+        let rel = (nb.statistic - r.statistic).abs() / r.statistic.abs().max(1e-300);
+        assert!(
+            rel < 1e-10,
+            "split_nb={} split_exact(dual)={} rel={rel}",
+            nb.statistic,
             r.statistic
         );
     }
@@ -1874,183 +1861,5 @@ mod tests {
                 );
             }
         }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::many_single_char_names, clippy::similar_names)]
-mod copy_free_reference {
-    use super::*;
-    use crate::signal_test::with_new_routes_disabled;
-    use crate::test_support::{assert_bits_eq, col_vals, copy_free_families, Layouts};
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::similar_names)]
-    pub(crate) fn pls3_split_lv_correlations_reference(
-        x: MatRef<'_, f64>,
-        y: MatRef<'_, f64>,
-        splits: &[SplitIdx],
-        opts: &Pls3ConfirmatoryTestOpts,
-    ) -> Col<f64> {
-        use crate::linalg::{row_subset, standardize, standardize_apply};
-
-        let per_split = |sp: &SplitIdx| -> f64 {
-            let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
-            let x_tr = row_subset(x, tr);
-            let x_te = row_subset(x, te);
-            let y_tr = row_subset(y, tr);
-            let y_te = row_subset(y, te);
-
-            let (xs_tr, x_mean, x_scale) = standardize(x_tr.as_ref());
-            let xs_te = standardize_apply(x_te.as_ref(), x_mean.as_ref(), x_scale.as_ref());
-            let (ys_tr, y_mean, y_scale) = standardize(y_tr.as_ref());
-            let ys_te = standardize_apply(y_te.as_ref(), y_mean.as_ref(), y_scale.as_ref());
-
-            pls3_split_column_r_primal(
-                xs_tr.as_ref(),
-                xs_tr.norm_l2(),
-                xs_te.as_ref(),
-                ys_tr.as_ref(),
-                ys_te.as_ref(),
-                opts.keep_x,
-                opts.keep_y,
-                opts.max_iter,
-                opts.tol,
-            )
-        };
-
-        let r_vec: Vec<f64> = if opts.disable_parallelism {
-            splits.iter().map(per_split).collect()
-        } else {
-            use rayon::prelude::*;
-            splits.par_iter().map(per_split).collect()
-        };
-        Col::<f64>::from_fn(r_vec.len(), |i| r_vec[i])
-    }
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::similar_names)]
-    pub(crate) fn pls3_split_zbars_columns_primal_reference(
-        x: MatRef<'_, f64>,
-        y: MatRef<'_, f64>,
-        splits: &[SplitIdx],
-        perms: &[Vec<usize>],
-        opts: &Pls3ConfirmatoryTestOpts,
-    ) -> Vec<f64> {
-        use crate::linalg::{row_subset, standardize, standardize_apply};
-
-        let q = y.ncols();
-        let n_cols = perms.len() + 1;
-
-        let per_split = |sp: &SplitIdx| -> Vec<f64> {
-            let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
-
-            // Built once per split: invariant across replicates, because only Y
-            // is permuted.
-            let x_tr = row_subset(x, tr);
-            let x_te = row_subset(x, te);
-            let (xs_tr, x_mean, x_scale) = standardize(x_tr.as_ref());
-            let xs_te = standardize_apply(x_te.as_ref(), x_mean.as_ref(), x_scale.as_ref());
-            // The X-side input of the relative floor, likewise per split.
-            let xs_tr_fro = xs_tr.norm_l2();
-
-            let column_z = |col: usize| -> f64 {
-                // Column 0 is the identity row map; column c > 0 applies
-                // permutation c−1, the same convention the Gram route uses.
-                let row_of = |i: usize| if col == 0 { i } else { perms[col - 1][i] };
-                let y_tr = Mat::<f64>::from_fn(tr.len(), q, |i, j| y[(row_of(tr[i]), j)]);
-                let y_te = Mat::<f64>::from_fn(te.len(), q, |i, j| y[(row_of(te[i]), j)]);
-                let (ys_tr, y_mean, y_scale) = standardize(y_tr.as_ref());
-                let ys_te = standardize_apply(y_te.as_ref(), y_mean.as_ref(), y_scale.as_ref());
-
-                let r = pls3_split_column_r_primal(
-                    xs_tr.as_ref(),
-                    xs_tr_fro,
-                    xs_te.as_ref(),
-                    ys_tr.as_ref(),
-                    ys_te.as_ref(),
-                    opts.keep_x,
-                    opts.keep_y,
-                    opts.max_iter,
-                    opts.tol,
-                );
-                // ±0.9999 pre-atanh clamp applied per (split, column),
-                // exactly where `mean_fisher_z` applies it before summing.
-                r.clamp(-0.9999, 0.9999).atanh()
-            };
-            // The replicate columns are independent refits sharing only the
-            // read-only X side above, so they map in parallel too: with the
-            // splits alone as the parallel axis, a J below the core count
-            // would leave cores idle. `collect` keeps column order, and each
-            // column's value does not depend on which worker computes it.
-            if opts.disable_parallelism {
-                (0..n_cols).map(column_z).collect()
-            } else {
-                use rayon::prelude::*;
-                (0..n_cols).into_par_iter().map(column_z).collect()
-            }
-        };
-
-        crate::signal_test::zbars_over_splits(splits, n_cols, opts.disable_parallelism, per_split)
-    }
-
-    #[test]
-    fn pls3_primal_split_statistics_match_reference() {
-        with_new_routes_disabled(|| {
-            for f in copy_free_families().into_iter().filter(|f| f.w.is_none()) {
-                let n = f.x.nrows();
-                let y = Mat::<f64>::from_fn(n, 4, |i, j| f.x[(i, j)] + 0.5 * f.y[(i + 3 * j) % n]);
-                let (_, mut rng) = crate::rng::resolve_seed(Some(6)).unwrap();
-                let splits = draw_splits(n, 1, 4, true, &mut rng).unwrap();
-                let perms: Vec<Vec<usize>> = (0..5)
-                    .map(|_| crate::resample::permute_indices(n, &mut rng))
-                    .collect();
-                let lay = Layouts::new(f.x.as_ref());
-                for (view, xv) in lay.all(&f.x) {
-                    for (keep_x, keep_y) in [
-                        (None, None),
-                        (Some(3), None),
-                        (None, Some(2)),
-                        (Some(3), Some(2)),
-                    ] {
-                        for dp in [true, false] {
-                            let opts = Pls3ConfirmatoryTestOpts {
-                                keep_x,
-                                keep_y,
-                                disable_parallelism: dp,
-                                ..Default::default()
-                            };
-                            let what =
-                                format!("{} {view} keep=({keep_x:?},{keep_y:?}) dp={dp}", f.name);
-                            let a = pls3_split_lv_correlations(xv, y.as_ref(), &splits, &opts);
-                            let b = pls3_split_lv_correlations_reference(
-                                xv,
-                                y.as_ref(),
-                                &splits,
-                                &opts,
-                            );
-                            assert_bits_eq(&col_vals(a.as_ref()), &col_vals(b.as_ref()), &what);
-                            let a = pls3_split_zbars_columns_primal(
-                                xv,
-                                y.as_ref(),
-                                &splits,
-                                &perms,
-                                &opts,
-                            );
-                            let b = pls3_split_zbars_columns_primal_reference(
-                                xv,
-                                y.as_ref(),
-                                &splits,
-                                &perms,
-                                &opts,
-                            );
-                            assert_bits_eq(&a, &b, &what);
-                        }
-                    }
-                }
-            }
-        });
     }
 }

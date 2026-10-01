@@ -15,7 +15,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use plskit::error::{PlsKitError, PlsKitResult};
-use plskit::preprocess::{preprocess as core_preprocess, PreprocessInput};
+use plskit::preprocess::{
+    preprocess as core_preprocess, preprocess_block as core_preprocess_block, PreprocessBlockInput,
+    PreprocessInput,
+};
 use plskit::{
     pls1_confirmatory_test as core_pls1_confirmatory_test,
     pls1_find_k_optimal as core_pls1_find_k_optimal,
@@ -34,9 +37,13 @@ use plskit::{
 use plskit::{pls1_perm_null as core_pls1_perm_null, PermNullOpts, PermNullOutput};
 
 // ── numpy ↔ faer bridge ─────────────────────────────────────────────────
-// The only place ndarray and faer touch in the repo. Inputs copy +
-// transpose row-major numpy → column-major faer in one pass (except the
-// `pls1_x` view of `X` for the PLS1 fits); outputs copy back the same way.
+// The only place ndarray and faer touch in the repo. `X` / `X_new` go
+// through `x_view` (read in place when C- or F-contiguous); the other
+// matrix inputs the engine takes as a view (`Y`, `Y_new`, `W`, `L`) go
+// through `col_major_view` (read in place when F-contiguous). Any other
+// layout, the model arrays (the engine's model structs own their
+// matrices) and 1-D inputs are copied column-major in one pass. Outputs
+// copy back the same way.
 // Every input goes through `aligned` first: these helpers are the only
 // places the seam reads a numpy array's data (`as_array` / `as_slice`).
 
@@ -56,7 +63,7 @@ fn aligned<D: Dimension>(
     if copy.is_aligned() {
         Ok(copy)
     } else {
-        Err(invalid_args_err(
+        Err(invalid_argument_err(
             "could not make an aligned float64 copy of a misaligned input array",
         ))
     }
@@ -72,7 +79,7 @@ fn np_mat_to_faer(arr: PyReadonlyArray2<'_, f64>) -> PyResult<Mat<f64>> {
 /// A copy-free faer view of a contiguous, aligned numpy matrix: row-major
 /// for a C-ordered array, column-major for a Fortran-ordered one; `None`
 /// for any other layout, and for misaligned data. Only for engine entries
-/// that accept `X` in any layout (see `pls1_x`).
+/// that accept `X` in any layout (see `x_view`).
 fn np_mat_view<'a>(arr: &'a PyReadonlyArray2<'_, f64>) -> Option<MatRef<'a, f64>> {
     if !arr.is_aligned() {
         return None;
@@ -88,20 +95,49 @@ fn np_mat_view<'a>(arr: &'a PyReadonlyArray2<'_, f64>) -> Option<MatRef<'a, f64>
     }
 }
 
-/// `X` for `pls1_fit` / `spls1_fit`: a contiguous, aligned array is read in
-/// place (row-major for C order, column-major for Fortran order), anything
-/// else is copied column-major by `np_mat_to_faer`. The engine standardizes
-/// into X's own layout, or with `pre_standardized` runs its kernel on X as
-/// given, so the last bits of a fit depend on the layout of X, within the
-/// crate's tolerance. Callers pass `arr` through [`aligned`] first: numpy's
-/// copy of a misaligned C-ordered array is C-ordered, so it is read
-/// row-major and fits to the bits of the same values passed aligned.
-fn pls1_x<'a>(
+/// `X` for an engine entry: a contiguous, aligned array is read in place
+/// (row-major for C order, column-major for Fortran order), anything else
+/// is copied column-major by `np_mat_to_faer`. Every engine entry accepts X
+/// in any layout. `pls1_fit` / `spls1_fit` (and so `pls1_fit`'s
+/// `k="optimal"` / `"sequence"` final fit), `pls1_predict` and
+/// `pls1_rotation_stability` (whose reference fits read X in place) form
+/// products in X's own layout: C and F order give last bits that differ
+/// within the crate's tolerance. The other entries give the same bits for
+/// C and F order today; the engine pins that for the resampling and
+/// inference engines, `preprocess`, the `split_nb` gate, the PLS3 fits and
+/// `pls3_transform`. Callers pass
+/// `arr` through [`aligned`] first: its copy of a misaligned array is
+/// C-ordered, so it is read row-major and gives the bits of the same values
+/// passed aligned in C order. The Python wrapper aligns with `order="K"`
+/// before the call, so a public call keeps the caller's order.
+fn x_view<'a>(
     arr: &'a PyReadonlyArray2<'_, f64>,
     copy: &'a mut Option<Mat<f64>>,
 ) -> PyResult<MatRef<'a, f64>> {
     if let Some(view) = np_mat_view(arr) {
         return Ok(view);
+    }
+    Ok(copy.insert(np_mat_to_faer(arr.clone())?).as_ref())
+}
+
+/// `Y`, `Y_new`, `W` or `L` for an engine entry: a Fortran-contiguous,
+/// aligned array is read in place, column-major; any other layout is
+/// copied column-major by `np_mat_to_faer`, as every one of them was
+/// before. Only column-major data is read in place because that is the
+/// copy's own layout, so a view and a copy give the same bits in every
+/// entry; a row-major view of a C-ordered `Y` does not (a
+/// `pre_standardized_Y` PLS3 fit moves in the last bits). The seam test
+/// `test_block_inputs_give_the_same_bits_in_every_layout` pins that.
+/// Callers pass `arr` through [`aligned`] first, as for [`x_view`].
+fn col_major_view<'a>(
+    arr: &'a PyReadonlyArray2<'_, f64>,
+    copy: &'a mut Option<Mat<f64>>,
+) -> PyResult<MatRef<'a, f64>> {
+    if arr.is_aligned() && arr.is_fortran_contiguous() {
+        if let Ok(slice) = arr.as_slice() {
+            let (n, d) = (arr.shape()[0], arr.shape()[1]);
+            return Ok(MatRef::from_column_major_slice(slice, n, d));
+        }
     }
     Ok(copy.insert(np_mat_to_faer(arr.clone())?).as_ref())
 }
@@ -293,20 +329,35 @@ fn rotation_stability_to_dict(
 // `method` selects the variant; `args` (optional dict) carries
 // method-specific kwargs. Unknown keys raise.
 
-/// Build a `PlsKitException` with `.code = "invalid_args"` already
-/// set. Used wherever args-dict validation fails (unknown key,
-/// wrong-typed value, etc.).
-fn invalid_args_err(msg: &str) -> PyErr {
+/// A `PlsKitException` with `.code` already set: the seam's own raise
+/// sites go through here, so none of them reaches Python with the empty
+/// code a bare `PlsKitException::new_err` carries (`map_res` sets the
+/// code of every engine error the same way).
+fn coded_err(code: &str, msg: &str) -> PyErr {
     let py_err = PlsKitException::new_err(msg.to_owned());
     Python::attach(|py| {
-        let _ = py_err.value(py).setattr("code", "invalid_args");
+        let _ = py_err.value(py).setattr("code", code);
     });
     py_err
 }
 
+/// `invalid_args`: a method / selector string or an `args`-dict entry
+/// (unknown key, wrong-typed or negative value) is not accepted.
+fn invalid_args_err(msg: &str) -> PyErr {
+    coded_err("invalid_args", msg)
+}
+
+/// `invalid_argument`: a malformed input outside the `args` dict (a model
+/// dict missing a field, an input array that cannot be aligned).
+fn invalid_argument_err(msg: &str) -> PyErr {
+    coded_err("invalid_argument", msg)
+}
+
 fn validate_keys(method: &str, args: &Bound<'_, PyDict>, allowed: &[&str]) -> PyResult<()> {
     for (k, _) in args.iter() {
-        let ks: String = k.extract()?;
+        let ks: String = k
+            .extract()
+            .map_err(|_| invalid_args_err(&format!("args keys must be strings, got {k}")))?;
         if !allowed.iter().any(|a| *a == ks) {
             return Err(invalid_args_err(&format!(
                 "method='{method}' does not accept arg '{ks}'; allowed: {allowed:?}"
@@ -314,6 +365,105 @@ fn validate_keys(method: &str, args: &Bound<'_, PyDict>, allowed: &[&str]) -> Py
         }
     }
     Ok(())
+}
+
+// ── args-dict values ───────────────────────────────────────────────────
+//
+// One reader per value kind, shared by every entry point that takes an
+// `args` / `rotation_args` dict. A missing key, or one whose value is
+// `None`, takes the engine's default; a value of the wrong kind raises
+// `invalid_args` with plskit-bind's message (`args['<key>'] for <label>
+// <why>`), so every wrapper words the failure the same way.
+
+/// `bool` is a Python `int` subclass (and numpy's `bool_` converts to a
+/// float), so a count or a number must reject it by type.
+fn is_bool(v: &Bound<'_, PyAny>) -> bool {
+    v.is_instance_of::<pyo3::types::PyBool>()
+        || v.get_type()
+            .name()
+            .is_ok_and(|n| n.to_str().is_ok_and(|n| n == "bool" || n == "bool_"))
+}
+
+/// The value as the failure message quotes it (plskit-bind's `describe`).
+fn describe(v: &Bound<'_, PyAny>) -> String {
+    match v.extract::<String>() {
+        Ok(s) => format!("the string {s:?}"),
+        Err(_) => v.repr().map_or_else(|_| "?".to_owned(), |r| r.to_string()),
+    }
+}
+
+/// A non-null value in an `args` dict.
+fn arg<'py>(args: Option<&Bound<'py, PyDict>>, key: &str) -> Option<Bound<'py, PyAny>> {
+    args.and_then(|a| a.get_item(key).ok().flatten())
+        .filter(|v| !v.is_none())
+}
+
+fn arg_err(key: &str, label: &str, why: &str, v: &Bound<'_, PyAny>) -> PyErr {
+    invalid_args_err(&format!(
+        "args['{key}'] for {label} {why}, got {}",
+        describe(v)
+    ))
+}
+
+/// Largest float every integer up to which is exact (plskit-bind's
+/// `F64_EXACT_MAX`): a whole float count above it is rejected.
+const F64_EXACT_MAX: f64 = 9_007_199_254_740_992.0;
+
+/// A count: a non-negative int, or a whole float in `[0, 2^53]`.
+fn arg_usize(
+    args: Option<&Bound<'_, PyDict>>,
+    label: &str,
+    key: &str,
+    default: usize,
+) -> PyResult<usize> {
+    let Some(v) = arg(args, key) else {
+        return Ok(default);
+    };
+    let bad = || arg_err(key, label, "must be a non-negative whole number", &v);
+    if is_bool(&v) {
+        return Err(bad());
+    }
+    if let Ok(n) = v.extract::<i64>() {
+        return usize::try_from(n).map_err(|_| bad());
+    }
+    match v.extract::<f64>() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Ok(x) if x.is_finite() && x.fract() == 0.0 && (0.0..=F64_EXACT_MAX).contains(&x) => {
+            Ok(x as usize)
+        }
+        _ => Err(bad()),
+    }
+}
+
+/// A number: an int or a float.
+fn arg_f64(
+    args: Option<&Bound<'_, PyDict>>,
+    label: &str,
+    key: &str,
+    default: f64,
+) -> PyResult<f64> {
+    let Some(v) = arg(args, key) else {
+        return Ok(default);
+    };
+    if is_bool(&v) {
+        return Err(arg_err(key, label, "must be a number", &v));
+    }
+    v.extract::<f64>()
+        .map_err(|_| arg_err(key, label, "must be a number", &v))
+}
+
+/// A bool; nothing converts.
+fn arg_bool(
+    args: Option<&Bound<'_, PyDict>>,
+    label: &str,
+    key: &str,
+    default: bool,
+) -> PyResult<bool> {
+    let Some(v) = arg(args, key) else {
+        return Ok(default);
+    };
+    v.extract::<bool>()
+        .map_err(|_| arg_err(key, label, "must be a bool", &v))
 }
 
 fn btreemap_to_dict<'py>(
@@ -334,7 +484,7 @@ fn parse_confirmatory_method(s: &str) -> PyResult<ConfirmatoryMethod> {
         "split_exact" => Ok(ConfirmatoryMethod::SplitExact),
         "score" => Ok(ConfirmatoryMethod::Score),
         "e" => Ok(ConfirmatoryMethod::E),
-        _ => Err(PlsKitException::new_err(format!("unknown method: {s}"))),
+        _ => Err(invalid_args_err(&format!("unknown method: {s}"))),
     }
 }
 
@@ -342,94 +492,44 @@ fn parse_confirmatory_args(
     method: &str,
     args: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<ConfirmatoryArgs> {
-    match method {
-        "raw_perm" => {
-            let allowed: &[&str] = &["n_perm", "n_folds"];
+    let m = parse_confirmatory_method(method)?;
+    let label = format!("method='{method}'");
+    // Absent keys fall back to the engine's own defaults.
+    Ok(match ConfirmatoryArgs::defaults_for(m) {
+        ConfirmatoryArgs::RawPerm { n_perm, n_folds } => {
             if let Some(a) = args {
-                validate_keys("raw_perm", a, allowed)?;
+                validate_keys(method, a, &["n_perm", "n_folds"])?;
             }
-            // Absent keys fall back to the engine's own defaults.
-            let ConfirmatoryArgs::RawPerm {
-                n_perm: d_perm,
-                n_folds: d_folds,
-            } = ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::RawPerm)
-            else {
-                unreachable!("defaults_for(RawPerm) is RawPerm")
-            };
-            let n_perm = match args.and_then(|a| a.get_item("n_perm").ok().flatten()) {
-                Some(v) => v.extract::<usize>()?,
-                None => d_perm,
-            };
-            let n_folds = match args.and_then(|a| a.get_item("n_folds").ok().flatten()) {
-                Some(v) => v.extract::<usize>()?,
-                None => d_folds,
-            };
-            Ok(ConfirmatoryArgs::RawPerm { n_perm, n_folds })
+            ConfirmatoryArgs::RawPerm {
+                n_perm: arg_usize(args, &label, "n_perm", n_perm)?,
+                n_folds: arg_usize(args, &label, "n_folds", n_folds)?,
+            }
         }
-        "split_nb" => {
-            let allowed: &[&str] = &["n_splits", "force"];
+        ConfirmatoryArgs::SplitNb { n_splits, force } => {
             if let Some(a) = args {
-                validate_keys("split_nb", a, allowed)?;
+                validate_keys(method, a, &["n_splits", "force"])?;
             }
-            let ConfirmatoryArgs::SplitNb {
-                n_splits: d_splits,
-                force: d_force,
-            } = ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::SplitNb)
-            else {
-                unreachable!("defaults_for(SplitNb) is SplitNb")
-            };
-            let n_splits = match args.and_then(|a| a.get_item("n_splits").ok().flatten()) {
-                Some(v) => v.extract::<usize>()?,
-                None => d_splits,
-            };
-            let force = match args.and_then(|a| a.get_item("force").ok().flatten()) {
-                Some(v) => v.extract::<bool>().map_err(|_| {
-                    invalid_args_err("args['force'] for method='split_nb' must be a bool")
-                })?,
-                None => d_force,
-            };
-            Ok(ConfirmatoryArgs::SplitNb { n_splits, force })
+            ConfirmatoryArgs::SplitNb {
+                n_splits: arg_usize(args, &label, "n_splits", n_splits)?,
+                force: arg_bool(args, &label, "force", force)?,
+            }
         }
-        "split_exact" => {
-            let allowed: &[&str] = &["n_perm", "n_splits"];
+        ConfirmatoryArgs::SplitExact { n_perm, n_splits } => {
             if let Some(a) = args {
-                validate_keys("split_exact", a, allowed)?;
+                validate_keys(method, a, &["n_perm", "n_splits"])?;
             }
-            let ConfirmatoryArgs::SplitExact {
-                n_perm: d_perm,
-                n_splits: d_splits,
-            } = ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::SplitExact)
-            else {
-                unreachable!("defaults_for(SplitExact) is SplitExact")
-            };
-            let n_perm = match args.and_then(|a| a.get_item("n_perm").ok().flatten()) {
-                Some(v) => v.extract::<usize>()?,
-                None => d_perm,
-            };
-            let n_splits = match args.and_then(|a| a.get_item("n_splits").ok().flatten()) {
-                Some(v) => v.extract::<usize>()?,
-                None => d_splits,
-            };
-            Ok(ConfirmatoryArgs::SplitExact { n_perm, n_splits })
+            ConfirmatoryArgs::SplitExact {
+                n_perm: arg_usize(args, &label, "n_perm", n_perm)?,
+                n_splits: arg_usize(args, &label, "n_splits", n_splits)?,
+            }
         }
-        "score" => {
-            let allowed: &[&str] = &[];
+        other @ (ConfirmatoryArgs::Score | ConfirmatoryArgs::E) => {
             if let Some(a) = args {
-                validate_keys("score", a, allowed)?;
+                validate_keys(method, a, &[])?;
             }
-            Ok(ConfirmatoryArgs::Score)
+            other
         }
-        "e" => {
-            let allowed: &[&str] = &[];
-            if let Some(a) = args {
-                validate_keys("e", a, allowed)?;
-            }
-            Ok(ConfirmatoryArgs::E)
-        }
-        _ => Err(PlsKitException::new_err(format!(
-            "unknown method: {method}"
-        ))),
-    }
+    })
 }
 
 fn parse_optimal_selector(s: &str) -> PyResult<Selector> {
@@ -437,8 +537,29 @@ fn parse_optimal_selector(s: &str) -> PyResult<Selector> {
         "r2_se" => Ok(Selector::R2Se),
         "r2_max" => Ok(Selector::R2Max),
         "bic" => Ok(Selector::Bic),
-        _ => Err(PlsKitException::new_err(format!("unknown selector: {s}"))),
+        _ => Err(invalid_args_err(&format!("unknown selector: {s}"))),
     }
+}
+
+/// Varimax `args` (`rotate`) / `rotation_args` (`pls1_rotation_stability`).
+fn parse_varimax_args(args: Option<&Bound<'_, PyDict>>) -> PyResult<VarimaxArgs> {
+    if let Some(a) = args {
+        validate_keys("varimax", a, &["max_iter", "tol", "kaiser_normalize"])?;
+    }
+    let d = VarimaxArgs::default();
+    let label = "method='varimax'";
+    Ok(VarimaxArgs {
+        max_iter: arg_usize(args, label, "max_iter", d.max_iter)?,
+        tol: arg_f64(args, label, "tol", d.tol)?,
+        kaiser_normalize: arg_bool(args, label, "kaiser_normalize", d.kaiser_normalize)?,
+    })
+}
+
+fn rotation_method_not_implemented(method: &str) -> PyErr {
+    coded_err(
+        "rotation_method_not_implemented",
+        &format!("rotation method '{method}' is not implemented in this version"),
+    )
 }
 
 fn parse_rotation_method(
@@ -446,54 +567,8 @@ fn parse_rotation_method(
     args: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<RotationMethod> {
     match method {
-        "varimax" => {
-            let allowed: &[&str] = &["max_iter", "tol", "kaiser_normalize"];
-            if let Some(a) = args {
-                validate_keys("varimax", a, allowed)?;
-            }
-            let defaults = VarimaxArgs::default();
-            let max_iter = match args.and_then(|a| a.get_item("max_iter").ok().flatten()) {
-                Some(v) => v.extract::<usize>().map_err(|_| {
-                    invalid_args_err(
-                        "args['max_iter'] for method='varimax' must be a non-negative int",
-                    )
-                })?,
-                None => defaults.max_iter,
-            };
-            let tol = match args.and_then(|a| a.get_item("tol").ok().flatten()) {
-                Some(v) => v.extract::<f64>().map_err(|_| {
-                    invalid_args_err("args['tol'] for method='varimax' must be a float")
-                })?,
-                None => defaults.tol,
-            };
-            let kaiser_normalize = match args
-                .and_then(|a| a.get_item("kaiser_normalize").ok().flatten())
-            {
-                Some(v) => v.extract::<bool>().map_err(|_| {
-                    invalid_args_err("args['kaiser_normalize'] for method='varimax' must be a bool")
-                })?,
-                None => defaults.kaiser_normalize,
-            };
-            Ok(RotationMethod::Varimax(VarimaxArgs {
-                max_iter,
-                tol,
-                kaiser_normalize,
-            }))
-        }
-        other => {
-            // Stamp the typed code manually since this branch bypasses
-            // `map_res` (which is the usual path that sets `code`).
-            // PyO3 0.26: use `Python::attach` and `.value(py)`.
-            let py_err = PlsKitException::new_err(format!(
-                "rotation method '{other}' is not implemented in this version"
-            ));
-            Python::attach(|py| {
-                let _ = py_err
-                    .value(py)
-                    .setattr("code", "rotation_method_not_implemented");
-            });
-            Err(py_err)
-        }
+        "varimax" => Ok(RotationMethod::Varimax(parse_varimax_args(args)?)),
+        other => Err(rotation_method_not_implemented(other)),
     }
 }
 
@@ -516,7 +591,7 @@ fn pls1_fit<'py>(
     // Bridge numpy → faer at the entry seam.
     let x = aligned(x)?;
     let mut x_copy = None;
-    let xf = pls1_x(&x, &mut x_copy)?;
+    let xf = x_view(&x, &mut x_copy)?;
     let yf = np_col_to_faer(y)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
@@ -542,7 +617,7 @@ fn spls1_fit<'py>(
     };
     let x = aligned(x)?;
     let mut x_copy = None;
-    let xf = pls1_x(&x, &mut x_copy)?;
+    let xf = x_view(&x, &mut x_copy)?;
     let yf = np_col_to_faer(y)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
@@ -566,8 +641,10 @@ fn pls1_predict<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     // Reconstruct a Pls1Model from the dict's fields — bridge ndarray view → faer Mat.
     let m = pls1_model_from_dict(py, &model)?;
-    let x_faer = np_mat_to_faer(x_new)?;
-    let yhat = map_res(core_pls1_predict(&m, x_faer.as_ref()))?;
+    let x_new = aligned(x_new)?;
+    let mut x_copy = None;
+    let x_faer = x_view(&x_new, &mut x_copy)?;
+    let yhat = map_res(core_pls1_predict(&m, x_faer))?;
     Ok(faer_col_to_np(py, yhat))
 }
 
@@ -590,22 +667,28 @@ fn pls1_model_from_dict(py: Python<'_>, d: &Bound<'_, PyDict>) -> PyResult<Pls1M
     let get_mat = |k: &str| -> PyResult<Mat<f64>> {
         let v: PyReadonlyArray2<'_, f64> = d
             .get_item(k)?
-            .ok_or_else(|| PlsKitException::new_err(format!("missing field {k}")))?
+            .ok_or_else(|| invalid_argument_err(&format!("missing field {k}")))?
             .extract()?;
         np_mat_to_faer(v)
     };
     let get_col = |k: &str| -> PyResult<Col<f64>> {
         let v: PyReadonlyArray1<'_, f64> = d
             .get_item(k)?
-            .ok_or_else(|| PlsKitException::new_err(format!("missing field {k}")))?
+            .ok_or_else(|| invalid_argument_err(&format!("missing field {k}")))?
             .extract()?;
         np_col_to_faer(v)
     };
-    let intercept: f64 = d.get_item("intercept")?.unwrap().extract()?;
-    let k_used: usize = d.get_item("k_used")?.unwrap().extract()?;
+    let intercept: f64 = d
+        .get_item("intercept")?
+        .ok_or_else(|| invalid_argument_err("missing field intercept"))?
+        .extract()?;
+    let k_used: usize = d
+        .get_item("k_used")?
+        .ok_or_else(|| invalid_argument_err("missing field k_used"))?
+        .extract()?;
     let pre_standardized: bool = d
         .get_item("pre_standardized")?
-        .ok_or_else(|| PlsKitException::new_err("missing field pre_standardized"))?
+        .ok_or_else(|| invalid_argument_err("missing field pre_standardized"))?
         .extract()?;
     let t_scores = get_mat("T")?;
     let n_samples = t_scores.nrows();
@@ -692,14 +775,14 @@ fn pls3_model_from_dict(d: &Bound<'_, PyDict>) -> PyResult<Pls3Model> {
     let get_mat = |k: &str| -> PyResult<Mat<f64>> {
         let v: PyReadonlyArray2<'_, f64> = d
             .get_item(k)?
-            .ok_or_else(|| PlsKitException::new_err(format!("missing field {k}")))?
+            .ok_or_else(|| invalid_argument_err(&format!("missing field {k}")))?
             .extract()?;
         np_mat_to_faer(v)
     };
     let get_col = |k: &str| -> PyResult<Col<f64>> {
         let v: PyReadonlyArray1<'_, f64> = d
             .get_item(k)?
-            .ok_or_else(|| PlsKitException::new_err(format!("missing field {k}")))?
+            .ok_or_else(|| invalid_argument_err(&format!("missing field {k}")))?
             .extract()?;
         np_col_to_faer(v)
     };
@@ -715,15 +798,15 @@ fn pls3_model_from_dict(d: &Bound<'_, PyDict>) -> PyResult<Pls3Model> {
         y_scale: get_col("Y_scale")?,
         k_used: d
             .get_item("k_used")?
-            .ok_or_else(|| PlsKitException::new_err("missing field k_used"))?
+            .ok_or_else(|| invalid_argument_err("missing field k_used"))?
             .extract()?,
         pre_standardized_x: d
             .get_item("pre_standardized_X")?
-            .ok_or_else(|| PlsKitException::new_err("missing field pre_standardized_X"))?
+            .ok_or_else(|| invalid_argument_err("missing field pre_standardized_X"))?
             .extract()?,
         pre_standardized_y: d
             .get_item("pre_standardized_Y")?
-            .ok_or_else(|| PlsKitException::new_err("missing field pre_standardized_Y"))?
+            .ok_or_else(|| invalid_argument_err("missing field pre_standardized_Y"))?
             .extract()?,
         keep_x: get_opt_usize(d, "keep_X")?,
         keep_y: get_opt_usize(d, "keep_Y")?,
@@ -783,8 +866,12 @@ fn pls3_fit<'py>(
         pre_standardized_y: pre_standardized_Y,
         ..Pls3FitOpts::default()
     };
-    let xf = np_mat_to_faer(x)?;
-    let yf = np_mat_to_faer(y)?;
+    let x = aligned(x)?;
+    let mut x_copy = None;
+    let xf = x_view(&x, &mut x_copy)?;
+    let y = aligned(y)?;
+    let mut y_copy = None;
+    let yf = col_major_view(&y, &mut y_copy)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
     let m = map_res(core_pls3_fit(xf.as_ref(), yf.as_ref(), k, wref, opts))?;
@@ -818,8 +905,12 @@ fn spls3_fit<'py>(
         tol: tol.unwrap_or(defaults.tol),
         ..defaults
     };
-    let xf = np_mat_to_faer(x)?;
-    let yf = np_mat_to_faer(y)?;
+    let x = aligned(x)?;
+    let mut x_copy = None;
+    let xf = x_view(&x, &mut x_copy)?;
+    let y = aligned(y)?;
+    let mut y_copy = None;
+    let yf = col_major_view(&y, &mut y_copy)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
     let m = map_res(core_spls3_fit(
@@ -846,14 +937,18 @@ fn pls3_transform<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let m = pls3_model_from_dict(&model)?;
     let w = parse_transform_which(which)?;
-    let xf = x_new.map(np_mat_to_faer).transpose()?;
-    let yf = y_new.map(np_mat_to_faer).transpose()?;
-    let s = map_res(core_pls3_transform(
-        &m,
-        xf.as_ref().map(Mat::as_ref),
-        yf.as_ref().map(Mat::as_ref),
-        w,
-    ))?;
+    let x_new = x_new.map(aligned).transpose()?;
+    let mut x_copy = None;
+    let xc = &mut x_copy;
+    let xf = x_new.as_ref().map(move |a| x_view(a, xc)).transpose()?;
+    let y_new = y_new.map(aligned).transpose()?;
+    let mut y_copy = None;
+    let yc = &mut y_copy;
+    let yf = y_new
+        .as_ref()
+        .map(move |a| col_major_view(a, yc))
+        .transpose()?;
+    let s = map_res(core_pls3_transform(&m, xf, yf, w))?;
     let d = PyDict::new(py);
     d.set_item("x_scores", s.x_scores.map(|a| faer_mat_to_np(py, a)))?;
     d.set_item("y_scores", s.y_scores.map(|a| faer_mat_to_np(py, a)))?;
@@ -894,8 +989,12 @@ fn pls3_confirmatory_test_raw<'py>(
         // always been, along with the `max_iter` / `tol` the core picks.
         ..Pls3ConfirmatoryTestOpts::default()
     };
-    let xf = np_mat_to_faer(x)?;
-    let yf = np_mat_to_faer(y)?;
+    let x = aligned(x)?;
+    let mut x_copy = None;
+    let xf = x_view(&x, &mut x_copy)?;
+    let y = aligned(y)?;
+    let mut y_copy = None;
+    let yf = col_major_view(&y, &mut y_copy)?;
     let r = map_res(core_pls3_confirmatory_test(
         xf.as_ref(),
         yf.as_ref(),
@@ -928,16 +1027,28 @@ fn rotate<'py>(
     l: Option<PyReadonlyArray2<'_, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let rot_method = parse_rotation_method(method, args.as_ref())?;
-    let wf = np_mat_to_faer(w)?;
-    let lf_storage = l.map(np_mat_to_faer).transpose()?;
-    let lf_ref = lf_storage.as_ref().map(faer::Mat::as_ref);
-    let out: RotateOutput = map_res(core_rotate(wf.as_ref(), rot_method, lf_ref))?;
+    // The args the engine ran with (defaults filled, values typed), which
+    // `RotationSpec.args` records; never the caller's raw dict.
+    let RotationMethod::Varimax(va) = rot_method;
+    let w = aligned(w)?;
+    let mut w_copy = None;
+    let wf = col_major_view(&w, &mut w_copy)?;
+    let l = l.map(aligned).transpose()?;
+    let mut l_copy = None;
+    let lc = &mut l_copy;
+    let lf_ref = l.as_ref().map(move |a| col_major_view(a, lc)).transpose()?;
+    let out: RotateOutput = map_res(core_rotate(wf, rot_method, lf_ref))?;
     // PyO3 0.26: `PyDict::new` (was `new_bound` in 0.22).
     let d = PyDict::new(py);
     d.set_item("w_rot", faer_mat_to_np(py, out.w_rot))?;
     d.set_item("r", faer_mat_to_np(py, out.r))?;
     d.set_item("sweeps", out.sweeps)?;
     d.set_item("v_converged", out.v_converged)?;
+    let resolved = PyDict::new(py);
+    resolved.set_item("max_iter", va.max_iter)?;
+    resolved.set_item("tol", va.tol)?;
+    resolved.set_item("kaiser_normalize", va.kaiser_normalize)?;
+    d.set_item("args", resolved)?;
     Ok(d)
 }
 
@@ -995,7 +1106,9 @@ fn pls1_confirmatory_test_raw<'py>(
         // Dense wrapper surface — `keep` is reserved for the spls1 family.
         keep: None,
     };
-    let xf = np_mat_to_faer(x)?;
+    let x = aligned(x)?;
+    let mut x_copy = None;
+    let xf = x_view(&x, &mut x_copy)?;
     let yf = np_col_to_faer(y)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
@@ -1031,7 +1144,9 @@ fn split_nb_gate<'py>(
     x: PyReadonlyArray2<'py, f64>,
     weights: Option<PyReadonlyArray1<'py, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let xf = np_mat_to_faer(x)?;
+    let x = aligned(x)?;
+    let mut x_copy = None;
+    let xf = x_view(&x, &mut x_copy)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let r = map_res(core_split_nb_gate(
         xf.as_ref(),
@@ -1042,33 +1157,6 @@ fn split_nb_gate<'py>(
     d.set_item("stable_rank", r.stable_rank)?;
     d.set_item("n_eff", r.n_eff)?;
     Ok(d)
-}
-
-fn parse_varimax_args(args: Option<&Bound<'_, PyDict>>) -> PyResult<plskit::VarimaxArgs> {
-    use plskit::VarimaxArgs;
-    let allowed: &[&str] = &["max_iter", "tol", "kaiser_normalize"];
-    if let Some(a) = args {
-        validate_keys("varimax", a, allowed)?;
-    }
-    // Absent keys fall back to the engine's own defaults.
-    let defaults = VarimaxArgs::default();
-    let max_iter = match args.and_then(|a| a.get_item("max_iter").ok().flatten()) {
-        Some(v) => v.extract::<usize>()?,
-        None => defaults.max_iter,
-    };
-    let tol = match args.and_then(|a| a.get_item("tol").ok().flatten()) {
-        Some(v) => v.extract::<f64>()?,
-        None => defaults.tol,
-    };
-    let kaiser_normalize = match args.and_then(|a| a.get_item("kaiser_normalize").ok().flatten()) {
-        Some(v) => v.extract::<bool>()?,
-        None => defaults.kaiser_normalize,
-    };
-    Ok(VarimaxArgs {
-        max_iter,
-        tol,
-        kaiser_normalize,
-    })
 }
 
 #[pyfunction]
@@ -1105,30 +1193,20 @@ fn pls1_rotation_stability_raw<'py>(
     weights: Option<PyReadonlyArray1<'_, f64>>,
     max_skip_rate: Option<f64>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let xm = np_mat_to_faer(x)?;
+    let x = aligned(x)?;
+    let mut x_copy = None;
+    let xm = x_view(&x, &mut x_copy)?;
     let yc = np_col_to_faer(y)?;
 
-    let method = match rotation_method {
-        "varimax" => {
-            let args = parse_varimax_args(rotation_args)?;
-            plskit::RotationStabilityMethod::Varimax(args)
-        }
-        other => {
-            // Stamp the typed code manually since this branch bypasses
-            // `map_res` (which is the usual path that sets `code`).
-            let py_err = PlsKitException::new_err(format!(
-                "rotation_method '{other}' not implemented in v0.x"
-            ));
-            Python::attach(|py| {
-                let _ = py_err
-                    .value(py)
-                    .setattr("code", "rotation_method_not_implemented");
-            });
-            return Err(py_err);
-        }
+    // Same method strings and `args` parser as `rotate`.
+    let method = match parse_rotation_method(rotation_method, rotation_args)? {
+        RotationMethod::Varimax(args) => plskit::RotationStabilityMethod::Varimax(args),
     };
 
-    let l_mat: Option<Mat<f64>> = l.map(np_mat_to_faer).transpose()?;
+    let l = l.map(aligned).transpose()?;
+    let mut l_copy = None;
+    let lc = &mut l_copy;
+    let l_ref = l.as_ref().map(move |a| col_major_view(a, lc)).transpose()?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
 
@@ -1150,7 +1228,7 @@ fn pls1_rotation_stability_raw<'py>(
         yc.as_ref(),
         k,
         method,
-        l_mat.as_ref().map(Mat::as_ref),
+        l_ref,
         wref,
         opts,
     ))?;
@@ -1189,29 +1267,17 @@ fn run_find_k_optimal<'py>(
     if let Some(a) = args.as_ref() {
         validate_keys("optimal", a, allowed)?;
     }
-    let n_folds = match args
-        .as_ref()
-        .and_then(|a| a.get_item("n_folds").ok().flatten())
-    {
-        Some(v) => v.extract::<usize>()?,
-        None => defaults.n_folds,
-    };
+    let args = args.as_ref();
+    let label = "method='optimal'";
+    let n_folds = arg_usize(args, label, "n_folds", defaults.n_folds)?;
     // Reject n_folds with bic.
-    if matches!(sel, Selector::Bic)
-        && args
-            .as_ref()
-            .and_then(|a| a.get_item("n_folds").ok().flatten())
-            .is_some()
-    {
+    if matches!(sel, Selector::Bic) && arg(args, "n_folds").is_some() {
         return Err(invalid_args_err(
             "selector='bic' does not accept arg 'n_folds'",
         ));
     }
-    let n_perm = match args
-        .as_ref()
-        .and_then(|a| a.get_item("n_perm").ok().flatten())
-    {
-        Some(v) => {
+    let n_perm = match arg(args, "n_perm") {
+        Some(_) => {
             let Some(dm) = diag_method else {
                 return Err(invalid_args_err(
                     "args['n_perm'] requires diagnostic to be set",
@@ -1225,15 +1291,12 @@ fn run_find_k_optimal<'py>(
                     "args['n_perm'] only valid for diagnostic in {raw_perm, split_exact}",
                 ));
             }
-            v.extract::<usize>()?
+            arg_usize(args, label, "n_perm", defaults.n_perm)?
         }
         None => defaults.n_perm,
     };
-    let n_splits = match args
-        .as_ref()
-        .and_then(|a| a.get_item("n_splits").ok().flatten())
-    {
-        Some(v) => {
+    let n_splits = match arg(args, "n_splits") {
+        Some(_) => {
             let Some(dm) = diag_method else {
                 return Err(invalid_args_err(
                     "args['n_splits'] requires diagnostic to be set",
@@ -1247,15 +1310,12 @@ fn run_find_k_optimal<'py>(
                     "args['n_splits'] only valid for diagnostic in {split_nb, split_exact}",
                 ));
             }
-            v.extract::<usize>()?
+            arg_usize(args, label, "n_splits", defaults.n_splits)?
         }
         None => defaults.n_splits,
     };
-    let force = match args
-        .as_ref()
-        .and_then(|a| a.get_item("force").ok().flatten())
-    {
-        Some(v) => {
+    let force = match arg(args, "force") {
+        Some(_) => {
             let Some(dm) = diag_method else {
                 return Err(invalid_args_err(
                     "args['force'] requires diagnostic to be set",
@@ -1266,9 +1326,7 @@ fn run_find_k_optimal<'py>(
                     "args['force'] only valid for diagnostic='split_nb'",
                 ));
             }
-            v.extract::<bool>().map_err(|_| {
-                invalid_args_err("args['force'] for diagnostic='split_nb' must be a bool")
-            })?
+            arg_bool(args, "diagnostic='split_nb'", "force", defaults.force)?
         }
         None => defaults.force,
     };
@@ -1284,7 +1342,9 @@ fn run_find_k_optimal<'py>(
         disable_parallelism,
         verbose,
     };
-    let xf = np_mat_to_faer(x)?;
+    let x = aligned(x)?;
+    let mut x_copy = None;
+    let xf = x_view(&x, &mut x_copy)?;
     let yf = np_col_to_faer(y)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
@@ -1459,29 +1519,11 @@ fn run_find_k_sequence<'py>(
     if let Some(a) = args.as_ref() {
         validate_keys("sequence", a, allowed)?;
     }
-    let n_perm = match args
-        .as_ref()
-        .and_then(|a| a.get_item("n_perm").ok().flatten())
-    {
-        Some(v) => v.extract::<usize>()?,
-        None => defaults.n_perm,
-    };
-    let n_splits = match args
-        .as_ref()
-        .and_then(|a| a.get_item("n_splits").ok().flatten())
-    {
-        Some(v) => v.extract::<usize>()?,
-        None => defaults.n_splits,
-    };
-    let force = match args
-        .as_ref()
-        .and_then(|a| a.get_item("force").ok().flatten())
-    {
-        Some(v) => v.extract::<bool>().map_err(|_| {
-            invalid_args_err("args['force'] for test_method='split_nb' must be a bool")
-        })?,
-        None => defaults.force,
-    };
+    let args = args.as_ref();
+    let label = format!("test_method='{test_method}'");
+    let n_perm = arg_usize(args, &label, "n_perm", defaults.n_perm)?;
+    let n_splits = arg_usize(args, &label, "n_splits", defaults.n_splits)?;
+    let force = arg_bool(args, &label, "force", defaults.force)?;
     let opts = FindKSequenceOpts {
         test_method: tm,
         alpha: alpha.unwrap_or(defaults.alpha),
@@ -1493,7 +1535,9 @@ fn run_find_k_sequence<'py>(
         disable_parallelism,
         verbose,
     };
-    let xf = np_mat_to_faer(x)?;
+    let x = aligned(x)?;
+    let mut x_copy = None;
+    let xf = x_view(&x, &mut x_copy)?;
     let yf = np_col_to_faer(y)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
@@ -1648,7 +1692,9 @@ fn pls1_perm_null_raw<'py>(
         disable_parallelism,
         verbose,
     };
-    let xf = np_mat_to_faer(x)?;
+    let x = aligned(x)?;
+    let mut x_copy = None;
+    let xf = x_view(&x, &mut x_copy)?;
     let yf = np_col_to_faer(y)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
@@ -1702,28 +1748,29 @@ fn preprocess<'py>(
     weights: Option<PyReadonlyArray1<'_, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
     // Bridge X (2-D, optional).
-    let xf = x.map(np_mat_to_faer).transpose()?;
-    let xref = xf.as_ref().map(faer::Mat::as_ref);
+    let x = x.map(aligned).transpose()?;
+    let mut x_copy = None;
+    let xc = &mut x_copy;
+    let xref = x.as_ref().map(move |a| x_view(a, xc)).transpose()?;
 
     // Y is shape-polymorphic (1-D or 2-D; see `PreprocessResult`). Detect 1-D vs 2-D up front.
-    let mut y_was_2d = false;
-    let yf_1d: Option<faer::Col<f64>>;
-    let yf_2d: Option<faer::Mat<f64>>;
+    let mut yf_1d: Option<faer::Col<f64>> = None;
+    let mut y_2d: Option<PyReadonlyArray2<'_, f64>> = None;
     if let Some(yobj) = y {
         if let Ok(arr1) = yobj.extract::<PyReadonlyArray1<'_, f64>>() {
             yf_1d = Some(np_col_to_faer(arr1)?);
-            yf_2d = None;
         } else {
-            let arr2: PyReadonlyArray2<'_, f64> = yobj.extract()?;
-            yf_2d = Some(np_mat_to_faer(arr2)?);
-            yf_1d = None;
-            y_was_2d = true;
+            y_2d = Some(aligned(yobj.extract()?)?);
         }
-    } else {
-        yf_1d = None;
-        yf_2d = None;
     }
+    let y_was_2d = y_2d.is_some();
     let y_ref_1d = yf_1d.as_ref().map(faer::Col::as_ref);
+    let mut y_copy = None;
+    let yc = &mut y_copy;
+    let y_ref_2d = y_2d
+        .as_ref()
+        .map(move |a| col_major_view(a, yc))
+        .transpose()?;
 
     // Bridge weights.
     let wf = weights.map(np_col_to_faer).transpose()?;
@@ -1731,38 +1778,14 @@ fn preprocess<'py>(
 
     let d = PyDict::new(py);
     if y_was_2d {
-        // Core preprocess never sees the 2-D Y (it only takes a 1-D y), so it
-        // cannot check Y's row count against X or weights the way it does for
-        // the 1-D path. Do that check here before standardizing Y by hand.
-        let yref2d_for_check = yf_2d.as_ref().unwrap().as_ref();
-        if let Some(x) = xref {
-            if x.nrows() != yref2d_for_check.nrows() {
-                map_res::<()>(Err(PlsKitError::DimensionMismatch {
-                    x: (x.nrows(), x.ncols()),
-                    y: yref2d_for_check.nrows(),
-                }))?;
-            }
-        }
-        if let Some(w) = wref {
-            if w.nrows() != yref2d_for_check.nrows() {
-                map_res::<()>(Err(PlsKitError::InvalidWeights {
-                    reason: "length_mismatch",
-                }))?;
-            }
-        }
-        // Run core preprocess WITHOUT y so it normalizes weights and standardizes X.
-        let core_in = PreprocessInput {
+        // A 2-D Y goes to the core's block form: the same validation and
+        // moments as the 1-D path, applied per column.
+        let r = map_res(core_preprocess_block(PreprocessBlockInput {
             x: xref,
-            y: None,
+            y: y_ref_2d,
             weights: wref,
-        };
-        let core_r = map_res(core_preprocess(core_in))?;
-        // Apply the SAME normalized weights to standardize the 2-D Y.
-        let yref2d = yf_2d.as_ref().unwrap().as_ref();
-        let wn_ref = core_r.weights_normalized.as_ref().map(faer::Col::as_ref);
-        let (y_std, y_mean, y_scale) = plskit::linalg::standardize_weighted(yref2d, wn_ref);
-
-        if let Some((xs, x_mean, x_scale)) = core_r.x_std {
+        }))?;
+        if let Some((xs, x_mean, x_scale)) = r.x_std {
             d.set_item("X_std", faer_mat_to_np(py, xs))?;
             d.set_item("X_mean", faer_col_to_np(py, x_mean))?;
             d.set_item("X_scale", faer_col_to_np(py, x_scale))?;
@@ -1771,15 +1794,16 @@ fn preprocess<'py>(
             d.set_item("X_mean", py.None())?;
             d.set_item("X_scale", py.None())?;
         }
+        let (y_std, y_mean, y_scale) = r.y_std.expect("Y was passed");
         d.set_item("Y_std", faer_mat_to_np(py, y_std))?;
         d.set_item("Y_mean", faer_col_to_np(py, y_mean))?;
         d.set_item("Y_scale", faer_col_to_np(py, y_scale))?;
-        if let Some(wn) = core_r.weights_normalized {
+        if let Some(wn) = r.weights_normalized {
             d.set_item("weights_normalized", faer_col_to_np(py, wn))?;
         } else {
             d.set_item("weights_normalized", py.None())?;
         }
-        d.set_item("n_eff", core_r.n_eff)?;
+        d.set_item("n_eff", r.n_eff)?;
     } else {
         let core_in = PreprocessInput {
             x: xref,
@@ -1836,20 +1860,21 @@ fn spls1_find_keep_optimal<'py>(
     if let Some(a) = args.as_ref() {
         validate_keys("keep_optimal", a, allowed)?;
     }
-    let n_folds = match args
-        .as_ref()
-        .and_then(|a| a.get_item("n_folds").ok().flatten())
-    {
-        Some(v) => v.extract::<usize>()?,
-        None => FindKeepOptimalOpts::default().n_folds,
-    };
+    let n_folds = arg_usize(
+        args.as_ref(),
+        "method='keep_optimal'",
+        "n_folds",
+        FindKeepOptimalOpts::default().n_folds,
+    )?;
     let opts = FindKeepOptimalOpts {
         n_folds,
         seed,
         disable_parallelism,
         verbose,
     };
-    let xf = np_mat_to_faer(x)?;
+    let x = aligned(x)?;
+    let mut x_copy = None;
+    let xf = x_view(&x, &mut x_copy)?;
     let yf = np_col_to_faer(y)?;
     let wf = weights.map(np_col_to_faer).transpose()?;
     let wref = wf.as_ref().map(Col::as_ref);
@@ -1878,15 +1903,6 @@ fn _plskit(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // off the engine constant so `_api.py`'s reroute warning never keeps its
     // own copy that could drift from the value the Rust reroute sites use.
     m.add("SPLIT_NB_REROUTE_N_PERM", plskit::SPLIT_NB_REROUTE_N_PERM)?;
-    // `rotate()`'s varimax args default from the engine's own
-    // `VarimaxArgs::default()` instead of `_api.py` keeping a second,
-    // hand-maintained copy of the same three numbers.
-    let varimax_defaults = PyDict::new(py);
-    let vd = plskit::VarimaxArgs::default();
-    varimax_defaults.set_item("max_iter", vd.max_iter)?;
-    varimax_defaults.set_item("tol", vd.tol)?;
-    varimax_defaults.set_item("kaiser_normalize", vd.kaiser_normalize)?;
-    m.add("VARIMAX_DEFAULTS", varimax_defaults)?;
     m.add_function(wrap_pyfunction!(preprocess, m)?)?;
     m.add_function(wrap_pyfunction!(pls1_fit, m)?)?;
     m.add_function(wrap_pyfunction!(pls1_predict, m)?)?;

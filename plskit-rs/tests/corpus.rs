@@ -1,6 +1,7 @@
 //! Integration test: load every fixture in `testdata/` and assert the Rust
-//! core reproduces the frozen output, at the corpus tolerances (scalars
-//! `atol=1e-12`, arrays `atol=1e-10`; integer and string fields exactly).
+//! core reproduces the frozen output, at the corpus tolerances
+//! (`|a − e| ≤ atol + rtol·|e|` with scalars `atol=1e-12`, arrays
+//! `atol=1e-10`, `rtol=1e-14`; integer and string fields exactly).
 //!
 //! One test per function family, each walking every manifest case of that
 //! family. The call each arm makes is the one `plskit-testdata-gen` made to
@@ -30,10 +31,14 @@ use plskit::{
 };
 use serde_json::Value;
 
-/// Corpus tolerance for 0-D fields.
+/// Corpus absolute tolerance for 0-D fields.
 const ATOL_SCALAR: f64 = 1e-12;
-/// Corpus tolerance for array fields (and the flattened `{k: score}` maps).
+/// Corpus absolute tolerance for array fields (and the flattened `{k: score}` maps).
 const ATOL_ARRAY: f64 = 1e-10;
+/// Corpus relative tolerance for every `f64` field (`testdata/README.md`
+/// "Tolerance"): about 45 ε, so cross-host drift in a large value (one ulp
+/// of the score statistic ≈ 6126 is 9.1e-13) stays inside.
+const RTOL: f64 = 1e-14;
 
 /// Function families with an arm in this file. Kept in step with the
 /// `#[test]` functions below by [`all_manifest_functions_are_covered`].
@@ -86,18 +91,20 @@ fn cases_for(function: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Run `check` on every case of `function`; fail if there are none.
+/// Run `check` on every case of `function`; fail if there are none, or if a
+/// case carries a kwarg outside `kwargs` (see [`Kwargs`]).
 ///
 /// Every case runs with faer's global parallelism disabled (process-wide;
 /// this file is its own test binary). faer's operator `*` and high-level
 /// decompositions read that global, whose default degree is the Rayon pool
 /// size, so a core path reading it would round differently per
 /// `RAYON_NUM_THREADS`; disabled, such a read panics and names the site.
-fn for_each_case(function: &str, mut check: impl FnMut(&Value, &Inputs, &Fixture)) {
+fn for_each_case(function: &str, kwargs: Kwargs, mut check: impl FnMut(&Value, &Inputs, &Fixture)) {
     faer::disable_global_parallelism();
     let cases = cases_for(function);
     assert!(!cases.is_empty(), "no {function} cases in the manifest");
     for case in &cases {
+        kwargs.assert_covers(case);
         let inputs = Inputs::load(&corpus_dir().join(case["inputs"].as_str().unwrap()));
         let fx = Fixture::load(case);
         check(case, &inputs, &fx);
@@ -238,7 +245,7 @@ impl Fixture {
             .unwrap_or_else(|| panic!("{}: integer field {field} missing from fixture", self.name))
     }
 
-    /// 0-D `f64` field, `atol = 1e-12`.
+    /// 0-D `f64` field, `atol = 1e-12`, `rtol = 1e-14`.
     fn scalar(&self, field: &str, actual: f64) {
         let e = self.f64_field(field);
         assert_eq!(
@@ -250,13 +257,14 @@ impl Fixture {
         let e = *e.iter().next().unwrap();
         assert!(
             close(actual, e, ATOL_SCALAR),
-            "{}.{field}: |{actual} - {e}| = {:e} > {ATOL_SCALAR:e}",
+            "{}.{field}: |{actual} - {e}| = {:e} > {:e}",
             self.name,
-            (actual - e).abs()
+            (actual - e).abs(),
+            ATOL_SCALAR + RTOL * e.abs()
         );
     }
 
-    /// 1-D `f64` field, `atol = 1e-10`.
+    /// 1-D `f64` field, `atol = 1e-10`, `rtol = 1e-14`.
     fn array(&self, field: &str, actual: &[f64]) {
         let e = self.f64_field(field);
         assert_eq!(
@@ -274,9 +282,10 @@ impl Fixture {
         for (i, (&a, &ev)) in actual.iter().zip(e.iter()).enumerate() {
             assert!(
                 close(a, ev, ATOL_ARRAY),
-                "{}.{field}[{i}]: |{a} - {ev}| = {:e} > {ATOL_ARRAY:e}",
+                "{}.{field}[{i}]: |{a} - {ev}| = {:e} > {:e}",
                 self.name,
-                (a - ev).abs()
+                (a - ev).abs(),
+                ATOL_ARRAY + RTOL * ev.abs()
             );
         }
     }
@@ -286,7 +295,7 @@ impl Fixture {
         self.array(field, &v);
     }
 
-    /// 2-D `f64` field, `atol = 1e-10`.
+    /// 2-D `f64` field, `atol = 1e-10`, `rtol = 1e-14`.
     fn mat(&self, field: &str, actual: &faer::Mat<f64>) {
         let e = self.f64_field(field);
         assert_eq!(
@@ -306,9 +315,10 @@ impl Fixture {
                 let (a, ev) = (actual[(i, j)], e[[i, j]]);
                 assert!(
                     close(a, ev, ATOL_ARRAY),
-                    "{}.{field}[{i},{j}]: |{a} - {ev}| = {:e} > {ATOL_ARRAY:e}",
+                    "{}.{field}[{i},{j}]: |{a} - {ev}| = {:e} > {:e}",
                     self.name,
-                    (a - ev).abs()
+                    (a - ev).abs(),
+                    ATOL_ARRAY + RTOL * ev.abs()
                 );
             }
         }
@@ -401,15 +411,88 @@ impl Fixture {
     }
 }
 
-/// `|a − e| ≤ atol`, with NaN equal to NaN and an infinity equal to itself
-/// (numpy's `assert_allclose` defaults, which the Python side uses). The
-/// exact `==` is what makes `inf` match `inf`, where the difference is NaN.
+/// `|a − e| ≤ atol + RTOL·|e|` for a finite `e`, with NaN equal to NaN and
+/// an infinity equal only to itself: numpy's `assert_allclose`, which the
+/// Python side uses. The exact `==` is what makes `inf` match `inf`, where
+/// the difference is NaN; the finiteness guard keeps `RTOL·|inf|` from
+/// accepting any `a` against an infinite `e`.
 #[allow(clippy::float_cmp)]
 fn close(a: f64, e: f64, atol: f64) -> bool {
-    a == e || (a.is_nan() && e.is_nan()) || (a - e).abs() <= atol
+    a == e
+        || (a.is_nan() && e.is_nan())
+        || (e.is_finite() && (a - e).abs() <= atol + RTOL * e.abs())
+}
+
+/// [`close`] is numpy's `assert_allclose(a, e, rtol=RTOL, atol=atol)`,
+/// `equal_nan=True`, on the edges every corpus comparison relies on.
+#[test]
+fn close_follows_numpy_allclose() {
+    let (inf, nan) = (f64::INFINITY, f64::NAN);
+    let big = 6_125.560_061_283_051_f64;
+    let rows = [
+        (big, f64::from_bits(big.to_bits() + 2), true), // 2 ulps: inside RTOL only
+        (big, big + 1e-10, false),
+        (0.5, 0.5 + 5e-13, true),
+        (0.5, 0.5 + 5e-12, false),
+        (nan, nan, true),
+        (1.0, nan, false),
+        (inf, inf, true),
+        (-inf, inf, false),
+        (1.0, inf, false),
+        (inf, 1.0, false),
+    ];
+    for (a, e, want) in rows {
+        assert_eq!(close(a, e, ATOL_SCALAR), want, "close({a}, {e})");
+    }
 }
 
 // ── kwargs ────────────────────────────────────────────────────────────────
+
+/// The manifest kwargs an arm accepts: the keys it reads (options it passes
+/// to the call, or the `weights` descriptor [`Inputs::weights`] checks) plus
+/// the keys that only describe the generated data (`n`, `d`, data seeds),
+/// which the Python arm drops too. `args` lists the keys of the nested
+/// `args` object.
+///
+/// A case carrying any other key fails its arm: its fixture would be
+/// compared against a call without that option, and an option such as
+/// `pre_standardized` on already-standardized inputs can agree to the
+/// tolerance, so the fixture would pass while pinning nothing new. An arm
+/// that starts reading a kwarg adds it here in the same edit.
+#[derive(Clone, Copy)]
+struct Kwargs {
+    top: &'static [&'static str],
+    args: &'static [&'static str],
+}
+
+impl Kwargs {
+    const fn top(top: &'static [&'static str]) -> Self {
+        Self { top, args: &[] }
+    }
+
+    fn assert_covers(self, case: &Value) {
+        let kw = case["kwargs"].as_object().expect("kwargs is an object");
+        let stray: Vec<&String> = kw
+            .keys()
+            .filter(|k| !self.top.contains(&k.as_str()))
+            .collect();
+        let stray_args: Vec<&String> = kw
+            .get("args")
+            .and_then(Value::as_object)
+            .map(|a| {
+                a.keys()
+                    .filter(|k| !self.args.contains(&k.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            stray.is_empty() && stray_args.is_empty(),
+            "{}: kwargs {stray:?} and args {stray_args:?} are not read by the {} arm",
+            case["name"],
+            case["function"]
+        );
+    }
+}
 
 fn kw_usize(kw: &Value, key: &str) -> usize {
     usize::try_from(
@@ -469,7 +552,8 @@ fn confirmatory_args(method: ConfirmatoryMethod, args: &Value) -> ConfirmatoryAr
     }
 }
 
-/// `FindKOptimalOpts` from `selector` / `diagnostic` / `args` / `seed`.
+/// `FindKOptimalOpts` from `selector` / `diagnostic` / `args` /
+/// `pre_standardized` / `seed`.
 fn find_k_optimal_opts(kw: &Value) -> FindKOptimalOpts {
     let d = FindKOptimalOpts::default();
     let args = &kw["args"];
@@ -486,12 +570,14 @@ fn find_k_optimal_opts(kw: &Value) -> FindKOptimalOpts {
         n_folds: kw_opt_usize(args, "n_folds").unwrap_or(d.n_folds),
         n_perm: kw_opt_usize(args, "n_perm").unwrap_or(d.n_perm),
         n_splits: kw_opt_usize(args, "n_splits").unwrap_or(d.n_splits),
+        pre_standardized: kw_bool(kw, "pre_standardized"),
         seed: kw_seed(kw),
         ..d
     }
 }
 
-/// `FindKSequenceOpts` from `test_method` / `alpha` / `args` / `seed`.
+/// `FindKSequenceOpts` from `test_method` / `alpha` / `args` /
+/// `pre_standardized` / `seed`.
 fn find_k_sequence_opts(kw: &Value) -> FindKSequenceOpts {
     let d = FindKSequenceOpts::default();
     let args = &kw["args"];
@@ -502,10 +588,16 @@ fn find_k_sequence_opts(kw: &Value) -> FindKSequenceOpts {
         alpha: kw_opt_f64(kw, "alpha").unwrap_or(d.alpha),
         n_perm: kw_opt_usize(args, "n_perm").unwrap_or(d.n_perm),
         n_splits: kw_opt_usize(args, "n_splits").unwrap_or(d.n_splits),
+        pre_standardized: kw_bool(kw, "pre_standardized"),
         seed: kw_seed(kw),
         ..d
     }
 }
+
+/// Kwargs of the `*_find_k_optimal` arms (`keep` for the sparse one).
+const FIND_K_OPTIMAL_ARGS: &[&str] = &["n_folds", "n_perm", "n_splits"];
+/// Kwargs of the `*_find_k_sequence` arms (`keep` for the sparse one).
+const FIND_K_SEQUENCE_ARGS: &[&str] = &["n_perm", "n_splits"];
 
 // ── Shared field sets ─────────────────────────────────────────────────────
 
@@ -562,7 +654,10 @@ fn check_svd_outputs(fx: &Fixture, m: &plskit::Pls3Model) {
 /// with the manifest seed, then a fixed fit at its `k_star`.
 #[test]
 fn pls1_fit_cases_match_corpus() {
-    for_each_case("pls1_fit", |case, inputs, fx| {
+    // `seed` feeds the K selection of `k = "sequence"`; with an integer `k`
+    // both this arm and the Python one pass it and the fit ignores it.
+    let kwargs = Kwargs::top(&["k", "k_max", "pre_standardized", "seed", "weights"]);
+    for_each_case("pls1_fit", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let (x, y) = (inputs.mat("X"), inputs.col("y"));
         let weights = inputs.weights(case);
@@ -592,7 +687,10 @@ fn pls1_fit_cases_match_corpus() {
             y.as_ref(),
             KSpec::Fixed(k),
             wref,
-            FitOpts::default(),
+            FitOpts {
+                pre_standardized: kw_bool(kw, "pre_standardized"),
+                ..FitOpts::default()
+            },
         )
         .expect("fit");
         check_pls1_model(fx, &m);
@@ -601,7 +699,19 @@ fn pls1_fit_cases_match_corpus() {
 
 #[test]
 fn pls1_find_k_optimal_cases_match_corpus() {
-    for_each_case("pls1_find_k_optimal", |case, inputs, fx| {
+    let kwargs = Kwargs {
+        top: &[
+            "args",
+            "diagnostic",
+            "k_max",
+            "pre_standardized",
+            "seed",
+            "selector",
+            "weights",
+        ],
+        args: FIND_K_OPTIMAL_ARGS,
+    };
+    for_each_case("pls1_find_k_optimal", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let weights = inputs.weights(case);
         let r = plskit::pls1_find_k_optimal(
@@ -618,7 +728,19 @@ fn pls1_find_k_optimal_cases_match_corpus() {
 
 #[test]
 fn pls1_find_k_sequence_cases_match_corpus() {
-    for_each_case("pls1_find_k_sequence", |case, inputs, fx| {
+    let kwargs = Kwargs {
+        top: &[
+            "alpha",
+            "args",
+            "k_max",
+            "pre_standardized",
+            "seed",
+            "test_method",
+            "weights",
+        ],
+        args: FIND_K_SEQUENCE_ARGS,
+    };
+    for_each_case("pls1_find_k_sequence", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let weights = inputs.weights(case);
         let r = plskit::pls1_find_k_sequence(
@@ -638,7 +760,24 @@ fn pls1_find_k_sequence_cases_match_corpus() {
 /// `split_nb` case carrying the subsampling CI bundle.
 #[test]
 fn pls1_confirmatory_test_cases_match_corpus() {
-    for_each_case("pls1_confirmatory_test", |case, inputs, fx| {
+    let kwargs = Kwargs {
+        top: &[
+            "args",
+            "ci",
+            "disable_parallelism",
+            "k",
+            "level",
+            "m_rate",
+            "max_failure_rate",
+            "method",
+            "n_boot",
+            "pre_standardized",
+            "seed",
+            "weights",
+        ],
+        args: &["force", "n_folds", "n_perm", "n_splits"],
+    };
+    for_each_case("pls1_confirmatory_test", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let (x, y) = (inputs.mat("X"), inputs.col("y"));
         let weights = inputs.weights(case);
@@ -661,6 +800,7 @@ fn pls1_confirmatory_test_cases_match_corpus() {
             },
             ConfirmatoryTestOpts {
                 args: confirmatory_args(method, &kw["args"]),
+                pre_standardized: kw_bool(kw, "pre_standardized"),
                 seed: kw_seed(kw),
                 disable_parallelism: kw_bool(kw, "disable_parallelism"),
                 ci,
@@ -703,7 +843,9 @@ fn pls1_confirmatory_test_cases_match_corpus() {
 
 #[test]
 fn pls1_predict_cases_match_corpus() {
-    for_each_case("pls1_predict", |case, inputs, fx| {
+    // The generated data: training / new-data shapes and seeds.
+    let kwargs = Kwargs::top(&["d", "k", "n_new", "n_train", "seed_new", "seed_train"]);
+    for_each_case("pls1_predict", kwargs, |case, inputs, fx| {
         let m = plskit::pls1_fit(
             inputs.mat("X_train").as_ref(),
             inputs.col("y_train").as_ref(),
@@ -722,7 +864,8 @@ fn pls1_predict_cases_match_corpus() {
 /// the Python wrapper passes to `rotate`).
 #[test]
 fn rotate_cases_match_corpus() {
-    for_each_case("rotate", |case, inputs, fx| {
+    let kwargs = Kwargs::top(&["d", "k", "method", "n", "seed"]);
+    for_each_case("rotate", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         assert_eq!(kw["method"].as_str(), Some("varimax"), "{}", fx.name);
         let m = plskit::pls1_fit(
@@ -748,7 +891,8 @@ fn rotate_cases_match_corpus() {
 
 #[test]
 fn preprocess_cases_match_corpus() {
-    for_each_case("preprocess", |case, inputs, fx| {
+    let kwargs = Kwargs::top(&["d", "n", "seed", "weights"]);
+    for_each_case("preprocess", kwargs, |case, inputs, fx| {
         let x = inputs.0.contains_key("X").then(|| inputs.mat("X"));
         let y = inputs.0.contains_key("y").then(|| inputs.col("y"));
         let weights = inputs.weights(case);
@@ -779,7 +923,18 @@ fn preprocess_cases_match_corpus() {
 
 #[test]
 fn pls1_perm_null_cases_match_corpus() {
-    for_each_case("pls1_perm_null", |case, inputs, fx| {
+    let kwargs = Kwargs::top(&[
+        "d",
+        "disable_parallelism",
+        "k",
+        "n",
+        "n_perm",
+        "pre_standardized",
+        "return_perm_matrix",
+        "seed",
+        "weights",
+    ]);
+    for_each_case("pls1_perm_null", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let weights = inputs.weights(case);
         let r = plskit::pls1_perm_null(
@@ -789,8 +944,8 @@ fn pls1_perm_null_cases_match_corpus() {
             weights.as_ref().map(faer::Col::as_ref),
             PermNullOpts {
                 n_perm: kw_usize(kw, "n_perm"),
-                return_perm_matrix: false,
-                pre_standardized: false,
+                return_perm_matrix: kw_bool(kw, "return_perm_matrix"),
+                pre_standardized: kw_bool(kw, "pre_standardized"),
                 disable_parallelism: kw_bool(kw, "disable_parallelism"),
                 verbose: false,
             },
@@ -805,13 +960,38 @@ fn pls1_perm_null_cases_match_corpus() {
         fx.int("k", r.k);
         fx.int("seed", r.seed);
         fx.scalar("n_eff", r.n_eff);
+        // Row-major `(n_perm, d)` in the core, stored 2-D.
+        let d = r.beta_ref.len();
+        fx.optional(
+            "beta_perm_matrix",
+            r.beta_perm_matrix.as_deref(),
+            |fx, m| {
+                fx.mat(
+                    "beta_perm_matrix",
+                    &faer::Mat::from_fn(r.n_perm, d, |i, j| m[i * d + j]),
+                );
+            },
+        );
     });
 }
 
 #[test]
 fn pls1_rotation_stability_cases_match_corpus() {
-    for_each_case("pls1_rotation_stability", |case, inputs, fx| {
+    let kwargs = Kwargs::top(&[
+        "d",
+        "disable_parallelism",
+        "k",
+        "level",
+        "m_rate",
+        "n",
+        "n_boot",
+        "pre_standardized",
+        "seed",
+        "weights",
+    ]);
+    for_each_case("pls1_rotation_stability", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
+        let weights = inputs.weights(case);
         let d = RotationStabilityOpts::default();
         let r = plskit::pls1_rotation_stability(
             inputs.mat("X").as_ref(),
@@ -819,11 +999,12 @@ fn pls1_rotation_stability_cases_match_corpus() {
             kw_usize(kw, "k"),
             RotationStabilityMethod::Varimax(VarimaxArgs::default()),
             None,
-            None,
+            weights.as_ref().map(faer::Col::as_ref),
             RotationStabilityOpts {
                 n_boot: kw_opt_usize(kw, "n_boot").unwrap_or(d.n_boot),
                 m_rate: kw_opt_f64(kw, "m_rate").unwrap_or(d.m_rate),
                 level: kw_opt_f64(kw, "level").unwrap_or(d.level),
+                pre_standardized: kw_bool(kw, "pre_standardized"),
                 seed: kw_seed(kw),
                 disable_parallelism: kw_bool(kw, "disable_parallelism"),
                 ..d
@@ -852,7 +1033,9 @@ fn pls1_rotation_stability_cases_match_corpus() {
 
 #[test]
 fn spls1_fit_cases_match_corpus() {
-    for_each_case("spls1_fit", |case, inputs, fx| {
+    // `seed` is the data-generation seed: spls1_fit takes none.
+    let kwargs = Kwargs::top(&["k", "keep", "seed", "weights"]);
+    for_each_case("spls1_fit", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let weights = inputs.weights(case);
         let m = plskit::spls1_fit(
@@ -871,7 +1054,8 @@ fn spls1_fit_cases_match_corpus() {
 
 #[test]
 fn spls1_find_keep_optimal_cases_match_corpus() {
-    for_each_case("spls1_find_keep_optimal", |case, inputs, fx| {
+    let kwargs = Kwargs::top(&["k", "seed", "weights"]);
+    for_each_case("spls1_find_keep_optimal", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let weights = inputs.weights(case);
         let r = plskit::spls1_find_keep_optimal(
@@ -901,7 +1085,20 @@ fn spls1_find_keep_optimal_cases_match_corpus() {
 
 #[test]
 fn spls1_find_k_optimal_cases_match_corpus() {
-    for_each_case("spls1_find_k_optimal", |case, inputs, fx| {
+    let kwargs = Kwargs {
+        top: &[
+            "args",
+            "diagnostic",
+            "k_max",
+            "keep",
+            "pre_standardized",
+            "seed",
+            "selector",
+            "weights",
+        ],
+        args: FIND_K_OPTIMAL_ARGS,
+    };
+    for_each_case("spls1_find_k_optimal", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let weights = inputs.weights(case);
         let r = plskit::spls1_find_k_optimal(
@@ -919,7 +1116,20 @@ fn spls1_find_k_optimal_cases_match_corpus() {
 
 #[test]
 fn spls1_find_k_sequence_cases_match_corpus() {
-    for_each_case("spls1_find_k_sequence", |case, inputs, fx| {
+    let kwargs = Kwargs {
+        top: &[
+            "alpha",
+            "args",
+            "k_max",
+            "keep",
+            "pre_standardized",
+            "seed",
+            "test_method",
+            "weights",
+        ],
+        args: FIND_K_SEQUENCE_ARGS,
+    };
+    for_each_case("spls1_find_k_sequence", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let weights = inputs.weights(case);
         let r = plskit::spls1_find_k_sequence(
@@ -939,25 +1149,31 @@ fn spls1_find_k_sequence_cases_match_corpus() {
 
 #[test]
 fn pls3_fit_cases_match_corpus() {
-    for_each_case("pls3_fit", |case, inputs, fx| {
-        let m = plskit::pls3_fit(
-            inputs.mat("X").as_ref(),
-            inputs.mat("Y").as_ref(),
-            kw_usize(&case["kwargs"], "k"),
-            None,
-            Pls3FitOpts::default(),
-        )
-        .expect("pls3_fit");
-        check_svd_outputs(fx, &m);
-        fx.mat("x_scores", &m.x_scores);
-        fx.mat("y_scores", &m.y_scores);
-        fx.int("k_used", m.k_used);
-    });
+    // `seed` is the data-generation seed: pls3_fit takes none.
+    for_each_case(
+        "pls3_fit",
+        Kwargs::top(&["k", "seed"]),
+        |case, inputs, fx| {
+            let m = plskit::pls3_fit(
+                inputs.mat("X").as_ref(),
+                inputs.mat("Y").as_ref(),
+                kw_usize(&case["kwargs"], "k"),
+                None,
+                Pls3FitOpts::default(),
+            )
+            .expect("pls3_fit");
+            check_svd_outputs(fx, &m);
+            fx.mat("x_scores", &m.x_scores);
+            fx.mat("y_scores", &m.y_scores);
+            fx.int("k_used", m.k_used);
+        },
+    );
 }
 
 #[test]
 fn pls3_transform_cases_match_corpus() {
-    for_each_case("pls3_transform", |case, inputs, fx| {
+    let kwargs = Kwargs::top(&["k", "seed_new", "seed_train", "which"]);
+    for_each_case("pls3_transform", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let m = plskit::pls3_fit(
             inputs.mat("X").as_ref(),
@@ -987,7 +1203,11 @@ fn pls3_transform_cases_match_corpus() {
 
 #[test]
 fn pls3_confirmatory_test_cases_match_corpus() {
-    for_each_case("pls3_confirmatory_test", |case, inputs, fx| {
+    let kwargs = Kwargs {
+        top: &["args", "disable_parallelism", "k", "method", "seed"],
+        args: &["force", "n_folds", "n_perm", "n_splits"],
+    };
+    for_each_case("pls3_confirmatory_test", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let method = method_from_str(kw["method"].as_str().expect("method"));
         let r = plskit::pls3_confirmatory_test(
@@ -1024,7 +1244,8 @@ fn pls3_confirmatory_test_cases_match_corpus() {
 /// between the generator and the manifest would move first.
 #[test]
 fn spls3_fit_cases_match_corpus() {
-    for_each_case("spls3_fit", |case, inputs, fx| {
+    let kwargs = Kwargs::top(&["k", "keep_X", "keep_Y", "max_iter", "tol"]);
+    for_each_case("spls3_fit", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let d = Pls3FitOpts::default();
         let opts = Pls3FitOpts {

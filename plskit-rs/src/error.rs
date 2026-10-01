@@ -84,7 +84,8 @@ pub enum PlsKitError {
     #[error("invalid weights: {reason}")]
     InvalidWeights {
         /// Short `camel_snake` token describing the problem
-        /// (e.g. `"negative"`, `"all_zero"`, `"insufficient_effective_n"`).
+        /// (e.g. `"negative"`, `"all_zero"`, `"insufficient_effective_n"`,
+        /// `"length_mismatch"`).
         reason: &'static str,
     },
 
@@ -228,53 +229,103 @@ impl PlsKitError {
 mod tests {
     use super::*;
 
+    /// Every variant's `code()` is the string documented in `_docs/python/api.md`
+    /// ("All codes"); the Python wrapper stamps it on `PlsKitError.code`, so the
+    /// strings are a cross-language contract. The index match has no wildcard:
+    /// a new variant does not compile until it is given an index, and then fails
+    /// until it has a row here (and, by the same review, in the docs).
     #[test]
-    fn invalid_weights_variants_render() {
-        let e = PlsKitError::InvalidWeights { reason: "negative" };
-        assert_eq!(format!("{e}"), "invalid weights: negative");
-        let e = PlsKitError::InvalidWeights { reason: "all_zero" };
-        assert_eq!(format!("{e}"), "invalid weights: all_zero");
-        let e = PlsKitError::InvalidWeights {
-            reason: "insufficient_effective_n",
-        };
-        assert_eq!(format!("{e}"), "invalid weights: insufficient_effective_n");
-    }
-
-    #[test]
-    fn resampling_degenerate_carries_threshold() {
-        let e = PlsKitError::ResamplingDegenerate {
-            skipped: 50,
-            total: 1000,
-            skip_rate: 0.050,
-            threshold: 0.250,
-        };
-        let s = format!("{e}");
-        assert!(s.contains("50/1000"), "missing skipped/total");
-        assert!(s.contains("0.050"), "missing skip_rate");
-        assert!(s.contains("0.250"), "missing threshold");
-    }
-
-    #[test]
-    fn error_displays_dimension_mismatch() {
-        let e = PlsKitError::DimensionMismatch { x: (10, 5), y: 9 };
-        let s = format!("{e}");
-        assert!(s.contains("10"));
-        assert!(s.contains('9'));
-    }
-
-    #[test]
-    fn rotation_method_not_implemented_code() {
-        let e = PlsKitError::RotationMethodNotImplemented {
-            name: "promax".into(),
-        };
-        assert_eq!(e.code(), "rotation_method_not_implemented");
-        assert!(format!("{e}").contains("promax"));
-    }
-
-    #[test]
-    fn already_rotated_code() {
-        let e = PlsKitError::AlreadyRotated;
-        assert_eq!(e.code(), "already_rotated");
+    fn every_variant_maps_to_its_documented_code() {
+        use PlsKitError as E;
+        let s = || String::from("x");
+        let table: Vec<(E, &str)> = vec![
+            (
+                E::DimensionMismatch { x: (1, 1), y: 2 },
+                "dimension_mismatch",
+            ),
+            (E::KExceedsMax { k: 2, k_max: 1 }, "k_exceeds_max"),
+            (E::NonFiniteInput, "non_finite_input"),
+            (
+                E::ConvergenceFailure { iter: 1, tol: 0.1 },
+                "convergence_failure",
+            ),
+            (E::InvalidArgument(s()), "invalid_argument"),
+            (E::Internal(s()), "internal"),
+            (
+                E::RotationMethodNotImplemented { name: s() },
+                "rotation_method_not_implemented",
+            ),
+            (
+                E::InvalidArgs {
+                    method: s(),
+                    detail: s(),
+                },
+                "invalid_args",
+            ),
+            (E::InvalidInput(s()), "invalid_input"),
+            (E::ShapeMismatch(s()), "shape_mismatch"),
+            (E::AlreadyRotated, "already_rotated"),
+            (E::InvalidWeights { reason: "negative" }, "invalid_weights"),
+            (
+                E::ResamplingDegenerate {
+                    skipped: 1,
+                    total: 2,
+                    skip_rate: 0.5,
+                    threshold: 0.25,
+                },
+                "resampling_degenerate",
+            ),
+            (
+                E::ResampleFailureRateExceeded {
+                    max_failure_rate: 0.01,
+                    observed_worker: 0.0,
+                    observed_holdout_corr: 0.5,
+                    n_worker_failed: 0,
+                    n_holdout_corr_failed: 50,
+                    n_boot: 100,
+                },
+                "resample_failure_rate_exceeded",
+            ),
+            (
+                E::PermNullDegenerate {
+                    failed: 1,
+                    total: 2,
+                },
+                "perm_null_degenerate",
+            ),
+            (E::OptimalNoComponent, "optimal_no_component"),
+            (
+                E::SequenceNoRejection { alpha: 0.05 },
+                "sequence_no_rejection",
+            ),
+        ];
+        let mut seen: Vec<usize> = table
+            .iter()
+            .map(|(e, code)| {
+                assert_eq!(e.code(), *code, "{e:?}");
+                match e {
+                    E::DimensionMismatch { .. } => 0,
+                    E::KExceedsMax { .. } => 1,
+                    E::NonFiniteInput => 2,
+                    E::ConvergenceFailure { .. } => 3,
+                    E::InvalidArgument(_) => 4,
+                    E::Internal(_) => 5,
+                    E::RotationMethodNotImplemented { .. } => 6,
+                    E::InvalidArgs { .. } => 7,
+                    E::InvalidInput(_) => 8,
+                    E::ShapeMismatch(_) => 9,
+                    E::AlreadyRotated => 10,
+                    E::InvalidWeights { .. } => 11,
+                    E::ResamplingDegenerate { .. } => 12,
+                    E::ResampleFailureRateExceeded { .. } => 13,
+                    E::PermNullDegenerate { .. } => 14,
+                    E::OptimalNoComponent => 15,
+                    E::SequenceNoRejection { .. } => 16,
+                }
+            })
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..17).collect::<Vec<_>>(), "one row per variant");
     }
 
     #[test]
@@ -292,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn resample_failure_rate_exceeded_code() {
+    fn resample_failure_rate_exceeded_message_carries_the_rates() {
         let e = PlsKitError::ResampleFailureRateExceeded {
             max_failure_rate: 0.01,
             observed_worker: 0.0,
@@ -301,7 +352,6 @@ mod tests {
             n_holdout_corr_failed: 50,
             n_boot: 100,
         };
-        assert_eq!(e.code(), "resample_failure_rate_exceeded");
         let s = format!("{e}");
         assert!(
             s.contains("0.5") || s.contains("50/100"),

@@ -11,82 +11,45 @@ def _data(n=80, d=6, k_signal=2, snr=4.0, seed=1):
     return X, y
 
 
-def test_optimal_r2_se_returns_cv_scores_and_se():
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"selector": "bic", "args": {"n_folds": 5}},
+         "does not accept arg 'n_folds'"),
+        ({"selector": "r2_se", "args": {"n_splits": 30}},
+         "requires diagnostic to be set"),
+        ({"selector": "bogus"}, "unknown selector: bogus"),
+        ({"args": {"n_folds": "x"}},
+         r"args\['n_folds'\] for method='optimal' must be a non-negative whole number"),
+    ],
+)
+def test_optimal_seam_rejects_args_the_selection_cannot_use(kwargs, message):
+    # Seam-only validators in run_find_k_optimal.
     X, y = _data()
-    r = plskit.pls1_find_k_optimal(X, y, k_max=4, selector="r2_se",
-                                    args={"n_folds": 5}, seed=7)
-    assert isinstance(r, plskit.FindKOptimalResult)
-    assert r.selector == "r2_se"
-    assert r.cv_scores is not None
-    assert r.cv_scores_se is not None
-    assert r.bic_scores is None
-    assert r.pvalues is None
-    assert r.diagnostic is None
+    with pytest.raises(plskit.PlsKitError, match=message) as ei:
+        plskit.pls1_find_k_optimal(X, y, k_max=4, seed=7, **kwargs)
+    assert ei.value.code == "invalid_args"
 
 
-def test_optimal_r2_max_returns_cv_scores_no_se():
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"k_max": -1}, "k_max must be a non-negative whole number"),
+        ({"selector": 1}, "selector must be a string, got 1"),
+        ({"diagnostic": 2}, "diagnostic must be a string"),
+        ({"args": [1]}, "args must be a dict"),
+        ({"verbose": 1}, "verbose must be a bool"),
+    ],
+)
+def test_optimal_rejects_unusable_top_level_values(kwargs, message):
     X, y = _data()
-    r = plskit.pls1_find_k_optimal(X, y, k_max=4, selector="r2_max",
-                                    args={"n_folds": 5}, seed=7)
-    assert r.selector == "r2_max"
-    assert r.cv_scores is not None
-    assert r.cv_scores_se is None
-    assert r.bic_scores is None
+    kwargs = {"k_max": 4, **kwargs}
+    with pytest.raises(plskit.PlsKitError, match=message) as ei:
+        plskit.pls1_find_k_optimal(X, y, seed=7, **kwargs)
+    assert ei.value.code == "invalid_argument"
 
 
-@pytest.mark.parametrize("selector", ["r2_se", "r2_max"])
-def test_optimal_rejects_leave_one_out_at_n_eq_2(selector):
-    """n = 2: the CV layer's own n_folds cap/floor (max(2, n - 2)) pushes
-    the effective fold count back up to n, leave-one-out (every validation
-    fold a single row). The same degeneracy raw_perm rejects."""
-    X, y = _data(n=2, d=3, k_signal=1, seed=6)
-    with pytest.raises(plskit.PlsKitError) as exc_info:
-        plskit.pls1_find_k_optimal(X, y, k_max=1, selector=selector, seed=7)
-    assert exc_info.value.code == "invalid_argument"
-
-
-def test_optimal_bic_returns_bic_scores_only():
+def test_optimal_selector_none_is_the_default():
+    """None for an optional argument means its default, as in plskit-bind."""
     X, y = _data()
-    r = plskit.pls1_find_k_optimal(X, y, k_max=4, selector="bic", seed=7)
-    assert r.selector == "bic"
-    assert r.bic_scores is not None
-    assert r.cv_scores is None
-    assert r.cv_scores_se is None
-
-
-def test_optimal_bic_rejects_n_folds():
-    X, y = _data()
-    with pytest.raises(plskit.PlsKitError):
-        plskit.pls1_find_k_optimal(X, y, k_max=4, selector="bic",
-                                     args={"n_folds": 5}, seed=7)
-
-
-def test_optimal_with_diagnostic_returns_pvalues():
-    X, y = _data()
-    r = plskit.pls1_find_k_optimal(
-        X, y, k_max=4, selector="r2_se",
-        diagnostic="split_nb",
-        args={"n_folds": 5, "n_splits": 30},
-        seed=7,
-    )
-    assert r.pvalues is not None
-    assert r.pvalues.shape == (r.k_star,)
-    assert r.diagnostic == "split_nb"
-
-
-def test_optimal_diagnostic_score_rejected():
-    X, y = _data()
-    with pytest.raises(plskit.PlsKitError):
-        plskit.pls1_find_k_optimal(
-            X, y, k_max=4, selector="r2_se",
-            diagnostic="score", seed=7,
-        )
-
-
-def test_optimal_n_splits_without_diagnostic_rejected():
-    X, y = _data()
-    with pytest.raises(plskit.PlsKitError):
-        plskit.pls1_find_k_optimal(
-            X, y, k_max=4, selector="r2_se",
-            args={"n_splits": 30}, seed=7,
-        )
+    assert plskit.pls1_find_k_optimal(X, y, 3, selector=None, seed=7).selector == "r2_se"

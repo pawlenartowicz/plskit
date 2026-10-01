@@ -1,8 +1,20 @@
-module plskit
+"""
+    PLSKit
 
-export version
+Partial Least Squares with modern inference, from Julia. PLSKit runs the
+Python `plskit` package through PythonCall.jl: every function, argument
+name and result field is the Python one (see `_docs/julia/`).
+"""
+module PLSKit
 
-# Stub — will dispatch into the Rust plskit-core engine via JLL once wired.
-version() = "0.0.1"
+using PythonCall
 
-end # module plskit
+export PlsKitResult, PlsKitError
+
+include("python.jl")
+include("results.jl")
+include("errors.jl")
+include("call.jl")
+include("generated.jl")
+
+end # module PLSKit

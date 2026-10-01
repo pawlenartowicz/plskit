@@ -11,27 +11,15 @@ def _data(n=80, d=5, k_signal=1, snr=5.0, seed=1):
     return X, y
 
 
-def test_sequence_returns_full_pvalues():
+def test_sequence_records_the_alpha_it_was_given():
+    # 0.1 is not the default, so a dropped alpha would record 0.05.
     X, y = _data()
     r = plskit.pls1_find_k_sequence(
         X, y, k_max=4, test_method="split_nb",
-        args={"n_splits": 30}, alpha=0.05, seed=7,
+        args={"n_splits": 30}, alpha=0.1, seed=7,
     )
     assert isinstance(r, plskit.FindKSequenceResult)
-    assert r.pvalues.shape == (4,)
-    assert r.test_method == "split_nb"
-    assert r.alpha == 0.05
-
-
-def test_sequence_none_alpha_is_recorded_as_resolved_value():
-    """None (the public default for alpha) must resolve to the engine's own
-    default and be recorded on result.alpha, never as None."""
-    X, y = _data()
-    r = plskit.pls1_find_k_sequence(
-        X, y, k_max=4, test_method="split_nb",
-        args={"n_splits": 30}, seed=7,
-    )
-    assert r.alpha == pytest.approx(0.05)
+    assert r.alpha == 0.1
 
 
 def test_sequence_no_rejection_returns_kstar_zero():
@@ -48,5 +36,13 @@ def test_sequence_no_rejection_returns_kstar_zero():
 
 def test_sequence_score_rejected():
     X, y = _data()
-    with pytest.raises(plskit.PlsKitError):
+    with pytest.raises(plskit.PlsKitError, match="has no sequential variant") as ei:
         plskit.pls1_find_k_sequence(X, y, k_max=4, test_method="score", seed=7)
+    assert ei.value.code == "invalid_args"
+
+
+def test_sequence_args_count_must_be_a_whole_number():
+    X, y = _data()
+    with pytest.raises(plskit.PlsKitError, match=r"args\['n_splits'\] for test_method='split_exact'") as ei:
+        plskit.pls1_find_k_sequence(X, y, 2, test_method="split_exact", args={"n_splits": -1})
+    assert ei.value.code == "invalid_args"

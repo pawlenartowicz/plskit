@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::dual_route::SCORE_BAND;
-use crate::fit::{pls1_fit_prepared, ParChoice};
+use crate::fit::{pls1_fit_prepared_fro, ParChoice};
 use crate::linalg::{standardize, standardize1, standardize_apply};
 use crate::test_support::{orthonormal_basis, project_off};
 use faer::{Col, Mat, Par};
@@ -270,8 +270,15 @@ fn nspace_kernel_is_sound_and_matches_the_primal_on_every_design_family() {
         let gram = NspaceGram::new(d.xs.as_ref(), Par::Seq);
         let block = gram.block();
         for k in d.k_min..=K_SWEEP_MAX.min(n - 1) {
-            let fit = pls1_fit_prepared(d.xs.as_ref(), d.z.as_ref(), k, None, ParChoice::Seq)
-                .expect("primal fit");
+            let fit = pls1_fit_prepared_fro(
+                d.xs.as_ref(),
+                d.z.as_ref(),
+                k,
+                None,
+                ParChoice::Seq,
+                d.xs.norm_l2(),
+            )
+            .expect("primal fit");
             let t = tally.entry((d.family, k)).or_default();
             match pls1_nspace_kernel(&block, d.z.as_ref(), k) {
                 NspaceOutcome::Resolved { alpha, k_used } => {
@@ -365,8 +372,15 @@ fn score_band_covers_the_measured_score_discrepancy() {
             else {
                 continue;
             };
-            let fit = pls1_fit_prepared(xs_tr.as_ref(), z.as_ref(), k, None, ParChoice::Seq)
-                .expect("primal fit");
+            let fit = pls1_fit_prepared_fro(
+                xs_tr.as_ref(),
+                z.as_ref(),
+                k,
+                None,
+                ParChoice::Seq,
+                xs_tr.norm_l2(),
+            )
+            .expect("primal fit");
             let s_gram = seq_gemv(m.as_ref(), &alpha);
             let s_primal = seq_gemv(xs_te.as_ref(), &fit.coef);
             let norm = s_primal.norm_l2();

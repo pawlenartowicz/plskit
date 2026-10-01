@@ -217,8 +217,10 @@ pub(crate) fn sigma_rel_floor(n: usize, p: usize, q: usize, x_fro: f64, y_fro: f
 /// `linalg::standardize` uses, evaluated in the same `(i, j)` order, so
 /// both routes produce the same bits.
 struct Prepared {
-    /// Standardized X, or `None` when `pre_standardized_x` meant the
-    /// caller's matrix is used as-is. Resolve with [`Prepared::blocks`].
+    /// Standardized X; under `pre_standardized_x`, a column-major copy of
+    /// the caller's X when `linalg::col_major_or_copy` makes one, else
+    /// `None` (the caller's matrix is used as-is). Resolve with
+    /// [`Prepared::blocks`].
     xs_owned: Option<Mat<f64>>,
     /// Standardized Y; same `None` convention as `xs_owned`.
     ys_owned: Option<Mat<f64>>,
@@ -231,8 +233,9 @@ struct Prepared {
 }
 
 impl Prepared {
-    /// The blocks `A` was formed from: the standardized copies, or the
-    /// caller's `x` / `y` under `pre_standardized_*`.
+    /// The blocks `A` was formed from: the standardized copies, or under
+    /// `pre_standardized_*` the caller's `x` / `y` (as given when
+    /// column-major, else their column-major copies).
     fn blocks<'a>(
         &'a self,
         x: MatRef<'a, f64>,
@@ -363,12 +366,22 @@ fn prepare(
     if k > k_max {
         return Err(PlsKitError::KExceedsMax { k, k_max });
     }
+    // Last, as `pls1_fit`'s `n >= k + 1` check is. PLS3 bounds `k` without
+    // `n` (`n - 1 < k` truncates; see `sigma_rel_floor`), so only an empty
+    // block, whose standardization moments would be NaN, is refused.
+    crate::preprocess::check_has_rows(n_samples)?;
 
     // Standardize OR skip, recording the moments either way so
-    // `pls3_transform` can apply the same transform to new data.
+    // `pls3_transform` can apply the same transform to new data. A skipped
+    // block that is row-major or has a negative column stride is copied
+    // column-major, as the standardized copy is: faer's products below (the
+    // scores, `‖·‖_F` for the relative floor) sum in the operand's layout
+    // order, so reading it as given would move the last bits of the scores
+    // and could move `k_used` on the floor. A column-major block is read as
+    // given, so its bits are unchanged.
     let (xs_owned, x_mean, x_scale) = if opts.pre_standardized_x {
         (
-            None,
+            crate::linalg::col_major_or_copy(x),
             Col::<f64>::zeros(n_features),
             Col::<f64>::from_fn(n_features, |_| 1.0),
         )
@@ -378,7 +391,7 @@ fn prepare(
     };
     let (ys_owned, y_mean, y_scale) = if opts.pre_standardized_y {
         (
-            None,
+            crate::linalg::col_major_or_copy(y),
             Col::<f64>::zeros(n_targets),
             Col::<f64>::from_fn(n_targets, |_| 1.0),
         )
@@ -532,6 +545,9 @@ pub(crate) fn pls3_lv1_prestd(
 ///   (observation weights are not implemented for this family; see
 ///   "Observation weights are refused" in `_docs/concepts/PLS3/fit-and-transform.md`)
 /// - `PlsKitError::KExceedsMax` when `k > min(n_features, n_targets)`
+/// - `PlsKitError::InvalidArgument` when X and Y have zero rows (checked
+///   after `k`; one row is not an error, see "Truncation" in
+///   `_docs/concepts/PLS3/fit-and-transform.md`)
 /// - `PlsKitError::NonFiniteInput` when X or Y contains NaN/inf
 /// - `PlsKitError::Internal` when faer's SVD fails to converge
 ///
@@ -1204,28 +1220,6 @@ mod tests {
     }
 
     #[test]
-    fn fit_returns_requested_shapes() {
-        let (x, y) = shared_factor_data(60, 8, 4, 11);
-        let m = pls3_fit(x.as_ref(), y.as_ref(), 2, None, Pls3FitOpts::default()).unwrap();
-        assert_eq!(m.k_used, 2);
-        assert_eq!((m.u_saliences.nrows(), m.u_saliences.ncols()), (8, 2));
-        assert_eq!((m.v_saliences.nrows(), m.v_saliences.ncols()), (4, 2));
-        assert_eq!(m.singular_values.nrows(), 2);
-        assert_eq!((m.x_scores.nrows(), m.x_scores.ncols()), (60, 2));
-        assert_eq!((m.y_scores.nrows(), m.y_scores.ncols()), (60, 2));
-    }
-
-    #[test]
-    fn dense_pls3_fit_reports_no_sparse_metadata() {
-        let (x, y) = shared_factor_data(50, 10, 4, 7);
-        let m = pls3_fit(x.as_ref(), y.as_ref(), 2, None, Pls3FitOpts::default()).unwrap();
-        assert_eq!(m.keep_x, None);
-        assert_eq!(m.keep_y, None);
-        assert!(m.converged.is_none());
-        assert!(m.n_iter.is_none());
-    }
-
-    #[test]
     fn pls3_fit_opts_default_has_iteration_caps() {
         let o = Pls3FitOpts::default();
         assert_eq!(o.max_iter, 100);
@@ -1271,21 +1265,59 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn signs_are_pinned_to_largest_u_entry_positive() {
+        // The convention: the largest-|.| entry of each u column is positive.
         let (x, y) = shared_factor_data(60, 8, 4, 11);
         let m = pls3_fit(x.as_ref(), y.as_ref(), 3, None, Pls3FitOpts::default()).unwrap();
         for a in 0..m.k_used {
-            let mut best = 0usize;
-            for j in 1..8 {
-                if m.u_saliences[(j, a)].abs() > m.u_saliences[(best, a)].abs() {
-                    best = j;
-                }
-            }
+            let piv = sign_pivot(m.u_saliences.col(a));
             assert!(
-                m.u_saliences[(best, a)] > 0.0,
+                m.u_saliences[(piv, a)] > 0.0,
                 "component {a}: largest-|.| u entry is negative"
             );
         }
+        // A sign check alone is vacuous when every raw component already
+        // comes out positive, so compare each fit with the raw SVD of the
+        // same `A`: the pinned pair must be the raw pair jointly negated
+        // exactly when the raw pivot is negative, and the sweep must contain
+        // such a component. Negating Y negates A, so each (Y, -Y) pair
+        // should see one of the two raw signs.
+        let mut n_flipped = 0usize;
+        for seed in [2u64, 8, 11, 13, 25] {
+            let (x, y) = shared_factor_data(60, 8, 4, seed);
+            let y_neg = Mat::<f64>::from_fn(y.nrows(), y.ncols(), |i, j| -y[(i, j)]);
+            for (label, yv) in [("Y", &y), ("-Y", &y_neg)] {
+                let opts = Pls3FitOpts::default();
+                let m = pls3_fit(x.as_ref(), yv.as_ref(), 3, None, opts).unwrap();
+                let (Prepared { par, .. }, a) =
+                    prepare(x.as_ref(), yv.as_ref(), 3, None, opts).unwrap();
+                let raw = crate::linalg::thin_svd(a.as_ref(), par).unwrap();
+                for c in 0..m.k_used {
+                    let flip = raw.u[(sign_pivot(raw.u.col(c)), c)] < 0.0;
+                    n_flipped += usize::from(flip);
+                    let s = if flip { -1.0 } else { 1.0 };
+                    for i in 0..8 {
+                        assert_eq!(
+                            m.u_saliences[(i, c)].to_bits(),
+                            (s * raw.u[(i, c)]).to_bits(),
+                            "seed {seed} {label} component {c}: u[{i}] (flip={flip})"
+                        );
+                    }
+                    for j in 0..4 {
+                        assert_eq!(
+                            m.v_saliences[(j, c)].to_bits(),
+                            (s * raw.v[(j, c)]).to_bits(),
+                            "seed {seed} {label} component {c}: v[{j}] not flipped jointly"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            n_flipped > 0,
+            "no raw component needed a flip: the sign check would be vacuous"
+        );
     }
 
     #[test]
@@ -1380,19 +1412,6 @@ mod tests {
     }
 
     #[test]
-    fn plssvd_fit_is_the_same_function() {
-        let (x, y) = shared_factor_data(40, 6, 3, 5);
-        let a = pls3_fit(x.as_ref(), y.as_ref(), 2, None, Pls3FitOpts::default()).unwrap();
-        let b = plssvd_fit(x.as_ref(), y.as_ref(), 2, None, Pls3FitOpts::default()).unwrap();
-        for j in 0..6 {
-            assert_eq!(
-                a.u_saliences[(j, 0)].to_bits(),
-                b.u_saliences[(j, 0)].to_bits()
-            );
-        }
-    }
-
-    #[test]
     fn transform_on_training_data_reproduces_in_sample_scores() {
         let (x, y) = shared_factor_data(50, 7, 3, 21);
         let m = pls3_fit(x.as_ref(), y.as_ref(), 2, None, Pls3FitOpts::default()).unwrap();
@@ -1462,17 +1481,6 @@ mod tests {
         assert!(matches!(r, Err(PlsKitError::NonFiniteInput)));
     }
 
-    #[test]
-    #[allow(clippy::many_single_char_names)]
-    fn plssvd_transform_is_the_same_function() {
-        let (x, y) = shared_factor_data(50, 7, 3, 21);
-        let m = pls3_fit(x.as_ref(), y.as_ref(), 2, None, Pls3FitOpts::default()).unwrap();
-        let a = pls3_transform(&m, Some(x.as_ref()), None, TransformWhich::XScores).unwrap();
-        let b = plssvd_transform(&m, Some(x.as_ref()), None, TransformWhich::XScores).unwrap();
-        let (a, b) = (a.x_scores.unwrap(), b.x_scores.unwrap());
-        assert_eq!(a[(0, 0)].to_bits(), b[(0, 0)].to_bits());
-    }
-
     /// Two latent directions, each driving a disjoint pair of outcomes:
     /// f1 -> (Y0, Y1) and f2 -> (Y2, Y3), with f1 loading X columns 0..3 and
     /// f2 loading X columns 4..7. With `keep_y` = 2 and k = 2, the supports of
@@ -1500,6 +1508,13 @@ mod tests {
         let (x, y) = shared_factor_data(50, 10, 4, 11);
         let dense = pls3_fit(x.as_ref(), y.as_ref(), 3, None, Pls3FitOpts::default()).unwrap();
         assert_eq!(dense.k_used, 3);
+        assert!(
+            dense.keep_x.is_none()
+                && dense.keep_y.is_none()
+                && dense.converged.is_none()
+                && dense.n_iter.is_none(),
+            "a dense fit carries no sparse metadata"
+        );
         let sparse = spls3_fit(
             x.as_ref(),
             y.as_ref(),
@@ -1792,7 +1807,7 @@ mod tests {
             if c.sigma < SIGMA_FLOOR {
                 break;
             }
-            if !comps.is_empty() && c.sigma < rel {
+            if c.sigma < rel {
                 break;
             }
             matmul(
@@ -2216,5 +2231,176 @@ mod tests {
         );
         assert_eq!(m.k_used, 1, "sigma = {:?}", m.singular_values);
         assert_eq!(comps.len(), 1);
+    }
+
+    /// `pls3_fit` / `spls3_fit` / `pls3_transform` output flattened for the
+    /// layout tests: saliences, `σ`, both score blocks and the four moment
+    /// vectors.
+    fn layout_flat(m: &Pls3Model) -> Vec<f64> {
+        use crate::test_support::{col_vals, mat_vals};
+        let mut v = mat_vals(m.u_saliences.as_ref());
+        v.extend(mat_vals(m.v_saliences.as_ref()));
+        v.extend(col_vals(m.singular_values.as_ref()));
+        v.extend(mat_vals(m.x_scores.as_ref()));
+        v.extend(mat_vals(m.y_scores.as_ref()));
+        for c in [&m.x_mean, &m.x_scale, &m.y_mean, &m.y_scale] {
+            v.extend(col_vals(c.as_ref()));
+        }
+        v
+    }
+
+    /// The unweighted `copy_free_families` (PLS3 refuses weights) with a
+    /// three-column Y built from each family's `(x, y)`, crossed with both
+    /// `pre_standardized_*` flags: `(label, x, y, opts)`, each block
+    /// standardized without weights when its flag is set.
+    fn layout_cases() -> Vec<(String, Mat<f64>, Mat<f64>, Pls3FitOpts)> {
+        let mut out = Vec::new();
+        for f in crate::test_support::copy_free_families()
+            .into_iter()
+            .filter(|f| f.w.is_none())
+        {
+            let n = f.x.nrows();
+            #[allow(clippy::cast_precision_loss)]
+            let yy = Mat::<f64>::from_fn(n, 3, |i, j| f.y[i] * (j + 1) as f64 + f.x[(i, j)]);
+            for pre_x in [false, true] {
+                for pre_y in [false, true] {
+                    let x = if pre_x {
+                        crate::linalg::standardize(f.x.as_ref()).0
+                    } else {
+                        f.x.clone()
+                    };
+                    let y = if pre_y {
+                        crate::linalg::standardize(yy.as_ref()).0
+                    } else {
+                        yy.clone()
+                    };
+                    let opts = Pls3FitOpts {
+                        pre_standardized_x: pre_x,
+                        pre_standardized_y: pre_y,
+                        ..Pls3FitOpts::default()
+                    };
+                    out.push((format!("{} pre=({pre_x}, {pre_y})", f.name), x, y, opts));
+                }
+            }
+        }
+        out
+    }
+
+    /// Layout invariance in both blocks: a padded submatrix, a row-major
+    /// view and a negative-column-stride view of X, or of Y, give the
+    /// owned column-major block's output to the bit, for the dense fit at
+    /// `k = 1, 2`, the sparse fit (selecting, and at its dense endpoint)
+    /// and `pls3_transform`, with and without `pre_standardized_*` on
+    /// either block. The other block stays owned.
+    #[test]
+    fn pls3_family_is_bit_identical_across_layouts() {
+        use crate::test_support::{assert_layout_agree, mat_vals, Agree};
+        /// The fit inputs `(x, y)` with the varied side replaced by `v`.
+        fn blocks<'a>(
+            side: &str,
+            v: MatRef<'a, f64>,
+            x: &'a Mat<f64>,
+            y: &'a Mat<f64>,
+        ) -> (MatRef<'a, f64>, MatRef<'a, f64>) {
+            if side == "X" {
+                (v, y.as_ref())
+            } else {
+                (x.as_ref(), v)
+            }
+        }
+        for (label, x, y, opts) in layout_cases() {
+            let p = x.ncols();
+            let m = pls3_fit(x.as_ref(), y.as_ref(), 2, None, opts).unwrap();
+            for side in ["X", "Y"] {
+                let varied = if side == "X" { &x } else { &y };
+                for k in [1, 2] {
+                    let what = format!("{side} layout: pls3_fit k={k} {label}");
+                    assert_layout_agree(varied, &what, Agree::Bits, |v| {
+                        let (xv, yv) = blocks(side, v, &x, &y);
+                        Ok(layout_flat(&pls3_fit(xv, yv, k, None, opts)?))
+                    })
+                    .unwrap();
+                }
+                for (keep_x, keep_y) in [(3, 2), (p, 3)] {
+                    let what =
+                        format!("{side} layout: spls3_fit keep=({keep_x}, {keep_y}) {label}");
+                    assert_layout_agree(varied, &what, Agree::Bits, |v| {
+                        let (xv, yv) = blocks(side, v, &x, &y);
+                        Ok(layout_flat(&spls3_fit(
+                            xv, yv, 2, keep_x, keep_y, None, opts,
+                        )?))
+                    })
+                    .unwrap();
+                }
+                let what = format!("{side} layout: pls3_transform {label}");
+                assert_layout_agree(varied, &what, Agree::Bits, |v| {
+                    let s = if side == "X" {
+                        pls3_transform(&m, Some(v), None, TransformWhich::XScores)?.x_scores
+                    } else {
+                        pls3_transform(&m, None, Some(v), TransformWhich::YScores)?.y_scores
+                    };
+                    Ok(mat_vals(s.unwrap().as_ref()))
+                })
+                .unwrap();
+            }
+        }
+    }
+
+    /// Zero rows: every PLS3 fit raises `invalid_argument`, as `pls1_fit`
+    /// does, instead of returning `k_used = 0` with NaN moments (the mean
+    /// of an empty column). The argument checks keep their precedence, as
+    /// in `pls1_fit`, whose row-count check also comes last. One row is
+    /// not an error: centering leaves `n − 1 = 0` dimensions, so the
+    /// standardizing fit truncates to `k_used = 0` with finite moments
+    /// ("Truncation" in `_docs/concepts/PLS3/fit-and-transform.md`).
+    #[test]
+    fn zero_rows_error_and_one_row_truncates() {
+        type Fit =
+            fn(MatRef<'_, f64>, MatRef<'_, f64>, usize, Pls3FitOpts) -> PlsKitResult<Pls3Model>;
+        let fits: [(&str, Fit); 4] = [
+            ("pls3_fit", |x, y, k, o| pls3_fit(x, y, k, None, o)),
+            ("plssvd_fit", |x, y, k, o| plssvd_fit(x, y, k, None, o)),
+            ("spls3_fit selecting", |x, y, k, o| {
+                spls3_fit(x, y, k, 2, 2, None, o)
+            }),
+            ("spls3_fit dense endpoint", |x, y, k, o| {
+                spls3_fit(x, y, k, 4, 3, None, o)
+            }),
+        ];
+        let empty_x = Mat::<f64>::zeros(0, 4);
+        let empty_y = Mat::<f64>::zeros(0, 3);
+        let (x1, y1) = shared_factor_data(1, 4, 3, 2);
+        for (name, fit) in fits {
+            for (pre_x, pre_y) in [(false, false), (true, false), (false, true), (true, true)] {
+                let o = Pls3FitOpts {
+                    pre_standardized_x: pre_x,
+                    pre_standardized_y: pre_y,
+                    ..Pls3FitOpts::default()
+                };
+                let what = format!("{name} pre=({pre_x}, {pre_y})");
+                match fit(empty_x.as_ref(), empty_y.as_ref(), 1, o) {
+                    Err(PlsKitError::InvalidArgument(m)) => {
+                        assert!(m.contains("need n >= 1"), "{what}: {m}");
+                    }
+                    r => panic!("{what}: {r:?}"),
+                }
+                assert!(
+                    matches!(
+                        fit(empty_x.as_ref(), empty_y.as_ref(), 4, o),
+                        Err(PlsKitError::KExceedsMax { k: 4, k_max: 3 })
+                    ),
+                    "{what}: k > k_max is reported first"
+                );
+                if !(pre_x || pre_y) {
+                    let m = fit(x1.as_ref(), y1.as_ref(), 1, o).unwrap();
+                    assert_eq!(m.k_used, 0, "{what}: one row");
+                    let moments = [&m.x_mean, &m.x_scale, &m.y_mean, &m.y_scale];
+                    assert!(
+                        moments.iter().all(|c| c.iter().all(|v| v.is_finite())),
+                        "{what}: one row, moments {moments:?}"
+                    );
+                }
+            }
+        }
     }
 }

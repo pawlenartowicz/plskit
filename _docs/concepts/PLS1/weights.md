@@ -10,7 +10,10 @@ what they mean, when to use them, and the numerical recipe.
 
 - WLS-style precision / sampling weights: a length-`n` non-negative
   vector that re-scales each row of `(X, y)` by `√w`
-- Default `weights=None` is uniform (equivalent to all-ones)
+- Default `weights=None` is uniform (equivalent to all-ones). Weights whose
+  normalized entries `w_i / mean(w)` are all within `1e-12` of 1 are treated
+  exactly as `weights=None`: the call is bit-identical, the result echoes
+  `weights` as `None`, and `n_eff = n`
 - Weights are normalized to sum to `n` (i.e., `w / mean(w)`) before use
 
 ## When to use them

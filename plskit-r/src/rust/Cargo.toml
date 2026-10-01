@@ -1,7 +1,8 @@
 [package]
 name = "plskit-r"
-version = "0.0.1"
+version = "0.6.2"
 edition = "2021"
+rust-version = "1.85"
 license = "GPL-3.0-or-later"
 publish = false
 
@@ -9,14 +10,25 @@ publish = false
 name = "plskit_r"
 crate-type = ["staticlib"]
 
-# This is the extendr-side Rust manifest, NOT part of the cargo workspace
-# (R's build pipeline invokes cargo here independently). Two consequences:
-#  1. The `plskit` dep below resolves from crates.io once `plskit` is
-#     published. Until then, the R wrapper is a build-skeleton; flip on a
-#     [patch.crates-io] block pointing at `../../../plskit-rs` when you
-#     want to test the R wrapper against unpublished changes.
-#  2. The version pin must equal RELEASED `plskit` on crates.io and
-#     lock-step with the monorepo workspace.package.version.
+# The extendr crate of the R package. It is NOT a workspace member: R's
+# build runs cargo here on its own. Consequences (spec 2.3 and 4.6):
+#  - plskit and plskit-bind come from crates.io, pinned to
+#    DESCRIPTION:Version. plskit-bind is not on crates.io until the
+#    0.6.2 engine release (P4); until then the package builds only in
+#    dev mode (PLSKIT_CARGO_CONFIG, see tools/cargo-build.R), which
+#    patches in the in-repo crates.
+#  - the empty [workspace] table makes this manifest its own workspace
+#    root, and [profile.release] repeats the workspace block
+#    (scripts/check-profile-sync.py enforces both).
 [dependencies]
 extendr-api = "0.9"
-plskit = "0.1.0"
+plskit = "=0.6.2"
+plskit-bind = "=0.6.2"
+
+[workspace]
+
+[profile.release]
+opt-level = 3
+codegen-units = 1               # determinism: single codegen unit (bit-near contract, not bit-exact)
+lto = "thin"                    # cross-crate inlining
+panic = "unwind"                # default; pinned for determinism

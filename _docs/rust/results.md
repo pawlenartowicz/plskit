@@ -25,7 +25,7 @@ long form below.
 | `x_std` | `Option<(Mat<f64>, Col<f64>, Col<f64>)>` | `Some((X_std, X_mean, X_scale))` when `X` was passed |
 | `y_std` | `Option<(Col<f64>, f64, f64)>` | `Some((y_std, y_mean, y_scale))` when `y` was passed |
 | `weights_normalized` | `Option<Col<f64>>` | `Some(w')` (normalized to mean 1, Σ = n) when weights were passed |
-| `n_eff` | `Option<f64>` | populated when weights were passed; `None` otherwise |
+| `n_eff` | `Option<f64>` | Kish's effective sample size, populated when weights were passed (exactly `n` when they are all equal, as every fit reports); `None` otherwise |
 
 ## `Pls1Model` — what `pls1_fit` returns
 
@@ -171,7 +171,7 @@ field semantics are identical to the Python counterpart; see
 | `n_splits` | `Option<usize>` | `Some` for `split_*` methods, `None` for `raw_perm` / `score` / `e` |
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | always; Kish effective sample size, equals `n_samples` for uniform/absent weights |
-| `rho_hat` | `Option<f64>` | `Some` for `split_nb` only, and only when unweighted with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
+| `rho_hat` | `Option<f64>` | `Some` for `split_nb` only, and only when unweighted (no weights, or all-equal weights) with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
 | `stable_rank` | `Option<f64>` | stable rank of the standardized `X`, as seen by the `split_nb` auto-gate; `Some` whenever `split_nb` was requested (fired or not, including under `force`), `None` for every other requested method |
 | `ci` | `Option<ConfirmatoryCI>` | `Some` when called with `ci=true`; carries the rotation-invariant subsample CIs |
 
@@ -276,7 +276,7 @@ at nominal 5%), does not grow with `n_boot`, and is not calibrated at
 | `variance_rot` | `f64` | aggregate `V_rot = (1/B) Σ_b Σ_k α²_rot,b,k` |
 | `variance_unrot_per_axis` | `Vec<f64>` | per-axis `V_unrot,k`, length K, reference-axis order |
 | `variance_rot_per_axis` | `Vec<f64>` | per-axis `V_rot,k`, length K, reference-axis order |
-| `degenerate_baseline` | `bool` | `true` iff `V_unrot = 0` on the engine pass or more than 5% of bootstrap iterations had `V_unrot* = 0`; when set, `variance_ratio.point` is `NaN` |
+| `degenerate_baseline` | `bool` | `true` iff `V_unrot = 0` on the engine pass or more than 5% of bootstrap iterations had `V_unrot* = 0`; only the first trigger makes `variance_ratio.point` `NaN`, under the second alone the point stays the finite `V_rot / V_unrot` |
 | `n_boot_finite` | `usize` | number of resamples that produced finite per-axis squared residuals (≤ `n_boot`) |
 | `n_eff` | `f64` | effective sample size `(Σ wᵢ)² / Σ wᵢ²` from the full normalized weight vector; equals `n` for uniform weights |
 

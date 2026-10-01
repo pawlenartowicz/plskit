@@ -17,6 +17,23 @@ a function or read its result.
   (`seed`, `weights`, `pre_standardized`) live at the top level.
 - Type hints use NumPy notation: `np.ndarray, shape (n, d)` is a 2-D
   array; `np.ndarray, shape (n,)` is a 1-D vector.
+- **Arrays** are read as `float64` in their own memory layout. A C- or
+  F-ordered `float64` `X` reaches the engine without a copy, and so does
+  an F-ordered `float64` `Y`, `Y_new`, `W` or `L` (a C-ordered one is
+  copied column-major, which gives the same bits as F order); other
+  dtypes are converted, and a strided view is copied by the extension.
+  Results for two layouts of the same values agree to rounding (the
+  corpus tolerance, `1e-10 + 1e-14·|value|`), not bit for bit, and a
+  fit sitting on its truncation floor can stop at a different
+  `k_used`. The last bits move with the layout in `pls1_fit`,
+  `spls1_fit`, `pls1_predict` and `pls1_rotation_stability`; the others
+  currently give C and F order the same bits. The same array in the
+  same layout gives byte-identical results on every run and at every
+  thread count. An array numpy cannot read as real numbers (strings,
+  numeric strings included, ragged nested lists, complex values,
+  non-numeric objects) raises `PlsKitError(code="invalid_argument")`;
+  booleans (read as `1`/`0`) and integers are converted, and `None` or
+  `pd.NA` in an object array reads as NaN (`non_finite_input`).
 - Per-function entry format:
 
   ```
@@ -38,11 +55,15 @@ canonical recipe — useful when calling several plskit functions
 back-to-back on the same data, to avoid recomputing the standardization.
 All arguments are optional; only the fields matching passed inputs are
 populated.
-**arguments:** `X` (optional), `Y` (optional), `weights` (optional)
+**arguments:** `X` (optional), `Y` (optional, 1-D or 2-D), `weights` (optional)
 **options:** —
 **returns:** `PreprocessResult` with `X_std` / `X_mean` / `X_scale`,
 `Y_std` / `Y_mean` / `Y_scale`, `weights_normalized`, `n_eff`. Pass
 the standardized arrays to subsequent calls with `pre_standardized=True`.
+A 2-D `Y` is validated exactly as a 1-D one (row counts, finiteness,
+weights; NaN or infinity raises `code="non_finite_input"`) and each of its
+columns is standardized as a 1-D `Y` would be. An `X` or `Y` with zero
+rows raises `code="invalid_argument"` (an empty column has no mean).
 
 ---
 
@@ -253,7 +274,12 @@ ordinary case.
 **options:** `pre_standardized_X` (bool, default `False`);
 `pre_standardized_Y` (bool, default `False`); `weights` (length-`n` vector —
 **not implemented for this family**; anything other than `None` raises
-`PlsKitError(code="invalid_argument")`).
+`PlsKitError(code="invalid_argument")`). Zero rows raise
+`invalid_argument`, as in `pls1_fit`; `k` is not bounded by `n`, so a
+single row is not an error (it truncates to `k_used = 0` unless both
+blocks are `pre_standardized_*`; see Truncation in
+[fit and transform](../concepts/PLS3/fit-and-transform.md)). `spls3_fit`
+follows the same rule.
 **returns:** `PLS3Result` with `U`, `V`, `singular_values`, `x_scores`,
 `y_scores`, the four standardization moment arrays, `k_used` and the two
 `pre_standardized_*` echoes. `U` and `V` have a pinned sign (largest-|.|
@@ -511,7 +537,8 @@ subspace-level is not settled.
 **function:** `rotate`
 **need:** simple-structure rotation of `W`. Can be called on a fitted
 result to stamp a `RotationSpec`, or on a bare `W` matrix.
-**arguments:** `model_or_W` (a PLS1Result or a 2-D np.ndarray)
+**arguments:** `model_or_W` (a PLS1Result, or a 2-D `W` read like any
+other array argument: an `np.ndarray`, a nested list, ...)
 **options:** `method` (`"varimax"`; default `"varimax"`); `args` (dict
 of method-specific kwargs); `L` (loading basis on which simplicity is
 computed; default identity → varimax on `W` directly).
@@ -583,8 +610,10 @@ See [results](results.md) for full field shapes:
 
 - `PlsKitError`: base error, with `code` for programmatic handling.
 - `PlsKitInvalidWeights` (`code="invalid_weights"`): weights vector failed
-  validation; `reason` is `"negative"`, `"all_zero"` or
-  `"insufficient_effective_n"`.
+  validation; `reason` is `"negative"`, `"all_zero"`,
+  `"insufficient_effective_n"` or `"length_mismatch"` (the weights length
+  differs from the row count of `X` or `y` / `Y`). A NaN or infinite
+  weight raises `code="non_finite_input"` instead.
 - `PlsKitResamplingDegenerate` (`code="resampling_degenerate"`): the
   resampling loop skipped more than `max_skip_rate` of its draws. Carries
   `skipped`, `total`, `skip_rate`, `threshold`.
@@ -592,25 +621,40 @@ See [results](results.md) for full field shapes:
 **`invalid_args` vs. `invalid_argument`.** Two different codes, easy to
 confuse:
 
-- `invalid_args`: a method-specific args dict (`args=`, `rotation_args=`,
-  `find_k_args=`) had an unknown key, a missing key, or a value of the
-  wrong type. Raised when the extension parses the dict for the chosen
-  `method`, and on the Python side for `find_k_args` on `pls1_fit`.
+- `invalid_args`: a method string (`method=`, `selector=`, `diagnostic=`,
+  `test_method=`, `which=`) is unknown, or a method-specific args dict
+  (`args=`, `rotation_args=`, `find_k_args=`) had an unknown key, a
+  missing key, or a value of the wrong type or sign (a count that is
+  negative or not a whole number, a non-number `tol`, a non-bool
+  `force`). Raised when the extension parses the dict for the chosen
+  `method`, and on the Python side for `find_k_args` on `pls1_fit`. A key
+  set to `None` takes the engine default, like an absent key.
 - `invalid_argument`: a top-level argument has a bad value (for example
-  `k="optimal"` without `k_max`, an array with the wrong number of
-  dimensions, or `weights` passed to a PLS3 function).
+  `k="optimal"` without `k_max`, a count such as `k`, `n_boot` or
+  `n_perm` that is negative or not a whole number, `k = 0` or
+  `k_max = 0` at every function that takes one ("k must be >= 1",
+  "k_max must be >= 1"), a keep-count of `0`, an array argument numpy
+  cannot read as real numbers (strings, ragged nested lists, complex
+  values), a `seed` outside
+  `[0, 2^64)`, a non-number `level`, a flag such as `ci` or `verbose`
+  that is not a bool, a method name that is not a string, an `args` /
+  `rotation_args` / `find_k_args` that is not a dict, an array with the
+  wrong number of dimensions, a `model` that is not the result type the
+  function takes, such as a `PLS3Result` passed to `pls1_predict` or
+  `rotate`, or `weights` passed to a PLS3 function).
+  `None` for an optional argument means its default.
 
 **All codes.** `PlsKitError.code` is one of:
 
 | `code` | Meaning |
 |---|---|
 | `dimension_mismatch` | `X` and `y` have different row counts |
-| `k_exceeds_max` | requested `k` exceeds the maximum for this data |
+| `k_exceeds_max` | requested `k` (or `k_max`) is above the maximum for this data; `k = 0` is `invalid_argument` |
 | `non_finite_input` | an input contains NaN or infinity |
 | `convergence_failure` | reserved; no current code path raises it |
 | `invalid_argument` | bad value for a top-level argument (see above) |
 | `invalid_args` | bad method-specific args dict (see above) |
-| `invalid_input` | invalid input content (shape, finiteness, `K = 0`, ...) |
+| `invalid_input` | invalid input content (shape, finiteness, a `rotate` loadings matrix with no columns, ...) |
 | `shape_mismatch` | two arrays have incompatible shapes |
 | `rotation_method_not_implemented` | the requested rotation method does not exist in this version |
 | `already_rotated` | `rotate` was called on a `PLS1Result` that already has a `rotation_spec` |

@@ -12,16 +12,23 @@ All in `plskit-rs/src/fit.rs`:
 
 - `validate_and_normalize_weights(weights, n, k_requested)` validates
   length, finiteness and sign, normalizes to mean 1, and computes `n_eff`
-  with `linalg::compute_n_eff` on the raw weights. It does **not** check
-  `n_eff` against `k`; its `k_requested` argument is unused (see the
-  history note below).
-- `check_n_eff_for_k(n_eff, k, weighted)` is the check itself. It returns
-  `InvalidWeights { reason: "insufficient_effective_n" }` when weights were
-  supplied, and `InvalidArgument("insufficient n for k=...")` when they were
-  not (no weights in play, so it is a data-size error, and callers branch on
-  `code()`).
+  with `linalg::compute_n_eff` on the raw weights. All-equal weights
+  (every normalized entry 1 within `1e-12`) come back as `None` with
+  `n_eff = n` exactly, so every downstream `w_norm.is_some()` branch
+  (standardization, route choice, `rho_hat`, the `split_nb` gate) takes the
+  unweighted path and the call is bit-identical to one without weights. It
+  does **not** check `n_eff` against `k`; its `k_requested` argument is
+  unused (see the history note below).
+- `validate_weights_for_k(weights, n, k)` is that validation followed by the
+  check, and the one call a top-level entry makes. The private
+  `check_n_eff_for_k(n_eff, k, weighted)` returns
+  `InvalidWeights { reason: "insufficient_effective_n" }` for non-uniform
+  weights, and `InvalidArgument("insufficient n for k=...")` for uniform or
+  absent ones (no weights in play, so it is a data-size error, and callers
+  branch on `code()`). `weighted` is read off the normalized vector, never
+  off the caller's `Option`.
 - `FitOpts::check_n_eff: bool` (default `true`) controls whether
-  `pls1_fit` calls `check_n_eff_for_k`. The same flag also gates the
+  `pls1_fit` calls `validate_weights_for_k` or the bare validation. The same flag also gates the
   truncation guard for `pre_standardized: true` fits: with both flags set,
   a NIPALS short-circuit below the requested `k` returns `InvalidInput`;
   with `check_n_eff: false` the truncated model is returned and callers
@@ -34,8 +41,7 @@ never set it. The Rust bypass is documented in
 ## Top-level entries
 
 Every public entry that takes weights and a component count calls
-`validate_and_normalize_weights` and then `check_n_eff_for_k` directly, on
-the full data, before any fitting:
+`validate_weights_for_k` on the full data, before any fitting:
 
 | Entry | File | Checked against |
 |---|---|---|
@@ -48,7 +54,7 @@ the full data, before any fitting:
 | `spls1_find_keep_optimal` | `find_k.rs` | `k` |
 
 `split_nb_gate` calls `validate_and_normalize_weights` with
-`k_requested = 0` and never calls `check_n_eff_for_k`; it has no `k`.
+`k_requested = 0` and runs no check; it has no `k`.
 `preprocess` computes `n_eff` without a check for the same reason. The
 PLS3 family refuses weights, so `n_eff = n` and there is no check.
 
@@ -116,5 +122,5 @@ including per-fold CV. That coupled two distinct failure modes: "user
 request infeasible on the full dataset" and "one unlucky fold has low
 `n_eff` by construction." The current contract separates them:
 `validate_and_normalize_weights` no longer checks `n_eff`, and
-`check_n_eff_for_k` is called explicitly at the top-level entries (and
+`validate_weights_for_k` is called explicitly at the top-level entries (and
 from `pls1_fit` via the `FitOpts::check_n_eff` flag).

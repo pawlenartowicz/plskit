@@ -133,11 +133,12 @@ class ConfirmatoryTestResult:
     n_perm: int | None
     n_splits: int | None
     seed: int
-    # Populated (non-None) for method="split_nb" only, when unweighted and
-    # the test half has at least 4 rows. None for every other method
-    # (including "split_exact", which has no z-scatter interpretation to
-    # offer), and None for "split_nb" itself when weighted or the test half
-    # is too small.
+    n_eff: float = float("nan")
+    # Populated (non-None) for method="split_nb" only, when the weights are
+    # absent or all equal and the test half has at least 4 rows. None for
+    # every other method (including "split_exact", which has no z-scatter
+    # interpretation to offer), and None for "split_nb" itself when the
+    # weights are non-uniform or the test half is too small.
     rho_hat: float | None = None
     # Stable rank of the standardized X, as seen by the split_nb auto-gate.
     # Populated (non-None) whenever "split_nb" was the REQUESTED method —
@@ -145,7 +146,6 @@ class ConfirmatoryTestResult:
     # so it shows what the gate saw. None for every other requested method,
     # which never evaluates the gate.
     stable_rank: float | None = None
-    n_eff: float = float("nan")
     ci: ConfirmatoryCI | None = None
 
 

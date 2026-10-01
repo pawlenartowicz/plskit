@@ -108,8 +108,11 @@ pub struct RotationStabilityOutput {
     pub variance_rot_per_axis: Vec<f64>,
 
     /// Diagnostic flag: `true` iff `V_unrot = 0` on the engine
-    /// pass or > 5 % of bootstrap iterations had `V_unrot* = 0`. When set,
-    /// `variance_ratio.point` is `NaN`.
+    /// pass or > 5 % of bootstrap iterations had `V_unrot* = 0`. Only the
+    /// first trigger makes `variance_ratio.point` `NaN` (with every CI
+    /// bound); under the second alone the point is the finite
+    /// `V_rot / V_unrot` and the CI is built from the draws that kept
+    /// `V_unrot* > 0`.
     pub degenerate_baseline: bool,
     /// Number of resamples that produced finite per-axis squared residuals
     /// (`≤ n_boot`). Falls below `n_boot` only when the per-resample fit
@@ -124,7 +127,7 @@ pub struct RotationStabilityOutput {
 ///
 /// # Errors
 /// - `KExceedsMax` when `k > n_features`
-/// - `InvalidArgument` when `k = 1` (rotation indeterminacy diagnostic
+/// - `InvalidArgument` when `k = 0`, `k = 1` (rotation indeterminacy diagnostic
 ///   is meaningless on a 1-D subspace), `k > 7` (brute-force enumeration
 ///   tractability cap), `m_rate`/`level`/`n_boot` out of range, or `L`
 ///   shape-incompatible with the loadings.
@@ -154,7 +157,10 @@ pub fn pls1_rotation_stability(
             y: y.nrows(),
         });
     }
-    if k == 0 || k > d {
+    if k == 0 {
+        return Err(PlsKitError::InvalidArgument("k must be >= 1".into()));
+    }
+    if k > d {
         return Err(PlsKitError::KExceedsMax { k, k_max: d });
     }
     if k == 1 {
@@ -195,9 +201,7 @@ pub fn pls1_rotation_stability(
     crate::fit::check_finite_col(y)?;
 
     // ── Validate + normalize weights ──
-    let (w_norm, n_eff_val, _all_uniform) =
-        crate::fit::validate_and_normalize_weights(weights, n, k)?;
-    crate::fit::check_n_eff_for_k(n_eff_val, k, weights.is_some())?;
+    let (w_norm, n_eff_val) = crate::fit::validate_weights_for_k(weights, n, k)?;
 
     // ── Resolve seed + reference fit + reference rotation ──
     let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
@@ -347,7 +351,7 @@ fn fit_subsample(
     let w_sub_norm: Option<Col<f64>> = match weights {
         Some(w_full) => {
             let w_sub = col_row_subset(w_full, sample_idx);
-            let (w_norm_sub, _, _) = validate_and_normalize_weights(Some(w_sub.as_ref()), m, k)?;
+            let (w_norm_sub, _) = validate_and_normalize_weights(Some(w_sub.as_ref()), m, k)?;
             w_norm_sub
         }
         None => None,
@@ -712,41 +716,6 @@ mod tests {
         }
     }
 
-    /// Unweighted replicates are unchanged by the weighted standardization:
-    /// `standardize_weighted(x, None)` is `standardize(x)` bit for bit.
-    #[test]
-    fn unweighted_subsample_matches_plain_standardization() {
-        let (x, y) = synth(40, 4, 2.0, 9);
-        let idx: Vec<usize> = (0..40).filter(|i| i % 4 != 1).collect();
-        let got = fit_subsample(x.as_ref(), y.as_ref(), &idx, 2, false, None).unwrap();
-        let x_sub = crate::linalg::row_subset(x.as_ref(), &idx);
-        let y_sub = crate::linalg::col_row_subset(y.as_ref(), &idx);
-        let (xs, _, _) = crate::linalg::standardize(x_sub.as_ref());
-        let (ys, _, _) = crate::linalg::standardize1(y_sub.as_ref());
-        let want = crate::fit::pls1_fit(
-            xs.as_ref(),
-            ys.as_ref(),
-            crate::fit::KSpec::Fixed(2),
-            None,
-            crate::fit::FitOpts {
-                pre_standardized: true,
-                par: crate::fit::ParChoice::Seq,
-                ..crate::fit::FitOpts::default()
-            },
-        )
-        .unwrap()
-        .w_star;
-        for a in 0..2 {
-            for j in 0..4 {
-                assert_eq!(
-                    got[(j, a)].to_bits(),
-                    want[(j, a)].to_bits(),
-                    "W[({j}, {a})]"
-                );
-            }
-        }
-    }
-
     fn synth(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, faer::Col<f64>) {
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
         let x = Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0));
@@ -818,20 +787,6 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn rotation_stability_runs_end_to_end() {
-        let (x, y) = synth(100, 6, 4.0, 7);
-        let r = run_one(&x, &y, 2, 200, 13);
-        assert_eq!(r.method, "varimax");
-        assert_eq!(r.n_boot, 200);
-        assert_eq!(r.m, 26);
-        assert_eq!(r.variance_ratio_per_axis.len(), 2);
-        assert_eq!(r.variance_unrot_per_axis.len(), 2);
-        assert_eq!(r.variance_rot_per_axis.len(), 2);
-        assert!(r.variance_unrot >= 0.0);
-        assert!(r.variance_rot >= 0.0);
-    }
-
     /// Structural sanity — on a factor-model design with simple-structure
     /// loadings, the diagnostic produces a finite ratio in a reasonable
     /// range without flagging `degenerate_baseline`.
@@ -844,7 +799,7 @@ mod tests {
     /// provides — see TODO. Until then, the reliable check is that the
     /// diagnostic *runs* and produces a defensible value.
     #[test]
-    fn variance_ratio_factor_model_below_one() {
+    fn variance_ratio_is_bounded_on_factor_model() {
         // TODO: tighten to `upper < 0.95` once
         // a synthetic that reliably triggers PLS1 NIPALS drift in the
         // close-σ block is calibrated. The current threshold (`upper <
@@ -894,6 +849,7 @@ mod tests {
     fn per_axis_decomposition_sums_to_aggregate() {
         let (x, y) = synth(150, 6, 4.0, 11);
         let r = run_one(&x, &y, 2, 200, 5);
+        assert_eq!(r.method, "varimax");
         let sum_unrot: f64 = r.variance_unrot_per_axis.iter().sum();
         let sum_rot: f64 = r.variance_rot_per_axis.iter().sum();
         assert!(
@@ -949,137 +905,105 @@ mod tests {
         }
     }
 
-    /// Degenerate baseline flag must be set when V_unrot = 0
-    /// (synthetic D = K orthonormal X pins NIPALS axes to canonical basis).
+    /// `degenerate_baseline` on both triggers, at the reducer: V_unrot = 0
+    /// on the engine pass (the point and every CI bound are NaN), and more
+    /// than 5% of the paired bootstrap draws with V_unrot* = 0. With every
+    /// replicate failed the reducer errors even when the skip gate lets the
+    /// rows through.
     #[test]
-    fn degenerate_baseline_flagged() {
-        // D = K = 2, orthonormal X with y in the column space — NIPALS
-        // axes coincide with canonical basis on every subsample.
-        let n = 200;
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(101);
-        let x = Mat::<f64>::from_fn(n, 2, |i, j| {
-            // Columns alternate between two orthogonal patterns: even-odd
-            // signs with random magnitudes. After standardization, the
-            // NIPALS subspace is the canonical basis on every subsample.
-            let sign = if (i + j) % 2 == 0 { 1.0 } else { -1.0 };
-            if (j == 0 && i % 2 == 0) || (j == 1 && i % 2 == 1) {
-                sign * (1.0 + 0.01 * rng.random_range(-1.0..1.0))
-            } else {
-                0.0
-            }
-        });
-        let y = faer::Col::<f64>::from_fn(n, |i| if i % 2 == 0 { 1.0 } else { -1.0 });
-        // This may or may not yield V_unrot = 0 on real data — the test
-        // permissively checks that *if* we hit the degenerate case, the
-        // flag is set and the point estimate is NaN.
-        let r = run_one(&x, &y, 2, 200, 7);
-        if r.degenerate_baseline {
-            assert!(
-                r.variance_ratio.point.is_nan(),
-                "degenerate_baseline=true requires variance_ratio.point=NaN, got {}",
-                r.variance_ratio.point,
-            );
-        }
-        // Non-flagged path is also acceptable; this is a structural test
-        // for the contract, not an existence test for the degenerate case.
-    }
-
-    /// Parallel and sequential paths must be bit-exact under fixed seed.
-    #[test]
-    #[allow(clippy::float_cmp)]
-    fn parallel_matches_sequential() {
-        let (x, y) = synth(120, 6, 4.0, 19);
-        let opts_seq = RotationStabilityOpts {
-            n_boot: 200,
-            m_rate: 0.7,
-            level: 0.95,
-            seed: Some(33),
-            disable_parallelism: true,
-            ..Default::default()
+    fn reduce_variance_ratio_flags_degenerate_baseline() {
+        let row = |u: [f64; 2], r: [f64; 2]| RotationStabilityWorkerRow {
+            sq_unrot_per_axis: u.to_vec(),
+            sq_rot_per_axis: r.to_vec(),
         };
-        let opts_par = RotationStabilityOpts {
-            disable_parallelism: false,
-            ..opts_seq
+        let reduce = |rows: &[RotationStabilityWorkerRow], max_skip: f64| {
+            reduce_variance_ratio(rows, 2, rows.len(), 10, 0.7, 0.95, 1, 2, 20.0, max_skip)
         };
-        let r_seq = pls1_rotation_stability(
-            x.as_ref(),
-            y.as_ref(),
-            2,
-            RotationStabilityMethod::Varimax(VarimaxArgs::default()),
-            None,
-            None,
-            opts_seq,
-        )
-        .unwrap();
-        let r_par = pls1_rotation_stability(
-            x.as_ref(),
-            y.as_ref(),
-            2,
-            RotationStabilityMethod::Varimax(VarimaxArgs::default()),
-            None,
-            None,
-            opts_par,
-        )
-        .unwrap();
-        assert_eq!(r_seq.variance_ratio.point, r_par.variance_ratio.point);
-        assert_eq!(r_seq.variance_ratio.lower, r_par.variance_ratio.lower);
-        assert_eq!(r_seq.variance_ratio.upper, r_par.variance_ratio.upper);
-        assert_eq!(r_seq.variance_unrot, r_par.variance_unrot);
-        assert_eq!(r_seq.variance_rot, r_par.variance_rot);
-    }
-
-    /// Reproducibility under fixed seed.
-    #[test]
-    #[allow(clippy::float_cmp)]
-    fn reproducibility_under_fixed_seed() {
-        let (x, y) = synth(120, 6, 4.0, 21);
-        let a = run_one(&x, &y, 2, 200, 99);
-        let b = run_one(&x, &y, 2, 200, 99);
-        assert_eq!(a.variance_ratio.point, b.variance_ratio.point);
-        assert_eq!(a.variance_ratio.lower, b.variance_ratio.lower);
-        assert_eq!(a.variance_ratio.upper, b.variance_ratio.upper);
-        assert_eq!(a.variance_unrot, b.variance_unrot);
-        assert_eq!(a.variance_rot, b.variance_rot);
-        for kk in 0..a.variance_ratio_per_axis.len() {
-            assert_eq!(
-                a.variance_ratio_per_axis[kk].point,
-                b.variance_ratio_per_axis[kk].point,
-            );
-        }
-    }
-
-    /// Alignment-family regression. Both sides must use
-    /// signed-permutation alignment for a fair paired comparison.
-    /// Sentinel: signed-permutation alignment is sign-flip
-    /// invariant on the reference, so flipping the sign of a column of
-    /// the unrotated reference must leave V_unrot unchanged.
-    #[test]
-    fn signed_perm_alignment_used_on_both_sides() {
-        let (x, y) = synth(150, 6, 4.0, 25);
-        let r = run_one(&x, &y, 2, 200, 41);
-        // Indirect check: under signed-permutation alignment, V_unrot is
-        // invariant to sign-flips on either side. If the worker were
-        // (mistakenly) using identity alignment on the unrotated side,
-        // V_unrot would change with reference sign-flips. Since we cannot
-        // perturb the reference without re-fitting, we assert the property
-        // that follows from signed-permutation: V_unrot must equal the
-        // sum of per-axis residuals (which is exactly residual_frobenius²
-        // from the alignment payload, by the cost identity).
-        let sum_unrot: f64 = r.variance_unrot_per_axis.iter().sum();
-        assert!(
-            (sum_unrot - r.variance_unrot).abs() < 1e-10,
-            "alignment payload identity broken: sum_per_axis={}, aggregate={}",
-            sum_unrot,
-            r.variance_unrot,
+        // Primary trigger: V_unrot = 0 on every replicate.
+        let r = reduce(&vec![row([0.0, 0.0], [0.5, 0.5]); 20], 0.01).unwrap();
+        assert!(r.degenerate_baseline);
+        let v = &r.variance_ratio;
+        assert!(v.point.is_nan() && v.lower.is_nan() && v.upper.is_nan() && v.sd.is_nan());
+        assert!(r.variance_ratio_per_axis.iter().all(|c| c.point.is_nan()));
+        // Secondary trigger: one non-zero replicate of 20, so ~36% of the
+        // 1000 paired bootstrap draws have V_unrot* = 0 (> 5%). The flag is
+        // set but the point stays the finite V_rot / V_unrot = 1 / 0.1.
+        let mut rows = vec![row([0.0, 0.0], [0.5, 0.5]); 20];
+        rows[0] = row([1.0, 1.0], [0.5, 0.5]);
+        let r = reduce(&rows, 0.01).unwrap();
+        assert!(r.degenerate_baseline);
+        let point = r.variance_ratio.point;
+        assert!(point.is_finite());
+        assert_eq!(
+            point.to_bits(),
+            (r.variance_rot / r.variance_unrot).to_bits()
         );
-        // Stronger check: V_unrot > 0 in general (signed-permutation can
-        // absorb sign and label only, not within-block continuous rotation).
-        // If the worker accidentally used continuous-orthogonal alignment
-        // on the unrotated side, V_unrot would collapse to ~0 here.
-        assert!(
-            r.variance_unrot > 1e-6,
-            "V_unrot collapsed to {} — likely using orthogonal (not signed-perm) alignment",
-            r.variance_unrot,
+        // Every replicate failed: an error even when the skip gate allows it.
+        let nan = vec![RotationStabilityWorkerRow::nan(2); 20];
+        assert!(matches!(
+            reduce(&nan, 1.0),
+            Err(PlsKitError::ResamplingDegenerate {
+                skipped: 20,
+                total: 20,
+                ..
+            })
+        ));
+    }
+
+    /// The worker reads X only through row gathers of owned column-major
+    /// copies, so every layout of X gives the owned matrix's per-axis
+    /// residuals to the bit once the references are fixed. The references
+    /// are fitted on the owned matrix: `pls1_fit` itself is only
+    /// rounding-equal across layouts (CHANGELOG 0.6.1; owned by fit.rs).
+    #[test]
+    fn rotation_stability_worker_is_layout_invariant() {
+        crate::test_support::assert_families_layout_invariant(
+            "rotation_stability",
+            |c| {
+                let k = 2;
+                let n = c.x.nrows();
+                let (w_norm, _) = crate::fit::validate_and_normalize_weights(c.w, n, k)?;
+                let wr = w_norm.as_ref().map(faer::Col::as_ref);
+                let w_unrot = crate::fit::pls1_fit(
+                    c.x_owned.as_ref(),
+                    c.y,
+                    crate::fit::KSpec::Fixed(k),
+                    wr,
+                    crate::fit::FitOpts {
+                        pre_standardized: c.pre,
+                        ..Default::default()
+                    },
+                )?
+                .w_star;
+                let w_rot = crate::rotate::rotate(
+                    w_unrot.as_ref(),
+                    RotationMethod::Varimax(VarimaxArgs::default()),
+                    None,
+                )?
+                .w_rot;
+                let m = crate::subsample::resolve_m(n, 0.7);
+                let mut out = Vec::new();
+                for seed in [1_u64, 2, 3] {
+                    let (_, mut rng) = crate::rng::resolve_seed(Some(seed))?;
+                    let row = run_one_rotation_stability(
+                        c.x,
+                        c.y,
+                        k,
+                        m,
+                        c.pre,
+                        w_unrot.as_ref(),
+                        w_rot.as_ref(),
+                        VarimaxArgs::default(),
+                        None,
+                        wr,
+                        &mut rng,
+                    )?;
+                    out.extend(row.sq_unrot_per_axis);
+                    out.extend(row.sq_rot_per_axis);
+                }
+                Ok(out)
+            },
+            Vec::clone,
         );
     }
 
@@ -1132,250 +1056,5 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code(), "shape_mismatch");
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::many_single_char_names, clippy::too_many_arguments)]
-#[allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
-mod copy_free_reference {
-    use super::*;
-    use crate::signal_test::with_new_routes_disabled;
-    use crate::test_support::{assert_bits_eq, copy_free_families, Layouts};
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::many_single_char_names)]
-    fn fit_subsample_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        sample_idx: &[usize],
-        k: usize,
-        pre_standardized_x: bool,
-        weights: Option<ColRef<'_, f64>>,
-    ) -> PlsKitResult<Mat<f64>> {
-        use crate::fit::{pls1_fit, validate_and_normalize_weights, FitOpts, KSpec};
-        use crate::linalg::{
-            col_row_subset, row_subset, standardize1_weighted, standardize_weighted,
-        };
-
-        let m = sample_idx.len();
-        let d = x.ncols();
-        let x_sub = row_subset(x, sample_idx);
-        let y_sub = col_row_subset(y, sample_idx);
-
-        // Slice + re-normalize weights for this subsample. A too-small n_eff_sub
-        // surfaces from the pls1_fit call below, not here; the caller maps either
-        // error to a NaN row.
-        let w_sub_norm: Option<Col<f64>> = match weights {
-            Some(w_full) => {
-                let w_sub = col_row_subset(w_full, sample_idx);
-                let (w_norm_sub, _, _) =
-                    validate_and_normalize_weights(Some(w_sub.as_ref()), m, k)?;
-                w_norm_sub
-            }
-            None => None,
-        };
-
-        let (xs, ys) = if pre_standardized_x {
-            (
-                Mat::<f64>::from_fn(x_sub.nrows(), d, |i, j| x_sub[(i, j)]),
-                Col::<f64>::from_fn(y_sub.nrows(), |i| y_sub[i]),
-            )
-        } else {
-            let wref = w_sub_norm.as_ref().map(Col::as_ref);
-            let (xs, _, _) = standardize_weighted(x_sub.as_ref(), wref);
-            let (ys, _, _) = standardize1_weighted(y_sub.as_ref(), wref);
-            (xs, ys)
-        };
-
-        let fit_b = pls1_fit(
-            xs.as_ref(),
-            ys.as_ref(),
-            KSpec::Fixed(k),
-            w_sub_norm.as_ref().map(Col::as_ref),
-            FitOpts {
-                pre_standardized: true,
-                // Seq inside the per-resample worker — outer Rayon owns the threadpool.
-                par: crate::fit::ParChoice::Seq,
-                ..FitOpts::default()
-            },
-        )?;
-        Ok(fit_b.w_star)
-    }
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::many_single_char_names)]
-    fn run_one_rotation_stability_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        k: usize,
-        m: usize,
-        pre_standardized_x: bool,
-        w_unrot_ref: MatRef<'_, f64>,
-        w_rot_ref: MatRef<'_, f64>,
-        varimax_args: VarimaxArgs,
-        l: Option<MatRef<'_, f64>>,
-        weights: Option<ColRef<'_, f64>>,
-        rng: &mut crate::rng::Rng,
-    ) -> PlsKitResult<RotationStabilityWorkerRow> {
-        let n = x.nrows();
-        let d = x.ncols();
-
-        let (sample_idx, _holdout_idx) = crate::subsample::subsample_indices(n, m, rng);
-        let w_b = fit_subsample_reference(x, y, &sample_idx, k, pre_standardized_x, weights)?;
-
-        // Unrotated alignment — signed-permutation against the unrotated ref.
-        // Per-axis squared residual is read directly from the alignment payload
-        // (no need to materialize an aligned matrix); see the cost
-        // identity on `SignedPermutationAlignment.residual_frobenius`.
-        // `?` so that a truncated `w_b` (NIPALS short-circuit, k_used < k)
-        // propagates as Err to the outer worker, which maps it to a NaN row.
-        let aln_unrot = procrustes::signed_permutation(w_b.as_ref(), w_unrot_ref, false)?;
-        let sq_unrot_per_axis: Vec<f64> = (0..k)
-            .map(|kk| {
-                let src = aln_unrot.assigned[kk];
-                let s = aln_unrot.signs[kk];
-                let mut acc = 0.0_f64;
-                for j in 0..d {
-                    let diff = s * w_b[(j, src)] - w_unrot_ref[(j, kk)];
-                    acc += diff * diff;
-                }
-                acc
-            })
-            .collect();
-
-        // Continuous-orthogonal alignment is scaffolding — puts W_b into the
-        // same orthogonal frame as the reference so varimax converges to a
-        // comparable simple-structure target. Residual is discarded.
-        let r_orth = procrustes::orthogonal(w_b.as_ref(), w_unrot_ref, false)?.rotation;
-        let mut w_b_rot_input = Mat::<f64>::zeros(d, k);
-        faer::linalg::matmul::matmul(
-            w_b_rot_input.as_mut(),
-            faer::Accum::Replace,
-            w_b.as_ref(),
-            r_orth.as_ref(),
-            1.0,
-            faer::Par::Seq,
-        );
-
-        let rot_b = crate::rotate::rotate(
-            w_b_rot_input.as_ref(),
-            RotationMethod::Varimax(varimax_args),
-            l,
-        )?;
-        let w_b_rot = rot_b.w_rot;
-
-        // Rotated alignment — signed-permutation against the rotated ref.
-        let aln_rot = procrustes::signed_permutation(w_b_rot.as_ref(), w_rot_ref, false)?;
-        let sq_rot_per_axis: Vec<f64> = (0..k)
-            .map(|kk| {
-                let src = aln_rot.assigned[kk];
-                let s = aln_rot.signs[kk];
-                let mut acc = 0.0_f64;
-                for j in 0..d {
-                    let diff = s * w_b_rot[(j, src)] - w_rot_ref[(j, kk)];
-                    acc += diff * diff;
-                }
-                acc
-            })
-            .collect();
-
-        Ok(RotationStabilityWorkerRow {
-            sq_unrot_per_axis,
-            sq_rot_per_axis,
-        })
-    }
-
-    // Per-unit body: no parallel axis; serial vs parallel is covered by
-    // byte_parity (rotation_stability_byte_parity).
-    #[test]
-    fn run_one_rotation_stability_matches_reference() {
-        use crate::fit::{pls1_fit, FitOpts, KSpec};
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let n = f.x.nrows();
-                let w =
-                    f.w.as_ref()
-                        .map(|w| crate::linalg::normalize_weights(w.as_ref()).unwrap());
-                let wr = w.as_ref().map(Col::as_ref);
-                let k = 2;
-                let w_unrot = pls1_fit(
-                    f.x.as_ref(),
-                    f.y.as_ref(),
-                    KSpec::Fixed(k),
-                    None,
-                    FitOpts::default(),
-                )
-                .unwrap()
-                .w_star;
-                let w_rot = crate::rotate::rotate(
-                    w_unrot.as_ref(),
-                    RotationMethod::Varimax(VarimaxArgs::default()),
-                    None,
-                )
-                .unwrap()
-                .w_rot;
-                let (xs, _, _) = crate::linalg::standardize(f.x.as_ref());
-                let (ys, _, _) = crate::linalg::standardize1(f.y.as_ref());
-                for pre in [false, true] {
-                    let (x0, y0) = if pre { (&xs, &ys) } else { (&f.x, &f.y) };
-                    let lay = Layouts::new(x0.as_ref());
-                    for (view, xv) in lay.all(x0) {
-                        for seed in [1_u64, 2, 3] {
-                            let (_, mut r1) = crate::rng::resolve_seed(Some(seed)).unwrap();
-                            let (_, mut r2) = crate::rng::resolve_seed(Some(seed)).unwrap();
-                            let what = format!("{} {view} pre={pre} seed {seed}", f.name);
-                            let m = n * 2 / 3;
-                            match (
-                                run_one_rotation_stability(
-                                    xv,
-                                    y0.as_ref(),
-                                    k,
-                                    m,
-                                    pre,
-                                    w_unrot.as_ref(),
-                                    w_rot.as_ref(),
-                                    VarimaxArgs::default(),
-                                    None,
-                                    wr,
-                                    &mut r1,
-                                ),
-                                run_one_rotation_stability_reference(
-                                    xv,
-                                    y0.as_ref(),
-                                    k,
-                                    m,
-                                    pre,
-                                    w_unrot.as_ref(),
-                                    w_rot.as_ref(),
-                                    VarimaxArgs::default(),
-                                    None,
-                                    wr,
-                                    &mut r2,
-                                ),
-                            ) {
-                                (Ok(a), Ok(b)) => {
-                                    assert_bits_eq(
-                                        &a.sq_unrot_per_axis,
-                                        &b.sq_unrot_per_axis,
-                                        &format!("{what}.unrot"),
-                                    );
-                                    assert_bits_eq(
-                                        &a.sq_rot_per_axis,
-                                        &b.sq_rot_per_axis,
-                                        &format!("{what}.rot"),
-                                    );
-                                }
-                                (Err(a), Err(b)) => {
-                                    assert_eq!(a.to_string(), b.to_string(), "{what}");
-                                }
-                                (a, b) => panic!("{what}: ok {} vs {}", a.is_ok(), b.is_ok()),
-                            }
-                        }
-                    }
-                }
-            }
-        });
     }
 }

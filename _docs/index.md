@@ -18,6 +18,6 @@ CIs), alongside a compatibility layer for legacy outputs.
 - [Concepts](concepts/index.md): language-agnostic methods and methodology
 - [Python](python/index.md): install, quickstart, API
 - [Rust](rust/index.md): install, quickstart, API
-- [R](r/index.md): placeholder (planned)
-- [Julia](julia/index.md): placeholder (planned)
+- [R](r/index.md): install, quickstart, differences from Python (implemented, not yet released; runs the Rust engine through `plskit-bind` and extendr)
+- [Julia](julia/index.md): install, quickstart, differences from Python (implemented, not yet registered; runs the Python package through PythonCall.jl)
 - [Internals](internals/index.md): contributor docs and `plskit-rs` internals

@@ -4,6 +4,263 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+- Added: the `plskit-bind` workspace crate, a language-neutral binding
+  layer over the plskit engine. It exposes the whole Python surface
+  through one `call(fn_name, Record)` entry point. The R wrapper calls the
+  engine through it; the Julia wrapper uses only its registry dump, to
+  render its stubs.
+- Changed (Python, stricter input): `pls1_fit`, `spls1_fit`,
+  `spls1_find_keep_optimal`, `spls1_find_k_optimal` and
+  `spls1_find_k_sequence` reject a `k` or `keep` that is not a non-negative
+  whole number with `PlsKitError(code="invalid_argument")` instead of
+  coercing it: a fractional float (`k=2.7` used to fit 2 components) or a
+  `bool` now raises where it used to coerce; a negative value already
+  raised, but as a PyO3 `OverflowError` rather than a `PlsKitError`, and now
+  raises `PlsKitError(code="invalid_argument")` instead. A whole float such
+  as `2.0` is still accepted. `pls1_fit` with an integer `k` rejects a
+  `k_max` or `find_k_args` argument instead of ignoring it; for
+  `spls1_find_k_optimal` and `spls1_find_k_sequence`, only `keep` is
+  checked this way, not `k_max`. All of this matches the rules the R
+  wrapper applies through `plskit-bind`; the Julia wrapper inherits them
+  from the Python package.
+- Added (R): the R package `plskit` (`plskit-r/`) with the whole Python
+  surface: the same 20 functions, argument names and result fields,
+  through the `plskit-bind` layer. Results are classed named lists
+  (`c("pls1_result", "plskit_result")`, ...), seeds are decimal strings,
+  and errors are `plskit_error` conditions carrying the Python error
+  codes. It passes the shared `testdata/` corpus. Until `plskit-bind` is
+  on crates.io it builds only from a checkout, with `PLSKIT_CARGO_CONFIG`
+  naming a cargo config that patches in the in-repo crates
+  (`_docs/r/installation.md`). The package version moves from 0.0.1 to
+  0.6.2, the engine version. The placeholder `version()` export, which
+  masked `base::version`, is removed.
+- Added (Julia): the Julia package `PLSKit.jl` (`plskit-jl/`) with the
+  whole Python surface: it runs the Python `plskit` package through
+  PythonCall.jl, so every function, argument name and result field is the
+  Python one. Results are `PlsKitResult{T}` values with one alias per
+  result type (`PLS1Result`, ...), errors are a single `PlsKitError`
+  carrying Python's `code` as a `Symbol`, and Python warnings are
+  re-emitted with `@warn`. Its tests check one `testdata/` fixture per
+  function at the corpus tolerances; the numbers come from the Python
+  wheel, which passes the whole corpus. The
+  package and module are renamed from `plskit` to `PLSKit` (UUID kept),
+  version 0.6.2, pinning PyPI `plskit==0.6.2` through `CondaPkg.toml`.
+  The placeholder `version()` export is removed.
+  - The Julia package version, its `CondaPkg.toml` pin and
+    `PLSKIT_PY_VERSION` are always equal and name the `plskit-py` release
+    the package runs on; Julia may lag Python, never lead it. CI builds
+    `plskit-py` from source when the checkout matches the pin and installs
+    the pinned wheel from PyPI when the checkout is newer
+    (`scripts/julia-python-pin.py`); the `-jl` release job tests against
+    PyPI only.
+- Added (CI): `scripts/check-profile-sync.py` keeps the R crate's
+  `[profile.release]`, `[workspace]` table and dependency versions in
+  step with the workspace; `scripts/render-r-stubs.py --check` and
+  `scripts/render-jl-stubs.py --check` fail when the committed R stubs or
+  Julia stubs and aliases drift from the `plskit-bind` registry;
+  `scripts/check-docs-drift.py` also checks the R `NAMESPACE` exports and
+  the Julia `export`s against the Python surface. The R package is checked
+  with `R CMD check` on Linux, macOS and Windows, and the Julia tests run
+  on the same three OSes (Julia LTS and current).
+- Fixed: `pls1_confirmatory_test` confidence intervals (normal-theory
+  leverage CI and NB-Wald `holdout_corr` CI) used a wrong inverse normal.
+  Below `level` 0.85 the critical value was off by up to 20%
+  (Φ⁻¹(0.9) gave 1.0253, not 1.2816): CIs were too narrow near level 0.8
+  and too wide near level 0.5. At the default level 0.95 the bounds move by
+  about 2e-10 relative. `standard_normal_inv` now matches Wichura's AS241
+  in every branch, including a far-tail coefficient typo that the public
+  API cannot reach.
+- Fixed: a column of `X` (or `y`, or a column of `Y`) that is constant to
+  rounding now gets scale `max(1, |mean|)` instead of `1`, so it
+  standardizes to zeros up to rounding at any magnitude. Before, a constant
+  column near `1e300` truncated `pls1_fit` to `k_used = 0` or gave NaN
+  coefficients and made `pls3_fit` fail with "SVD of X'Y failed to
+  converge", and one near `1e20` silently shifted the other `pls1_fit`
+  coefficients. `X_scale` / `Y_scale` (from `preprocess` and PLS3 fits) now
+  report `|mean|` for such a column when `|mean| > 1`; constants of
+  magnitude at most 1 keep scale 1. Such columns no longer force
+  `pls1_fit` onto its materialized-copy route.
+- Fixed: a column whose standard deviation underflows (zero or subnormal,
+  e.g. a single `5e-324` among zeros) is treated as constant (only
+  centered) instead of getting scale `0` or a subnormal scale and a silent
+  all-NaN `pls1_fit` or a failed `pls3_fit`.
+- Fixed: all-equal observation weights are now identical to absent weights
+  at every entry: results are bit-identical to `weights=None` (including
+  `rho_hat` on `split_nb`, the `split_nb` auto-gate, the replicate route,
+  BIC, and `n_eff = n` exactly), and an `n_eff < k + 1` failure raises
+  `invalid_argument` rather than `invalid_weights` /
+  `insufficient_effective_n`. Before, equal non-unit weights could round
+  `n_eff` just below `n`, rejecting a feasible `n = k + 1` call or firing
+  the `split_nb` gate at `n = 25`. The same holds inside
+  `pls1_confirmatory_test`: a `raw_perm` fold or a `split_exact` /
+  `split_nb` half whose own weights are all equal (or all zero) trains
+  unweighted, as `pls1_fit` does on those rows.
+- Fixed: `pls1_confirmatory_test` rejects `k = 0` with `invalid_argument`
+  ("k must be >= 1") for every method; `split_exact`, `split_nb` and
+  `score` used to return a p-value.
+- Fixed (Python): `preprocess` with a 2-D `Y` containing NaN or infinity
+  raises `non_finite_input`, like a 1-D `y`. Validation and
+  standardization of a multi-column `Y` moved into the core
+  (`plskit::preprocess::preprocess_block`); outputs for finite input are
+  bit-identical.
+- Fixed (Python): an unknown `method`, `selector`, `diagnostic` or
+  `test_method` raises `PlsKitError(code="invalid_args")` (the `code` used
+  to be empty). Model-dict fields missing on `pls1_predict` /
+  `pls3_transform` raise `invalid_argument` instead of an uncoded error or
+  a panic.
+- Fixed (Python): an unusable argument value no longer escapes as a raw
+  `TypeError` / `OverflowError`: a negative, fractional or non-numeric
+  count, a seed outside `[0, 2^64)`, a non-number float option, a non-bool
+  flag, a non-string method name or a non-dict `args`. Inside an `args` /
+  `rotation_args` dict the error is `invalid_args`, for a top-level
+  argument `invalid_argument`; messages match `plskit-bind`.
+- Changed (Python): argument rules now follow `plskit-bind`. `None` for an
+  optional argument or an args-dict key means its default, a whole float
+  such as `100.0` is accepted as a count, and a `bool` is rejected where a
+  number is expected. `pls1_rotation_stability` parses `rotation_args` with
+  `rotate`'s parser, and `pls1_fit` validates `seed` when `k` is an int.
+- Changed (Python): `RotationSpec.args` records the varimax arguments the
+  engine resolved (defaults filled, counts as `int`) instead of echoing the
+  caller's dict. The private `_plskit.VARIMAX_DEFAULTS` is removed.
+- Changed (Python): `ConfirmatoryTestResult` fields are ordered `n_eff,
+  rho_hat, stable_rank`, matching `results.md` and the R/Julia wrappers;
+  `scripts/check-docs-drift.py` now fails when a Python result dataclass
+  orders its fields differently from `results.md`.
+- Changed (testing): corpus comparisons (Rust, Python, R, Julia, bind and
+  the generator's settle step) add a relative term, `|a - e| <= atol +
+  1e-14 * |e|` for finite `e` (an infinity equals only itself), so
+  cross-host drift of an ulp or two in large values (the ~6126 score
+  statistic) no longer sits at the edge of `atol = 1e-12`.
+- Testdata: regenerated the three `pls1_confirmatory_test` `split_nb` CI
+  fixtures (AS241 fix) and added `pls1_confirmatory_split_nb_ci_level80`,
+  the first CI fixture off the default level, which pins the level-0.8
+  critical value and fails a wrapper that drops `level`.
+  `producing_version` is 0.6.2 and the manifest tolerances record `rtol`.
+- Docs: `length_mismatch` is listed as an `invalid_weights` reason; the
+  `split_nb` docstrings state the actual auto-gate rule (at most 4 columns,
+  `n_eff < 25`, or stable rank < 3);
+  `RotationStabilityResult.degenerate_baseline` no longer claims
+  `variance_ratio.point` is always NaN when set (only the `V_unrot = 0`
+  trigger gives NaN).
+- Fixed: `k = 0` and `k_max = 0` raise `invalid_argument` ("k must be >= 1"
+  / "k_max must be >= 1") at every entry, in every wrapper.
+  `pls1_rotation_stability`, the `find_k` family, `spls1_find_keep_optimal`
+  and `pls1_fit(k="optimal"|"sequence")` raised `k_exceeds_max`,
+  `pls1_perm_null` used a different message, and `pls3_confirmatory_test`
+  reported its `k = 1` restriction. `k_exceeds_max` now means only a count
+  above its maximum.
+- Fixed: `preprocess` reports `n_eff` exactly `n` for all-equal weights, as
+  every fit does (Kish's ratio could round an ulp below `n`).
+  `weights_normalized` is still returned.
+- Fixed (Python): an array argument numpy cannot read as real numbers
+  (strings, including numeric strings, ragged nested lists, non-numeric
+  objects, complex, datetime or structured dtypes) raises
+  `PlsKitError(code="invalid_argument")` naming the argument, as
+  `plskit-bind` does, instead of numpy's `ValueError` / `TypeError`; a
+  complex array used to be cast silently to its real part. `None` and
+  `pd.NA` in an object array read as NaN (`non_finite_input`). A 0-d
+  `weights` or `Y` is rejected as not 1-D / 2-D.
+- Changed (Python, performance and numerics): a C- or F-ordered float64 `X`
+  reaches the engine without a copy at every entry that takes one. This
+  reverses the 0.6.1 rule that the Python API passes every `X` on in C
+  order: an F-ordered `X` no longer pays a full copy (about 25 to 40 ms per
+  fit at 1e7 entries), and results for different memory layouts of the same
+  values agree to rounding (corpus tolerance) rather than bit for bit.
+  `pls1_fit`, `spls1_fit`, `pls1_predict` and `pls1_rotation_stability` can
+  differ in the last bits between C and F order; the same array in the same
+  layout still gives byte-identical results across runs and thread counts.
+  Julia arrays are column-major and now read in place, so Julia
+  `pls1_fit` / `spls1_fit` results can differ from 0.6.2 in the last bits
+  (they now match the Rust core's column-major bits).
+- Changed (performance): the permutation and split loops take `‖X̃‖_F` once
+  per block instead of once per replicate on their primal route
+  (`pls1_perm_null`, the `raw_perm` CV folds, the `split_exact` refit
+  splits). On one core at 1000 × 1000 with 1000 permutations, a k = 1
+  `pls1_perm_null` drops from 1.41 s to 0.66 s and a k = 1 `raw_perm` from
+  5.86 s to 2.88 s, so k = 1 is again faster than k = 2 at that shape.
+  Results are bit-identical.
+- Changed (internal): the p-space Gram backend's per-replicate diagnostics
+  are compiled only into tests; production replicates no longer fill or
+  allocate them. Results are unchanged.
+- Fixed: `pls3_fit`, `plssvd_fit`, `spls3_fit`, `preprocess` and
+  `preprocess_block` raise `invalid_argument` ("insufficient n: need
+  n >= 1") on zero rows, as `pls1_fit` does. They used to return NaN
+  standardization moments, the PLS3 fits with `k_used = 0`. One row is
+  still not an error for the PLS3 family: its `k` is not bounded by `n`, so
+  the fit truncates.
+- Fixed (numerics): `pls3_fit`, `plssvd_fit` and `spls3_fit` give
+  bit-identical results for every memory layout of `X` and `Y`, also with
+  `pre_standardized_X` / `pre_standardized_Y`. A pre-standardized
+  row-major or negative-stride block used to move the scores in the last
+  bits (up to about 4e-14 for a reversed row order) and could move `k_used`
+  on the truncation floor; such a block is now copied column-major, no
+  more than the copy the standardizing path always makes. Column-major
+  results are unchanged to the bit. In Python, a default C-ordered `X` with
+  `pre_standardized_X=True` now gives the same bits as its F-ordered copy.
+- Changed (R, plskit-bind): bool data is read as 1/0 in every numeric
+  array argument, as numpy reads a bool array in Python and Julia a `Bool`
+  array, with the same bits as the equal 0/1 doubles. In R a logical matrix
+  keeps its shape, and logical vectors and logical data.frame columns are
+  accepted; `NA` in logical data raises `non_finite_input`, as in numeric
+  data. Flags and integer arguments stay strict.
+- Fixed (Python): `pls1_predict`, `pls3_transform`, `plssvd_transform` and
+  `rotate` given a model of the wrong type (a `PLS3Result` where a
+  `PLS1Result` is expected, `None`, ...) raise
+  `PlsKitError(code="invalid_argument")` in `plskit-bind`'s words
+  ("model must be a PLS1Result, got a PLS3Result"), as R does, instead of
+  `AttributeError` or `TypeError`. `rotate` reads a nested-list `W` like any
+  other array argument.
+- Changed (Python, performance): an aligned F-ordered float64 `Y`, `Y_new`,
+  `W` or `L` reaches the engine without a copy. C-ordered and strided ones
+  are still copied column-major, so results are bit-identical to before for
+  every layout.
+- Changed (performance): `pls1_fit` / `spls1_fit` on a row-major
+  (C-ordered, the Python default) `X` at least 2048 columns wide read the
+  standardization moments and the `X'·t` products in blocks of 8 rows. On
+  one M4 core a 1000 × 10000 C-ordered k = 1 fit drops from about 24 ms to
+  about 13 ms (it was about 1.4x slower than its column-major copy, and is
+  now no slower). Moments are
+  bit-identical. Fits of such inputs that are not pre-standardized move in
+  the last bits, agreeing with 0.6.2 to corpus tolerance but not bit for
+  bit, and stay byte-identical across thread counts. Column-major `X`,
+  pre-standardized fits and narrower `X` are unchanged bit for bit. The
+  reference fit inside `pls1_rotation_stability`, `pls1_confirmatory_test`
+  with `ci`, and the final fit of `pls1_fit(k="optimal"|"sequence")` take
+  the same path.
+- Changed (performance): the rule that sends a `perm_null`, `raw_perm` or
+  `split_exact` resampling loop to the p-space Gram route (build
+  `C = X'X` once, then one `C·r` per replicate) now weighs the build and
+  the per-replicate product at their measured costs:
+  `p·(0.33·n_tr + 1.3·B·k) < 2·B·k·n_tr`, was `p·(n_tr + B·k) <
+  2·B·k·n_tr`. Shapes near the boundary that stayed primal although the
+  Gram route was faster now take it, and break-even shapes that took it
+  stay primal (over a 164-shape sweep: 91.3 s to 85.5 s in total;
+  `split_exact` at 1600 × 640, k = 2, 199 permutations: about 1.2x faster
+  on one M4 core). The
+  coefficients were fitted on an Apple M4. No corpus fixture changes
+  route. On shapes that do, results agree with 0.6.2 to corpus tolerance
+  (observed at most 1.6e-14), not bit for bit.
+- Changed (performance): `split_exact` at k = 2 on the n-space Gram route
+  (`p` well above the training size) runs its kernel over runs of 16
+  outcome columns as matrix products instead of one matrix-vector product
+  per column: 1000 × 1000, 1000 permutations, k = 2 drops from about 12.2 s
+  to about 6.0 s on one M4 core. k = 1 is unchanged. The statistic and
+  p-value were unchanged in every case tested; the per-split statistics can
+  move by about 1e-16 when the last run of columns is partial
+  (`n_perm + 1` not a multiple of 16) at small training sizes, within
+  corpus tolerance. Results stay byte-identical across thread counts, and
+  splits that fall back to the primal refit are unchanged bit for bit.
+- Changed (release): a `vX.Y.Z` tag now publishes `plskit-bind` to
+  crates.io after `plskit`, for the R package to build against. The
+  workspace pins its `plskit` dependency exactly (`=X.Y.Z`), so a version
+  bump that misses it fails to build instead of drifting. The `-r` release
+  job installs the R tarball against crates.io with the committed lock file
+  before uploading it.
+- Changed (dependencies): `chacha20` (through `rand`) moves from the yanked
+  0.10.0 to 0.10.2, so a freshly resolved R lock file gets the same version
+  as the workspace. No numeric change: corpus, byte-parity and
+  thread-count tests pass unchanged.
+
 ## [0.6.1] - 2026-09-29
 
 - Changed (performance): `pls1_fit` / `spls1_fit` no longer write a

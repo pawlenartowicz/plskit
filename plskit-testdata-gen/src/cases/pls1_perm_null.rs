@@ -1,13 +1,14 @@
 //! `pls1_perm_null` fixture cases.
 
 use crate::cases::{
-    default_tolerance, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64,
-    synth_data, CasePaths,
+    case_files, default_tolerance, ensure_moved, manifest_case, ndarray_to_faer_col,
+    ndarray_to_faer_mat, perm_null_weights, scalar_f64, scalar_i64, synth_data,
+    weighted_prestd_n80_d6, CasePaths, Xyw, WEIGHTED_PRESTD_N80_D6_INPUTS,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
 use anyhow::Result;
-use plskit::{pls1_perm_null, PermNullOpts};
+use plskit::{pls1_perm_null, PermNullOpts, PermNullOutput};
 use std::path::Path;
 
 /// Convert a `Vec<f64>` to a 1-D `ndarray::ArrayD<f64>`.
@@ -83,21 +84,6 @@ pub fn basic_n80_d6_k2(root: &Path) -> Result<Case> {
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
         tolerance: Some(default_tolerance()),
-    })
-}
-
-/// Weights of [`weighted_n80_d6_k2`]: uneven, mean not one, and zero on
-/// every tenth row. `pls1_perm_null` renormalizes them on entry and
-/// `pls1_fit` renormalizes them again, so the fixture pins the √w row
-/// scaling of the weighted permutation loop, zero-weight rows included.
-#[allow(clippy::cast_precision_loss)]
-fn perm_null_weights(n: usize) -> ndarray::Array1<f64> {
-    ndarray::Array1::from_shape_fn(n, |i| {
-        if i % 10 == 9 {
-            0.0
-        } else {
-            1.0 + (i % 4) as f64 * 0.5
-        }
     })
 }
 
@@ -367,4 +353,169 @@ fn tall_case(
         },
         tolerance: Some(default_tolerance()),
     })
+}
+
+/// One `pls1_perm_null` call on `data` (written to `inputs/{inputs_name}.npz`)
+/// at `seed = 42`, serially.
+struct PermNullCall<'a> {
+    name: &'a str,
+    inputs_name: &'a str,
+    data: &'a Xyw,
+    k: usize,
+    n_perm: usize,
+    pre_standardized: bool,
+    return_perm_matrix: bool,
+}
+
+/// The call `c` describes, on `c.data`.
+fn perm_null_run(c: &PermNullCall<'_>) -> Result<PermNullOutput> {
+    let weights = c.data.w_faer();
+    Ok(pls1_perm_null(
+        c.data.x_faer().as_ref(),
+        c.data.y_faer().as_ref(),
+        c.k,
+        weights.as_ref().map(faer::Col::as_ref),
+        PermNullOpts {
+            n_perm: c.n_perm,
+            return_perm_matrix: c.return_perm_matrix,
+            pre_standardized: c.pre_standardized,
+            disable_parallelism: true,
+            verbose: false,
+        },
+        Some(42),
+    )?)
+}
+
+/// Write `c.data`, run the call, and write the output fields of
+/// [`basic_n80_d6_k2`] plus, when `c.return_perm_matrix`, `beta_perm_matrix`
+/// as a 2-D `(n_perm, d)` array (the core's flat buffer is row-major, which is
+/// also the Python wrapper's `(n_perm, D)` layout). The manifest `kwargs`
+/// record the two flags only when they are set.
+fn perm_null_call(root: &Path, c: &PermNullCall<'_>) -> Result<Case> {
+    let function = "pls1_perm_null";
+    let rel_inputs = format!("inputs/{}.npz", c.inputs_name);
+    let rel_outputs = format!("outputs/{function}/{}.npz", c.name);
+    let (abs_inputs, abs_outputs) = case_files(root, &rel_inputs, &rel_outputs)?;
+    c.data.write(&abs_inputs)?;
+
+    let (n, d) = c.data.x.dim();
+    let result = perm_null_run(c)?;
+
+    {
+        let mut w = NpzWriter::create(&abs_outputs)?;
+        w.add_f64("beta_ref", &vec_to_array(&result.beta_ref))?;
+        w.add_f64("beta_perm_mean", &vec_to_array(&result.beta_perm_mean))?;
+        w.add_f64("beta_perm_sd", &vec_to_array(&result.beta_perm_sd))?;
+        w.add_f64("beta_perm_z", &vec_to_array(&result.beta_perm_z))?;
+        w.add_i64("n_perm", &scalar_i64(i64::try_from(result.n_perm)?))?;
+        w.add_i64("k", &scalar_i64(i64::try_from(result.k)?))?;
+        w.add_i64("seed", &scalar_i64(i64::try_from(result.seed)?))?;
+        w.add_f64("n_eff", &scalar_f64(result.n_eff))?;
+        if let Some(flat) = result.beta_perm_matrix {
+            let matrix = ndarray::Array2::from_shape_vec((result.n_perm, d), flat)?;
+            w.add_f64("beta_perm_matrix", &matrix.into_dyn())?;
+        }
+        w.finish()?;
+    }
+
+    let mut kwargs = serde_json::json!({
+        "n": n, "d": d, "k": c.k, "n_perm": c.n_perm,
+        "seed": 42, "disable_parallelism": true
+    });
+    if c.data.w.is_some() {
+        kwargs["weights"] = serde_json::json!("nonuniform");
+    }
+    if c.pre_standardized {
+        kwargs["pre_standardized"] = serde_json::json!(true);
+    }
+    if c.return_perm_matrix {
+        kwargs["return_perm_matrix"] = serde_json::json!(true);
+    }
+    manifest_case(root, c.name, function, rel_inputs, rel_outputs, kwargs)
+}
+
+/// Case: [`basic_n80_d6_k2`]'s call with `pre_standardized = true` and
+/// `return_perm_matrix = true`, on its inputs file (same bytes). The inputs
+/// are standard-normal columns, inside the scale contract of the
+/// pre-standardized path. The only fixture of that path and of the returned
+/// `(200, 6)` permutation matrix's rows.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_perm_null` fails.
+pub fn pre_standardized_n80_d6_k2(root: &Path) -> Result<Case> {
+    let (x, y) = synth_data(80, 6, 2, 4.0, 42);
+    perm_null_call(
+        root,
+        &PermNullCall {
+            name: "pls1_perm_null_pre_standardized_n80_d6_k2",
+            inputs_name: "pls1_perm_null_basic_n80_d6_k2",
+            data: &Xyw { x, y, w: None },
+            k: 2,
+            n_perm: 200,
+            pre_standardized: true,
+            return_perm_matrix: true,
+        },
+    )
+}
+
+/// Case: weighted `pls1_perm_null` on a single predictor (`n=40, d=1`) at
+/// `k=1`, 200 permutations, weights [`perm_null_weights`]`(40)`. The corpus's
+/// only `d = 1` perm-null fixture.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_perm_null` fails.
+pub fn weighted_n40_d1_k1(root: &Path) -> Result<Case> {
+    // `synth_data` sums the first `k_signal` columns into y: at d = 1 that is 1.
+    let (x, y) = synth_data(40, 1, 1, 4.0, 42);
+    perm_null_call(
+        root,
+        &PermNullCall {
+            name: "pls1_perm_null_weighted_n40_d1_k1",
+            inputs_name: "pls1_perm_null_weighted_n40_d1_k1",
+            data: &Xyw {
+                x,
+                y,
+                w: Some(perm_null_weights(40)),
+            },
+            k: 1,
+            n_perm: 200,
+            pre_standardized: false,
+            return_perm_matrix: false,
+        },
+    )
+}
+
+/// Case: [`weighted_n80_d6_k2`]'s call with `pre_standardized = true` on X
+/// and y standardized by their unweighted moments
+/// (`cases::weighted_prestd_n80_d6`). Under the flag the weights still drive
+/// the reference fit and the √w row scaling of the permutation loop; the
+/// only fixture of that combination. The generator refuses it unless
+/// `beta_perm_z` moves when the flag is dropped.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written, `pls1_perm_null`
+/// fails, or the output does not depend on `pre_standardized`.
+pub fn weighted_prestd_n80_d6_k2(root: &Path) -> Result<Case> {
+    let data = weighted_prestd_n80_d6();
+    let call = PermNullCall {
+        name: "pls1_perm_null_weighted_prestd_n80_d6_k2",
+        inputs_name: WEIGHTED_PRESTD_N80_D6_INPUTS,
+        data: &data,
+        k: 2,
+        n_perm: 200,
+        pre_standardized: true,
+        return_perm_matrix: false,
+    };
+    let with = perm_null_run(&call)?;
+    let without = perm_null_run(&PermNullCall {
+        pre_standardized: false,
+        ..call
+    })?;
+    ensure_moved(
+        call.name,
+        "beta_perm_z",
+        &with.beta_perm_z,
+        &without.beta_perm_z,
+    )?;
+    perm_null_call(root, &call)
 }

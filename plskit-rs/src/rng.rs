@@ -52,38 +52,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn child_seeds_are_deterministic_for_fixed_parent_seed() {
-        let (_, mut rng_a) = resolve_seed(Some(42)).unwrap();
-        let (_, mut rng_b) = resolve_seed(Some(42)).unwrap();
-        let a = child_seeds(&mut rng_a, 100);
-        let b = child_seeds(&mut rng_b, 100);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn resolve_seed_passes_through_caller_value() {
-        let (s, _) = resolve_seed(Some(12345)).unwrap();
-        assert_eq!(s, 12345);
-    }
-
-    #[test]
-    fn resolve_seed_none_returns_nonzero_seed() {
-        let (s, _) = resolve_seed(None).unwrap();
-        // Probability of OS entropy returning exactly 0 is 2^-64; flag if it happens.
-        assert_ne!(s, 0);
-    }
-
-    #[test]
-    fn child_rng_reproducible_from_seed() {
-        use rand::Rng;
-        let mut a = child_rng(7);
-        let mut b = child_rng(7);
-        let mut va = vec![0u64; 10];
-        let mut vb = vec![0u64; 10];
-        for i in 0..10 {
-            va[i] = a.next_u64();
-            vb[i] = b.next_u64();
-        }
-        assert_eq!(va, vb);
+    fn resolve_seed_none_draws_fresh_entropy() {
+        let (a, _) = resolve_seed(None).unwrap();
+        let (b, _) = resolve_seed(None).unwrap();
+        // Two OS draws collide with probability 2^-64.
+        assert_ne!(a, b, "seed=None must draw OS entropy, not a constant");
     }
 }

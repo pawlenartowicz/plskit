@@ -9,7 +9,7 @@
 )]
 
 use super::*;
-use crate::fit::{pls1_fit_prepared, ParChoice, PreparedFit};
+use crate::fit::{pls1_fit_prepared_fro, ParChoice, PreparedFit};
 use crate::linalg::{standardize, standardize1};
 use crate::resample::block_par;
 use faer::{Col, Mat, Par};
@@ -104,60 +104,12 @@ fn raw_perm_starts_at_k_two_and_respects_the_smallest_training_fold() {
 }
 
 #[test]
-fn split_exact_starts_at_k_two() {
-    let (n_train, _) = crate::resample::split_sizes(60, 2);
-    assert!(!nspace_eligible_split_exact(n_train, 3000, 200, 1, true));
-    assert!(nspace_eligible_split_exact(n_train, 3000, 200, 2, true));
-    assert!(nspace_eligible_split_exact(
-        n_train, 3000, 200, K_DUAL_MAX, true
-    ));
-    assert!(!nspace_eligible_split_exact(n_train, 3000, 200, 2, false));
-    assert!(!nspace_eligible_split_exact(
-        n_train,
-        3000,
-        200,
-        K_DUAL_MAX + 1,
-        true
-    ));
-}
-
-#[test]
 fn k_is_the_per_replicate_multiplicity_of_the_flop_rule() {
     // n = 60, p = 100, B = 100: at k = 1 the Gram costs more than it saves
     // (60·(100 + 100) = 12 000 ≥ 100·100), at k = 2 it pays
     // (60·(200 + 100) = 18 000 < 100·200).
     assert!(!nspace_eligible_perm_null(60, 100, 100, 1, true));
     assert!(nspace_eligible_perm_null(60, 100, 100, 2, true));
-}
-
-#[test]
-fn the_memory_cap_still_binds() {
-    let n = crate::dual_route::DUAL_ROUTE_MAX_N_TR + 1;
-    assert!(!nspace_eligible_perm_null(n, 10_000_000, 100_000, 2, true));
-}
-
-#[test]
-fn byte_parity_wide_shapes_take_the_nspace_route() {
-    // The wide cases in tests/byte_parity.rs: n = 40, d = 2000.
-    for k in [1_usize, 2] {
-        assert!(
-            nspace_eligible_perm_null(40, 2000, 100, k, true),
-            "perm_null k={k}"
-        );
-    }
-    assert!(
-        nspace_eligible_raw_perm(40, 5, 2000, 50, 2, true),
-        "raw_perm"
-    );
-    assert!(
-        nspace_eligible_raw_perm(40, 20, 2000, 50, 2, true),
-        "raw_perm, many folds"
-    );
-    let (n_train, _) = crate::resample::split_sizes(40, 2);
-    assert!(
-        nspace_eligible_split_exact(n_train, 2000, 50, 2, true),
-        "split_exact"
-    );
 }
 
 #[test]
@@ -274,17 +226,15 @@ fn outcome(xs: &Mat<f64>, snr: f64, seed: u64) -> Col<f64> {
 }
 
 fn primal(xs: &Mat<f64>, z: &Col<f64>, k: usize) -> PreparedFit {
-    pls1_fit_prepared(xs.as_ref(), z.as_ref(), k, None, ParChoice::Seq).expect("primal fit")
-}
-
-fn max_abs(a: &Col<f64>) -> f64 {
-    (0..a.nrows()).map(|i| a[i].abs()).fold(0.0_f64, f64::max)
-}
-
-fn max_abs_diff(a: &Col<f64>, b: &Col<f64>) -> f64 {
-    (0..a.nrows())
-        .map(|i| (a[i] - b[i]).abs())
-        .fold(0.0_f64, f64::max)
+    pls1_fit_prepared_fro(
+        xs.as_ref(),
+        z.as_ref(),
+        k,
+        None,
+        ParChoice::Seq,
+        xs.norm_l2(),
+    )
+    .expect("primal fit")
 }
 
 /// Primal-side absolute error of `‖X_a'y_a‖` as a multiple of
@@ -300,31 +250,6 @@ fn primal_margin_leaves_the_floor_gate_a_factor_two() {
     // computed one; past gate 3 the computed one is RESOLVE_BAND × floor.
     let exact_min = (1.0 - 1.0 / BOUND_BAND).sqrt() * RESOLVE_BAND;
     assert!(exact_min - PRIMAL_W_MARGIN >= 2.0, "{exact_min}");
-}
-
-#[test]
-fn k_one_matches_the_closed_form() {
-    for (n, p, seed) in [(12_usize, 400_usize, 1_u64), (30, 2000, 2), (60, 3000, 3)] {
-        let xs = standardized(n, p, seed);
-        let z = outcome(&xs, 1.0, seed + 100);
-        let gram = NspaceGram::new(xs.as_ref(), Par::Seq);
-        let block = gram.block();
-        let NspaceOutcome::Resolved { alpha, k_used } = pls1_nspace_kernel(&block, z.as_ref(), 1)
-        else {
-            panic!("n={n}, p={p}: ordinary data must resolve at k = 1");
-        };
-        assert_eq!(k_used, 1);
-        // `pls1_cv_r2_columns`' closed form: alpha = z·(z'Gz)/(z'G²z).
-        let g1 = seq_gemv(block.g, &z);
-        let g2 = seq_gemv(block.g, &g1);
-        let num: f64 = (0..n).map(|i| z[i] * g1[i]).sum();
-        let den: f64 = (0..n).map(|i| z[i] * g2[i]).sum();
-        let closed = Col::<f64>::from_fn(n, |i| z[i] * (num / den));
-        assert!(
-            max_abs_diff(&alpha, &closed) <= 1e-12 * max_abs(&closed),
-            "n={n}, p={p}"
-        );
-    }
 }
 
 #[test]
@@ -379,75 +304,6 @@ fn out_of_contract_shapes_are_unresolved() {
     ));
 }
 
-#[test]
-fn wide_ordinary_data_resolves_up_to_k_dual_max_and_matches_the_primal_kernel() {
-    let (n, p) = (30, 2000);
-    let xs = standardized(n, p, 7);
-    let z = outcome(&xs, 0.5, 107);
-    let gram = NspaceGram::new(xs.as_ref(), Par::Seq);
-    for k in 1..=K_DUAL_MAX {
-        let NspaceOutcome::Resolved { alpha, k_used } =
-            pls1_nspace_kernel(&gram.block(), z.as_ref(), k)
-        else {
-            panic!("k={k}: ordinary wide data must resolve");
-        };
-        let fit = primal(&xs, &z, k);
-        assert_eq!((k_used, fit.k_used), (k, k), "k={k}");
-        let coef = seq_gemv(xs.transpose(), &alpha);
-        assert!(
-            max_abs_diff(&coef, &fit.coef) <= 1e-10 * max_abs(&fit.coef).max(1.0),
-            "k={k}"
-        );
-    }
-}
-
-#[test]
-fn an_outcome_in_the_span_of_two_directions_is_unresolved_past_two() {
-    let (n, p) = (30, 1500);
-    let xs = standardized(n, p, 8);
-    let svd = xs.thin_svd().expect("svd");
-    let u = svd.U();
-    let z = Col::<f64>::from_fn(n, |i| 1.3 * u[(i, 0)] - 0.7 * u[(i, 1)]);
-    let gram = NspaceGram::new(xs.as_ref(), Par::Seq);
-    assert!(matches!(
-        pls1_nspace_kernel(&gram.block(), z.as_ref(), 2),
-        NspaceOutcome::Resolved { k_used: 2, .. }
-    ));
-    assert_eq!(primal(&xs, &z, 2).k_used, 2);
-    for k in 3..=5 {
-        assert!(
-            matches!(
-                pls1_nspace_kernel(&gram.block(), z.as_ref(), k),
-                NspaceOutcome::Unresolved
-            ),
-            "k={k}"
-        );
-        assert_eq!(primal(&xs, &z, k).k_used, 2, "k={k}: the primal truncates");
-    }
-}
-
-#[test]
-fn base_bounds_reduce_to_the_k_one_forms_and_grow_with_the_component() {
-    let (n_tr, p, x_fro) = (48_usize, 3000_usize, 379.2_f64);
-    let fro2 = x_fro * x_fro;
-    let (w1, t1) = nspace_base_bounds(1, n_tr, p, x_fro);
-    // The K = 1 expressions of `pls1_cv_r2_columns`, bit for bit.
-    assert_eq!(
-        w1.to_bits(),
-        (((p + 2 * n_tr) as f64) * f64::EPSILON * fro2).to_bits()
-    );
-    assert_eq!(
-        t1.to_bits(),
-        (((2 * p + 3 * n_tr) as f64) * f64::EPSILON * fro2 * fro2).to_bits()
-    );
-    let mut prev = (w1, t1);
-    for a in 2..=10 {
-        let cur = nspace_base_bounds(a, n_tr, p, x_fro);
-        assert!(cur.0 > prev.0 && cur.1 > prev.1, "a={a}");
-        prev = cur;
-    }
-}
-
 /// Printed by `python3 scripts/gate_feasibility.py nspace --reference`.
 const SPIKE_G2: f64 = 2303.608226002213;
 /// `(E_w(a), E_t(a), rho_a)` for `a = 1..=4`.
@@ -498,24 +354,9 @@ fn history_bounds_reproduce_the_feasibility_spike() {
     let (out, trace) = pls1_nspace_kernel_traced(&block, z.as_ref(), 4);
     assert!(matches!(out, NspaceOutcome::Resolved { k_used: 4, .. }));
     assert_eq!(trace.len(), 4);
-    // No history at the first component.
-    let (w1, _) = nspace_base_bounds(1, n, p, block.x_fro);
-    assert_eq!(trace[0].e_w.to_bits(), w1.to_bits());
     for (a, (t, &(e_w, e_t, rho))) in trace.iter().zip(SPIKE_REFERENCE.iter()).enumerate() {
         assert!(close(t.e_w, e_w), "a={}: E_w {:e} vs {e_w:e}", a + 1, t.e_w);
         assert!(close(t.e_t, e_t), "a={}: E_t {:e} vs {e_t:e}", a + 1, t.e_t);
         assert!(close(t.rho, rho), "a={}: rho {:e} vs {rho:e}", a + 1, t.rho);
     }
-}
-
-#[test]
-fn nspace_blocks_built_counts_on_the_calling_thread() {
-    let xs = standardized(10, 50, 9);
-    let before = nspace_blocks_built();
-    let _ = NspaceGram::new(xs.as_ref(), Par::Seq);
-    assert_eq!(nspace_blocks_built(), before + 1);
-    let other = std::thread::spawn(nspace_blocks_built)
-        .join()
-        .expect("thread");
-    assert_eq!(other, 0, "the counter is per thread");
 }

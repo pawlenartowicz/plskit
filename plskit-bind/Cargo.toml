@@ -1,0 +1,21 @@
+[package]
+name = "plskit-bind"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Language-neutral binding layer for plskit: one call() entry point, strict argument validation and result records shared by the R and Julia wrappers."
+
+[dependencies]
+plskit = { workspace = true }
+faer = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1"                # corpus test: manifest reader
+ndarray = "0.17"                # corpus test: npz reader
+ndarray-npy = "0.10"            # corpus test: npz reader
+
+[lints]
+workspace = true

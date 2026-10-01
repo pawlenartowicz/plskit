@@ -5,3 +5,4 @@
 pub mod cases;
 pub mod manifest;
 pub mod npz;
+pub mod settle;

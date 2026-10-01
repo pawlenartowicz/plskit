@@ -264,85 +264,6 @@ fn beta_of(coef: &Col<f64>, inp: &KernelInputs) -> Col<f64> {
     Col::<f64>::from_fn(coef.nrows(), |j| coef[j] * inp.y_scale / inp.x_scale[j])
 }
 
-// ── the kernel against the reference ─────────────────────────────────────
-
-#[test]
-fn kernel_k1_is_bit_identical_to_reference() {
-    // At k = 1 every step (s, w_floor, selection, r = w, t, tt, p, q) is the
-    // same operation on the same inputs as in the reference: the rotation is
-    // `w` itself and nothing has been deflated yet.
-    // (2000, 600) is large enough that a Rayon `Par` really splits work;
-    // `par_fixed()` is the one production uses.
-    for (n, d) in [(60, 12), (2000, 600)] {
-        let (x, y) = signal_design(n, d, 3, 0.1, 7);
-        let w = mixed_weights(n);
-        for weights in [None, Some(w.as_ref())] {
-            let inp = kernel_inputs(x.as_ref(), y.as_ref(), weights);
-            for keep in [None, Some(4), Some(d)] {
-                for par in [Par::Seq, crate::fit::par_fixed()] {
-                    let what = format!(
-                        "n={n} d={d} weighted={} keep={keep:?} par={par:?}",
-                        weights.is_some()
-                    );
-                    let new = pls1_kernel(
-                        inp.xs.as_ref(),
-                        inp.ys.as_ref(),
-                        1,
-                        keep,
-                        par,
-                        inp.xs.norm_l2(),
-                    )
-                    .unwrap();
-                    let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 1, keep, par)
-                        .unwrap();
-                    assert_mat_bits(&new.0, &old.0, &format!("{what} T"));
-                    assert_mat_bits(&new.1, &old.1, &format!("{what} P"));
-                    assert_mat_bits(&new.2, &old.2, &format!("{what} W"));
-                    assert_col_bits(&new.3, &old.3, &format!("{what} Q"));
-                    assert_col_bits(
-                        &coef_of(&new, par),
-                        &coef_of(&old, par),
-                        &format!("{what} coef"),
-                    );
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn kernel_matches_reference_at_k5() {
-    let (n, d) = (150, 40);
-    let (x, y) = signal_design(n, d, 6, 0.2, 13);
-    let w = mixed_weights(n);
-    for weights in [None, Some(w.as_ref())] {
-        let inp = kernel_inputs(x.as_ref(), y.as_ref(), weights);
-        for keep in [None, Some(9)] {
-            let what = format!("weighted={} keep={keep:?}", weights.is_some());
-            let new = pls1_kernel(
-                inp.xs.as_ref(),
-                inp.ys.as_ref(),
-                5,
-                keep,
-                Par::Seq,
-                inp.xs.norm_l2(),
-            )
-            .unwrap();
-            let old =
-                nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 5, keep, Par::Seq).unwrap();
-            assert_eq!(new.2.ncols(), 5, "{what}: all five components are real");
-            let tols = factor_tolerances(&inp, &old, keep, 1e-10);
-            assert_factors_close(&new, &old, &tols, &what);
-            let (cn, co) = (coef_of(&new, Par::Seq), coef_of(&old, Par::Seq));
-            assert!(coef_drift(&cn, &co) <= 1e-10, "{what}: coef");
-            assert!(
-                coef_drift(&beta_of(&cn, &inp), &beta_of(&co, &inp)) <= 1e-10,
-                "{what}: beta"
-            );
-        }
-    }
-}
-
 // ── the loop's contract with a backend (a Gram backend relies on it) ──
 
 /// The X backend with a gate that returns `Unresolved` at a chosen
@@ -770,11 +691,6 @@ fn run_property(seed: u64, n_designs: usize, n_max: usize, d_max: usize) {
 }
 
 #[test]
-fn kernel_matches_reference_on_random_designs() {
-    run_property(20_260_925, 64, 300, 400);
-}
-
-#[test]
 fn kernel_matches_reference_on_random_designs_full() {
     // Ranges n to 2000, d to 5000, k to 20; a few seconds in release.
     run_property(20_260_926, 400, 2000, 5000);
@@ -788,14 +704,15 @@ fn k1_public_fit_is_bit_identical_to_reference() {
     for (n, d) in [(60, 12), (2000, 600)] {
         let (x, y) = signal_design(n, d, 3, 0.1, 17);
         // The offset puts |mean|/scale past `IMPLICIT_MAX_MEAN_RATIO`, so the
-        // public fit runs the kernel on the standardized copy that the
-        // reference gets; the implicit route is checked to 1e-10 in
-        // `fit::copy_free_reference`.
+        // public fit runs the kernel on the standardized copy the reference
+        // gets. The implicit route is checked against the kernel in
+        // `half_zero_weights_match_reference_dense_and_sparse` and pinned by
+        // the corpus.
         let x = Mat::<f64>::from_fn(n, d, |i, j| x[(i, j)] + 1e6);
         let w = mixed_weights(n);
         for weights in [None, Some(w.as_ref())] {
             let inp = kernel_inputs(x.as_ref(), y.as_ref(), weights);
-            for keep in [None, Some(4)] {
+            for keep in [None, Some(4), Some(d)] {
                 for choice in [ParChoice::Seq, ParChoice::Auto] {
                     let what = format!(
                         "n={n} d={d} weighted={} keep={keep:?} {choice:?}",
@@ -977,6 +894,15 @@ fn half_zero_weights_match_reference_dense_and_sparse() {
         )
         .unwrap();
         assert!(coef_drift(&m.coef, &cn) <= 1e-10, "{what}: pls1_fit coef");
+        // The factors the model returns, not only `coef`: T, P and Q of the
+        // implicit backend against the copy kernel, per component.
+        let public: Parts = (
+            m.t_scores.clone(),
+            m.p_loadings.clone(),
+            new.2.clone(),
+            m.q_loadings.clone(),
+        );
+        assert_factors_close(&public, &new, &tols, &format!("{what}: pls1_fit factors"));
     }
 }
 

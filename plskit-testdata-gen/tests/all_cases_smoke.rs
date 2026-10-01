@@ -1,100 +1,85 @@
-//! End-to-end smoke test for `cases::all_cases` — confirms every fixture
-//! family registers correctly and the full corpus contains the expected
-//! number of entries.
+//! The generator reproduces the committed corpus index. `cases::all_cases`
+//! runs every case into a scratch directory, and its manifest entries must
+//! equal `testdata/manifest.json` case for case (name, function, inputs,
+//! outputs, kwargs, tolerance): a case added, removed or edited without
+//! regenerating the corpus fails here. Content hashes are not compared with
+//! the committed ones (fixture bytes may differ across hosts within
+//! tolerance, `testdata/README.md` "Regenerating: settle mode");
+//! `scripts/check_corpus_hash.py` owns those and `plskit-rs/tests/corpus.rs`
+//! the values.
 
 use plskit_testdata_gen::cases::all_cases;
-use std::collections::HashSet;
+use plskit_testdata_gen::npz::sha256_of_file;
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use tempfile::tempdir;
 
+fn without_hashes(mut case: Value) -> Value {
+    case.as_object_mut()
+        .expect("case is an object")
+        .remove("hashes");
+    case
+}
+
 #[test]
-fn all_cases_produces_full_corpus() {
+fn all_cases_matches_the_committed_manifest() {
     let dir = tempdir().unwrap();
     let cases = all_cases(dir.path()).unwrap();
-    assert_eq!(
-        cases.len(),
-        59,
-        "expected exactly 59 cases, got {}",
-        cases.len()
-    );
-    let functions: HashSet<_> = cases.iter().map(|c| c.function.clone()).collect();
-    for f in [
-        "pls1_fit",
-        "pls1_find_k_optimal",
-        "pls1_find_k_sequence",
-        "pls1_confirmatory_test",
-        "pls1_predict",
-        "rotate",
-        "preprocess",
-        "pls1_perm_null",
-        "pls1_rotation_stability",
-        "spls1_fit",
-        "spls1_find_keep_optimal",
-        "spls1_find_k_optimal",
-        "spls1_find_k_sequence",
-        "pls3_fit",
-        "pls3_transform",
-        "pls3_confirmatory_test",
-        "spls3_fit",
-    ] {
-        assert!(functions.contains(f), "missing function family: {f}");
-    }
-    let names: HashSet<_> = cases.iter().map(|c| c.name.clone()).collect();
-    assert!(names.contains("pls1_fit_small_n50_d10_k1"));
-    assert!(names.contains("pls1_confirmatory_split_nb_ci"));
-    assert!(names.contains("pls1_fit_skinny_n200_d5_k1"));
-    assert!(names.contains("pls1_predict_basic_n80_d6_k2"));
-    assert!(names.contains("rotate_varimax_d6_k2"));
-    assert!(names.contains("preprocess_n50_d10_with_weights"));
-    assert!(names.contains("pls1_perm_null_basic_n80_d6_k2"));
-    assert!(names.contains("pls1_rotation_stability_n80_d6_k2"));
-    assert!(names.contains("pls1_fit_weighted_n50_d10_k2"));
-    assert!(names.contains("pls1_confirmatory_weighted_score"));
-    assert!(names.contains("pls3_fit_wide_n30_p100_q3_k2"));
-    assert!(names.contains("pls3_transform_basic_n80_p6_q3_k2"));
-    assert!(names.contains("pls3_confirmatory_split_exact"));
-    assert!(names.contains("pls1_confirmatory_raw_perm_wide"));
-    assert!(names.contains("pls3_confirmatory_split_exact_wide"));
-    for name in [
-        "pls1_perm_null_weighted_n80_d6_k2",
-        "pls1_perm_null_wide_n60_d3000_k1",
-        "pls1_perm_null_wide_n60_d3000_k2",
-        "pls1_confirmatory_raw_perm_wide_k2",
-        "pls1_confirmatory_split_exact_wide_k2",
-        "spls1_find_k_sequence_split_exact_keep3",
-    ] {
-        assert!(names.contains(name), "missing fixture {name}");
-    }
-    assert!(names.contains("pls1_perm_null_tall_n2000_d50_k3"));
-    assert!(names.contains("pls1_perm_null_tall_weighted_n2000_d50_k2"));
-    assert!(names.contains("pls1_confirmatory_raw_perm_tall_k2"));
-    assert!(names.contains("spls1_find_k_sequence_split_exact_tall_keep10"));
+
+    let mut generated = BTreeMap::new();
     for c in &cases {
+        // A case's recorded hashes must be those of its files as the whole
+        // run left them: a later case that rewrites a shared inputs file
+        // ("last writer wins") with other bytes leaves this one stale.
+        for (rel, recorded) in [
+            (&c.inputs, &c.hashes.inputs_sha256),
+            (&c.outputs, &c.hashes.outputs_sha256),
+        ] {
+            let path = dir.path().join(rel);
+            assert!(path.exists(), "{}: {rel} was not written", c.name);
+            assert_eq!(
+                &sha256_of_file(&path).unwrap(),
+                recorded,
+                "{}: {rel} changed after its case hashed it",
+                c.name
+            );
+        }
+        let entry = without_hashes(serde_json::to_value(c).unwrap());
+        assert!(
+            generated.insert(c.name.clone(), entry).is_none(),
+            "duplicate case name {}",
+            c.name
+        );
+    }
+
+    let manifest =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../testdata/manifest.json");
+    let committed: Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    let committed: BTreeMap<String, Value> = committed["cases"]
+        .as_array()
+        .expect("cases")
+        .iter()
+        .map(|c| {
+            let name = c["name"].as_str().expect("name").to_owned();
+            (name, without_hashes(c.clone()))
+        })
+        .collect();
+
+    let names = |m: &BTreeMap<String, Value>| m.keys().cloned().collect::<BTreeSet<_>>();
+    let (gen, com) = (names(&generated), names(&committed));
+    assert_eq!(
+        gen,
+        com,
+        "the generator and testdata/manifest.json list different cases (manifest only: {:?}; \
+         generator only: {:?}); regenerate: cargo run -p plskit-testdata-gen -- --testdata-root testdata",
+        com.difference(&gen).collect::<Vec<_>>(),
+        gen.difference(&com).collect::<Vec<_>>()
+    );
+    for (name, entry) in &generated {
         assert_eq!(
-            c.hashes.inputs_sha256.len(),
-            64,
-            "case {} has bad inputs hash",
-            c.name
-        );
-        assert_eq!(
-            c.hashes.outputs_sha256.len(),
-            64,
-            "case {} has bad outputs hash",
-            c.name
-        );
-        assert!(
-            dir.path().join(&c.inputs).exists(),
-            "inputs missing for {}",
-            c.name
-        );
-        assert!(
-            dir.path().join(&c.outputs).exists(),
-            "outputs missing for {}",
-            c.name
-        );
-        assert!(
-            c.tolerance.is_some(),
-            "tolerance should be populated for {}",
-            c.name
+            entry, &committed[name],
+            "{name}: the manifest entry differs from the generator's; regenerate"
         );
     }
 }

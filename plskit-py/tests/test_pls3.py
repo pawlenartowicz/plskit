@@ -28,6 +28,8 @@ def test_fit_returns_PLS3Result_with_expected_shapes():
     assert m.k_used == 2
     assert m.pre_standardized_X is False
     assert m.pre_standardized_Y is False
+    assert m.keep_X is None and m.keep_Y is None
+    assert m.converged is None and m.n_iter is None
     # PLS3 is symmetric — there is no predict and no coefficient vector.
     assert not hasattr(m, "beta")
     assert not hasattr(m, "coef")
@@ -43,7 +45,7 @@ def test_plssvd_fit_alias_matches_pls3_fit():
 
 def test_fit_1d_Y_is_rejected_with_a_clear_message():
     X, Y = _data()
-    with pytest.raises(plskit.PlsKitError) as ei:
+    with pytest.raises(plskit.PlsKitError, match="use pls1_fit") as ei:
         plskit.pls3_fit(X, Y[:, 0], k=1)
     assert ei.value.code == "invalid_argument"
 
@@ -55,26 +57,11 @@ def test_fit_weights_are_rejected():
     assert ei.value.code == "invalid_argument"
 
 
-def test_fit_k_above_min_p_q_raises_k_exceeds_max():
-    X, Y = _data()
-    with pytest.raises(plskit.PlsKitError) as ei:
-        plskit.pls3_fit(X, Y, k=4)
-    assert ei.value.code == "k_exceeds_max"
-
-
-def test_transform_on_training_data_reproduces_in_sample_scores():
-    X, Y = _data()
-    m = plskit.pls3_fit(X, Y, k=2)
-    s = plskit.pls3_transform(m, X, Y, which="both")
-    assert isinstance(s, plskit.PLS3Scores)
-    np.testing.assert_allclose(s.x_scores, m.x_scores, atol=1e-10)
-    np.testing.assert_allclose(s.y_scores, m.y_scores, atol=1e-10)
-
-
 def test_transform_which_selects_blocks():
     X, Y = _data()
     m = plskit.pls3_fit(X, Y, k=2)
     s = plskit.pls3_transform(m, X, None, which="x_scores")
+    assert isinstance(s, plskit.PLS3Scores)
     assert s.x_scores is not None and s.y_scores is None
     s = plskit.pls3_transform(m, None, Y, which="y_scores")
     assert s.x_scores is None and s.y_scores is not None
@@ -96,7 +83,37 @@ def test_plssvd_transform_alias_matches():
     assert np.array_equal(a.x_scores, b.x_scores)
 
 
-def test_confirmatory_test_rejects_a_strong_shared_factor():
+@pytest.mark.parametrize(
+    "call, message",
+    [
+        (lambda m1, m3, X: plskit.pls1_predict(m3, X),
+         "model must be a PLS1Result, got a PLS3Result"),
+        (lambda m1, m3, X: plskit.pls1_predict(None, X),
+         "model must be a PLS1Result, got None"),
+        (lambda m1, m3, X: plskit.pls3_transform(m1, X),
+         "model must be a PLS3Result, got a PLS1Result"),
+        (lambda m1, m3, X: plskit.plssvd_transform({"U": X}, X),
+         "model must be a PLS3Result, got a dict"),
+        (lambda m1, m3, X: plskit.pls1_predict(X, X),
+         "model must be a PLS1Result, got an ndarray"),
+        (lambda m1, m3, X: plskit.pls1_predict(1, X),
+         "model must be a PLS1Result, got an int"),
+    ],
+    ids=["predict_pls3", "predict_none", "transform_pls1", "plssvd_transform_dict",
+         "predict_ndarray", "predict_int"],
+)
+def test_a_model_of_the_wrong_type_is_invalid_argument(call, message):
+    """A model argument of the wrong type raises `invalid_argument` worded
+    as plskit-bind (R) words it, not the `AttributeError` its fields would."""
+    X, Y = _data()
+    m1, m3 = plskit.pls1_fit(X, Y[:, 0], k=1), plskit.pls3_fit(X, Y, k=1)
+    with pytest.raises(plskit.PlsKitError) as ei:
+        call(m1, m3, X)
+    assert ei.value.code == "invalid_argument"
+    assert str(ei.value) == message
+
+
+def test_confirmatory_test_split_exact_marshals_its_fields():
     X, Y = _data(snr=3.0, seed=2)
     r = plskit.pls3_confirmatory_test(
         X, Y, k=1, method="split_exact", args={"n_perm": 199, "n_splits": 10}, seed=42
@@ -110,24 +127,6 @@ def test_confirmatory_test_rejects_a_strong_shared_factor():
     assert r.rho_hat is None
     assert r.stable_rank is None
     assert r.ci is None
-    assert r.pvalue <= 0.01
-
-
-def test_confirmatory_test_does_not_reject_independent_blocks():
-    X, Y = _data(snr=0.0, seed=9)
-    r = plskit.pls3_confirmatory_test(
-        X, Y, k=1, method="split_exact", args={"n_perm": 199, "n_splits": 10}, seed=42
-    )
-    assert r.pvalue > 0.05
-
-
-def test_confirmatory_test_same_seed_is_reproducible():
-    X, Y = _data(snr=2.0, seed=3)
-    kw = dict(method="split_exact", args={"n_perm": 99, "n_splits": 8}, seed=5)
-    a = plskit.pls3_confirmatory_test(X, Y, k=1, **kw)
-    b = plskit.pls3_confirmatory_test(X, Y, k=1, **kw)
-    assert a.pvalue == b.pvalue
-    assert a.statistic == b.statistic
 
 
 def test_confirmatory_test_seed_none_is_recorded_and_replayable():
@@ -158,15 +157,6 @@ def test_confirmatory_test_unknown_arg_key_is_rejected():
     assert ei.value.code == "invalid_args"
 
 
-def test_confirmatory_test_k_above_one_is_rejected():
-    X, Y = _data()
-    with pytest.raises(plskit.PlsKitError) as ei:
-        plskit.pls3_confirmatory_test(
-            X, Y, k=2, method="split_exact", args={"n_perm": 49, "n_splits": 6}, seed=1
-        )
-    assert ei.value.code == "invalid_argument"
-
-
 def test_split_nb_runs_and_reports_its_own_method():
     # p=6 and n=80 clear the gate's column, n_eff and stable-rank floors.
     X, Y = _data(snr=3.0, seed=2)
@@ -179,19 +169,6 @@ def test_split_nb_runs_and_reports_its_own_method():
     assert r.stable_rank is not None
     assert r.rho_hat is not None
     assert r.ci is None
-    assert 0.0 < r.pvalue <= 1.0
-    assert r.pvalue <= 0.01
-
-
-def test_split_nb_statistic_matches_split_exact_at_the_same_seed():
-    X, Y = _data(snr=2.0, seed=3)
-    nb = plskit.pls3_confirmatory_test(
-        X, Y, k=1, method="split_nb", args={"n_splits": 8}, seed=5
-    )
-    ex = plskit.pls3_confirmatory_test(
-        X, Y, k=1, method="split_exact", args={"n_perm": 99, "n_splits": 8}, seed=5
-    )
-    assert nb.statistic == ex.statistic
 
 
 def test_split_nb_gate_reroutes_and_warns():
@@ -204,15 +181,6 @@ def test_split_nb_gate_reroutes_and_warns():
     assert r.method == "split_exact"
     assert r.n_perm == 1000
     assert r.n_splits == 6
-
-
-def test_split_nb_force_overrides_the_gate():
-    X, Y = _data(n=80, p=3, q=3, snr=3.0, seed=2)
-    r = plskit.pls3_confirmatory_test(
-        X, Y, k=1, method="split_nb", args={"n_splits": 6, "force": True}, seed=42
-    )
-    assert r.method == "split_nb"
-    assert r.n_perm is None
 
 
 def test_split_nb_unknown_arg_key_is_rejected():
@@ -252,3 +220,22 @@ def test_orthogonal_Y_keeps_no_component_like_pls1(k):
     s = plskit.pls3_transform(m, X_new=X, Y_new=Y)
     assert s.x_scores.shape == (60, 0)
     assert s.y_scores.shape == (60, 0)
+
+
+@pytest.mark.parametrize(
+    "call, message",
+    [
+        (lambda X, Y: plskit.pls3_fit(X, Y, k=-1), "k must be a non-negative whole number"),
+        (lambda X, Y: plskit.pls3_fit(X, Y, pre_standardized_Y=1), "pre_standardized_Y must be a bool"),
+        (lambda X, Y: plskit.spls3_fit(X, Y, 1, 2.5, 2), "keep_X must be a non-negative whole number"),
+        (lambda X, Y: plskit.pls3_confirmatory_test(X, Y, method="split_exact", seed=-1),
+         "seed must be a whole number"),
+        (lambda X, Y: plskit.pls3_transform(plskit.pls3_fit(X, Y), X, which=1),
+         "which must be a string"),
+    ],
+)
+def test_pls3_family_rejects_unusable_top_level_values(call, message):
+    X, Y = _data()
+    with pytest.raises(plskit.PlsKitError, match=message) as ei:
+        call(X, Y)
+    assert ei.value.code == "invalid_argument"

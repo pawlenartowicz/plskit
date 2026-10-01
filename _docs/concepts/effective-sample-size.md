@@ -64,15 +64,17 @@ loop treats it:
 ## What users see
 
 - **`PlsKitInvalidWeights` with `reason="insufficient_effective_n"`**
-  (error code `invalid_weights`) from a top-level call with weights: your
-  `(weights, k)` combination is infeasible. The effective sample size is
-  too small for the number of components requested. Actions: lower `k`
-  (or `k_max`), flatten extreme weights, or add observations.
+  (error code `invalid_weights`) from a top-level call with non-uniform
+  weights: your `(weights, k)` combination is infeasible. The effective
+  sample size is too small for the number of components requested.
+  Actions: lower `k` (or `k_max`), flatten extreme weights, or add
+  observations.
 
 - **`PlsKitError` with code `invalid_argument`** ("insufficient n for
-  k=...") from a top-level call without weights: the same check, but with
-  no weights in play it is a plain data-size problem, `n < k + 1`. Lower
-  `k` or add observations.
+  k=...") from a top-level call without weights, or with all-equal weights
+  (which are no weights: the call is identical to one without them): the
+  same check, but with no weights in play it is a plain data-size problem,
+  `n < k + 1`. Lower `k` or add observations.
 
 - **`PlsKitResamplingDegenerate`** (error code `resampling_degenerate`)
   from `pls1_confirmatory_test(ci=True)` or `pls1_rotation_stability`:

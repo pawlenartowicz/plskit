@@ -53,4 +53,8 @@ fn rotate_matches_ssdlite_reference() {
         "R diverges from SSDLite reference"
     );
     assert_eq!(out.sweeps, sweeps_expected, "sweep count differs");
+    assert!(
+        (out.v_converged - v["V_converged"].as_f64().unwrap()).abs() < 1e-12,
+        "V_converged differs from SSDLite"
+    );
 }

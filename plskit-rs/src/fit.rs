@@ -67,7 +67,7 @@ pub struct FitOpts {
     /// fit) set `check_n_eff=false` and tolerate truncation by design.
     pub pre_standardized: bool,
     /// When true (default), `pls1_fit` errors with `InvalidWeights{reason:"insufficient_effective_n"}`
-    /// (weighted inputs) or `InvalidArgument` (uniform/absent weights)
+    /// (non-uniform weights) or `InvalidArgument` (uniform or absent weights)
     /// if `n_eff < k + 1`. Set to false for per-iteration internal calls (CV folds,
     /// bootstrap subsamples) where the upstream accumulator handles degeneracy.
     /// See `_docs/internals/n-eff-check.md`.
@@ -179,7 +179,12 @@ pub struct Pls1Model {
 }
 
 /// Validate weights and produce `(normalized vector, n_eff, all_uniform_flag)`.
-/// Returns `Ok((None, n as f64, true))` when `weights` is `None`.
+/// Returns `Ok((None, n as f64, true))` when `weights` is `None` **and** when
+/// every weight is equal: all-equal weights are no weights (uniform-weight
+/// invariance), so every downstream branch on `w_norm.is_some()` takes the
+/// unweighted path and the call is bit-identical to one without weights.
+/// That includes `n_eff`, which is exactly `n` (Kish's ratio of equal
+/// non-unit weights can round an ulp below it).
 ///
 /// # Errors
 /// - `InvalidWeights { reason: "length_mismatch" }` if `weights.len() != n`
@@ -187,17 +192,18 @@ pub struct Pls1Model {
 /// - `InvalidWeights { reason: "negative" }` for any `w < 0`
 /// - `InvalidWeights { reason: "all_zero" }` if `Σw == 0`
 ///
-/// The `all_uniform` flag is `true` when post-normalization every entry equals 1.0 (within 1e-12).
-/// Callers should echo `None` for `weights` on the result struct when this flag is set
-/// (uniform-weight invariance: all-equal weights are indistinguishable from none).
+/// All-equal means every normalized entry is 1.0 within 1e-12; such weights
+/// come back as `None` with `n_eff = n`, exactly like absent weights.
+/// Top-level entries that take a component count call
+/// `validate_weights_for_k` instead.
 pub(crate) fn validate_and_normalize_weights(
     weights: Option<ColRef<'_, f64>>,
     n: usize,
     k_requested: usize,
-) -> PlsKitResult<(Option<Col<f64>>, f64, bool)> {
+) -> PlsKitResult<(Option<Col<f64>>, f64)> {
     let Some(w) = weights else {
         #[allow(clippy::cast_precision_loss)]
-        return Ok((None, n as f64, true));
+        return Ok((None, n as f64));
     };
 
     if w.nrows() != n {
@@ -218,11 +224,43 @@ pub(crate) fn validate_and_normalize_weights(
     }
     let wn = crate::linalg::normalize_weights(w)
         .ok_or(PlsKitError::InvalidWeights { reason: "all_zero" })?;
-    let n_eff = crate::linalg::compute_n_eff(w);
-    let _ = k_requested; // n_eff check moved to check_n_eff_for_k; see _docs/internals/n-eff-check.md
-    let max_dev = (0..n).map(|i| (wn[i] - 1.0).abs()).fold(0.0_f64, f64::max);
-    let all_uniform = max_dev < 1e-12;
-    Ok((Some(wn), n_eff, all_uniform))
+    let _ = k_requested; // the n_eff check lives in validate_weights_for_k; see _docs/internals/n-eff-check.md
+    if weights_all_equal(wn.as_ref()) {
+        #[allow(clippy::cast_precision_loss)]
+        return Ok((None, n as f64));
+    }
+    Ok((Some(wn), crate::linalg::compute_n_eff(w)))
+}
+
+/// The all-equal predicate on normalized weights `w'` (mean 1): every
+/// entry is 1.0 within 1e-12. Such weights are no weights, and their
+/// `n_eff` is exactly `n`; `preprocess` reports the same `n_eff` for them.
+pub(crate) fn weights_all_equal(wn: ColRef<'_, f64>) -> bool {
+    let max_dev = (0..wn.nrows())
+        .map(|i| (wn[i] - 1.0).abs())
+        .fold(0.0_f64, f64::max);
+    max_dev < 1e-12
+}
+
+/// `validate_and_normalize_weights` followed by the `n_eff ≥ k + 1` check:
+/// the one call every top-level entry with weights and a component count
+/// makes. Returns `(normalized weights, n_eff)`. Whether the weights are "in
+/// play" for the error kind is read off the normalized vector, never off
+/// the caller's `Option`, so all-equal weights fail exactly as absent ones.
+///
+/// # Errors
+/// Those of `validate_and_normalize_weights`, then
+/// `InvalidWeights { reason: "insufficient_effective_n" }` (non-uniform
+/// weights) or `InvalidArgument` (uniform or absent weights) when
+/// `n_eff < k + 1`.
+pub(crate) fn validate_weights_for_k(
+    weights: Option<ColRef<'_, f64>>,
+    n: usize,
+    k: usize,
+) -> PlsKitResult<(Option<Col<f64>>, f64)> {
+    let (w_norm, n_eff) = validate_and_normalize_weights(weights, n, k)?;
+    check_n_eff_for_k(n_eff, k, w_norm.is_some())?;
+    Ok((w_norm, n_eff))
 }
 
 /// Check that every entry of `x` is finite. Used at top-level public
@@ -280,19 +318,19 @@ pub(crate) fn check_finite_col(y: ColRef<'_, f64>) -> PlsKitResult<()> {
 
 /// Check that effective sample size supports the requested number of components.
 ///
-/// When `weighted=true` (observation weights were supplied), returns
+/// When `weighted=true` (non-uniform observation weights), returns
 /// `Err(InvalidWeights { reason: "insufficient_effective_n" })` when `n_eff < k + 1`.
-/// When `weighted=false` (uniform / absent weights), returns
+/// When `weighted=false` (uniform or absent weights), returns
 /// `Err(InvalidArgument)` — no weights are in play, so the failure is a plain
 /// data-size problem, not a weights problem (callers branch on `code()`).
-/// Called at every TOP-LEVEL public entry that takes weights;
-/// NOT called by per-iteration internals (CV folds, bootstrap subsamples,
-/// permutation refits); see `_docs/internals/n-eff-check.md`.
+/// Reached only through `validate_weights_for_k`, which derives `weighted`
+/// from the normalized vector; see `_docs/internals/n-eff-check.md`.
 ///
 /// # Errors
-/// `InvalidWeights { reason: "insufficient_effective_n" }` (weighted) or
-/// `InvalidArgument` (unweighted) when `n_eff < k + 1`.
-pub(crate) fn check_n_eff_for_k(n_eff: f64, k: usize, weighted: bool) -> PlsKitResult<()> {
+/// `InvalidWeights { reason: "insufficient_effective_n" }` (non-uniform
+/// weights) or `InvalidArgument` (uniform or absent weights) when
+/// `n_eff < k + 1`.
+fn check_n_eff_for_k(n_eff: f64, k: usize, weighted: bool) -> PlsKitResult<()> {
     #[allow(clippy::cast_precision_loss)]
     if n_eff < (k as f64) + 1.0 {
         return Err(if weighted {
@@ -385,6 +423,7 @@ pub(crate) fn check_fit_y_and_k(
 /// # Errors
 /// - `PlsKitError::DimensionMismatch` when `y.nrows() != x.nrows()`
 /// - `PlsKitError::InvalidWeights { reason: "length_mismatch" }` when `weights.len() != n`
+/// - `PlsKitError::InvalidArgument` when `k == 0`
 /// - `PlsKitError::KExceedsMax` when `k > n_features`
 /// - `PlsKitError::NonFiniteInput` when X, y, or weights contains NaN/inf
 /// - `PlsKitError::InvalidWeights` for negative, all-zero, or insufficient-`n_eff` weights
@@ -414,15 +453,14 @@ pub fn pls1_fit(
     // reported ahead of y, k, keep and the weights, as the replicate loops
     // (which check X first) report it.
     // Weights: finite, non-negative, Σw > 0, normalized to mean 1.
-    let checked = check_fit_y_and_k(n_features, y, k_requested, opts.keep)
-        .and_then(|()| validate_and_normalize_weights(weights, n_samples, k_requested))
-        .and_then(|v| {
-            if opts.check_n_eff {
-                check_n_eff_for_k(v.1, k_requested, weights.is_some())?;
-            }
-            Ok(v)
-        });
-    let (w_norm, n_eff_val, all_uniform) = match checked {
+    let checked = check_fit_y_and_k(n_features, y, k_requested, opts.keep).and_then(|()| {
+        if opts.check_n_eff {
+            validate_weights_for_k(weights, n_samples, k_requested)
+        } else {
+            validate_and_normalize_weights(weights, n_samples, k_requested)
+        }
+    });
+    let (w_norm, n_eff_val) = match checked {
         Ok(v) => v,
         Err(e) => {
             check_finite_mat(x)?;
@@ -584,7 +622,7 @@ pub fn pls1_fit(
         intercept,
         k_used,
         pre_standardized: opts.pre_standardized,
-        weights: if all_uniform { None } else { w_norm },
+        weights: w_norm,
         n_eff: n_eff_val,
         keep: opts.keep,
     })
@@ -649,24 +687,10 @@ pub(crate) struct PreparedFit {
     pub(crate) k_used: usize,
 }
 
-/// See [`PreparedFit`]. `par` is resolved from `xs`'s shape and `k` exactly
-/// as `pls1_fit` resolves it.
-///
-/// # Errors
-/// None today (the kernel has no error path); the `Result` is kept so a
-/// kernel error can surface without a signature change.
-pub(crate) fn pls1_fit_prepared(
-    xs: MatRef<'_, f64>,
-    ys: ColRef<'_, f64>,
-    k: usize,
-    keep: Option<usize>,
-    par: ParChoice,
-) -> PlsKitResult<PreparedFit> {
-    pls1_fit_prepared_fro(xs, ys, k, keep, par, xs.norm_l2())
-}
-
-/// [`pls1_fit_prepared`] with `‖xs‖_F` supplied as `x_fro` by a caller that
-/// already has it (see [`pls1_kernel`]).
+/// [`PreparedFit`] of `xs`, `ys`, with `‖xs‖_F` supplied as `x_fro`
+/// (see [`pls1_kernel`]): a loop over one fixed block takes `xs.norm_l2()`
+/// once and passes it to every call. `par` is resolved from `xs`'s shape and
+/// `k` exactly as `pls1_fit` resolves it.
 ///
 /// # Errors
 /// None today (the kernel has no error path); the `Result` is kept so a
@@ -748,7 +772,7 @@ pub(crate) fn pls1_fit_implicit(
 /// # Panics
 /// When `Σw == 0`, where `pls1_fit` returns `InvalidWeights`. Callers pass
 /// weights that went through `validate_and_normalize_weights` or a per-fold
-/// renormalization with its uniform fallback, whose sum is positive.
+/// renormalization (`None` for a zero-sum slice), whose sum is positive.
 pub(crate) fn fit_row_scale(w: ColRef<'_, f64>) -> Col<f64> {
     let wn = crate::linalg::normalize_weights(w).expect("fit_row_scale: positive weight sum");
     crate::linalg::sqrt_col(wn.as_ref())
@@ -1222,15 +1246,20 @@ impl ImplicitXBackend<'_> {
             .map(|sqw| Col::<f64>::from_fn(n, |i| t[i] * sqw[i]));
         let tw = tw_owned.as_ref().map_or(t, Col::as_ref);
         let sum_tw: f64 = (0..n).map(|i| tw[i]).sum();
-        let mut g = Col::<f64>::zeros(self.x.ncols());
-        matmul(
-            g.as_mut().as_mat_mut(),
-            Accum::Replace,
-            self.x.transpose(),
-            tw.as_mat(),
-            1.0,
-            self.par,
-        );
+        // A wide row-major X (a C-ordered host array) reads its rows in
+        // blocks; any other X goes to faer.
+        let mut g = crate::linalg::row_major_t_mul(self.x, tw, self.par).unwrap_or_else(|| {
+            let mut g = Col::<f64>::zeros(self.x.ncols());
+            matmul(
+                g.as_mut().as_mat_mut(),
+                Accum::Replace,
+                self.x.transpose(),
+                tw.as_mat(),
+                1.0,
+                self.par,
+            );
+            g
+        });
         for j in 0..g.nrows() {
             g[j] = (g[j] - self.mean[j] * sum_tw) / self.scale[j] * alpha;
         }
@@ -1540,27 +1569,6 @@ mod tests {
     }
 
     #[test]
-    fn fit_recovers_signal_directionally() {
-        let (x, y) = linear_data(200, 8, 3, 1);
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(3),
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
-        let y_hat: Col<f64> = &x * &m.beta;
-        let y_mean: f64 = (0..y.nrows()).map(|i| y[i]).sum::<f64>() / y.nrows() as f64;
-        let ss_tot: f64 = (0..y.nrows()).map(|i| (y[i] - y_mean).powi(2)).sum();
-        let ss_res: f64 = (0..y.nrows())
-            .map(|i| (y[i] - (y_hat[i] + m.intercept)).powi(2))
-            .sum();
-        let r2 = 1.0 - ss_res / ss_tot;
-        assert!(r2 > 0.9, "R² too low: {r2}");
-    }
-
-    #[test]
     fn fit_pre_standardized_skips_centering() {
         let (x, y) = linear_data(50, 8, 3, 1);
         let (xs, _, _) = crate::linalg::standardize(x.as_ref());
@@ -1581,109 +1589,6 @@ mod tests {
             assert_relative_eq!(m.beta[j], m.coef[j], epsilon = 1e-15);
         }
         assert_relative_eq!(m.intercept, 0.0, epsilon = 1e-15);
-    }
-
-    #[test]
-    fn fit_dimension_mismatch_errors() {
-        let x = Mat::<f64>::zeros(10, 5);
-        let y = Col::<f64>::zeros(9);
-        let err = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            None,
-            FitOpts::default(),
-        );
-        assert!(matches!(err, Err(PlsKitError::DimensionMismatch { .. })));
-    }
-
-    #[test]
-    fn fit_k_exceeds_max_errors() {
-        let (x, y) = linear_data(20, 5, 2, 1);
-        let err = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(20),
-            None,
-            FitOpts::default(),
-        );
-        assert!(matches!(err, Err(PlsKitError::KExceedsMax { .. })));
-    }
-
-    #[test]
-    fn pls1_fit_rejects_k_zero() {
-        let (x, y) = linear_data(20, 5, 2, 1);
-        let err = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(0),
-            None,
-            FitOpts::default(),
-        );
-        assert!(
-            matches!(err, Err(PlsKitError::InvalidArgument(_))),
-            "expected InvalidArgument, got {err:?}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::many_single_char_names)]
-    fn pre_standardized_below_scale_contract_errors_when_strict() {
-        // Regression for review-finding H1/N5 (ticket #3): with
-        // `pre_standardized=true` and inputs scaled so far below 1.0 that
-        // ‖X'y‖ < 1e-14, NIPALS short-circuits at the first component.
-        // Before the guard, this returned a finite k_used=0 model;
-        // afterwards it returns InvalidInput because `check_n_eff=true`.
-        let n = 30;
-        let d = 4;
-        let x = Mat::<f64>::from_fn(n, d, |i, j| {
-            // Roughly orthogonal columns at amplitude ~1e-9.
-            let s = if (i + j) % 2 == 0 { 1.0 } else { -1.0 };
-            1e-9 * s
-        });
-        let y = Col::<f64>::from_fn(n, |i| 1e-9 * (i as f64 - 15.0));
-        let err = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(3),
-            None,
-            FitOpts {
-                pre_standardized: true,
-                ..FitOpts::default()
-            },
-        );
-        assert!(
-            matches!(err, Err(PlsKitError::InvalidInput(_))),
-            "expected InvalidInput, got {err:?}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::many_single_char_names)]
-    fn pre_standardized_below_scale_contract_silent_when_internal() {
-        // Mirror of the above with `check_n_eff=false`: per-fold internal
-        // callers must keep their fail-soft behavior (truncated k_used,
-        // upstream aggregator handles it). The guard MUST stay opt-in.
-        let n = 30;
-        let d = 4;
-        let x = Mat::<f64>::from_fn(n, d, |i, j| {
-            let s = if (i + j) % 2 == 0 { 1.0 } else { -1.0 };
-            1e-9 * s
-        });
-        let y = Col::<f64>::from_fn(n, |i| 1e-9 * (i as f64 - 15.0));
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(3),
-            None,
-            FitOpts {
-                pre_standardized: true,
-                check_n_eff: false,
-                ..FitOpts::default()
-            },
-        )
-        .expect("internal-style call must not error on truncation");
-        assert!(m.k_used < 3, "expected truncation; got k_used={}", m.k_used);
     }
 
     // ── spls1 sparse kernel ──────────────────────────────────────────
@@ -1805,35 +1710,6 @@ mod tests {
         .unwrap();
         assert!(m3.w_star[(2, 0)] != 0.0, "col 2 (higher |w|-rank than its duplicate at idx 3 via index tie-break path) must survive");
         assert_eq!(m3.w_star[(3, 0)], 0.0, "col 3 loses the tie against col 2");
-    }
-
-    #[test]
-    fn spls1_rejects_keep_zero_and_keep_gt_d() {
-        let (x, y) = linear_data(20, 5, 2, 1);
-        let e0 = spls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            0,
-            None,
-            FitOpts::default(),
-        );
-        assert!(
-            matches!(e0, Err(PlsKitError::InvalidArgument(_))),
-            "keep=0: {e0:?}"
-        );
-        let e6 = spls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            6,
-            None,
-            FitOpts::default(),
-        );
-        assert!(
-            matches!(e6, Err(PlsKitError::InvalidArgument(_))),
-            "keep>d: {e6:?}"
-        );
     }
 
     // ── relative floor on w_norm (y exhausted) ──────────────────────
@@ -2095,477 +1971,176 @@ mod tests {
         .unwrap();
         assert_eq!(mw.k_used, 20);
     }
-
-    #[test]
-    fn dense_pls1_fit_has_keep_none() {
-        let (x, y) = linear_data(30, 5, 2, 1);
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
-        assert_eq!(m.keep, None);
-    }
 }
 
 #[cfg(test)]
 mod kernel_tests;
 
+/// `pls1_fit` at its public boundary: layout invariance (to rounding), input
+/// screening, error codes and precedence, and the prepared tail the
+/// resamplers use.
 #[cfg(test)]
 #[allow(
     clippy::many_single_char_names,
     clippy::too_many_lines,
     clippy::type_complexity
 )]
-mod copy_free_reference {
+mod boundary_tests {
     use super::*;
     use crate::linalg::{
-        normalize_weights, standardize, standardize1, standardize1_weighted, standardize_weighted,
+        normalize_weights, standardize1, standardize1_weighted, standardize_weighted,
     };
-    use crate::signal_test::with_new_routes_disabled;
     use crate::test_support::{
-        assert_bits_eq, col_vals, copy_free_families, mat_vals, signal_data, Family, Layouts,
+        assert_agree, assert_bits_eq, assert_layout_agree, col_vals, copy_free_families, mat_vals,
+        signal_data, Agree, Family,
     };
 
-    /// Pre-change body, verbatim.
-    #[allow(clippy::many_single_char_names, clippy::too_many_lines)]
-    fn pls1_fit_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        k: KSpec,
-        weights: Option<ColRef<'_, f64>>,
+    /// Layouts of X agree to rounding, not bit for bit: `pls1_fit` forms its
+    /// products from X in X's own layout (CHANGELOG 0.6.1), so each layout
+    /// sums in its own order. `Agree::Corpus(1e-10)` is the corpus array
+    /// tolerance, `1e-10 + 1e-14 · |value|`, which the Python docs promise
+    /// across layouts.
+    const FIT_LAYOUT_TOL: f64 = 1e-10;
+
+    /// Every numeric output of a fit, flattened; `k_used` as an `f64` fails
+    /// `Agree::Corpus(FIT_LAYOUT_TOL)` on any difference.
+    fn model_vals(m: &Pls1Model) -> Vec<f64> {
+        let mut v = mat_vals(m.t_scores.as_ref());
+        v.extend(mat_vals(m.p_loadings.as_ref()));
+        v.extend(mat_vals(m.w_star.as_ref()));
+        v.extend(col_vals(m.q_loadings.as_ref()));
+        v.extend(col_vals(m.coef.as_ref()));
+        v.extend(col_vals(m.beta.as_ref()));
+        #[allow(clippy::cast_precision_loss)]
+        v.extend([m.intercept, m.n_eff, m.k_used as f64]);
+        v
+    }
+
+    /// `pls1_fit` on every layout of `x` agrees with the owned column-major
+    /// run to `FIT_LAYOUT_TOL`; returns the owned run's values. `keep` routes
+    /// through `spls1_fit`'s path (`spls1_fit` only sets `FitOpts::keep`).
+    fn fit_layouts(
+        what: &str,
+        x: &Mat<f64>,
+        y: &Col<f64>,
+        w: Option<ColRef<'_, f64>>,
+        k: usize,
         opts: FitOpts,
-    ) -> PlsKitResult<Pls1Model> {
-        let n_samples = x.nrows();
-        let n_features = x.ncols();
-        if y.nrows() != n_samples {
-            return Err(PlsKitError::DimensionMismatch {
-                x: (n_samples, n_features),
-                y: y.nrows(),
-            });
-        }
-        check_finite_mat(x)?;
-        check_finite_col(y)?;
-
-        let KSpec::Fixed(k_requested) = k;
-
-        if k_requested == 0 {
-            return Err(PlsKitError::InvalidArgument("k must be >= 1".into()));
-        }
-
-        if k_requested > n_features {
-            return Err(PlsKitError::KExceedsMax {
-                k: k_requested,
-                k_max: n_features,
-            });
-        }
-
-        if let Some(kp) = opts.keep {
-            validate_keep(kp, n_features)?;
-        }
-
-        // Validate weights (finite, non-negative, Σw > 0) and normalize to mean 1.
-        let (w_norm, n_eff_val, all_uniform) =
-            validate_and_normalize_weights(weights, n_samples, k_requested)?;
-        if opts.check_n_eff {
-            check_n_eff_for_k(n_eff_val, k_requested, weights.is_some())?;
-        }
-        let wref: Option<ColRef<'_, f64>> = w_norm.as_ref().map(Col::as_ref);
-
-        // Standardize, or skip when pre_standardized. Use weighted versions when weights is Some.
-        let (xs_owned, x_mean, x_scale, ys_owned, y_mean, y_scale) = if opts.pre_standardized {
-            (
-                None,
-                Col::<f64>::zeros(n_features),
-                Col::<f64>::from_fn(n_features, |_| 1.0),
-                None,
-                0.0,
-                1.0,
-            )
-        } else {
-            let (xs, m, s) = crate::linalg::standardize_weighted(x, wref);
-            let (zs, ym, ysc) = crate::linalg::standardize1_weighted(y, wref);
-            (Some(xs), m, s, Some(zs), ym, ysc)
-        };
-
-        let xs_view: MatRef<'_, f64> = match &xs_owned {
-            Some(a) => a.as_ref(),
-            None => x,
-        };
-        let ys_view: ColRef<'_, f64> = match &ys_owned {
-            Some(a) => a.as_ref(),
-            None => y,
-        };
-
-        // Apply √w' row-scaling. Row-scaling is the Cholesky factor of diag(w'),
-        // *not* preprocessing, so it runs even when pre_standardized=true.
-        let (x_scaled_owned, y_scaled_owned): (Option<Mat<f64>>, Option<Col<f64>>) = match wref {
-            None => (None, None),
-            Some(w) => {
-                let sqw: Vec<f64> = (0..n_samples).map(|i| w[i].sqrt()).collect();
-                let xt =
-                    Mat::<f64>::from_fn(n_samples, n_features, |i, j| sqw[i] * xs_view[(i, j)]);
-                let yt = Col::<f64>::from_fn(n_samples, |i| sqw[i] * ys_view[i]);
-                (Some(xt), Some(yt))
-            }
-        };
-
-        let x_for_nipals: MatRef<'_, f64> = match &x_scaled_owned {
-            Some(a) => a.as_ref(),
-            None => xs_view,
-        };
-        let y_for_nipals: ColRef<'_, f64> = match &y_scaled_owned {
-            Some(a) => a.as_ref(),
-            None => ys_view,
-        };
-
-        let par = resolve_par(opts.par, n_samples, n_features, k_requested);
-        // The production kernel, so everything around it stays pinned bit for bit.
-        let (t_mat, p_mat, w_mat, q_vec) = pls1_kernel(
-            x_for_nipals,
-            y_for_nipals,
-            k_requested,
-            opts.keep,
-            par,
-            x_for_nipals.norm_l2(),
-        )?;
-
-        let k_used = w_mat.ncols();
-        if opts.pre_standardized && opts.check_n_eff && k_used < k_requested {
-            return Err(PlsKitError::InvalidInput(format!(
-                "pls1_fit(pre_standardized=true) truncated to k_used={k_used} < requested k={k_requested}: \
-                 NIPALS short-circuited on the {kth} component (norm < 1e-14, or at the \
-                 rounding floor relative to ‖X‖_F·‖y‖). Either X or y is exhausted (fewer \
-                 than k informative directions: lower k; at k_used=0, y is orthogonal to X \
-                 up to rounding), or the inputs \
-                 violate the pre_standardized scale contract (see `FitOpts::pre_standardized`): \
-                 re-fit with `pre_standardized=false` to let plskit standardize, or rescale your \
-                 inputs so that ‖X‖_F ≥ 1e-6.",
-                kth = k_used + 1
-            )));
-        }
-        let coef = pls1_coef_at_k(&w_mat, &p_mat, &q_vec, k_used, par);
-
-        // Back-project to raw scale: beta[j] = coef[j] * y_scale / x_scale[j]
-        let beta = if opts.pre_standardized {
-            coef.clone()
-        } else {
-            Col::<f64>::from_fn(n_features, |j| coef[j] * y_scale / x_scale[j])
-        };
-        let intercept = if opts.pre_standardized {
-            0.0
-        } else {
-            // y_hat_raw = mean_y + sum_j beta_j (x_j - mean_x_j)
-            let dot: f64 = (0..n_features).map(|j| beta[j] * x_mean[j]).sum();
-            y_mean - dot
-        };
-
-        Ok(Pls1Model {
-            t_scores: t_mat,
-            p_loadings: p_mat,
-            w_star: w_mat,
-            q_loadings: q_vec,
-            coef,
-            beta,
-            intercept,
-            k_used,
-            pre_standardized: opts.pre_standardized,
-            weights: if all_uniform { None } else { w_norm },
-            n_eff: n_eff_val,
-            keep: opts.keep,
+    ) -> Vec<f64> {
+        assert_layout_agree(x, what, Agree::Corpus(FIT_LAYOUT_TOL), |xv| {
+            pls1_fit(xv, y.as_ref(), KSpec::Fixed(k), w, opts).map(|m| model_vals(&m))
         })
+        .unwrap_or_else(|e| panic!("{what}: {e}"))
     }
 
-    fn assert_model_bits(a: &Pls1Model, b: &Pls1Model, what: &str) {
-        assert_eq!(a.k_used, b.k_used, "{what}.k_used");
-        assert_bits_eq(
-            &mat_vals(a.t_scores.as_ref()),
-            &mat_vals(b.t_scores.as_ref()),
-            &format!("{what}.t_scores"),
-        );
-        assert_bits_eq(
-            &mat_vals(a.p_loadings.as_ref()),
-            &mat_vals(b.p_loadings.as_ref()),
-            &format!("{what}.p_loadings"),
-        );
-        assert_bits_eq(
-            &mat_vals(a.w_star.as_ref()),
-            &mat_vals(b.w_star.as_ref()),
-            &format!("{what}.w_star"),
-        );
-        assert_bits_eq(
-            &col_vals(a.q_loadings.as_ref()),
-            &col_vals(b.q_loadings.as_ref()),
-            &format!("{what}.q"),
-        );
-        assert_bits_eq(
-            &col_vals(a.coef.as_ref()),
-            &col_vals(b.coef.as_ref()),
-            &format!("{what}.coef"),
-        );
-        assert_bits_eq(
-            &col_vals(a.beta.as_ref()),
-            &col_vals(b.beta.as_ref()),
-            &format!("{what}.beta"),
-        );
-        assert_bits_eq(
-            &[a.intercept, a.n_eff],
-            &[b.intercept, b.n_eff],
-            &format!("{what}.scalars"),
-        );
-        assert_eq!(
-            (a.pre_standardized, a.keep),
-            (b.pre_standardized, b.keep),
-            "{what}.flags"
-        );
-        match (&a.weights, &b.weights) {
-            (Some(x), Some(y)) => assert_bits_eq(
-                &col_vals(x.as_ref()),
-                &col_vals(y.as_ref()),
-                &format!("{what}.weights"),
-            ),
-            (None, None) => {}
-            _ => panic!("{what}.weights presence differs"),
-        }
-    }
-
-    /// `a` and `b` agree entry by entry to `tol` relative to `1 + |b|`: the
-    /// check for fits whose only difference is the layout the kernel read.
-    fn assert_model_close(a: &Pls1Model, b: &Pls1Model, tol: f64, what: &str) {
-        assert_eq!(a.k_used, b.k_used, "{what}.k_used");
-        let pairs = [
-            (
-                "t_scores",
-                mat_vals(a.t_scores.as_ref()),
-                mat_vals(b.t_scores.as_ref()),
-            ),
-            (
-                "p_loadings",
-                mat_vals(a.p_loadings.as_ref()),
-                mat_vals(b.p_loadings.as_ref()),
-            ),
-            (
-                "w_star",
-                mat_vals(a.w_star.as_ref()),
-                mat_vals(b.w_star.as_ref()),
-            ),
-            (
-                "q",
-                col_vals(a.q_loadings.as_ref()),
-                col_vals(b.q_loadings.as_ref()),
-            ),
-            ("coef", col_vals(a.coef.as_ref()), col_vals(b.coef.as_ref())),
-            ("beta", col_vals(a.beta.as_ref()), col_vals(b.beta.as_ref())),
-            (
-                "scalars",
-                vec![a.intercept, a.n_eff],
-                vec![b.intercept, b.n_eff],
-            ),
-        ];
-        for (name, x, y) in pairs {
-            assert_eq!(x.len(), y.len(), "{what}.{name} length");
-            for (i, (u, v)) in x.iter().zip(&y).enumerate() {
-                assert!(
-                    (u - v).abs() <= tol * (1.0 + v.abs()),
-                    "{what}.{name}[{i}]: {u} vs {v}"
-                );
-            }
-        }
-        assert_eq!(
-            (a.pre_standardized, a.keep),
-            (b.pre_standardized, b.keep),
-            "{what}.flags"
-        );
+    fn offset(x: &Mat<f64>, c: f64) -> Mat<f64> {
+        Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| x[(i, j)] + c)
     }
 
     #[test]
-    fn pls1_fit_matches_reference() {
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let (xs, _, _) = standardize(f.x.as_ref());
-                let (ys, _, _) = standardize1(f.y.as_ref());
-                for pre in [false, true] {
-                    let (x0, y0) = if pre { (&xs, &ys) } else { (&f.x, &f.y) };
-                    let lay = Layouts::new(x0.as_ref());
-                    for (view, xv) in lay.all(x0) {
-                        for k in [1_usize, 3] {
-                            for keep in [None, Some(3)] {
-                                for par in [ParChoice::Seq, ParChoice::Auto] {
-                                    let opts = FitOpts {
-                                        pre_standardized: pre,
-                                        check_n_eff: false,
-                                        par,
-                                        keep,
-                                    };
-                                    let wr = f.w.as_ref().map(Col::as_ref);
-                                    let a = pls1_fit(xv, y0.as_ref(), KSpec::Fixed(k), wr, opts)
-                                        .unwrap();
-                                    let b = pls1_fit_reference(
-                                        xv,
-                                        y0.as_ref(),
-                                        KSpec::Fixed(k),
-                                        wr,
-                                        opts,
-                                    )
-                                    .unwrap();
-                                    let what = format!(
-                                        "{} {view} pre={pre} k={k} keep={keep:?} {par:?}",
-                                        f.name
-                                    );
-                                    // Standardizing, the fit forms its products from
-                                    // the raw X; the reference from a standardized copy.
-                                    if pre {
-                                        assert_model_bits(&a, &b, &what);
-                                    } else {
-                                        assert_model_close(&a, &b, 1e-10, &what);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            // A size where `ParChoice::Auto` resolves to the Rayon path.
-            let (x, y) = signal_data(200, 2000, 9);
-            for par in [ParChoice::Seq, ParChoice::Auto] {
-                let opts = FitOpts {
-                    par,
-                    ..FitOpts::default()
-                };
-                let a = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(3), None, opts).unwrap();
-                let b = pls1_fit_reference(x.as_ref(), y.as_ref(), KSpec::Fixed(3), None, opts)
-                    .unwrap();
-                assert_model_close(&a, &b, 1e-10, &format!("large {par:?}"));
-            }
-        });
-    }
-
-    /// Past `IMPLICIT_MAX_MEAN_RATIO` the fit standardizes X into a copy in
-    /// X's layout: every column-major layout fits to the reference's bits, a
-    /// row-major one to within 1e-10.
-    #[test]
-    fn mean_heavy_x_fits_the_standardized_copy() {
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let x = Mat::<f64>::from_fn(f.x.nrows(), f.x.ncols(), |i, j| f.x[(i, j)] + 1e6);
-                let lay = Layouts::new(x.as_ref());
-                for (view, xv) in lay.all(&x) {
-                    for k in [1_usize, 3] {
-                        let opts = FitOpts {
-                            check_n_eff: false,
-                            ..FitOpts::default()
-                        };
-                        let wr = f.w.as_ref().map(Col::as_ref);
-                        let a = pls1_fit(xv, f.y.as_ref(), KSpec::Fixed(k), wr, opts).unwrap();
-                        let b = pls1_fit_reference(xv, f.y.as_ref(), KSpec::Fixed(k), wr, opts)
-                            .unwrap();
-                        let what = format!("{} {view} k={k}", f.name);
-                        if view == "row_major" {
-                            assert_model_close(&a, &b, 1e-10, &what);
-                        } else {
-                            assert_model_bits(&a, &b, &what);
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    /// Below `IMPLICIT_MAX_MEAN_RATIO` the fit forms its products from the raw
-    /// X. A common offset of 300 puts every family's largest `|mean_j| / scale_j`
-    /// between about 580 and 770, and every layout stays within 1e-10 of the
-    /// reference's standardized copy.
-    #[test]
-    fn offset_x_below_the_ratio_bound_matches_the_copy() {
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let x = Mat::<f64>::from_fn(f.x.nrows(), f.x.ncols(), |i, j| f.x[(i, j)] + 300.0);
-                let wr = f.w.as_ref().map(Col::as_ref);
-                let ratio = crate::linalg::fit_x_moments(x.as_ref(), wr).max_mean_ratio();
-                assert!(
-                    ratio > 100.0 && ratio < IMPLICIT_MAX_MEAN_RATIO,
-                    "{} ratio {ratio}",
-                    f.name
-                );
-                let lay = Layouts::new(x.as_ref());
-                for (view, xv) in lay.all(&x) {
-                    for k in [1_usize, 3] {
-                        let opts = FitOpts {
-                            check_n_eff: false,
-                            ..FitOpts::default()
-                        };
-                        let a = pls1_fit(xv, f.y.as_ref(), KSpec::Fixed(k), wr, opts).unwrap();
-                        let b = pls1_fit_reference(xv, f.y.as_ref(), KSpec::Fixed(k), wr, opts)
-                            .unwrap();
-                        assert_model_close(&a, &b, 1e-10, &format!("{} {view} k={k}", f.name));
-                    }
-                }
-            }
-        });
-    }
-
-    /// A `y` orthogonal to an offset X, below `IMPLICIT_MAX_MEAN_RATIO`: two
-    /// offset columns (largest `|mean_j| / scale_j` about 270), and a centered
-    /// column beside a constant 999.3 (ratio 999.3). The implicit products put
-    /// the first `‖X'y‖` above the floor, where the copy puts it below. The
-    /// fit decides on the copy and returns `k_used = 0`, to the reference's
-    /// bits.
-    #[test]
-    fn orthogonal_y_on_offset_x_keeps_no_component() {
-        use rand::{RngExt, SeedableRng};
-        with_new_routes_disabled(|| {
-            let designs = [[0.37, 99.7, -1.3, 89.73], [0.37, 0.0, 0.0, 999.3]];
-            for (c, n) in designs
-                .iter()
-                .flat_map(|c| [8_usize, 12, 16].map(|n| (c, n)))
-            {
-                // Column j is `c[2j]·a + c[2j + 1]`, `a = ±1` alternating.
-                let x = Mat::<f64>::from_fn(n, 2, |i, j| {
-                    let a = if i % 2 == 0 { 1.0 } else { -1.0 };
-                    c[2 * j] * a + c[2 * j + 1]
-                });
-                let ones = Col::<f64>::from_fn(n, |_| 1.0);
-                let basis =
-                    crate::test_support::orthonormal_basis(ones.as_ref(), x.as_ref(), 1e-12);
-                for seed in 0..20_u64 {
-                    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-                    let mut y = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
-                    crate::test_support::project_off(&basis, &mut y);
-                    let opts = FitOpts::default();
-                    let a = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(1), None, opts).unwrap();
-                    let b = pls1_fit_reference(x.as_ref(), y.as_ref(), KSpec::Fixed(1), None, opts)
-                        .unwrap();
-                    let what = format!("{c:?} n={n} seed={seed}");
-                    assert_eq!(b.k_used, 0, "{what}: reference");
-                    assert_model_bits(&a, &b, &what);
-                }
-            }
-        });
-    }
-
-    /// With `pre_standardized = false`, `pls1_fit` forms its products from X
-    /// in X's own layout, so every layout (including a C-ordered array that
-    /// `plskit-py` reads in place) fits to within 1e-10 of the owned
-    /// column-major matrix: the products round differently per layout. A
-    /// non-finite entry is found on every layout, on both paths, weighted or
-    /// not, also when its row has weight zero.
-    #[test]
-    fn standardizing_fit_layouts_agree() {
-        let fit = |x: MatRef<'_, f64>, f: &Family, k: usize, keep, par| {
-            let opts = FitOpts {
-                par,
-                keep,
-                ..FitOpts::default()
-            };
-            let wr = f.w.as_ref().map(Col::as_ref);
-            pls1_fit(x, f.y.as_ref(), KSpec::Fixed(k), wr, opts)
+    fn pls1_fit_is_layout_invariant_to_rounding() {
+        let opts = |pre, keep, par| FitOpts {
+            pre_standardized: pre,
+            par,
+            keep,
+            ..FitOpts::default()
         };
+        for f in copy_free_families() {
+            let w = f.w.as_ref().map(Col::as_ref);
+            for pre in [false, true] {
+                let (x, y) = f.inputs(pre);
+                for k in [1_usize, 3] {
+                    for keep in [None, Some(3)] {
+                        for par in [ParChoice::Seq, ParChoice::Auto] {
+                            let what = format!("{} pre={pre} k={k} keep={keep:?} {par:?}", f.name);
+                            fit_layouts(&what, &x, &y, w, k, opts(pre, keep, par));
+                        }
+                    }
+                }
+            }
+        }
+        // Sizes where `ParChoice::Auto` resolves to the Rayon path (at k = 3):
+        // the owned Seq and Auto runs agree too (nothing else runs the Rayon
+        // implicit products against Seq at this size). At 2100 columns
+        // (`linalg::ROW_BLOCK_MIN_COLS` and up) the row-major view reads its
+        // rows in blocks for the moments and `Xs'·t`
+        // (`linalg::row_major_t_mul`); 203 rows leave a partial block, also in
+        // each Rayon piece. At 2000 it keeps faer's product.
+        for (n, d, seed) in [(200, 2000, 9), (203, 2100, 10)] {
+            let (x, y) = signal_data(n, d, seed);
+            // The row-major view of `Layouts` (the transpose of a stored
+            // transpose) takes the blocked product exactly at 2100 columns,
+            // under both arms.
+            let x_t = x.transpose().to_owned();
+            for par in [Par::Seq, crate::fit::par_fixed()] {
+                assert_eq!(
+                    crate::linalg::row_major_t_mul(x_t.transpose(), y.as_ref(), par).is_some(),
+                    d == 2100,
+                    "{n}x{d} {par:?}: left its row-major route"
+                );
+            }
+            for k in [1_usize, 3] {
+                for keep in [None, Some(3)] {
+                    let what = format!("large {n}x{d} k={k} keep={keep:?}");
+                    let seq = fit_layouts(
+                        &format!("{what} Seq"),
+                        &x,
+                        &y,
+                        None,
+                        k,
+                        opts(false, keep, ParChoice::Seq),
+                    );
+                    let auto = fit_layouts(
+                        &format!("{what} Auto"),
+                        &x,
+                        &y,
+                        None,
+                        k,
+                        opts(false, keep, ParChoice::Auto),
+                    );
+                    assert_agree(
+                        &auto,
+                        &seq,
+                        Agree::Corpus(FIT_LAYOUT_TOL),
+                        &format!("{what} Auto vs Seq"),
+                    );
+                }
+            }
+        }
+        // Offset X on both sides of `IMPLICIT_MAX_MEAN_RATIO`: +300 on the
+        // dense family stays on the implicit products, +1e6 on the weighted
+        // family takes the standardized copy.
+        let fams = copy_free_families();
+        for (f, c, implicit) in [(&fams[0], 300.0, true), (&fams[1], 1e6, false)] {
+            let x = offset(&f.x, c);
+            let w = f.w.as_ref().map(Col::as_ref);
+            let ratio = crate::linalg::fit_x_moments(x.as_ref(), w).max_mean_ratio();
+            let what = format!("{} + {c:e} (ratio {ratio:.0})", f.name);
+            assert_eq!(
+                ratio > 100.0 && ratio < IMPLICIT_MAX_MEAN_RATIO,
+                implicit,
+                "{what}: left its route"
+            );
+            assert!(ratio > 100.0, "{what}: not mean-heavy");
+            for k in [1_usize, 3] {
+                fit_layouts(
+                    &format!("{what} k={k}"),
+                    &x,
+                    &f.y,
+                    w,
+                    k,
+                    opts(false, None, ParChoice::Seq),
+                );
+            }
+        }
+    }
+
+    /// A non-finite entry is found on every layout, on both paths, weighted
+    /// or not, also when its row has weight zero.
+    #[test]
+    fn non_finite_x_is_found_on_every_layout() {
         let (xl, yl) = signal_data(200, 2000, 9);
         let mut families = copy_free_families();
-        // A size where `ParChoice::Auto` resolves to the Rayon path.
         families.push(Family {
             name: "large",
             x: xl,
@@ -2573,40 +2148,79 @@ mod copy_free_reference {
             w: None,
         });
         for f in &families {
-            let lay = Layouts::new(f.x.as_ref());
-            for (view, xv) in lay.all(&f.x) {
-                for k in [1_usize, 3] {
-                    for keep in [None, Some(3)] {
-                        for par in [ParChoice::Seq, ParChoice::Auto] {
-                            let a = fit(xv, f, k, keep, par).unwrap();
-                            let b = fit(f.x.as_ref(), f, k, keep, par).unwrap();
-                            let what = format!("{} {view} k={k} keep={keep:?} {par:?}", f.name);
-                            assert_model_close(&a, &b, 1e-10, &what);
-                        }
-                    }
-                }
-            }
             let n = f.x.nrows();
             let mut bad = f.x.clone();
             bad[(n - 1, f.x.ncols() - 1)] = f64::INFINITY;
             let zero_last = Col::<f64>::from_fn(n, |i| if i + 1 == n { 0.0 } else { 1.0 });
-            let bad_lay = Layouts::new(bad.as_ref());
-            for (view, xv) in bad_lay.all(&bad) {
-                for pre in [false, true] {
-                    for w in [None, Some(zero_last.as_ref())] {
-                        let opts = FitOpts {
-                            pre_standardized: pre,
-                            ..FitOpts::default()
-                        };
-                        let r = pls1_fit(xv, f.y.as_ref(), KSpec::Fixed(1), w, opts);
-                        assert!(
-                            matches!(r, Err(PlsKitError::NonFiniteInput)),
-                            "{} {view} pre={pre} weighted={}",
-                            f.name,
-                            w.is_some()
-                        );
-                    }
+            for pre in [false, true] {
+                for w in [None, Some(zero_last.as_ref())] {
+                    let what = format!("{} pre={pre} weighted={}", f.name, w.is_some());
+                    let opts = FitOpts {
+                        pre_standardized: pre,
+                        ..FitOpts::default()
+                    };
+                    let r = assert_layout_agree(&bad, &what, Agree::Bits, |xv| {
+                        pls1_fit(xv, f.y.as_ref(), KSpec::Fixed(1), w, opts).map(|_| vec![])
+                    });
+                    assert!(
+                        matches!(r, Err(PlsKitError::NonFiniteInput)),
+                        "{what}: {r:?}"
+                    );
                 }
+            }
+        }
+    }
+
+    /// A `y` orthogonal to an offset X, below `IMPLICIT_MAX_MEAN_RATIO`: two
+    /// offset columns (largest `|mean_j| / scale_j` about 270), and a centered
+    /// column beside the offset column `a + 999.3` (ratio 999.3; a constant
+    /// column no longer counts, its ratio is at most 1). The implicit products
+    /// would put the first `‖X'y‖` above the floor and keep one component;
+    /// the copy puts it below, and the fit decides on the copy: `k_used = 0`.
+    #[test]
+    #[allow(clippy::float_cmp)] // the zero model's intercept is mean(y) exactly
+    fn orthogonal_y_on_offset_x_keeps_no_component() {
+        use rand::{RngExt, SeedableRng};
+        let designs = [[0.37, 99.7, -1.3, 89.73], [0.37, 0.0, 1.0, 999.3]];
+        for (c, n) in designs
+            .iter()
+            .flat_map(|c| [8_usize, 12, 16].map(|n| (c, n)))
+        {
+            // Column j is `c[2j]·a + c[2j + 1]`, `a = ±1` alternating.
+            let x = Mat::<f64>::from_fn(n, 2, |i, j| {
+                let a = if i % 2 == 0 { 1.0 } else { -1.0 };
+                c[2 * j] * a + c[2 * j + 1]
+            });
+            let ones = Col::<f64>::from_fn(n, |_| 1.0);
+            let basis = crate::test_support::orthonormal_basis(ones.as_ref(), x.as_ref(), 1e-12);
+            for seed in 0..20_u64 {
+                let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+                let mut y = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
+                crate::test_support::project_off(&basis, &mut y);
+                let what = format!("{c:?} n={n} seed={seed}");
+                let m = pls1_fit(
+                    x.as_ref(),
+                    y.as_ref(),
+                    KSpec::Fixed(1),
+                    None,
+                    FitOpts::default(),
+                )
+                .unwrap();
+                assert_eq!(m.k_used, 0, "{what}");
+                assert_eq!(
+                    (m.t_scores.ncols(), m.w_star.ncols(), m.q_loadings.nrows()),
+                    (0, 0, 0),
+                    "{what}"
+                );
+                assert!(
+                    (0..2).all(|j| m.coef[j] == 0.0 && m.beta[j] == 0.0),
+                    "{what}"
+                );
+                let (_, y_mean, _) = standardize1(y.as_ref());
+                assert_eq!(
+                    m.intercept, y_mean,
+                    "{what}: the zero model predicts mean(y)"
+                );
             }
         }
     }
@@ -2630,208 +2244,703 @@ mod copy_free_reference {
         }
     }
 
+    /// Each fault gets its documented code (and, for `InvalidWeights`, its
+    /// reason); with several faults at once the first check in `pls1_fit`'s
+    /// order wins.
     #[test]
-    fn pls1_fit_errors_match_reference() {
-        with_new_routes_disabled(|| {
-            let (x, y) = signal_data(20, 5, 7);
-            let mut bad_x = x.clone();
-            bad_x[(3, 2)] = f64::NAN;
-            let short_y = Col::<f64>::zeros(19);
-            let zero_w = Col::<f64>::zeros(20);
-            let neg_w = Col::<f64>::from_fn(20, |i| if i == 4 { -1.0 } else { 1.0 });
-            let mut nan_y = y.clone();
-            nan_y[6] = f64::NAN;
-            let nan_w = Col::<f64>::from_fn(20, |i| if i == 8 { f64::NAN } else { 1.0 });
-            let long_w = Col::<f64>::from_fn(21, |_| 1.0);
-            let tiny_x = Mat::<f64>::from_fn(30, 4, |i, j| {
-                1e-9 * if (i + j) % 2 == 0 { 1.0 } else { -1.0 }
-            });
-            let tiny_y = Col::<f64>::from_fn(30, |i| 1e-9 * (i as f64 - 15.0));
-            let strict_pre = FitOpts {
-                pre_standardized: true,
-                ..FitOpts::default()
-            };
-            let d = FitOpts::default();
-            let cases: Vec<(
-                &str,
-                MatRef<'_, f64>,
-                ColRef<'_, f64>,
-                usize,
-                Option<ColRef<'_, f64>>,
-                FitOpts,
-            )> = vec![
-                ("k = 0", x.as_ref(), y.as_ref(), 0, None, d),
-                ("k > d", x.as_ref(), y.as_ref(), 6, None, d),
-                (
-                    "keep = 0",
-                    x.as_ref(),
-                    y.as_ref(),
-                    2,
+    fn pls1_fit_errors_have_documented_codes_in_precedence_order() {
+        let (x, y) = signal_data(20, 5, 7);
+        let mut bad_x = x.clone();
+        bad_x[(3, 2)] = f64::NAN;
+        let short_y = Col::<f64>::zeros(19);
+        let zero_w = Col::<f64>::zeros(20);
+        let neg_w = Col::<f64>::from_fn(20, |i| if i == 4 { -1.0 } else { 1.0 });
+        let mut nan_y = y.clone();
+        nan_y[6] = f64::NAN;
+        let nan_w = Col::<f64>::from_fn(20, |i| if i == 8 { f64::NAN } else { 1.0 });
+        let long_w = Col::<f64>::from_fn(21, |_| 1.0);
+        // n_eff about 1: k = 2 needs n_eff >= 3.
+        let one_row_w = Col::<f64>::from_fn(20, |i| if i == 0 { 1.0 } else { 1e-6 });
+        let (x3, y3) = signal_data(3, 5, 7);
+        let tiny_x = Mat::<f64>::from_fn(30, 4, |i, j| {
+            1e-9 * if (i + j) % 2 == 0 { 1.0 } else { -1.0 }
+        });
+        let tiny_y = Col::<f64>::from_fn(30, |i| 1e-9 * (i as f64 - 15.0));
+        let strict_pre = FitOpts {
+            pre_standardized: true,
+            ..FitOpts::default()
+        };
+        let d = FitOpts::default();
+        let (ia, nf, iw) = ("invalid_argument", "non_finite_input", "invalid_weights");
+        let cases: Vec<(
+            &str,
+            MatRef<'_, f64>,
+            ColRef<'_, f64>,
+            usize,
+            Option<ColRef<'_, f64>>,
+            FitOpts,
+            &str,
+            Option<&str>,
+        )> = vec![
+            ("k = 0", x.as_ref(), y.as_ref(), 0, None, d, ia, None),
+            (
+                "k > d",
+                x.as_ref(),
+                y.as_ref(),
+                6,
+                None,
+                d,
+                "k_exceeds_max",
+                None,
+            ),
+            (
+                "keep = 0",
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                None,
+                FitOpts { keep: Some(0), ..d },
+                ia,
+                None,
+            ),
+            (
+                "keep > d",
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                None,
+                FitOpts { keep: Some(6), ..d },
+                ia,
+                None,
+            ),
+            ("NaN in X", bad_x.as_ref(), y.as_ref(), 2, None, d, nf, None),
+            (
+                "short y",
+                x.as_ref(),
+                short_y.as_ref(),
+                2,
+                None,
+                d,
+                "dimension_mismatch",
+                None,
+            ),
+            (
+                "all-zero weights",
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                Some(zero_w.as_ref()),
+                d,
+                iw,
+                Some("all_zero"),
+            ),
+            (
+                "negative weight",
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                Some(neg_w.as_ref()),
+                d,
+                iw,
+                Some("negative"),
+            ),
+            ("NaN in y", x.as_ref(), nan_y.as_ref(), 2, None, d, nf, None),
+            (
+                "NaN weight",
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                Some(nan_w.as_ref()),
+                d,
+                nf,
+                None,
+            ),
+            (
+                "wrong-length weights",
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                Some(long_w.as_ref()),
+                d,
+                iw,
+                Some("length_mismatch"),
+            ),
+            (
+                "weight on one row",
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                Some(one_row_w.as_ref()),
+                d,
+                iw,
+                Some("insufficient_effective_n"),
+            ),
+            // Unweighted, n < k + 1. (All-equal weights raise the same:
+            // `equal_weights_are_absent_weights_at_every_entry`.)
+            ("n < k + 1", x3.as_ref(), y3.as_ref(), 3, None, d, ia, None),
+            // Several faults at once: the first check in `pls1_fit`'s order wins.
+            (
+                "NaN X + k = 0",
+                bad_x.as_ref(),
+                y.as_ref(),
+                0,
+                None,
+                d,
+                nf,
+                None,
+            ),
+            (
+                "short y + NaN X",
+                bad_x.as_ref(),
+                short_y.as_ref(),
+                2,
+                None,
+                d,
+                "dimension_mismatch",
+                None,
+            ),
+            (
+                "NaN y + all-zero weights",
+                x.as_ref(),
+                nan_y.as_ref(),
+                2,
+                Some(zero_w.as_ref()),
+                d,
+                nf,
+                None,
+            ),
+            (
+                "NaN y + keep = 0",
+                x.as_ref(),
+                nan_y.as_ref(),
+                2,
+                None,
+                FitOpts { keep: Some(0), ..d },
+                nf,
+                None,
+            ),
+            // Review finding H1/N5 (ticket #3): with `pre_standardized = true`
+            // and inputs so far below unit scale that ‖X'y‖ < 1e-14, the
+            // kernel stops at the first component. A top-level call
+            // (`check_n_eff = true`) reports the truncation instead of
+            // returning a k_used = 0 model.
+            (
+                "strict truncation",
+                tiny_x.as_ref(),
+                tiny_y.as_ref(),
+                3,
+                None,
+                strict_pre,
+                "invalid_input",
+                None,
+            ),
+        ];
+        for (what, xv, yv, k, w, opts, code, reason) in cases {
+            let e = pls1_fit(xv, yv, KSpec::Fixed(k), w, opts).expect_err(what);
+            assert_eq!(e.code(), code, "{what}: {e}");
+            if let Some(want) = reason {
+                assert!(
+                    matches!(&e, PlsKitError::InvalidWeights { reason } if *reason == want),
+                    "{what}: {e:?}"
+                );
+            }
+        }
+        // The public sparse entry range-checks its keep-count the same way.
+        for keep in [0, 6] {
+            let e = spls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(2), keep, None, d)
+                .expect_err("spls1_fit keep");
+            assert_eq!(e.code(), ia, "spls1_fit keep={keep}: {e}");
+        }
+    }
+
+    /// Every public entry that takes weights and a component count, as its
+    /// whole output's `Debug` (an `f64` prints its shortest round-trip form,
+    /// so equal strings are equal bits) or its error code and message.
+    /// `confirmatory` runs one call per listed method.
+    fn entry_outcomes(
+        x: MatRef<'_, f64>,
+        y: ColRef<'_, f64>,
+        k: usize,
+        w: Option<ColRef<'_, f64>>,
+        confirmatory: &[crate::signal_test::ConfirmatoryArgs],
+    ) -> Vec<(String, String)> {
+        use crate::find_k::{
+            pls1_find_k_optimal, pls1_find_k_sequence, spls1_find_keep_optimal, FindKOptimalOpts,
+            FindKSequenceOpts, FindKeepOptimalOpts, Selector,
+        };
+        use crate::perm_null::{pls1_perm_null, PermNullOpts};
+        use crate::rotation_stability::{
+            pls1_rotation_stability, RotationStabilityMethod, RotationStabilityOpts,
+        };
+        use crate::signal_test::{
+            pls1_confirmatory_test, ConfirmatoryTestInput, ConfirmatoryTestOpts,
+        };
+        fn show<T: std::fmt::Debug>(r: PlsKitResult<T>) -> String {
+            match r {
+                Ok(v) => format!("ok: {v:?}"),
+                Err(e) => format!("{}: {e}", e.code()),
+            }
+        }
+        let seed = Some(5);
+        let mut out = vec![
+            (
+                "pls1_fit".to_owned(),
+                show(pls1_fit(x, y, KSpec::Fixed(k), w, FitOpts::default())),
+            ),
+            (
+                "perm_null".to_owned(),
+                show(pls1_perm_null(
+                    x,
+                    y,
+                    k,
+                    w,
+                    PermNullOpts {
+                        n_perm: 100,
+                        ..Default::default()
+                    },
+                    seed,
+                )),
+            ),
+            (
+                "rotation_stability".to_owned(),
+                show(pls1_rotation_stability(
+                    x,
+                    y,
+                    k,
+                    RotationStabilityMethod::Varimax(crate::rotate::VarimaxArgs::default()),
                     None,
-                    FitOpts { keep: Some(0), ..d },
-                ),
-                (
-                    "keep > d",
-                    x.as_ref(),
-                    y.as_ref(),
-                    2,
-                    None,
-                    FitOpts { keep: Some(6), ..d },
-                ),
-                ("NaN in X", bad_x.as_ref(), y.as_ref(), 2, None, d),
-                ("short y", x.as_ref(), short_y.as_ref(), 2, None, d),
-                (
-                    "all-zero weights",
-                    x.as_ref(),
-                    y.as_ref(),
-                    2,
-                    Some(zero_w.as_ref()),
-                    d,
-                ),
-                (
-                    "negative weight",
-                    x.as_ref(),
-                    y.as_ref(),
-                    2,
-                    Some(neg_w.as_ref()),
-                    d,
-                ),
-                ("NaN in y", x.as_ref(), nan_y.as_ref(), 2, None, d),
-                (
-                    "NaN weight",
-                    x.as_ref(),
-                    y.as_ref(),
-                    2,
-                    Some(nan_w.as_ref()),
-                    d,
-                ),
-                (
-                    "wrong-length weights",
-                    x.as_ref(),
-                    y.as_ref(),
-                    2,
-                    Some(long_w.as_ref()),
-                    d,
-                ),
-                // Several faults at once: the first check in `pls1_fit`'s
-                // order must win, as it did in the reference.
-                ("NaN X + k = 0", bad_x.as_ref(), y.as_ref(), 0, None, d),
-                (
-                    "short y + NaN X",
-                    bad_x.as_ref(),
-                    short_y.as_ref(),
-                    2,
-                    None,
-                    d,
-                ),
-                (
-                    "NaN y + all-zero weights",
-                    x.as_ref(),
-                    nan_y.as_ref(),
-                    2,
-                    Some(zero_w.as_ref()),
-                    d,
-                ),
-                (
-                    "NaN y + keep = 0",
-                    x.as_ref(),
-                    nan_y.as_ref(),
-                    2,
-                    None,
-                    FitOpts { keep: Some(0), ..d },
-                ),
-                (
-                    "strict truncation",
-                    tiny_x.as_ref(),
-                    tiny_y.as_ref(),
-                    3,
-                    None,
-                    strict_pre,
-                ),
-            ];
-            for (what, xv, yv, k, w, opts) in cases {
-                match (
-                    pls1_fit(xv, yv, KSpec::Fixed(k), w, opts),
-                    pls1_fit_reference(xv, yv, KSpec::Fixed(k), w, opts),
-                ) {
-                    (Err(a), Err(b)) => {
-                        assert_eq!(a.code(), b.code(), "{what}");
-                        assert_eq!(a.to_string(), b.to_string(), "{what}");
-                    }
-                    (a, b) => panic!("{what}: expected two errors, got {a:?} / {b:?}"),
+                    w,
+                    RotationStabilityOpts {
+                        n_boot: 100,
+                        seed,
+                        ..Default::default()
+                    },
+                )),
+            ),
+            (
+                "find_k_sequence".to_owned(),
+                show(pls1_find_k_sequence(
+                    x,
+                    y,
+                    k,
+                    w,
+                    FindKSequenceOpts {
+                        n_splits: 10,
+                        seed,
+                        ..Default::default()
+                    },
+                )),
+            ),
+            (
+                "find_keep_optimal".to_owned(),
+                show(spls1_find_keep_optimal(
+                    x,
+                    y,
+                    k,
+                    w,
+                    FindKeepOptimalOpts {
+                        seed,
+                        ..Default::default()
+                    },
+                )),
+            ),
+        ];
+        for selector in [Selector::R2Se, Selector::Bic] {
+            let r = pls1_find_k_optimal(
+                x,
+                y,
+                k,
+                w,
+                FindKOptimalOpts {
+                    selector,
+                    seed,
+                    ..Default::default()
+                },
+            );
+            out.push((format!("find_k_optimal {selector:?}"), show(r)));
+        }
+        for &args in confirmatory {
+            let r = pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x,
+                    y,
+                    k,
+                    weights: w,
+                },
+                ConfirmatoryTestOpts {
+                    args,
+                    seed,
+                    ..Default::default()
+                },
+            );
+            out.push((format!("confirmatory {:?}", args.method()), show(r)));
+        }
+        out
+    }
+
+    /// All-equal weights are no weights, at every top-level entry that
+    /// takes a component count: at n < k + 1 they raise the unweighted
+    /// `invalid_argument` (not `insufficient_effective_n`), and at a
+    /// feasible n every output is bit-identical to the call without
+    /// weights: `rho_hat`, `n_eff`, the replicate route (n = 40, p = 60
+    /// puts `perm_null` on the n-space route) and the BIC penalty included.
+    /// 0.3 is there because Kish's ratio of equal non-unit weights rounds
+    /// an ulp below n (2.999999999999999 at n = 3).
+    #[test]
+    fn equal_weights_are_absent_weights_at_every_entry() {
+        use crate::signal_test::ConfirmatoryArgs;
+        let every_method = [
+            ConfirmatoryArgs::RawPerm {
+                n_perm: 19,
+                n_folds: 5,
+            },
+            ConfirmatoryArgs::SplitNb {
+                n_splits: 10,
+                force: false,
+            },
+            ConfirmatoryArgs::SplitExact {
+                n_perm: 19,
+                n_splits: 10,
+            },
+            ConfirmatoryArgs::Score,
+            ConfirmatoryArgs::E,
+        ];
+        let tiny = signal_data(3, 5, 7);
+        let feasible = signal_data(40, 60, 8);
+        // The n < k + 1 case runs one method: `raw_perm`'s own n_folds < n
+        // floor would fire first and pass for the wrong reason.
+        for ((x, y), k, methods, fails) in [
+            (&tiny, 3, &every_method[2..3], true),
+            (&feasible, 2, &every_method[..], false),
+        ] {
+            let n = x.nrows();
+            let absent = entry_outcomes(x.as_ref(), y.as_ref(), k, None, methods);
+            for (entry, got) in &absent {
+                let ok = if fails {
+                    got.starts_with("invalid_argument: ") && got.contains("insufficient n for k=")
+                } else {
+                    got.starts_with("ok: ")
+                };
+                assert!(ok, "{entry}: {got}");
+            }
+            for c in [1.0, 0.3, 1e6] {
+                let w = Col::<f64>::from_fn(n, |_| c);
+                let equal = entry_outcomes(x.as_ref(), y.as_ref(), k, Some(w.as_ref()), methods);
+                for ((entry, a), (_, e)) in absent.iter().zip(&equal) {
+                    assert!(
+                        a == e,
+                        "n = {n}, w = {c}: {entry}\nabsent: {a}\nequal:  {e}"
+                    );
                 }
             }
-        });
+        }
+    }
+
+    /// The public entries that take X, besides the PLS1 fits and the
+    /// engines whose own tests pin layout bit-identity (the PLS3 family's
+    /// is `pls3::tests::pls3_family_is_bit_identical_across_layouts`). The
+    /// Python wrapper hands each its X in place (C or F order).
+    /// `preprocess` / `preprocess_block` and the `split_nb` gate give the
+    /// same bits on every layout. `pls1_predict` and
+    /// `pls1_rotation_stability` (whose reference fits read X in place)
+    /// agree to `FIT_LAYOUT_TOL`.
+    #[test]
+    fn x_taking_entries_agree_across_layouts() {
+        use crate::preprocess::{
+            preprocess, preprocess_block, PreprocessBlockInput, PreprocessInput,
+        };
+        use crate::rotation_stability::{
+            pls1_rotation_stability, RotationStabilityMethod, RotationStabilityOpts,
+        };
+        use crate::signal_test::split_nb_gate;
+        let agree = Agree::Corpus(FIT_LAYOUT_TOL);
+        let bits = Agree::Bits;
+        for f in copy_free_families() {
+            let w = f.w.as_ref().map(Col::as_ref);
+            let n = f.x.nrows();
+            let yy = Mat::<f64>::from_fn(n, 3, |i, j| f.y[i] * (j + 1) as f64 + f.x[(i, j)]);
+            let what = |e: &str| format!("{e} {}", f.name);
+            assert_layout_agree(&f.x, &what("preprocess"), bits, |xv| {
+                let r = preprocess(PreprocessInput {
+                    x: Some(xv),
+                    y: Some(f.y.as_ref()),
+                    weights: w,
+                })?;
+                let (xs, m, sd) = r.x_std.unwrap();
+                let mut v = mat_vals(xs.as_ref());
+                v.extend(col_vals(m.as_ref()));
+                v.extend(col_vals(sd.as_ref()));
+                Ok(v)
+            })
+            .unwrap();
+            assert_layout_agree(&f.x, &what("preprocess_block"), bits, |xv| {
+                let r = preprocess_block(PreprocessBlockInput {
+                    x: Some(xv),
+                    y: Some(yy.as_ref()),
+                    weights: w,
+                })?;
+                Ok(mat_vals(r.x_std.unwrap().0.as_ref()))
+            })
+            .unwrap();
+            assert_layout_agree(&f.x, &what("split_nb_gate"), bits, |xv| {
+                let g = split_nb_gate(xv, w)?;
+                Ok(vec![f64::from(u8::from(g.fires)), g.stable_rank, g.n_eff])
+            })
+            .unwrap();
+            let model = pls1_fit(
+                f.x.as_ref(),
+                f.y.as_ref(),
+                KSpec::Fixed(2),
+                w,
+                FitOpts::default(),
+            )
+            .unwrap();
+            assert_layout_agree(&f.x, &what("pls1_predict"), agree, |xv| {
+                Ok(col_vals(crate::predict::pls1_predict(&model, xv)?.as_ref()))
+            })
+            .unwrap();
+            assert_layout_agree(&f.x, &what("pls1_rotation_stability"), agree, |xv| {
+                let r = pls1_rotation_stability(
+                    xv,
+                    f.y.as_ref(),
+                    2,
+                    RotationStabilityMethod::Varimax(crate::rotate::VarimaxArgs::default()),
+                    None,
+                    w,
+                    RotationStabilityOpts {
+                        n_boot: 100,
+                        seed: Some(5),
+                        ..Default::default()
+                    },
+                )?;
+                let ci = |c: &crate::subsample::CIScalar| [c.point, c.lower, c.upper, c.sd];
+                let mut v = ci(&r.variance_ratio).to_vec();
+                v.extend(r.variance_ratio_per_axis.iter().flat_map(ci));
+                v.extend([r.variance_unrot, r.variance_rot, r.n_eff]);
+                v.extend(&r.variance_unrot_per_axis);
+                v.extend(&r.variance_rot_per_axis);
+                #[allow(clippy::cast_precision_loss)]
+                v.push(r.n_boot_finite as f64);
+                Ok(v)
+            })
+            .unwrap();
+        }
+    }
+
+    /// A zero count is `invalid_argument` at every public entry, with one
+    /// message per argument: `"{arg} must be >= 1"` (`k`, `k_max`, and the
+    /// keep-counts, which add why). `k_exceeds_max` is for a count above its
+    /// maximum only. The `find_k` rows of `entry_outcomes` pass their `k` as
+    /// `k_max`; `pls3_confirmatory_test` says this rather than its own
+    /// `k = 1` restriction. `score` is rejected too although its statistic
+    /// never reads k; `split_nb` is forced so the gate cannot reroute it.
+    #[test]
+    fn zero_count_is_invalid_argument_at_every_entry() {
+        use crate::find_k::{
+            spls1_find_k_optimal, spls1_find_k_sequence, FindKOptimalOpts, FindKSequenceOpts,
+        };
+        use crate::pls3::{pls3_fit, plssvd_fit, spls3_fit, Pls3FitOpts};
+        use crate::pls3_signal_test::{pls3_confirmatory_test, Pls3ConfirmatoryTestOpts};
+        use crate::signal_test::ConfirmatoryArgs;
+        fn show<T>(r: PlsKitResult<T>) -> String {
+            match r {
+                Ok(_) => "ok".to_owned(),
+                Err(e) => format!("{}: {e}", e.code()),
+            }
+        }
+        let (x, y) = signal_data(40, 6, 3);
+        let (x, y) = (x.as_ref(), y.as_ref());
+        let yy = Mat::<f64>::from_fn(40, 3, |i, j| x[(i, j)] + x[(i, 5 - j)]);
+        let yy = yy.as_ref();
+        let every_method = [
+            ConfirmatoryArgs::RawPerm {
+                n_perm: 19,
+                n_folds: 5,
+            },
+            ConfirmatoryArgs::SplitNb {
+                n_splits: 10,
+                force: true,
+            },
+            ConfirmatoryArgs::SplitExact {
+                n_perm: 19,
+                n_splits: 10,
+            },
+            ConfirmatoryArgs::Score,
+            ConfirmatoryArgs::E,
+        ];
+        let seed = Some(5);
+        let fk = || FindKOptimalOpts {
+            seed,
+            ..Default::default()
+        };
+        let fs = || FindKSequenceOpts {
+            n_splits: 10,
+            seed,
+            ..Default::default()
+        };
+        let p3 = Pls3FitOpts::default;
+        let p3c = |keep_x, keep_y| Pls3ConfirmatoryTestOpts {
+            args: ConfirmatoryArgs::SplitExact {
+                n_perm: 19,
+                n_splits: 6,
+            },
+            seed,
+            keep_x,
+            keep_y,
+            ..Default::default()
+        };
+        let mut rows: Vec<(String, &str, String)> = entry_outcomes(x, y, 0, None, &every_method)
+            .into_iter()
+            .map(|(entry, got)| {
+                let arg = if entry.starts_with("find_k_") {
+                    "k_max"
+                } else {
+                    "k"
+                };
+                (entry, arg, got)
+            })
+            .collect();
+        let d = FitOpts::default();
+        let mut row = |entry: &str, arg: &'static str, got: String| {
+            rows.push((entry.to_owned(), arg, got));
+        };
+        row(
+            "spls1_fit",
+            "k",
+            show(spls1_fit(x, y, KSpec::Fixed(0), 3, None, d)),
+        );
+        row(
+            "spls1_fit keep",
+            "keep",
+            show(spls1_fit(x, y, KSpec::Fixed(2), 0, None, d)),
+        );
+        row(
+            "spls1_find_k_optimal",
+            "k_max",
+            show(spls1_find_k_optimal(x, y, 0, 3, None, fk())),
+        );
+        row(
+            "spls1_find_k_optimal keep",
+            "keep",
+            show(spls1_find_k_optimal(x, y, 2, 0, None, fk())),
+        );
+        row(
+            "spls1_find_k_sequence",
+            "k_max",
+            show(spls1_find_k_sequence(x, y, 0, 3, None, fs())),
+        );
+        row(
+            "spls1_find_k_sequence keep",
+            "keep",
+            show(spls1_find_k_sequence(x, y, 2, 0, None, fs())),
+        );
+        row("pls3_fit", "k", show(pls3_fit(x, yy, 0, None, p3())));
+        row("plssvd_fit", "k", show(plssvd_fit(x, yy, 0, None, p3())));
+        row(
+            "spls3_fit",
+            "k",
+            show(spls3_fit(x, yy, 0, 2, 2, None, p3())),
+        );
+        row(
+            "spls3_fit keep_x",
+            "keep_x",
+            show(spls3_fit(x, yy, 1, 0, 2, None, p3())),
+        );
+        row(
+            "spls3_fit keep_y",
+            "keep_y",
+            show(spls3_fit(x, yy, 1, 2, 0, None, p3())),
+        );
+        row(
+            "pls3_confirmatory_test",
+            "k",
+            show(pls3_confirmatory_test(x, yy, 0, p3c(None, None))),
+        );
+        row(
+            "pls3_confirmatory_test keep_x",
+            "keep_x",
+            show(pls3_confirmatory_test(x, yy, 1, p3c(Some(0), None))),
+        );
+        row(
+            "pls3_confirmatory_test keep_y",
+            "keep_y",
+            show(pls3_confirmatory_test(x, yy, 1, p3c(None, Some(0)))),
+        );
+        for (entry, arg, got) in rows {
+            let want = format!("invalid_argument: invalid argument: {arg} must be >= 1");
+            assert!(got.starts_with(&want), "{entry}: {got}");
+        }
     }
 
     #[test]
     fn prepared_tail_on_hoisted_scaling_is_pls1_fit() {
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let Some(w_raw) = f.w.as_ref() else {
-                    continue;
-                };
-                // The caller's weights as `perm_null` and the CV folds hold them.
-                let wn = normalize_weights(w_raw.as_ref()).unwrap();
-                let (xs, _, _) = standardize_weighted(f.x.as_ref(), Some(wn.as_ref()));
-                let (ys, _, _) = standardize1_weighted(f.y.as_ref(), Some(wn.as_ref()));
-                let sqw = fit_row_scale(wn.as_ref());
-                let xs_fit = scale_rows(xs.as_ref(), sqw.as_ref());
-                let ys_fit = scale_col(ys.as_ref(), sqw.as_ref());
-                for i in 0..xs.nrows() {
-                    assert_eq!(xs_fit[(i, 1)].to_bits(), (sqw[i] * xs[(i, 1)]).to_bits());
-                    assert_eq!(ys_fit[i].to_bits(), (sqw[i] * ys[i]).to_bits());
-                }
-                for k in [1_usize, 3] {
-                    for keep in [None, Some(3)] {
-                        let opts = FitOpts {
-                            pre_standardized: true,
-                            check_n_eff: false,
-                            par: ParChoice::Seq,
-                            keep,
-                        };
-                        let direct = pls1_fit(
-                            xs.as_ref(),
-                            ys.as_ref(),
-                            KSpec::Fixed(k),
-                            Some(wn.as_ref()),
-                            opts,
-                        )
-                        .unwrap();
-                        let hoisted = pls1_fit_prepared(
-                            xs_fit.as_ref(),
-                            ys_fit.as_ref(),
-                            k,
-                            keep,
-                            ParChoice::Seq,
-                        )
-                        .unwrap();
-                        let what = format!("{} k={k} keep={keep:?}", f.name);
-                        assert_eq!(direct.k_used, hoisted.k_used, "{what}");
-                        assert_bits_eq(
-                            &mat_vals(direct.t_scores.as_ref()),
-                            &mat_vals(hoisted.t_scores.as_ref()),
-                            &what,
-                        );
-                        assert_bits_eq(
-                            &mat_vals(direct.w_star.as_ref()),
-                            &mat_vals(hoisted.w_star.as_ref()),
-                            &what,
-                        );
-                        assert_bits_eq(
-                            &col_vals(direct.coef.as_ref()),
-                            &col_vals(hoisted.coef.as_ref()),
-                            &what,
-                        );
-                        // pre_standardized: beta is coef.
-                        assert_bits_eq(
-                            &col_vals(direct.beta.as_ref()),
-                            &col_vals(hoisted.coef.as_ref()),
-                            &what,
-                        );
-                    }
+        for f in copy_free_families() {
+            let Some(w_raw) = f.w.as_ref() else {
+                continue;
+            };
+            // The caller's weights as `perm_null` and the CV folds hold them.
+            let wn = normalize_weights(w_raw.as_ref()).unwrap();
+            let (xs, _, _) = standardize_weighted(f.x.as_ref(), Some(wn.as_ref()));
+            let (ys, _, _) = standardize1_weighted(f.y.as_ref(), Some(wn.as_ref()));
+            let sqw = fit_row_scale(wn.as_ref());
+            let xs_fit = scale_rows(xs.as_ref(), sqw.as_ref());
+            let ys_fit = scale_col(ys.as_ref(), sqw.as_ref());
+            for i in 0..xs.nrows() {
+                assert_eq!(xs_fit[(i, 1)].to_bits(), (sqw[i] * xs[(i, 1)]).to_bits());
+                assert_eq!(ys_fit[i].to_bits(), (sqw[i] * ys[i]).to_bits());
+            }
+            // Taken once for the block, as `perm_null` and the CV folds do.
+            let x_fro = xs_fit.norm_l2();
+            for k in [1_usize, 3] {
+                for keep in [None, Some(3)] {
+                    let opts = FitOpts {
+                        pre_standardized: true,
+                        check_n_eff: false,
+                        par: ParChoice::Seq,
+                        keep,
+                    };
+                    let direct = pls1_fit(
+                        xs.as_ref(),
+                        ys.as_ref(),
+                        KSpec::Fixed(k),
+                        Some(wn.as_ref()),
+                        opts,
+                    )
+                    .unwrap();
+                    let hoisted = pls1_fit_prepared_fro(
+                        xs_fit.as_ref(),
+                        ys_fit.as_ref(),
+                        k,
+                        keep,
+                        ParChoice::Seq,
+                        x_fro,
+                    )
+                    .unwrap();
+                    let what = format!("{} k={k} keep={keep:?}", f.name);
+                    assert_eq!(direct.k_used, hoisted.k_used, "{what}");
+                    assert_bits_eq(
+                        &mat_vals(direct.t_scores.as_ref()),
+                        &mat_vals(hoisted.t_scores.as_ref()),
+                        &what,
+                    );
+                    assert_bits_eq(
+                        &mat_vals(direct.w_star.as_ref()),
+                        &mat_vals(hoisted.w_star.as_ref()),
+                        &what,
+                    );
+                    assert_bits_eq(
+                        &col_vals(direct.coef.as_ref()),
+                        &col_vals(hoisted.coef.as_ref()),
+                        &what,
+                    );
+                    // pre_standardized: beta is coef.
+                    assert_bits_eq(
+                        &col_vals(direct.beta.as_ref()),
+                        &col_vals(hoisted.coef.as_ref()),
+                        &what,
+                    );
                 }
             }
-        });
+        }
     }
 }

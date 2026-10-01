@@ -19,34 +19,25 @@ def test_preprocess_all_none_returns_empty():
     assert r.n_eff is None
 
 
-def test_preprocess_full_inputs():
-    X, y, w = _data()
-    r = plskit.preprocess(X=X, Y=y, weights=w)
-    assert r.X_std.shape == X.shape
-    assert r.Y_std.shape == y.shape
-    assert r.weights_normalized.shape == (X.shape[0],)
-    np.testing.assert_allclose(r.weights_normalized.mean(), 1.0, atol=1e-12)
-    assert 0 < r.n_eff <= X.shape[0]
-
-
 def test_preprocess_2d_y_round_trips_2d():
     X, y, w = _data()
-    Y = y.reshape(-1, 1)
-    r = plskit.preprocess(X=X, Y=Y, weights=w)
-    assert r.Y_std.shape == Y.shape
+    one = plskit.preprocess(X=X, Y=y, weights=w)
+    two = plskit.preprocess(X=X, Y=y.reshape(-1, 1), weights=w)
+    # Marshalling only: a 2-D Y comes back 2-D, with one mean and scale per
+    # column. The per-column numbers are the core's contract
+    # (preprocess_basic.rs); here column 0 just has to be the 1-D result.
+    assert two.Y_std.shape == (20, 1)
+    np.testing.assert_array_equal(two.Y_std[:, 0], one.Y_std)
+    np.testing.assert_array_equal(np.ravel(two.Y_mean), [one.Y_mean])
+    np.testing.assert_array_equal(np.ravel(two.Y_scale), [one.Y_scale])
 
 
 def test_preprocess_negative_weight_raises():
     X, y, w = _data()
     w[0] = -1.0
-    with pytest.raises(plskit.PlsKitError):
+    with pytest.raises(plskit.PlsKitInvalidWeights) as ei:
         plskit.preprocess(X=X, Y=y, weights=w)
-
-
-def test_preprocess_shape_mismatch_raises():
-    X, y, _ = _data()
-    with pytest.raises(plskit.PlsKitError):
-        plskit.preprocess(X=X, Y=y[:-1])
+    assert ei.value.reason == "negative"
 
 
 def test_preprocess_2d_y_weights_length_mismatch_raises():
@@ -58,29 +49,23 @@ def test_preprocess_2d_y_weights_length_mismatch_raises():
     assert exc_info.value.reason == "length_mismatch"
 
 
-def test_preprocess_2d_y_x_row_mismatch_raises():
+@pytest.mark.parametrize("two_d", [False, True])
+def test_preprocess_x_y_row_mismatch_raises(two_d):
     X, y, _ = _data()
-    Y = y.reshape(-1, 1)
+    Y = y.reshape(-1, 1) if two_d else y
     with pytest.raises(plskit.PlsKitError) as exc_info:
         plskit.preprocess(X=X[:-1], Y=Y)
     assert exc_info.value.code == "dimension_mismatch"
 
 
-def test_preprocess_cache_pattern_round_trip():
-    """Cache-pattern parity. Helper output + pre_standardized=True
-    must reproduce the from-raw fit. The standardized-space coef is identical
-    in both paths; beta and intercept differ because the cached fit operates in
-    standardized space (beta == coef, intercept == 0) while the raw fit
-    back-projects to the original scale."""
-    X, y, w = _data()
-    pre = plskit.preprocess(X=X, Y=y, weights=w)
-    m_cached = plskit.pls1_fit(
-        pre.X_std, pre.Y_std, k=2,
-        weights=pre.weights_normalized,
-        pre_standardized=True,
-    )
-    m_raw = plskit.pls1_fit(X, y, k=2, weights=w)
-    # coef is the same in both: both operate in standardized space for NIPALS.
-    np.testing.assert_allclose(m_cached.coef, m_raw.coef, atol=1e-10)
-    # Sanity: cached fit has no intercept (pre_standardized path).
-    assert m_cached.intercept == 0.0
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_preprocess_2d_y_non_finite_raises(bad):
+    """A 2-D Y is validated like a 1-D one, not standardized into a NaN
+    column."""
+    X, y, _ = _data()
+    Y = np.column_stack([y, y[::-1]])
+    Y[3, 1] = bad
+    with pytest.raises(plskit.PlsKitError) as exc_info:
+        plskit.preprocess(X=X, Y=Y)
+    assert exc_info.value.code == "non_finite_input"

@@ -23,10 +23,10 @@ plskit is a Partial Least Squares (PLS) library built around three ideas:
   Procrustes alignment is needed. The tests are introduced in our
   [NeurIPS 2026 paper](https://openreview.net/forum?id=xb6CB7d9LO).
 - **Same results in every language.** All numerical work runs in one
-  Rust engine. Python (and the planned R and Julia wrappers) call
-  into it, so a fixed `(version, seed, X, y)` gives the same results,
-  within a bit-near tolerance, in every language and on every
-  supported platform.
+  Rust engine. The Python and R wrappers call into it, and the Julia
+  wrapper runs the Python package, so a fixed `(version, seed, X, y)`
+  gives the same results, within a bit-near tolerance, in every
+  language and on every supported platform.
 - **Speed.** The engine is written in Rust with parallel resampling,
   which makes plskit probably the fastest PLS package available.
 
@@ -36,8 +36,8 @@ plskit is a Partial Least Squares (PLS) library built around three ideas:
 |----------|----------------------|-------------------------------------------------|
 | Rust     | `cargo add plskit`   | available — see [`plskit-rs/`](plskit-rs/)      |
 | Python   | `pip install plskit` | available — see [`plskit-py/`](plskit-py/)      |
-| R        | —                    | planned                                         |
-| Julia    | —                    | planned                                         |
+| R        | —                    | implemented, not yet released; see [`plskit-r/`](plskit-r/) |
+| Julia    | —                    | implemented, not yet registered; see [`plskit-jl/`](plskit-jl/) |
 
 Installation, examples, and language-specific notes live in each
 wrapper's README.
@@ -72,8 +72,8 @@ five methods.
 plskit/
 ├── plskit-rs/     Rust crate — canonical implementation
 ├── plskit-py/     Python wrapper
-├── plskit-r/      R wrapper (planned)
-├── plskit-jl/     Julia wrapper (planned)
+├── plskit-r/      R wrapper
+├── plskit-jl/     Julia wrapper (runs the Python package)
 └── testdata/      Shared reference corpus, regenerated from the Rust core
 ```
 

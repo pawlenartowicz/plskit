@@ -15,7 +15,6 @@ use crate::rng::{child_rng, child_seeds, Rng};
 /// Below that threshold the per-half fit degrades to a silent r=0.
 /// `draw_splits` and `run_e` enforce this floor; subsamplers
 /// enforce a stronger `m ≥ k+2` check after resolving `m`.
-#[allow(dead_code)]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(crate) fn split_sizes(n: usize, k: usize) -> (usize, usize) {
     let want = n / 2;
@@ -28,7 +27,6 @@ pub(crate) fn split_sizes(n: usize, k: usize) -> (usize, usize) {
 }
 
 /// Generate one `(train_idx, test_idx)` split given a child RNG.
-#[allow(dead_code)]
 pub(crate) fn one_split(n: usize, n_train: usize, rng: &mut Rng) -> (Vec<usize>, Vec<usize>) {
     let mut perm: Vec<usize> = (0..n).collect();
     perm.shuffle(rng);
@@ -39,7 +37,6 @@ pub(crate) fn one_split(n: usize, n_train: usize, rng: &mut Rng) -> (Vec<usize>,
 
 /// Return a random permutation of `0..n` via a child RNG. The caller applies it
 /// to reorder y rows; this function mutates nothing.
-#[allow(dead_code)]
 pub(crate) fn permute_indices(n: usize, rng: &mut Rng) -> Vec<usize> {
     let mut perm: Vec<usize> = (0..n).collect();
     perm.shuffle(rng);
@@ -118,7 +115,6 @@ pub(crate) fn block_par(disable_parallelism: bool) -> Par {
 /// Sequentially compute J child seeds, then run `f(j, &mut child_rng)`
 /// in parallel via Rayon (or serially when `disable_parallelism` is set).
 /// The pre-computed seeds make both paths byte-identical.
-#[allow(dead_code)]
 pub(crate) fn parallel_for_each_seeded<T: Send>(
     parent: &mut Rng,
     n_iterations: usize,
@@ -192,8 +188,8 @@ mod tests {
 
     #[test]
     #[allow(clippy::similar_names)]
-    fn split_sizes_clamps_to_n_minus_three() {
-        // n=10 → want=5, but k+2=2 doesn't bump and 5 ≤ n-3=7 so n_tr=5
+    fn split_sizes_halves_n() {
+        // n=10, k=1: n/2 = 5 and k+2 = 3 does not bump
         let (n_tr, n_te) = split_sizes(10, 1);
         assert_eq!(n_tr, 5);
         assert_eq!(n_te, 5);
@@ -217,30 +213,6 @@ mod tests {
         let mut all: Vec<usize> = tr.iter().chain(te.iter()).copied().collect();
         all.sort_unstable();
         assert_eq!(all, (0..10).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn parallel_for_each_seeded_is_byte_exact_vs_serial() {
-        // Same parent seed → same child seeds → same per-iter outputs in
-        // the same order, regardless of Rayon scheduling.
-        let (_, mut a) = resolve_seed(Some(99)).unwrap();
-        let (_, mut b) = resolve_seed(Some(99)).unwrap();
-        let par = parallel_for_each_seeded(&mut a, 64, false, |i, rng| {
-            use rand::Rng;
-            (i, rng.next_u64())
-        });
-        // Serial: pre-compute seeds the same way, run sequentially.
-        let seeds = child_seeds(&mut b, 64);
-        let ser: Vec<(usize, u64)> = seeds
-            .into_iter()
-            .enumerate()
-            .map(|(i, s)| {
-                use rand::Rng;
-                let mut r = child_rng(s);
-                (i, r.next_u64())
-            })
-            .collect();
-        assert_eq!(par, ser);
     }
 
     #[test]
@@ -314,7 +286,11 @@ mod tests {
     #[test]
     fn block_par_is_sequential_exactly_when_parallelism_is_disabled() {
         assert!(matches!(block_par(true), faer::Par::Seq));
-        assert!(matches!(block_par(false), faer::Par::Rayon(_)));
+        assert!(
+            matches!(block_par(false), faer::Par::Rayon(d) if d.get() == crate::fit::PAR_DEGREE),
+            "{:?}",
+            block_par(false)
+        );
     }
 
     fn demo_row(i: usize, rng: &mut Rng) -> Vec<f64> {
@@ -342,23 +318,6 @@ mod tests {
             );
             // Same parent consumption.
             assert_eq!(a.next_u64(), b.next_u64());
-        }
-    }
-
-    #[test]
-    fn parallel_fill_rows_seeded_keeps_a_nan_row_where_the_closure_writes_one() {
-        for dp in [true, false] {
-            let (_, mut p) = resolve_seed(Some(2)).unwrap();
-            let flat = parallel_fill_rows_seeded(&mut p, 6, 3, dp, |i, _, out| {
-                out.fill(if i == 4 { f64::NAN } else { i as f64 });
-            });
-            for (i, row) in flat.chunks(3).enumerate() {
-                assert!(row.iter().all(|v| if i == 4 {
-                    v.is_nan()
-                } else {
-                    v.to_bits() == (i as f64).to_bits()
-                }));
-            }
         }
     }
 

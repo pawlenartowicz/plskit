@@ -250,3 +250,145 @@ fn pls3_fit_is_invariant_to_the_scale_of_x_and_y() {
         }
     }
 }
+
+/// Columns that carry no information, next to `n` rows of real data: constant
+/// to rounding at several magnitudes (exact, and with relative jitter
+/// `1e-15`), or with a spread below the normal range. `1e6 + 0.1` and `0.1`
+/// are controls that already passed before the fix: their centering noise
+/// was small at scale 1.
+fn columns_without_information(n: usize) -> Vec<(&'static str, Vec<f64>)> {
+    let mut s = Stream(99);
+    let jitter: Vec<f64> = (0..n).map(|_| s.next()).collect();
+    vec![
+        ("1e300", vec![1e300; n]),
+        ("-1.7e300", vec![-1.7e300; n]),
+        ("1.234567e20", vec![1.234_567e20; n]),
+        ("1e6 + 0.1 (control)", vec![1e6 + 0.1; n]),
+        (
+            "1e300 with relative jitter 1e-15",
+            jitter.iter().map(|e| 1e300 * (1.0 + 1e-15 * e)).collect(),
+        ),
+        ("0.1 (control)", vec![0.1; n]),
+        (
+            "one 5e-324",
+            (0..n).map(|i| if i == 0 { 5e-324 } else { 0.0 }).collect(),
+        ),
+        (
+            "1e-310 on half",
+            (0..n)
+                .map(|i| if i % 2 == 0 { 1e-310 } else { 0.0 })
+                .collect(),
+        ),
+    ]
+}
+
+/// `x` with `c` appended as its last column.
+fn with_column(x: &Mat<f64>, c: &[f64]) -> Mat<f64> {
+    let p = x.ncols();
+    Mat::<f64>::from_fn(
+        x.nrows(),
+        p + 1,
+        |i, j| if j < p { x[(i, j)] } else { c[i] },
+    )
+}
+
+/// A column that carries no information ([`columns_without_information`])
+/// leaves `pls1_fit` as it is without it, whatever its magnitude: the same
+/// `k_used`, the same coefficients on the other columns, and a zero
+/// coefficient of its own. With scale 1 at every magnitude, the centering
+/// noise of a constant near `1e300` truncated the fit to `k_used = 0` or
+/// overflowed it to NaN coefficients, and a constant near `1e20` moved the
+/// other coefficients by about 10%; a spread that underflowed gave scale
+/// `0` or a subnormal scale and NaN coefficients.
+#[test]
+fn pls1_fit_ignores_a_column_without_information_at_any_magnitude() {
+    let n = 60;
+    let (x0, ymat) = linked(n, 3, 1, 11);
+    let y = ymat.col(0).to_owned();
+    let w = Col::<f64>::from_fn(n, |i| 0.5 + (i % 5) as f64 * 0.25);
+    for weighted in [false, true] {
+        let wref = weighted.then_some(w.as_ref());
+        let fit = |x: &Mat<f64>| {
+            pls1_fit(
+                x.as_ref(),
+                y.as_ref(),
+                KSpec::Fixed(2),
+                wref,
+                FitOpts::default(),
+            )
+            .unwrap()
+        };
+        let base = fit(&x0);
+        assert_eq!(base.k_used, 2);
+        for (name, c) in &columns_without_information(n) {
+            let m = fit(&with_column(&x0, c));
+            let what = format!("weighted={weighted} {name}");
+            assert_eq!(m.k_used, base.k_used, "{what}: k_used");
+            for j in 0..3 {
+                assert_close(
+                    m.coef[j],
+                    base.coef[j],
+                    1e-10,
+                    &format!("{what}: coef[{j}]"),
+                );
+            }
+            assert_close(m.coef[3], 0.0, 1e-10, &format!("{what}: coef[3]"));
+            assert!(m.beta[3].is_finite(), "{what}: beta[3] = {}", m.beta[3]);
+            assert_close(
+                m.intercept,
+                base.intercept,
+                1e-9,
+                &format!("{what}: intercept"),
+            );
+        }
+    }
+}
+
+/// The same columns leave `pls3_fit` as it is without them: the same
+/// `k_used` and singular values, the same X saliences on the other
+/// columns and a zero salience on the new one, the same Y saliences.
+/// Before the fix a constant near `1e300`, its jittered twin and the
+/// single `5e-324` made the fit fail ("SVD of X'Y failed to converge").
+#[test]
+fn pls3_fit_ignores_a_column_without_information_at_any_magnitude() {
+    // `pls3_fit` takes no weights yet.
+    let n = 60;
+    let (x0, y) = linked(n, 3, 3, 23);
+    let fit = |x: &Mat<f64>| pls3_fit(x.as_ref(), y.as_ref(), 2, None, Pls3FitOpts::default());
+    let base = fit(&x0).unwrap();
+    assert_eq!(base.k_used, 2);
+    for (name, c) in &columns_without_information(n) {
+        let m = fit(&with_column(&x0, c)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(m.k_used, base.k_used, "{name}: k_used");
+        for a in 0..base.k_used {
+            assert_close(
+                m.singular_values[a] / base.singular_values[a],
+                1.0,
+                1e-10,
+                &format!("{name}: singular_values[{a}]"),
+            );
+            for j in 0..3 {
+                assert_close(
+                    m.u_saliences[(j, a)],
+                    base.u_saliences[(j, a)],
+                    1e-10,
+                    &format!("{name}: u_saliences[({j}, {a})]"),
+                );
+            }
+            assert_close(
+                m.u_saliences[(3, a)],
+                0.0,
+                1e-10,
+                &format!("{name}: u_saliences[(3, {a})]"),
+            );
+            for j in 0..y.ncols() {
+                assert_close(
+                    m.v_saliences[(j, a)],
+                    base.v_saliences[(j, a)],
+                    1e-10,
+                    &format!("{name}: v_saliences[({j}, {a})]"),
+                );
+            }
+        }
+    }
+}

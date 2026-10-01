@@ -229,7 +229,7 @@ implementation; gate via PR review.
 
 ## Live tensions
 
-The five points where this convention chose against an alternative.
+The six points where this convention chose against an alternative.
 Override by editing the table; do not ship code that mixes both.
 
 1. **`n_perm` / `n_splits` / `n_boot` over `B_perm` / `J` / `B_boot`.**
@@ -256,3 +256,16 @@ Override by editing the table; do not ship code that mixes both.
    permutation, on any design. It replaces both former `split_perm` and
    `split_perm_nr` method values; the engine picks the no-refit or
    refit route internally, so there is only one method value to name.
+6. **One wrapper `preprocess` over two core forms.** Every wrapper exposes
+   a single `preprocess(X, Y, weights)` whose `Y` may be 1-D or 2-D; the
+   Rust core has `preprocess` (1-D `y`, scalar `Y_mean` / `Y_scale`) and
+   `preprocess::preprocess_block` (2-D `Y`, one mean and scale per
+   column), and the wrapper dispatches on the shape of `Y`. The
+   alternative, one core function over a 1-D-or-2-D input type, changes
+   `PreprocessInput` / `PreprocessResult` under every Rust caller for no
+   gain to wrapper users, and a second wrapper name (`preprocess_block`)
+   would split one cache-pattern helper in two for R and Julia users who
+   never see the distinction. `preprocess_block` stays out of the crate
+   root so the root keeps RULE 1's one-name-per-function surface. Both
+   core forms share the same validation and moments, so the dispatch is
+   the only wrapper-side logic.

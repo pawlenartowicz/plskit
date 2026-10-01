@@ -1,4 +1,4 @@
-"""Misaligned float64 input.
+"""Array marshalling: misaligned float64 input, and X's memory layout.
 
 A byte-offset view of a buffer (`buf[1:].view(np.float64)`) can be
 C-contiguous and still misaligned (`flags.aligned` is False). Rust may not
@@ -6,6 +6,10 @@ read `f64` data through a reference to misaligned memory, so both the Python
 wrapper and the extension seam must copy such an array into an aligned one
 before reading it. Every result must be bit-identical to the same values
 passed aligned.
+
+A C- or F-ordered float64 X is handed to the extension as it is, not copied.
+The block inputs (`Y`, `Y_new`, `W`, `L`) are read in place when F-ordered
+and copied column-major otherwise; every layout gives the same bits.
 """
 import dataclasses
 
@@ -52,12 +56,6 @@ def _data():
     Y = np.column_stack([y, X[:, 2] + rng.normal(size=30)])
     w = rng.uniform(0.5, 2.0, size=30)
     return X, y, Y, w
-
-
-def test_misaligned_helper_really_misaligns():
-    v = _misaligned(np.arange(12.0).reshape(3, 4))
-    assert not v.flags.aligned and v.flags.c_contiguous
-    assert np.array_equal(v, np.arange(12.0).reshape(3, 4))
 
 
 # Raw extension calls: the seam alone must cope, including arrays that
@@ -140,3 +138,98 @@ def test_ensure_array_returns_aligned():
     out = _api._ensure_array(X, "X", 2)
     assert out.flags.aligned and out.flags.c_contiguous
     assert np.array_equal(out, X)
+
+
+@pytest.mark.parametrize("order", ["C", "F"])
+@pytest.mark.parametrize("name", list(_public_cases()))
+def test_public_api_hands_the_extension_x_uncopied(name, order, monkeypatch):
+    """The wrapper passes a contiguous float64 X (or `W`, for `rotate`) on
+    in its own order: the array the extension receives is the caller's."""
+    call = _public_cases()[name]
+    seen = []
+
+    def record(fn):
+        def wrapped(*args, **kwargs):
+            seen.extend(v for v in (*args, *kwargs.values()) if isinstance(v, np.ndarray))
+            return fn(*args, **kwargs)
+        return wrapped
+
+    for attr in dir(_plskit):
+        fn = getattr(_plskit, attr)
+        if callable(fn) and not isinstance(fn, type):
+            monkeypatch.setattr(_plskit, attr, record(fn))
+    held = []
+
+    def mk(a):
+        held.append(np.array(a, dtype=np.float64, order=order))
+        return held[-1]
+
+    call(mk)
+    assert any(v is held[0] for v in seen), [v.flags for v in seen]
+
+
+def _block_layouts(a):
+    """The same values in every layout the seam tells apart: C and F order
+    (F also at an address 8 bytes past a buffer's start), and the strided
+    and negative-stride views the extension copies."""
+    a = np.asarray(a, dtype=np.float64)
+    big = np.zeros((2 * a.shape[0], 2 * a.shape[1]))
+    big[1::2, ::2] = a
+    f_offset = np.zeros(a.size + 1)[1:].reshape(a.shape[::-1]).T
+    f_offset[...] = a
+    out = {
+        "C": np.ascontiguousarray(a),
+        "F": np.asfortranarray(a),
+        "F_offset": f_offset,
+        "strided": big[1::2, ::2],
+        "reversed_rows": np.ascontiguousarray(a[::-1])[::-1],
+        "reversed_cols": np.asfortranarray(a[:, ::-1])[:, ::-1],
+    }
+    assert out["F_offset"].flags.f_contiguous and out["F_offset"].flags.aligned
+    for v in out.values():
+        assert np.array_equal(v, a)
+    return out
+
+
+def _block_cases():
+    # A shape and seed on which a row-major read of a C-ordered Y moves the
+    # last bits of a pre-standardized k=1 PLS3 fit (seen on arm64 macOS),
+    # so there the "C" layout below discriminates between reading C order
+    # in place and copying it column-major.
+    rng = np.random.default_rng(5)
+    n, p, q = 143, 46, 32
+    X = rng.standard_normal((n, p))
+    Y = rng.standard_normal((n, q)) + X[:, :1]
+    Xs = (X - X.mean(0)) / X.std(0, ddof=1)
+    Ys = (Y - Y.mean(0)) / Y.std(0, ddof=1)
+    y = Y[:, 0]
+    pre = {"pre_standardized_X": True, "pre_standardized_Y": True}
+    m3 = plskit.pls3_fit(Xs, Ys, k=2, **pre)
+    m1 = plskit.pls1_fit(X, y, k=3)
+    W = np.asarray(m1.W)
+    L = W @ rng.standard_normal((3, 3))
+    return {
+        "pls3_fit": (Y, lambda Yv: plskit.pls3_fit(X, Yv, k=2)),
+        "pls3_fit_pre": (Ys, lambda Yv: plskit.pls3_fit(Xs, Yv, k=1, **pre)),
+        "spls3_fit_pre": (Ys, lambda Yv: plskit.spls3_fit(Xs, Yv, 1, 20, 10, **pre)),
+        "pls3_confirmatory_test": (Y, lambda Yv: plskit.pls3_confirmatory_test(
+            X, Yv, k=1, method="split_exact", args={"n_perm": 99}, seed=7)),
+        "pls3_transform": (Ys, lambda Yv: plskit.pls3_transform(m3, Y_new=Yv, which="y_scores")),
+        "preprocess": (Y, lambda Yv: plskit.preprocess(X, Yv)),
+        "rotate_W": (W, lambda Wv: plskit.rotate(Wv, method="varimax")),
+        "rotate_L": (L, lambda Lv: plskit.rotate(W, method="varimax", L=Lv)),
+        "pls1_rotation_stability_L": (L, lambda Lv: plskit.pls1_rotation_stability(
+            X, y, 3, L=Lv, n_boot=100, seed=3)),
+    }
+
+
+@pytest.mark.parametrize("name", list(_block_cases()))
+def test_block_inputs_give_the_same_bits_in_every_layout(name):
+    """`Y`, `Y_new`, `W` and `L` in any layout give the bits of the
+    column-major copy the extension makes of a strided one (the path every
+    layout of these inputs took before F order was read in place)."""
+    value, call = _block_cases()[name]
+    layouts = _block_layouts(value)
+    ref = _bits(call(layouts.pop("strided")))
+    for label, v in layouts.items():
+        assert _bits(call(v)) == ref, label

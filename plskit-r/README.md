@@ -1,32 +1,25 @@
 # plskit-r
 
-R wrapper for the [plskit](https://github.com/pawlenartowicz/plskit)
-Rust crate, planned via `extendr`.
-
-## What is plskit?
-
-plskit is a Partial Least Squares (PLS) library built around three ideas:
-
-- **Modern inference.** Confirmatory tests use split-half held-out
-  prediction: `split_exact` is calibrated by permutation, and
-  `split_nb` is its faster Fisher-z approximation. Confidence
-  intervals are taken on rotation-invariant quantities (held-out
-  correlation, per-variable leverage, a subsampling z for β), so no
-  Procrustes alignment is needed. The tests are introduced in our
-  [NeurIPS 2026 paper](https://openreview.net/forum?id=xb6CB7d9LO).
-- **Same results in every language.** All numerical work runs in one
-  Rust engine. Python (and the planned R and Julia wrappers) call
-  into it, so a fixed `(version, seed, X, y)` gives the same results,
-  within a bit-near tolerance, in every language and on every
-  supported platform.
-- **Speed.** The engine is written in Rust with parallel resampling,
-  which makes plskit probably the fastest PLS package available.
+R package for [plskit](https://github.com/pawlenartowicz/plskit): PLS
+regression with modern inference. It wraps the Rust engine through
+extendr and the `plskit-bind` layer, with the same functions, argument
+names and result fields as the Python package.
 
 ## Status
 
-**Not functional in v0.1.0** — this directory is a placeholder. No
-package is built, installed, or published yet. Track progress on the
-[issue tracker](https://github.com/pawlenartowicz/plskit/issues).
+Implemented, not yet released. Until the first release it builds only
+from a checkout of the monorepo, in dev mode: see
+[`_docs/r/installation.md`](../_docs/r/installation.md).
 
-For a working wrapper today, use the Python package
-(`pip install plskit`) or the Rust crate (`cargo add plskit`).
+## `k`, not `ncomp`
+
+The number of components is `k` (and `k_max`), as in every plskit
+language, not `ncomp` as in the R `pls` package. This is deliberate
+(cross-language naming rule); there is no alias.
+
+## Documentation
+
+- [R pages](../_docs/r/index.md): installation, quickstart, differences
+  from Python (type mapping, string seeds, condition classes)
+- [Python API](../_docs/python/api.md): the canonical reference for every
+  function and argument

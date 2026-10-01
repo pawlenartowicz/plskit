@@ -13,6 +13,12 @@ import plskit
 ROOT = Path(__file__).resolve().parents[2] / "testdata"
 MANIFEST = ROOT / "manifest.json"
 
+# Corpus tolerances (testdata/README.md "Tolerance"), numpy's rule
+# |actual - expected| <= atol + rtol * |expected|, as in plskit-rs/tests/corpus.rs.
+ATOL_SCALAR = 1e-12
+ATOL_ARRAY = 1e-10
+RTOL = 1e-14
+
 
 def load_manifest():
     if not MANIFEST.exists():
@@ -23,21 +29,12 @@ def load_manifest():
     return json.loads(MANIFEST.read_text())["cases"]
 
 
-def test_manifest_is_v2():
-    if not MANIFEST.exists():
-        pytest.skip(f"{MANIFEST} missing")
-    m = json.loads(MANIFEST.read_text())
-    assert m["schema_version"] == 2
-    assert "producing_version" in m
-    assert all("outputs" in c and "hashes" in c for c in m["cases"])
-
-
 def load_npz(rel_path: str) -> dict:
     with np.load(ROOT / rel_path, allow_pickle=False) as f:
         return {k: f[k] for k in f.files}
 
 
-def assert_close(actual, expected, name: str, atol_scalar=1e-12, atol_array=1e-10):
+def assert_close(actual, expected, name: str):
     if expected is None:
         assert actual is None, f"{name}: expected None, got {actual!r}"
         return
@@ -58,10 +55,10 @@ def assert_close(actual, expected, name: str, atol_scalar=1e-12, atol_array=1e-1
         assert actual_str == exp_str, f"{name}: expected {exp_str!r}, got {actual_str!r}"
         return
     if np.isscalar(expected) or (hasattr(expected, "shape") and expected.shape == ()):
-        np.testing.assert_allclose(actual, float(expected), rtol=0, atol=atol_scalar,
+        np.testing.assert_allclose(actual, float(expected), rtol=RTOL, atol=ATOL_SCALAR,
                                    err_msg=name)
     else:
-        np.testing.assert_allclose(actual, expected, rtol=0, atol=atol_array,
+        np.testing.assert_allclose(actual, expected, rtol=RTOL, atol=ATOL_ARRAY,
                                    err_msg=name)
 
 
@@ -156,7 +153,7 @@ def test_corpus_case(case):
                 assert actual_dict is not None, f"{case['name']}.{d_field}"
                 for k_int, v_exp in zip(ks.tolist(), vs.tolist()):
                     np.testing.assert_allclose(actual_dict[int(k_int)], v_exp,
-                                               atol=1e-10,
+                                               atol=ATOL_ARRAY, rtol=RTOL,
                                                err_msg=f"{case['name']}.{d_field}[{k_int}]")
     elif fn == "pls1_find_k_sequence":
         kw = dict(kwargs); k_max = kw.pop("k_max")
@@ -214,7 +211,7 @@ def test_corpus_case(case):
         kw["n_perm"] = int(kw["n_perm"])
         r = plskit.pls1_perm_null(inputs["X"], inputs["y"], k, **kw)
         for field in ["beta_ref", "beta_perm_mean", "beta_perm_sd", "beta_perm_z",
-                      "n_perm", "k", "seed", "n_eff"]:
+                      "n_perm", "k", "seed", "n_eff", "beta_perm_matrix"]:
             if field in expected:
                 assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
     elif fn == "pls1_rotation_stability":
@@ -233,6 +230,7 @@ def test_corpus_case(case):
                 assert_close(getattr(r.variance_ratio, sub), expected[key],
                              f"{case['name']}.{key}")
         # CIScalar per-axis bundles encoded as variance_ratio_per_axis_k{i}_{sub}
+        assert len(r.variance_ratio_per_axis) == k, case["name"]
         for i, ci_scalar in enumerate(r.variance_ratio_per_axis):
             for sub in ["point", "lower", "upper", "sd"]:
                 key = f"variance_ratio_per_axis_k{i}_{sub}"
@@ -276,7 +274,7 @@ def test_corpus_case(case):
                 actual_dict = getattr(r, d_field)
                 for k_int2, v_exp in zip(ks.tolist(), vs.tolist()):
                     np.testing.assert_allclose(actual_dict[int(k_int2)], v_exp,
-                                               atol=1e-10,
+                                               atol=ATOL_ARRAY, rtol=RTOL,
                                                err_msg=f"{case['name']}.{d_field}[{k_int2}]")
     elif fn == "spls1_find_k_optimal":
         kw = _resolve_corpus_weights(case, dict(kwargs), inputs)
@@ -295,7 +293,7 @@ def test_corpus_case(case):
                 assert actual_dict is not None, f"{case['name']}.{d_field}"
                 for k_int2, v_exp in zip(ks.tolist(), vs.tolist()):
                     np.testing.assert_allclose(actual_dict[int(k_int2)], v_exp,
-                                               atol=1e-10,
+                                               atol=ATOL_ARRAY, rtol=RTOL,
                                                err_msg=f"{case['name']}.{d_field}[{k_int2}]")
     elif fn == "spls1_find_k_sequence":
         kw = _resolve_corpus_weights(case, dict(kwargs), inputs)
@@ -354,4 +352,4 @@ def test_corpus_case(case):
             if field in expected:
                 assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
     else:
-        pytest.skip(f"unknown function {fn}")
+        pytest.fail(f"{case['name']}: no Python arm for manifest function {fn!r}")

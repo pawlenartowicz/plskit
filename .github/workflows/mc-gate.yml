@@ -4,11 +4,15 @@ name: MC calibration gate
 # and on demand. Kept out of ci.yml so the schedule trigger does not fire
 # the full per-push CI suite.
 #
-# What runs: `cargo test -p plskit --release -- --ignored --nocapture`
-# `--ignored` runs ONLY ignored tests across every test target of the package
-# (today: coverage_mc's CI-coverage grid; picks up any future #[ignore]d
-# MC tests automatically without editing this file). `--nocapture` surfaces
-# the per-cell calibration numbers in the log even on a passing run.
+# What runs: `cargo test -p plskit --release -- --ignored --nocapture`.
+# `--ignored` runs ONLY the #[ignore]d tests of every test target of the
+# package, and picks up future ones without editing this file. Today that is
+# the Monte-Carlo calibration gate (tests/coverage_mc.rs's CI-coverage grid)
+# plus three gram_p tools, the diagnostic sweep (tall_shapes_n_over_p_sweep),
+# the work-floor benchmark (gram_p_work_floor_benchmark) and the route
+# boundary benchmark (gram_p_route_boundary_benchmark, about 25 s), which
+# print measurements and assert nothing a running test does not. `--nocapture`
+# surfaces the per-cell numbers in the log even on a passing run.
 #
 # Runtime is substantial (36-cell grid × 200 datasets × 300 boots).
 # ubuntu-only is sufficient for a statistical gate.

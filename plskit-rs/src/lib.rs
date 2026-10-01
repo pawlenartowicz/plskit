@@ -40,6 +40,9 @@ pub mod pls3_signal_test;
 /// PLS1 prediction from a fitted model.
 pub mod predict;
 /// Public preprocess helper: validates/normalizes weights and standardizes (X, y).
+/// `preprocess::preprocess_block` is its multi-column-`Y` form; it is not
+/// re-exported at the crate root because the wrappers expose both forms
+/// under the one name `preprocess`, dispatching on the shape of `Y`.
 pub mod preprocess;
 /// Resampling utilities (permutation indices, split-half indices).
 pub mod resample;

@@ -213,9 +213,9 @@ impl SplitNbResolution {
 ///
 /// Inputs are the validated weights, exactly as
 /// `fit::validate_and_normalize_weights` returns them: `w_norm` the
-/// normalized weights (`None` when absent) and `n_eff` its Kish effective
-/// sample size (computed from the weights as the caller handed them, and
-/// exactly the row count when weights are absent). That one `n_eff` is the
+/// normalized weights (`None` when absent or all-equal) and `n_eff` its Kish
+/// effective sample size (computed from the weights as the caller handed them,
+/// and exactly the row count when weights are absent or all-equal). That one `n_eff` is the
 /// number every result type reports, so the gate's size test and the
 /// reported `n_eff` can never disagree by a rounding step.
 ///
@@ -281,8 +281,7 @@ pub fn split_nb_gate(
     crate::fit::check_finite_mat(x)?;
     // k_requested is only used for a check this function doesn't make (there
     // is no component count in play), so any value passes; 0 is the honest one.
-    let (w_norm, n_eff, _all_uniform) =
-        crate::fit::validate_and_normalize_weights(weights, x.nrows(), 0)?;
+    let (w_norm, n_eff) = crate::fit::validate_and_normalize_weights(weights, x.nrows(), 0)?;
     // `force` only decides whether a flagged design is rerouted; this query
     // reports `fires` alone, so its value is irrelevant here.
     let gate = resolve_split_nb(x, w_norm.as_ref().map(Col::as_ref), n_eff, false);
@@ -405,9 +404,10 @@ pub struct ConfirmatoryTestOutput {
     /// Kish's effective sample size. Equals `n_samples` for uniform/absent weights.
     pub n_eff: f64,
     /// Estimated split correlation ρ̂, `Some` only on `split_nb` when its ruler
-    /// is valid (unweighted, `n_test >= 4`); `None` for every other method,
-    /// including `split_exact` (no z-scatter interpretation to offer), and
-    /// `None` on `split_nb` itself when weighted or `n_test < 4`. Unrelated to
+    /// is valid (unweighted, which includes all-equal weights, and
+    /// `n_test >= 4`); `None` for every other method, including
+    /// `split_exact` (no z-scatter interpretation to offer), and `None` on
+    /// `split_nb` itself under non-uniform weights or `n_test < 4`. Unrelated to
     /// `n_eff` (that field is the weights effective-n).
     pub rho_hat: Option<f64>,
     /// Stable rank `‖X_std‖²_F / ‖X_std‖²₂` of the standardized X, as seen by
@@ -427,6 +427,8 @@ pub struct ConfirmatoryTestOutput {
 /// - `PlsKitError::Internal` for the `Model` input form (wrappers must reassemble raw X+y)
 /// - `PlsKitError::DimensionMismatch` when row counts disagree
 /// - `PlsKitError::KExceedsMax` when k > `d`
+/// - `PlsKitError::InvalidArgument` when `k = 0` (every method, `score`
+///   included although its statistic does not depend on k)
 /// - `PlsKitError::InvalidArgument` for `method = "raw_perm"` with
 ///   `n_folds < 2` or `n_folds >= n` (leave-one-out; the pooled CV R² is
 ///   undefined when every validation fold is a single row)
@@ -534,6 +536,13 @@ pub(crate) fn confirmatory_test_impl(
         }
         ConfirmatoryArgs::Score | ConfirmatoryArgs::E => {}
     }
+    // k = 0 is rejected here, before dispatch, for every method: left to the
+    // runners, `raw_perm` and `e` rejected it through `pls1_fit` while
+    // `split_exact` / `split_nb` returned a constant p and `score` (which
+    // never reads k) a real one. Same error `pls1_fit` raises.
+    if k_resolved == 0 {
+        return Err(PlsKitError::InvalidArgument("k must be >= 1".into()));
+    }
     let k_max = x_ref.ncols();
     if k_resolved > k_max {
         return Err(PlsKitError::KExceedsMax {
@@ -544,9 +553,7 @@ pub(crate) fn confirmatory_test_impl(
 
     // Validate + normalize weights. Row-scaling pattern: materialize X̃ = √w' · X_std
     // and ỹ = √w' · y_std and run the unweighted statistics on (X̃, ỹ).
-    let (w_norm, n_eff_val, _all_uniform) =
-        crate::fit::validate_and_normalize_weights(weights_in, n, k_resolved)?;
-    crate::fit::check_n_eff_for_k(n_eff_val, k_resolved, weights_in.is_some())?;
+    let (w_norm, n_eff_val) = crate::fit::validate_weights_for_k(weights_in, n, k_resolved)?;
 
     if let Some(kp) = opts.keep {
         crate::fit::validate_keep(kp, x_ref.ncols())?;
@@ -745,10 +752,6 @@ pub(crate) fn confirmatory_test_impl(
 // Internal result carrier (not pub)
 // ──────────────────────────────────────────────────────────────────────────────
 
-// Debug is only needed so test-code assert_...!/unwrap_err() calls on
-// PlsKitResult<RunResult> can format the Ok side; production code never
-// prints a RunResult.
-#[derive(Debug)]
 struct RunResult {
     pvalue: f64,
     statistic: f64,
@@ -805,10 +808,8 @@ pub(crate) fn new_routes_disabled() -> bool {
 
 /// Run `f` with [`new_routes_disabled`] true on this thread, restoring the
 /// previous value afterwards, also when `f` panics, so nested and failing
-/// tests cannot leak the override. The byte-identity tests against the
-/// pre-refactor references run inside it: a newer route that serves their
-/// shapes must not turn a primal-versus-reference comparison into a
-/// comparison between two routes.
+/// tests cannot leak the override. Route-invisibility tests and the layout
+/// table run primal-only arms inside it.
 #[cfg(test)]
 pub(crate) fn with_new_routes_disabled<T>(f: impl FnOnce() -> T) -> T {
     struct Restore(bool);
@@ -840,7 +841,7 @@ pub(crate) enum ReplicateRoute {
     /// Primal unit body.
     Nspace,
     /// The p-space Gram backend (`gram_p`): tall blocks
-    /// (`p < 2·n_tr`), dense, weighted or sparse, `1 ≤ k ≤ K_GRAM_MAX`.
+    /// (`p < 1.54·n_tr`), dense, weighted or sparse, `1 ≤ k ≤ K_GRAM_MAX`.
     GramP,
 }
 
@@ -850,7 +851,7 @@ pub(crate) enum ReplicateRoute {
 /// rule admits (`dual_route::nspace_eligible_raw_perm`) takes `Nspace`,
 /// unless `new_routes_disabled()`. `GramP` when `gram_p::gram_p_eligible`
 /// admits the block (tried after `Nspace`: in the overlap band
-/// `n_tr < p < 2·n_tr` the n-space route is cheaper), unless
+/// `n_tr < p < 1.54·n_tr` the n-space route is cheaper), unless
 /// `new_routes_disabled()`. Everything else is `Primal`.
 pub(crate) fn raw_perm_route(
     n: usize,
@@ -885,7 +886,7 @@ pub(crate) fn raw_perm_route(
 /// input the n-space rule admits (`dual_route::nspace_eligible_split_exact`
 /// on `split_sizes(n, k).0`) takes `Nspace`, unless `new_routes_disabled()`.
 /// `GramP` when `gram_p::gram_p_eligible` admits the block (tried after
-/// `Nspace`: in the overlap band `n_tr < p < 2·n_tr` the n-space route is
+/// `Nspace`: in the overlap band `n_tr < p < 1.54·n_tr` the n-space route is
 /// cheaper), unless `new_routes_disabled()`. Everything else is `Primal`.
 pub(crate) fn split_exact_refit_route(
     n: usize,
@@ -1049,6 +1050,16 @@ fn pls1_cv_r2(
     Ok(r2[0])
 }
 
+/// The caller's mean-one weights sliced to rows `idx` and renormalized to
+/// mean one within them: the per-fold / per-half weights of `raw_perm` and
+/// the split routes. An all-zero or all-equal slice is no weights (`None`),
+/// as `pls1_fit` drops all-equal weights.
+fn renormalized_slice_weights(w: Option<ColRef<'_, f64>>, idx: &[usize]) -> Option<Col<f64>> {
+    use crate::linalg::{col_row_subset, normalize_weights};
+    w.and_then(|w| normalize_weights(col_row_subset(w, idx).as_ref()))
+        .filter(|w| !crate::fit::weights_all_equal(w.as_ref()))
+}
+
 /// One `raw_perm` fold, prepared once: the fold's X side of
 /// `pls1_fit(pre_standardized, !check_n_eff, Seq, w_tr)`, standardized
 /// training and validation blocks plus the fold's renormalized weights and
@@ -1063,18 +1074,22 @@ pub(crate) struct CvFold {
     pub(crate) xs_tr: Mat<f64>,
     /// Validation block standardized with the training moments, unscaled.
     pub(crate) xs_val: Mat<f64>,
-    /// The fold's renormalized weights, from `normalize_weights` on the
-    /// fold's training slice, with the uniform fallback for an all-zero fold.
+    /// The fold's renormalized weights (`renormalized_slice_weights` on the
+    /// fold's training slice), `None` when that slice is all zero or all equal.
     pub(crate) w_tr: Option<Col<f64>>,
     /// `fit_row_scale(w_tr)`, the √w'' `pls1_fit` would apply.
     pub(crate) sqw_fit: Option<Col<f64>>,
     /// `scale_rows(xs_tr, sqw_fit)` when weighted, else `None` (use `xs_tr`).
     pub(crate) xs_tr_fit: Option<Mat<f64>>,
+    /// `‖·‖_F` (`norm_l2`) of the block the fit runs on (`xs_tr_fit`, else
+    /// `xs_tr`), taken once per fold rather than once per column: the same
+    /// call on the same view, so the same bits.
+    pub(crate) x_fro: f64,
 }
 
 /// Prepare fold `fi` of `folds` once. `weights` are the caller's mean-one
 /// weights; the fold slices them to its training rows and renormalizes
-/// (uniform when the slice sums to zero), and `pls1_fit` would renormalize
+/// (no weights when the slice is all zero or all equal), and `pls1_fit` would renormalize
 /// that again before its √w scaling, which `sqw_fit` reproduces. The X-side
 /// check of `pls1_fit` (a finite standardized training block) runs here,
 /// once per fold on every route, instead of once per column.
@@ -1090,9 +1105,7 @@ pub(crate) fn prepare_cv_fold(
     weights: Option<ColRef<'_, f64>>,
 ) -> PlsKitResult<CvFold> {
     use crate::fit::{check_finite_mat, fit_row_scale, scale_rows};
-    use crate::linalg::{
-        col_row_subset, normalize_weights, standardize_apply_rows, standardize_rows,
-    };
+    use crate::linalg::{standardize_apply_rows, standardize_rows};
     let val_idx = folds[fi].clone();
     let train_idx: Vec<usize> = folds
         .iter()
@@ -1100,12 +1113,7 @@ pub(crate) fn prepare_cv_fold(
         .filter(|(j, _)| *j != fi)
         .flat_map(|(_, f)| f.iter().copied())
         .collect();
-    let w_tr: Option<Col<f64>> = weights.map(|w| {
-        let w_slice = col_row_subset(w, &train_idx);
-        // Re-normalize so weights mean = 1 within this fold.
-        normalize_weights(w_slice.as_ref())
-            .unwrap_or_else(|| Col::from_fn(train_idx.len(), |_| 1.0))
-    });
+    let w_tr = renormalized_slice_weights(weights, &train_idx);
     let (xs_tr, x_mean, x_scale) =
         standardize_rows(x, &train_idx, w_tr.as_ref().map(Col::as_ref), None);
     check_finite_mat(xs_tr.as_ref())?;
@@ -1114,6 +1122,7 @@ pub(crate) fn prepare_cv_fold(
     let xs_tr_fit = sqw_fit
         .as_ref()
         .map(|s| scale_rows(xs_tr.as_ref(), s.as_ref()));
+    let x_fro = xs_tr_fit.as_ref().unwrap_or(&xs_tr).norm_l2();
     Ok(CvFold {
         train_idx,
         val_idx,
@@ -1122,6 +1131,7 @@ pub(crate) fn prepare_cv_fold(
         w_tr,
         sqw_fit,
         xs_tr_fit,
+        x_fro,
     })
 }
 
@@ -1144,7 +1154,7 @@ pub(crate) fn cv_fold_contribution(
     k: usize,
     keep: Option<usize>,
 ) -> PlsKitResult<(f64, f64)> {
-    use crate::fit::{check_fit_y_and_k, pls1_fit_prepared, scale_col, ParChoice};
+    use crate::fit::{check_fit_y_and_k, pls1_fit_prepared_fro, scale_col, ParChoice};
     let (ys_tr, ys_val) = cv_fold_targets(fold, y_of);
 
     check_fit_y_and_k(fold.xs_tr.ncols(), ys_tr.as_ref(), k, keep)?;
@@ -1152,9 +1162,23 @@ pub(crate) fn cv_fold_contribution(
     let fit = match (&fold.xs_tr_fit, &fold.sqw_fit) {
         (Some(xs_fit), Some(sqw)) => {
             let ys_fit = scale_col(ys_tr.as_ref(), sqw.as_ref());
-            pls1_fit_prepared(xs_fit.as_ref(), ys_fit.as_ref(), k, keep, ParChoice::Seq)?
+            pls1_fit_prepared_fro(
+                xs_fit.as_ref(),
+                ys_fit.as_ref(),
+                k,
+                keep,
+                ParChoice::Seq,
+                fold.x_fro,
+            )?
         }
-        _ => pls1_fit_prepared(fold.xs_tr.as_ref(), ys_tr.as_ref(), k, keep, ParChoice::Seq)?,
+        _ => pls1_fit_prepared_fro(
+            fold.xs_tr.as_ref(),
+            ys_tr.as_ref(),
+            k,
+            keep,
+            ParChoice::Seq,
+            fold.x_fro,
+        )?,
     };
 
     let y_pred = crate::linalg::mat_vec(fold.xs_val.as_ref(), fit.coef.as_ref(), faer::Par::Seq);
@@ -1528,12 +1552,15 @@ pub(crate) struct PreparedSplit {
     /// per split instead of once per column. When false, every column's `r`
     /// is 0, as the failed per-half fit gave.
     pub(crate) x_finite: bool,
+    /// `xs_tr.norm_l2()`, taken once per split rather than once per column:
+    /// the same call on the same view, so the same bits.
+    pub(crate) x_fro: f64,
 }
 
 /// The X side of [`split_half_r`] for split `sp`. Per-half weights are the
 /// caller's `w_norm` sliced to the half and renormalized to mean one
 /// (mirrors `signal_test::pooled_cv_r2_columns`'s per-fold renormalization),
-/// with a uniform fallback for an all-zero half. Each half is standardized with the
+/// with no weights for an all-zero or all-equal half. Each half is standardized with the
 /// training half's weighted moments and then √w-scaled with its own
 /// half's weights as given (Convention A, matching `pls1_fit`), in one pass
 /// per half (`linalg::standardize_rows`).
@@ -1543,18 +1570,10 @@ pub(crate) fn prepare_split(
     sp: &SplitIdx,
     w_norm: Option<ColRef<'_, f64>>,
 ) -> PreparedSplit {
-    use crate::linalg::{
-        col_row_subset, normalize_weights, sqrt_col, standardize_apply_rows, standardize_rows,
-    };
+    use crate::linalg::{sqrt_col, standardize_apply_rows, standardize_rows};
     let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
-    let half_weights = |idx: &[usize]| -> Option<Col<f64>> {
-        w_norm.map(|w| {
-            let s = col_row_subset(w, idx);
-            normalize_weights(s.as_ref()).unwrap_or_else(|| Col::from_fn(idx.len(), |_| 1.0))
-        })
-    };
-    let w_tr = half_weights(tr);
-    let w_te = half_weights(te);
+    let w_tr = renormalized_slice_weights(w_norm, tr);
+    let w_te = renormalized_slice_weights(w_norm, te);
     let sw_tr = w_tr.as_ref().map(|w| sqrt_col(w.as_ref()));
     let sw_te = w_te.as_ref().map(|w| sqrt_col(w.as_ref()));
     let (xs_tr, x_mean, x_scale) = standardize_rows(
@@ -1571,12 +1590,14 @@ pub(crate) fn prepare_split(
         sw_te.as_ref().map(Col::as_ref),
     );
     let x_finite = crate::fit::check_finite_mat(xs_tr.as_ref()).is_ok();
+    let x_fro = xs_tr.norm_l2();
     PreparedSplit {
         xs_tr,
         xs_te,
         w_tr,
         w_te,
         x_finite,
+        x_fro,
     }
 }
 
@@ -1599,7 +1620,7 @@ pub(crate) fn split_column_r(
     k: usize,
     keep: Option<usize>,
 ) -> f64 {
-    use crate::fit::{check_fit_y_and_k, pls1_fit_prepared, ParChoice};
+    use crate::fit::{check_fit_y_and_k, pls1_fit_prepared_fro, ParChoice};
     if !prep.x_finite {
         return 0.0;
     }
@@ -1608,8 +1629,14 @@ pub(crate) fn split_column_r(
         return 0.0;
     }
     // Seq inside the per-split worker: outer Rayon owns the threadpool.
-    let Ok(m) = pls1_fit_prepared(prep.xs_tr.as_ref(), ys_tr.as_ref(), k, keep, ParChoice::Seq)
-    else {
+    let Ok(m) = pls1_fit_prepared_fro(
+        prep.xs_tr.as_ref(),
+        ys_tr.as_ref(),
+        k,
+        keep,
+        ParChoice::Seq,
+        prep.x_fro,
+    ) else {
         return 0.0;
     };
     // Both the scores (through the √w_te-scaled X̃_te) and the test outcome
@@ -1825,10 +1852,51 @@ pub(crate) fn split_unit(
         SplitBlock::Primal(_) => split_column_r(prep, sp, y_of, k, keep),
         SplitBlock::Nspace(ns) => {
             debug_assert!(k >= 1 && keep.is_none() && prep.w_tr.is_none());
-            crate::dual_route::split_column_r_nspace(prep, sp, ns, y_of, k)
+            crate::dual_route::split_columns_r_nspace(sp, ns, 1, &|_, i| y_of(i), k)[0]
+                .unwrap_or_else(|| split_column_r(prep, sp, y_of, k, None))
         }
         SplitBlock::GramP(gram) => split_column_r_gram_p(gram, prep, sp, y_of, k, keep),
     }
+}
+
+/// The `n_cols` split-half `r` values of one prepared split on the
+/// n-space route, before the clamp and Fisher z. The columns go through
+/// `dual_route::split_columns_r_nspace` in runs of
+/// `dual_route::NSPACE_BATCH` consecutive columns from column 0, one call
+/// per run, so the per-replicate products with `G` and `M` become one
+/// product per run; the runs are fixed by `n_cols` alone, so the bits do
+/// not depend on the thread count. The columns a run hands back undecided
+/// then run the Primal arm (`split_column_r`) in a second indexed map over
+/// just those columns, so a fallback-heavy input keeps one task per column
+/// rather than one per run. Each column's value is computed from its own
+/// inputs alone, whichever worker computes it. `prep.x_finite` is the
+/// caller's precondition.
+pub(crate) fn split_columns_nspace(
+    prep: &PreparedSplit,
+    sp: &SplitIdx,
+    ns: &crate::dual_route::NspaceSplit,
+    n_cols: usize,
+    k: usize,
+    disable_parallelism: bool,
+    column_y: &(dyn Fn(usize) -> Col<f64> + Sync),
+) -> Vec<f64> {
+    let batch = crate::dual_route::NSPACE_BATCH;
+    let runs = crate::resample::map_indexed(n_cols.div_ceil(batch), disable_parallelism, |run| {
+        let c0 = run * batch;
+        let ys: Vec<Col<f64>> = (c0..n_cols.min(c0 + batch)).map(column_y).collect();
+        crate::dual_route::split_columns_r_nspace(sp, ns, ys.len(), &|j, i| ys[j][i], k)
+    });
+    let decided: Vec<Option<f64>> = runs.into_iter().flatten().collect();
+    let undecided: Vec<usize> = (0..n_cols).filter(|&c| decided[c].is_none()).collect();
+    let fallbacks = crate::resample::map_indexed(undecided.len(), disable_parallelism, |u| {
+        let yc = column_y(undecided[u]);
+        split_column_r(prep, sp, &|i| yc[i], k, None)
+    });
+    let mut out: Vec<f64> = decided.into_iter().map(|r| r.unwrap_or(0.0)).collect();
+    for (c, r) in undecided.into_iter().zip(fallbacks) {
+        out[c] = r;
+    }
+    out
 }
 
 /// Per-column `z̄` of `split_exact`'s refit route on `route`: the split
@@ -1837,18 +1905,21 @@ pub(crate) fn split_unit(
 /// exactly one prepared split and its block ([`split_block`] under
 /// [`crate::resample::block_par`]) are alive, and the `n_cols` columns of
 /// that split map in parallel (or sequentially) through [`split_unit`], the
-/// same width the replicate-outer loop had. `column_y(c)` builds column `c`
-/// (raw, length n) inside the unit that needs it, so no `B·n` buffer is
-/// held. `k <= p` is the caller's precondition; `k = 0` is reachable and
-/// gives `r = 0` in every unit.
+/// same width the replicate-outer loop had. On the `Nspace` route the
+/// columns go through [`split_columns_nspace`] instead, in fixed runs with
+/// the fallbacks mapped per column. `column_y(c)` builds column `c` (raw,
+/// length n) inside the unit (or run) that needs it, so no `B·n` buffer is
+/// held.
+/// `k <= p` is the caller's precondition; `k = 0` is reachable and gives
+/// `r = 0` in every unit.
 ///
-/// Byte-identical to `mean_fisher_z` over `split_half_correlations` per
-/// column: each `(split, column)` value is `split_half_r`'s on the same
-/// inputs, clamped and `atanh`-ed where `mean_fisher_z` does it, and
-/// `zbars_over_splits` sums splits ascending and divides by J once. One
-/// exception: `mean_fisher_z` sums from -0.0 and `zbars_over_splits` from
-/// +0.0, so a statistic whose every term is -0.0 comes out +0.0. No
-/// p-value can change.
+/// On the Primal route, byte-identical to `mean_fisher_z` over
+/// `split_half_correlations` per column: each `(split, column)` value is
+/// `split_half_r`'s on the same inputs, clamped and `atanh`-ed where
+/// `mean_fisher_z` does it, and `zbars_over_splits` sums splits ascending
+/// and divides by J once. One exception: `mean_fisher_z` sums from -0.0 and
+/// `zbars_over_splits` from +0.0, so a statistic whose every term is -0.0
+/// comes out +0.0. No p-value can change.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn split_zbars_columns(
     route: ReplicateRoute,
@@ -1867,13 +1938,20 @@ pub(crate) fn split_zbars_columns(
     zbars_over_splits(splits, n_cols, true, |sp: &SplitIdx| {
         let prep = prepare_split(x, sp, w_norm);
         let block = split_block(route, &prep, par);
-        crate::resample::map_indexed(n_cols, disable_parallelism, |c| {
-            let yc = column_y(c);
-            // ±0.9999 pre-atanh clamp mirrored from nb_test (change together).
-            split_unit(&block, &prep, sp, &|i| yc[i], k, keep)
-                .clamp(-0.9999, 0.9999)
-                .atanh()
-        })
+        // ±0.9999 pre-atanh clamp mirrored from nb_test (change together).
+        let fisher_z = |r: f64| r.clamp(-0.9999, 0.9999).atanh();
+        match &block {
+            SplitBlock::Nspace(ns) if prep.x_finite => {
+                split_columns_nspace(&prep, sp, ns, n_cols, k, disable_parallelism, column_y)
+                    .into_iter()
+                    .map(fisher_z)
+                    .collect()
+            }
+            _ => crate::resample::map_indexed(n_cols, disable_parallelism, |c| {
+                let yc = column_y(c);
+                fisher_z(split_unit(&block, &prep, sp, &|i| yc[i], k, keep))
+            }),
+        }
     })
 }
 
@@ -2238,8 +2316,7 @@ fn split_perm_nr_zbars(
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<Vec<f64>> {
     use crate::linalg::{
-        col_row_subset, normalize_weights, row_subset, standardize1, standardize1_weighted,
-        standardize_apply_rows, standardize_rows,
+        row_subset, standardize1, standardize1_weighted, standardize_apply_rows, standardize_rows,
     };
     use crate::resample::{one_split, permute_indices, split_sizes};
 
@@ -2346,18 +2423,10 @@ fn split_perm_nr_zbars(
         // Per-half weights renormalized to mean 1 within the half, weighted
         // moments, then √w row-scaling — every step mirrored from
         // split_half_correlations (change together; that function owns the
-        // Convention A explanation). `normalize_weights` only returns None on
-        // an all-zero half, which the parent's weight validation makes
-        // unreachable; fall back to uniform there exactly as that function
-        // does rather than growing an error path this route cannot hit.
-        let half_weights = |idx: &[usize]| -> Option<Col<f64>> {
-            w_norm.map(|w| {
-                let s = col_row_subset(w, idx);
-                normalize_weights(s.as_ref()).unwrap_or_else(|| Col::from_fn(idx.len(), |_| 1.0))
-            })
-        };
-        let w_tr = half_weights(&sp.tr);
-        let w_te = half_weights(&sp.te);
+        // Convention A explanation), including `renormalized_slice_weights`
+        // for an all-zero or all-equal half.
+        let w_tr = renormalized_slice_weights(w_norm, &sp.tr);
+        let w_te = renormalized_slice_weights(w_norm, &sp.te);
         // Root taken once per row here, not once per (row, column) — with
         // n_cols = B+1 columns of Y the inline form would repeat it B times.
         let root = |w: &Col<f64>| Col::<f64>::from_fn(w.nrows(), |i| w[i].sqrt());
@@ -2841,8 +2910,8 @@ fn run_e(
 mod tests {
     use super::*;
     use crate::fit::{pls1_fit, FitOpts, KSpec};
-    use crate::linalg::{centered_moments, constant_to_rounding};
-    use crate::test_support::{orthonormal_basis, project_off};
+    use crate::linalg::{centered_moments, constant_to_rounding, normalize_weights};
+    use crate::test_support::{orthonormal_basis, project_off, signal_data};
 
     fn synth_with_signal(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
         use rand::RngExt;
@@ -2865,87 +2934,140 @@ mod tests {
         (x, y)
     }
 
-    // Smoke: ensure we can fit and immediately confirm.
+    /// Each method rejects on a strong-signal design, and reports its own
+    /// name. `split_exact` at k = 2 takes the refit route; its p-values lie
+    /// on the grid (c + 1) / 101, so `< 0.05` means at most four null
+    /// exceedances.
+    /// (n, d, snr, data seed), k, args, seed, method, strict p bound.
+    type PowerRow = (
+        (usize, usize, f64, u64),
+        usize,
+        ConfirmatoryArgs,
+        u64,
+        &'static str,
+        f64,
+    );
+
     #[test]
-    fn fit_then_confirm_smoke() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 1);
-        let _ = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 2,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb {
+    fn each_method_rejects_under_signal() {
+        let rows: [PowerRow; 4] = [
+            (
+                (80, 6, 5.0, 11),
+                3,
+                ConfirmatoryArgs::RawPerm {
+                    n_perm: 200,
+                    n_folds: 5,
+                },
+                7,
+                "raw_perm",
+                0.05,
+            ),
+            (
+                (60, 5, 4.0, 17),
+                2,
+                ConfirmatoryArgs::SplitNb {
                     n_splits: 30,
                     force: false,
                 },
-                seed: Some(1),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!((0.0..=1.0).contains(&r.pvalue));
+                2,
+                "split_nb",
+                0.1,
+            ),
+            (
+                (60, 5, 4.0, 23),
+                2,
+                ConfirmatoryArgs::SplitExact {
+                    n_perm: 100,
+                    n_splits: 20,
+                },
+                3,
+                "split_exact",
+                0.05,
+            ),
+            // Universal inference bounds P(reject | H0) by alpha exactly, so
+            // under signal p < 0.5 is the modest claim.
+            ((80, 5, 3.0, 41), 2, ConfirmatoryArgs::E, 5, "e", 0.5),
+        ];
+        for ((n, d, snr, data_seed), k, args, seed, method, bound) in rows {
+            let (x, y) = synth_with_signal(n, d, snr, data_seed);
+            let r = pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k,
+                    weights: None,
+                },
+                ConfirmatoryTestOpts {
+                    args,
+                    seed: Some(seed),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(r.method, method);
+            assert!(r.pvalue < bound, "{method}: p={}", r.pvalue);
+        }
+    }
+
+    /// `rho_hat` is `Some` in [0, 1] only on an unweighted `split_nb` run
+    /// with `n_test >= 4`; weights, a too-small test half, and `split_exact`
+    /// give `None`.
+    /// x, y, k, weights, args, reported method, `rho_hat.is_some()`.
+    type RhoRow<'a> = (
+        &'a Mat<f64>,
+        &'a Col<f64>,
+        usize,
+        Option<&'a Col<f64>>,
+        ConfirmatoryArgs,
+        &'static str,
+        bool,
+    );
+
+    #[test]
+    fn rho_hat_follows_the_ruler() {
+        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
+        let w = Col::<f64>::from_fn(60, |i| if i % 2 == 0 { 1.5 } else { 0.5 });
+        let (x10, y10) = synth_no_signal(10, 5, 9);
+        let nb = |n_splits, force| ConfirmatoryArgs::SplitNb { n_splits, force };
+        let exact = ConfirmatoryArgs::SplitExact {
+            n_perm: 49,
+            n_splits: 5,
+        };
+        // split_sizes(10, 5) -> (7, 3): n_test = 3 is below the ruler's
+        // floor. `force`, because n = 10 trips the auto-gate's n floor and
+        // would otherwise reroute to split_exact, which reports `None` for
+        // its own reasons and would pass vacuously.
+        let rows: [RhoRow<'_>; 4] = [
+            (&x, &y, 2, None, nb(30, false), "split_nb", true),
+            (&x, &y, 2, Some(&w), nb(30, false), "split_nb", false),
+            (&x10, &y10, 5, None, nb(10, true), "split_nb", false),
+            (&x, &y, 1, None, exact, "split_exact", false),
+        ];
+        for (x, y, k, w, args, method, some) in rows {
+            let r = pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k,
+                    weights: w.map(Col::as_ref),
+                },
+                ConfirmatoryTestOpts {
+                    args,
+                    seed: Some(2),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let what = format!("{method} k={k} weighted={}", w.is_some());
+            assert_eq!(r.method, method, "{what}");
+            assert_eq!(r.rho_hat.is_some(), some, "{what}: {:?}", r.rho_hat);
+            if let Some(rho) = r.rho_hat {
+                assert!((0.0..=1.0).contains(&rho), "{what}: {rho}");
+            }
+        }
     }
 
     // ── raw_perm tests ───────────────────────────────────────────────────────
-
-    #[test]
-    fn raw_perm_calibration_under_h0() {
-        let (x, y) = synth_no_signal(40, 5, 99);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 1,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::RawPerm {
-                    n_perm: 200,
-                    n_folds: 5,
-                },
-                seed: Some(7),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(r.method, "raw_perm");
-        assert!((0.0..=1.0).contains(&r.pvalue));
-        // No assertion on p — calibration tested in plskit-py statistical suite.
-    }
-
-    #[test]
-    fn raw_perm_rejects_under_signal() {
-        let (x, y) = synth_with_signal(80, 6, 5.0, 11);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 3,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::RawPerm {
-                    n_perm: 200,
-                    n_folds: 5,
-                },
-                seed: Some(7),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(r.pvalue < 0.05, "p={}", r.pvalue);
-    }
 
     #[test]
     fn raw_perm_rejects_leave_one_out_folds() {
@@ -2953,57 +3075,33 @@ mod tests {
         // that fold (spread of one point about its own mean) is always 0,
         // so the pooled CV R² is undefined. Must be rejected, not silently
         // returned as the degenerate statistic 0 / p 1.
-        let (x, y) = synth_no_signal(10, 3, 5);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 1,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::RawPerm {
-                    n_perm: 50,
-                    n_folds: 10,
-                },
-                seed: Some(3),
-                ..Default::default()
-            },
-        );
-        assert!(
-            matches!(r, Err(PlsKitError::InvalidArgument(_))),
-            "expected InvalidArgument for n_folds == n, got {r:?}"
-        );
-    }
-
-    #[test]
-    fn raw_perm_rejects_n_folds_greater_than_n() {
         // n_folds > n gives n one-row folds plus (n_folds - n) empty folds
         // (linalg::fold_split). An empty fold contributes (0, 0) to the
         // pooled sums, so every non-empty validation fold is still a single
-        // row: the same leave-one-out degeneracy as n_folds == n, just with
-        // some folds vacuous. Must be rejected the same way.
+        // row: the same degeneracy, rejected the same way.
         let (x, y) = synth_no_signal(10, 3, 5);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 1,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::RawPerm {
-                    n_perm: 50,
-                    n_folds: 11,
+        for n_folds in [10, 11] {
+            let r = pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k: 1,
+                    weights: None,
                 },
-                seed: Some(3),
-                ..Default::default()
-            },
-        );
-        assert!(
-            matches!(r, Err(PlsKitError::InvalidArgument(_))),
-            "expected InvalidArgument for n_folds > n, got {r:?}"
-        );
+                ConfirmatoryTestOpts {
+                    args: ConfirmatoryArgs::RawPerm {
+                        n_perm: 50,
+                        n_folds,
+                    },
+                    seed: Some(3),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                matches!(r, Err(PlsKitError::InvalidArgument(_))),
+                "expected InvalidArgument for n_folds={n_folds} with n = 10, got {r:?}"
+            );
+        }
     }
 
     // ── raw_perm dual (Gram) route tests ────────────────────────────────
@@ -3021,14 +3119,17 @@ mod tests {
     ///
     /// The routing decision is a pure function of shape (`n_tr_max`, `p`,
     /// `B+1`, `k`) with no caller-facing override, so the production
-    /// `run_raw_perm` cannot be run twice on identical inputs to land on
-    /// both branches — whichever `p` is chosen picks one branch
-    /// deterministically. The check below instead calls `run_raw_perm`
-    /// itself (not just the isolated `dual_route` module) on the branch
-    /// this fixture's shape selects, and compares its aggregate output
-    /// against the reference built from primitives, so a bug in the
-    /// production permutation loop — dual or primal — cannot hide behind
-    /// an in-test reimplementation.
+    /// runner cannot be run twice on identical inputs to land on both
+    /// branches — whichever `p` is chosen picks one branch
+    /// deterministically. The check below instead calls the public
+    /// `pls1_confirmatory_test` (not just the isolated `dual_route` module)
+    /// on the branch this fixture's shape selects, and compares its
+    /// aggregate output against the reference built from primitives, so a
+    /// bug in the production permutation loop — dual or primal — cannot
+    /// hide behind an in-test reimplementation. Replaying the fold draw and
+    /// child seeds from the same seed also pins that no RNG draw sits
+    /// between `resolve_seed` and the dispatch, and that the runner's
+    /// child-seed stream is the one `parallel_for_each_seeded` draws.
     #[allow(clippy::many_single_char_names)]
     #[allow(clippy::similar_names)]
     #[allow(clippy::too_many_arguments)]
@@ -3084,25 +3185,24 @@ mod tests {
             })
             .collect();
 
-        // Call the production runner itself, on a fresh rng seeded the same
-        // way the reference draw above was, so it consumes the identical
-        // shuffle/child-seed sequence and lands on whichever branch this
-        // fixture's shape selects (asserted above via `expect_dual`).
-        let (_, mut prod_rng) = crate::rng::resolve_seed(Some(seed)).unwrap();
-        let prod_opts = ConfirmatoryTestOpts {
-            args: ConfirmatoryArgs::RawPerm { n_perm, n_folds },
-            disable_parallelism: true,
-            ..Default::default()
-        };
-        let prod = run_raw_perm(
-            x.as_ref(),
-            y.as_ref(),
-            1,
-            n_perm,
-            n_folds,
-            None,
-            &prod_opts,
-            &mut prod_rng,
+        // Call the public entry at the same seed: it consumes the identical
+        // shuffle/child-seed sequence only if no draw sits between
+        // `resolve_seed` and the dispatch to `run_raw_perm`, and it lands on
+        // whichever branch this fixture's shape selects (asserted above via
+        // `expect_dual`).
+        let prod = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: 1,
+                weights: None,
+            },
+            ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::RawPerm { n_perm, n_folds },
+                seed: Some(seed),
+                disable_parallelism: true,
+                ..Default::default()
+            },
         )
         .unwrap();
         let stat_scale = prod.statistic.abs().max(a[0].abs());
@@ -3159,14 +3259,6 @@ mod tests {
         // n=60, p=3000, n_folds=5 ⇒ n_tr_max=48, B+1=50:
         // 48·(50+3000) = 146,400 < 3000·50 = 150,000 ⇒ dual is live.
         assert_raw_perm_dual_route_matches_primal(60, 3000, 4.0, 7, 49, 5, 11, true);
-    }
-
-    #[test]
-    fn raw_perm_primal_route_is_the_default_on_narrow_p() {
-        // n=60, p=6 ⇒ 48·(50+6) = 2,688 > 6·50 = 300 ⇒ primal.
-        // The same equivalence must still hold — the kernel is correct on
-        // both sides of the rule, the rule only decides which one runs.
-        assert_raw_perm_dual_route_matches_primal(60, 6, 4.0, 7, 49, 5, 11, false);
     }
 
     #[test]
@@ -3294,271 +3386,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn raw_perm_end_to_end_is_unchanged_on_a_primal_shaped_input() {
-        // Smoke test: a primal-shaped configuration still dispatches and
-        // returns a well-formed result after the branch is added. It pins
-        // no value, so it is not a regression guard — the guards for the
-        // primal numbers are `byte_parity`, `check_corpus_hash.py` and the
-        // pytest corpus suite.
-        let (x, y) = synth_with_signal(80, 6, 4.0, 42);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 1,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::RawPerm {
-                    n_perm: 200,
-                    n_folds: 5,
-                },
-                seed: Some(42),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(r.method, "raw_perm");
-        assert!(r.pvalue.is_finite() && r.pvalue > 0.0 && r.pvalue <= 1.0);
-    }
-
-    /// Wiring test: the public runner, on an input the rule sends *dual*,
-    /// must return exactly the p-value and statistic the primal branch
-    /// would have returned at the same seed.
-    ///
-    /// This is the test the kernel-level equivalence test cannot be. That
-    /// one hands both routes the same locally-built permutations, so it
-    /// proves the kernels agree but says nothing about the branch that
-    /// calls them: a column-0 convention slip, or a child-seed derivation
-    /// that drifts from what `parallel_for_each_seeded` actually draws,
-    /// would pass it. Here the reference is built from the runner's *own*
-    /// primal machinery — the same `shuffle` + `fold_split` draw, then
-    /// `pls1_cv_r2` and `parallel_for_each_seeded` verbatim — so both of
-    /// those separate the two p-values.
-    ///
-    /// A wrong *routing* argument (`n_tr_max`, `n_perm + 1`) is a different
-    /// failure and this test does not catch it: it flips the runner to
-    /// primal, which then matches the primal reference exactly. The
-    /// precondition assert below covers that, but it re-derives the rule
-    /// locally rather than reading it off the runner, so a routing
-    /// expression that drifts inside `run_raw_perm` stays uncovered.
-    ///
-    /// Replaying the pre-branch draw is valid because `pls1_confirmatory_test`
-    /// dispatches to `run_raw_perm` immediately after `resolve_seed`
-    /// (`signal_test.rs:520` then `:524`) with no RNG draw in between.
-    // `float_cmp` (pedantic, on crate-wide at lib.rs:8) fires on `assert_eq!`
-    // over f64. Here the equality is the point: a p-value is a count over a
-    // fixed denominator, so the two routes match to the bit or one of them
-    // is wrong.
-    #[allow(clippy::float_cmp)]
-    #[allow(clippy::many_single_char_names)]
-    #[test]
-    fn raw_perm_dual_route_runner_matches_the_primal_reference() {
-        use rand::seq::SliceRandom;
-
-        let (n, p, n_perm, n_folds, seed) = (60_usize, 3000_usize, 49_usize, 5_usize, 11_u64);
-        let (x, y) = synth_with_signal(n, p, 4.0, 7);
-
-        // Precondition: if this shape ever stops routing dual the test
-        // silently stops testing anything.
-        assert!(
-            crate::dual_route::use_dual_route(n - n / n_folds, p, n_perm + 1, 1),
-            "test premise: this shape must take the dual route"
-        );
-
-        // Reference: the runner's pre-branch fold draw, then its primal
-        // branch, statement for statement.
-        let (_, mut rng) = crate::rng::resolve_seed(Some(seed)).unwrap();
-        let mut indices: Vec<usize> = (0..n).collect();
-        indices.shuffle(&mut rng);
-        let folds = crate::linalg::fold_split(&indices, n_folds);
-        let obs = pls1_cv_r2(x.as_ref(), y.as_ref(), 1, &folds, None, None).unwrap();
-        let nulls =
-            crate::resample::parallel_for_each_seeded(&mut rng, n_perm, true, |_, child| {
-                let perm = crate::resample::permute_indices(n, child);
-                let y_perm = Col::<f64>::from_fn(n, |i| y[perm[i]]);
-                pls1_cv_r2(x.as_ref(), y_perm.as_ref(), 1, &folds, None, None).unwrap_or(f64::NAN)
-            });
-        let exceedances = nulls.iter().filter(|v| v.is_nan() || **v >= obs).count();
-        let p_expected = (exceedances as f64 + 1.0) / (n_perm as f64 + 1.0);
-
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 1,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::RawPerm { n_perm, n_folds },
-                seed: Some(seed),
-                disable_parallelism: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        // The p-value is a count, so it is exactly equal or it is wrong.
-        assert_eq!(
-            r.pvalue, p_expected,
-            "dual runner p={} vs primal reference p={p_expected}",
-            r.pvalue
-        );
-        let scale = r.statistic.abs().max(obs.abs());
-        let rel = if scale == 0.0 {
-            0.0
-        } else {
-            (r.statistic - obs).abs() / scale
-        };
-        assert!(
-            rel < 1e-10,
-            "statistic: dual={} primal={obs} rel={rel}",
-            r.statistic
-        );
-    }
-
-    // ── split_nb and split_exact tests ──────────────────────────────────────
-
-    #[test]
-    fn split_nb_rejects_under_signal() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 2,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb {
-                    n_splits: 30,
-                    force: false,
-                },
-                seed: Some(2),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(r.method, "split_nb");
-        assert!(r.pvalue < 0.1, "p={}", r.pvalue);
-    }
-
-    // k=2 forces split_exact's refit route (run_split_perm) — moved from the
-    // old standalone split_perm method test, which this replaces.
-    #[test]
-    fn split_exact_refit_route_runs_with_signal() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 23);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 2,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitExact {
-                    n_perm: 100,
-                    n_splits: 20,
-                },
-                seed: Some(3),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(r.method, "split_exact");
-        assert!((0.0..=1.0).contains(&r.pvalue));
-        // The statistic is tanh(z̄) on this path too, so it stays a correlation
-        // and remains in (-1, 1) — the clamp before atanh bounds |z̄| well
-        // short of infinity.
-        assert!(r.statistic.abs() < 1.0, "statistic={}", r.statistic);
-    }
-
     // ── split_exact tests ────────────────────────────────────────────────────
-
-    // Route agreement (no-refit vs refit). The two routes draw splits from
-    // different RNG streams (no-refit sequentially off the parent, refit through
-    // parallel_for_each_seeded child RNGs), so they never agree seed-for-seed.
-    // Injecting the same splits into both removes that difference and turns
-    // the check into the exact statement the method rests on: at K = 1 the
-    // batched linear map and an honest per-half pls1_fit produce the same
-    // test-half correlation, hence the same tanh(z̄).
-    #[test]
-    #[allow(clippy::many_single_char_names)]
-    fn split_exact_routes_agree_on_identical_splits() {
-        let n = 60_usize;
-        // Weighted case: the same identity has to survive Convention A
-        // (per-half weighted moments + √w row-scaling), which is the whole
-        // claim the no-refit route makes about weighted input.
-        let w = crate::linalg::normalize_weights(
-            Col::<f64>::from_fn(n, |i| if i % 3 == 0 { 2.0 } else { 0.5 }).as_ref(),
-        )
-        .unwrap();
-        assert_split_exact_routes_agree(n, None);
-        assert_split_exact_routes_agree(n, Some(w.as_ref()));
-    }
-
-    #[allow(clippy::many_single_char_names)]
-    fn assert_split_exact_routes_agree(n: usize, w_norm: Option<ColRef<'_, f64>>) {
-        use crate::resample::{one_split, split_sizes};
-
-        let (p, k) = (8_usize, 1_usize);
-        let (n_perm, n_splits, seed) = (9_usize, 6_usize, 31_u64);
-        let (x, y) = synth_with_signal(n, p, 3.0, 13);
-        let opts = ConfirmatoryTestOpts {
-            args: ConfirmatoryArgs::SplitExact { n_perm, n_splits },
-            seed: Some(seed),
-            ..Default::default()
-        };
-
-        let (_, mut rng_nr) = crate::rng::resolve_seed(Some(seed)).unwrap();
-        let z_bar_nr = split_perm_nr_zbars(
-            x.as_ref(),
-            y.as_ref(),
-            k,
-            n_perm,
-            n_splits,
-            w_norm,
-            &opts,
-            &mut rng_nr,
-        )
-        .unwrap();
-
-        // Replay the no-refit route's split draw exactly (same seed, same
-        // sequential one_split calls), then hand those splits to the refit
-        // route. Only the observed column exists on this side — the null
-        // columns depend on permutation draws the two routes do not share.
-        let (_, mut rng_re) = crate::rng::resolve_seed(Some(seed)).unwrap();
-        let (n_train, _) = split_sizes(n, k);
-        let splits: Vec<SplitIdx> = (0..n_splits)
-            .map(|_| {
-                let (tr, te) = one_split(n, n_train, &mut rng_re);
-                SplitIdx { tr, te }
-            })
-            .collect();
-        let z_bar_re = mean_fisher_z(&split_half_correlations(
-            x.as_ref(),
-            y.as_ref(),
-            k,
-            &splits,
-            w_norm,
-            false,
-            None,
-        ));
-
-        let scale = z_bar_nr[0].abs().max(z_bar_re.abs());
-        let rel = if scale == 0.0 {
-            0.0
-        } else {
-            (z_bar_nr[0] - z_bar_re).abs() / scale
-        };
-        assert!(
-            rel < 1e-10,
-            "weighted={}: no-refit z̄={} refit z̄={z_bar_re} rel={rel}",
-            w_norm.is_some(),
-            z_bar_nr[0]
-        );
-    }
 
     // Route selection is by input shape, not by a caller knob. Each case is
     // pinned bit-for-bit against the route it must land on, so a future edit
@@ -3599,7 +3427,7 @@ mod tests {
             .unwrap()
         };
         let run_route = |k: usize, weights: Option<ColRef<'_, f64>>, keep, refit: bool| {
-            let (w_norm, _, _) = crate::fit::validate_and_normalize_weights(weights, n, k).unwrap();
+            let (w_norm, _) = crate::fit::validate_and_normalize_weights(weights, n, k).unwrap();
             let (_, mut rng) = crate::rng::resolve_seed(Some(2)).unwrap();
             let opts = ConfirmatoryTestOpts {
                 keep,
@@ -3647,19 +3475,21 @@ mod tests {
             assert_eq!(a.statistic.to_bits(), b.statistic.to_bits());
         }
 
-        // k>1 and sparse keep each independently force the refit route.
-        // Both cases are unweighted: weights no longer affect route choice,
-        // so pairing them with these two would test nothing extra.
-        for (k, keep) in [(2, None), (1, Some(3))] {
-            let e = run_exact(k, None, keep);
-            let s = run_route(k, None, keep, true);
-            assert_eq!(e.method, "split_exact");
-            assert_eq!(
-                e.pvalue.to_bits(),
-                s.pvalue.to_bits(),
-                "k={k} keep={keep:?} took the wrong route"
-            );
-            assert_eq!(e.statistic.to_bits(), s.statistic.to_bits());
+        // k>1 and sparse keep each independently force the refit route,
+        // weighted or not.
+        for weights in [None, Some(w.as_ref())] {
+            for (k, keep) in [(2, None), (1, Some(3))] {
+                let e = run_exact(k, weights, keep);
+                let s = run_route(k, weights, keep, true);
+                let what = format!("weighted={} k={k} keep={keep:?}", weights.is_some());
+                assert_eq!(e.method, "split_exact");
+                assert_eq!(
+                    e.pvalue.to_bits(),
+                    s.pvalue.to_bits(),
+                    "{what} took the wrong route"
+                );
+                assert_eq!(e.statistic.to_bits(), s.statistic.to_bits(), "{what}");
+            }
         }
     }
 
@@ -3886,34 +3716,34 @@ mod tests {
         }
     }
 
+    /// Both association orders, unweighted and weighted. n = 60, B+1 = 50:
+    /// at p = 5 route B costs 30·30·55 = 49,500 > route A's 60·5·50 = 15,000,
+    /// so route A is live; at p = 40 route B costs 30·30·90 = 81,000 < route
+    /// A's 60·40·50 = 120,000, so route B is live (the branch production
+    /// uses on the near-singular grid, n ≤ 320, p = 400, B = 1000). The
+    /// weighted rows license the weighted derivation: the batched map folds
+    /// `diag(√w_tr)` into a fixed linear map, the reference refits honestly
+    /// under Convention A, and every one of the B+1 columns must agree.
     #[test]
-    fn split_perm_nr_route_a_matches_honest_refit_reference() {
-        // n=60, p=5, B+1=50: route_b cost 30·30·55=49,500 > route A cost
-        // 60·5·50=15,000 ⇒ route A is the active branch here.
-        assert_split_perm_nr_route_matches_honest_refit(60, 5, 4.0, 7, 49, 5, 11, false, false);
-    }
-
-    // Same two association orders again, weighted. This is the check that
-    // licenses the weighted derivation: the batched map folds diag(√w_tr)
-    // into a fixed linear map, the reference refits honestly under
-    // Convention A, and every one of the B+1 columns must still agree.
-    #[test]
-    fn split_perm_nr_route_a_matches_honest_refit_weighted() {
-        assert_split_perm_nr_route_matches_honest_refit(60, 5, 4.0, 7, 49, 5, 11, false, true);
-    }
-
-    #[test]
-    fn split_perm_nr_route_b_matches_honest_refit_weighted() {
-        assert_split_perm_nr_route_matches_honest_refit(60, 40, 4.0, 7, 49, 5, 11, true, true);
-    }
-
-    #[test]
-    fn split_perm_nr_route_b_matches_honest_refit_reference() {
-        // n=60, p=40, B+1=50: route_b cost 30·30·90=81,000 < route A cost
-        // 60·40·50=120,000 ⇒ route B is the active branch here — the branch
-        // production actually uses on the near-singular grid (n≤320, p=400,
-        // B=1000).
-        assert_split_perm_nr_route_matches_honest_refit(60, 40, 4.0, 7, 49, 5, 11, true, false);
+    fn split_perm_nr_route_matches_honest_refit() {
+        for (p, expect_route_b, weighted) in [
+            (5, false, false),
+            (5, false, true),
+            (40, true, false),
+            (40, true, true),
+        ] {
+            assert_split_perm_nr_route_matches_honest_refit(
+                60,
+                p,
+                4.0,
+                7,
+                49,
+                5,
+                11,
+                expect_route_b,
+                weighted,
+            );
+        }
     }
 
     // Same case as above, degenerate: every X row identical ⇒ standardize's
@@ -4337,6 +4167,16 @@ mod tests {
                 let got = guarded_pearson(n, |i| base_a[i], |i| b[i]);
                 assert!((got - r).abs() < 1e-12, "n={n} y×{f:e}: {got} vs {r}");
             }
+            // Either argument alone, from 1e±150 (the raw sums still in
+            // range) out to where they overflow or underflow: the same r.
+            for f in [1e-150, 1e150, 1e-200, 1e200, 1e-300, 1e300] {
+                let a: Vec<f64> = base_a.iter().map(|v| v * f).collect();
+                let b: Vec<f64> = base_b.iter().map(|v| v * f).collect();
+                let got_a = guarded_pearson(n, |i| a[i], |i| base_b[i]);
+                let got_b = guarded_pearson(n, |i| base_a[i], |i| b[i]);
+                assert!((got_a - r).abs() < 1e-12, "n={n} x×{f:e}: {got_a} vs {r}");
+                assert!((got_b - r).abs() < 1e-12, "n={n} y×{f:e}: {got_b} vs {r}");
+            }
             // Two small vectors whose own sums are normal but whose product
             // `ss_a·ss_b` underflows: the raw formula divides by a zero
             // root and clamps to ±1.
@@ -4479,244 +4319,6 @@ mod tests {
         );
     }
 
-    // Test 4 (#[ignore], slow): exactness under the null. y drawn
-    // independently of X ⇒ p is uniform to within Monte Carlo error over a
-    // few hundred reps. Run deliberately (`cargo test -- --ignored`), not in
-    // the fast suite.
-    #[test]
-    #[ignore = "slow MC null-uniformity check; run deliberately with --ignored"]
-    fn split_exact_no_refit_route_null_p_is_uniform() {
-        use rand::RngExt;
-        use rand::SeedableRng;
-        let mut seed_rng = rand_chacha::ChaCha8Rng::seed_from_u64(2026);
-        let n_reps = 300;
-        let mut below_05 = 0;
-        for _ in 0..n_reps {
-            let seed: u64 = seed_rng.random();
-            let (x, y) = synth_no_signal(40, 4, seed);
-            let r = pls1_confirmatory_test(
-                ConfirmatoryTestInput::Raw {
-                    x: x.as_ref(),
-                    y: y.as_ref(),
-                    k: 1,
-                    weights: None,
-                },
-                ConfirmatoryTestOpts {
-                    args: ConfirmatoryArgs::SplitExact {
-                        n_perm: 199,
-                        n_splits: 20,
-                    },
-                    seed: Some(seed),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            if r.pvalue < 0.5 {
-                below_05 += 1;
-            }
-        }
-        // Under H0, p ~ Uniform(0,1) ⇒ P(p<0.5) = 0.5. Binomial(300, 0.5)
-        // std ≈ 8.7; allow a generous ±5 std Monte Carlo band.
-        let frac = f64::from(below_05) / f64::from(n_reps);
-        assert!(
-            (0.35..=0.65).contains(&frac),
-            "P(p<0.5) = {frac}, expected ≈ 0.5"
-        );
-    }
-
-    // Test 5: guards. k=2 and sparse keep both error, each message naming
-    // run_split_perm as the alternative route. Both guards live inside
-    // split_perm_nr_zbars/run_split_perm_nr and are unreachable through the
-    // public API now: split_exact's dispatch never calls this route for k!=1
-    // or with keep set (it picks run_split_perm instead), so these tests call
-    // run_split_perm_nr directly. k=1 dense succeeds (weighted included — see
-    // split_exact_no_refit_route_accepts_weighted_input).
-    #[test]
-    fn split_exact_no_refit_route_guard_rejects_k_not_one() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
-        let (_, mut rng) = crate::rng::resolve_seed(Some(2)).unwrap();
-        let e = run_split_perm_nr(
-            x.as_ref(),
-            y.as_ref(),
-            2,
-            49,
-            5,
-            None,
-            &ConfirmatoryTestOpts::default(),
-            &mut rng,
-        )
-        .unwrap_err();
-        assert_eq!(e.code(), "invalid_argument");
-        assert!(e.to_string().contains("split_exact"), "msg={e}");
-    }
-
-    // Inverse of the guard this test used to assert: weighted k=1 dense input
-    // is now in scope for the no-refit route, and the weights must actually
-    // reach the statistic (a run that silently dropped them would return the
-    // unweighted numbers bit-for-bit).
-    #[test]
-    fn split_exact_no_refit_route_accepts_weighted_input() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
-        let w = Col::<f64>::from_fn(60, |i| if i % 2 == 0 { 1.5 } else { 0.5 });
-        let run = |weights| {
-            pls1_confirmatory_test(
-                ConfirmatoryTestInput::Raw {
-                    x: x.as_ref(),
-                    y: y.as_ref(),
-                    k: 1,
-                    weights,
-                },
-                ConfirmatoryTestOpts {
-                    args: ConfirmatoryArgs::SplitExact {
-                        n_perm: 49,
-                        n_splits: 5,
-                    },
-                    seed: Some(2),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-        };
-        let weighted = run(Some(w.as_ref()));
-        let unweighted = run(None);
-        assert_eq!(weighted.method, "split_exact");
-        assert!((0.0..=1.0).contains(&weighted.pvalue));
-        assert_ne!(
-            weighted.statistic.to_bits(),
-            unweighted.statistic.to_bits(),
-            "weights were ignored"
-        );
-    }
-
-    // Guard, not fallback: opts.keep is live sparse-fit plumbing honored by
-    // raw_perm/split_nb/split_exact's refit route/e, but split_exact's
-    // no-refit route performs no inner fits at all (see "Why no refits"), so
-    // a caller-set keep must error rather than silently running dense with no
-    // signal that keep was ignored. Calls run_split_perm_nr directly — see
-    // the comment on split_exact_no_refit_route_guard_rejects_k_not_one for
-    // why the public API cannot reach this guard.
-    #[test]
-    fn split_exact_no_refit_route_guard_rejects_sparse_keep() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
-        let (_, mut rng) = crate::rng::resolve_seed(Some(2)).unwrap();
-        let opts = ConfirmatoryTestOpts {
-            keep: Some(2),
-            ..Default::default()
-        };
-        let e =
-            run_split_perm_nr(x.as_ref(), y.as_ref(), 1, 49, 5, None, &opts, &mut rng).unwrap_err();
-        assert_eq!(e.code(), "invalid_argument");
-        assert!(e.to_string().contains("split_exact"), "msg={e}");
-    }
-
-    #[test]
-    fn split_exact_no_refit_route_succeeds_unweighted_k_one() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 1,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitExact {
-                    n_perm: 49,
-                    n_splits: 5,
-                },
-                seed: Some(2),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(r.method, "split_exact");
-        assert!((0.0..=1.0).contains(&r.pvalue));
-        assert!(r.pvalue >= 1.0 / 50.0 - 1e-12, "p={}", r.pvalue);
-        assert!(r.rho_hat.is_none(), "split_exact has no rho_hat");
-    }
-
-    // Test 6: rho_hat relocation (Rust side). split_nb, unweighted, n_te >= 4
-    // ⇒ Some in [0, 1]. Weighted or n_te = 3 ⇒ None. split_exact and every
-    // other method ⇒ None (checked above and in the other methods' tests).
-    #[test]
-    fn split_nb_rho_hat_populated_when_ruler_valid() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 2,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb {
-                    n_splits: 30,
-                    force: false,
-                },
-                seed: Some(2),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let rho = r
-            .rho_hat
-            .expect("split_nb must populate rho_hat when unweighted, n_test>=4");
-        assert!((0.0..=1.0).contains(&rho));
-    }
-
-    #[test]
-    fn split_nb_rho_hat_none_when_weighted() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
-        let w = Col::<f64>::from_fn(60, |i| if i % 2 == 0 { 1.5 } else { 0.5 });
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 2,
-                weights: Some(w.as_ref()),
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb {
-                    n_splits: 30,
-                    force: false,
-                },
-                seed: Some(2),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(r.rho_hat.is_none());
-    }
-
-    #[test]
-    fn split_nb_rho_hat_none_when_n_test_below_four() {
-        // split_sizes(10, 5) -> (n_train=7, n_test=3): below the n_test >= 4
-        // floor for the rho_hat ruler (same floor split_j_eff used to check).
-        let (x, y) = synth_no_signal(10, 5, 9);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 5,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                // `force` — this test is about the NB ruler's n_test floor, so
-                // NB has to actually run; n = 10 trips the auto-gate's n floor
-                // and would otherwise reroute to split_exact, which reports
-                // `rho_hat: None` for its own reasons and would pass vacuously.
-                args: ConfirmatoryArgs::SplitNb {
-                    n_splits: 10,
-                    force: true,
-                },
-                seed: Some(2),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(r.rho_hat.is_none());
-    }
-
     // ── split_nb auto-gate ───────────────────────────────────────────────────
 
     /// Single dominant factor: every column is the same latent `f` plus a tiny
@@ -4786,15 +4388,6 @@ mod tests {
         );
     }
 
-    /// `force` overrides the column precheck exactly as it overrides the other
-    /// two clauses — the precheck is one more OR term, not a hard block.
-    #[test]
-    fn gate_force_runs_nb_on_narrow_x() {
-        let (x, y) = synth_no_signal(60, 4, 11);
-        let r = gate_run(x.as_ref(), y.as_ref(), None, 20, true);
-        assert_eq!(r.method, "split_nb");
-    }
-
     #[test]
     fn gate_reroutes_when_stable_rank_below_floor() {
         let (x, y) = synth_one_factor(40, 5, 6);
@@ -4822,15 +4415,24 @@ mod tests {
         assert_eq!(r.n_splits, Some(20));
     }
 
+    /// `force` overrides the rank clause and the column precheck alike (the
+    /// precheck is one more OR term, not a hard block), and the rank is
+    /// still reported.
     #[test]
     fn gate_force_runs_nb_on_flagged_design_and_still_reports_rank() {
-        let (x, y) = synth_one_factor(40, 5, 6);
-        let r = gate_run(x.as_ref(), y.as_ref(), None, 20, true);
-        assert_eq!(r.method, "split_nb");
-        let sr = r.stable_rank.expect(
-            "rank is computed even under force — it is how a caller sees what the gate saw",
-        );
-        assert!(sr < SPLIT_NB_GATE_MIN_STABLE_RANK, "stable_rank={sr}");
+        for (name, (x, y)) in [
+            ("one factor", synth_one_factor(40, 5, 6)),
+            ("narrow x", synth_no_signal(60, 4, 11)),
+        ] {
+            let r = gate_run(x.as_ref(), y.as_ref(), None, 20, true);
+            assert_eq!(r.method, "split_nb", "{name}");
+            let sr = r.stable_rank.expect(
+                "rank is computed even under force — it is how a caller sees what the gate saw",
+            );
+            if name == "one factor" {
+                assert!(sr < SPLIT_NB_GATE_MIN_STABLE_RANK, "stable_rank={sr}");
+            }
+        }
     }
 
     #[test]
@@ -4853,6 +4455,19 @@ mod tests {
         assert!(
             sr >= SPLIT_NB_GATE_MIN_STABLE_RANK,
             "n_eff, not the spectrum, must be what fired here (stable_rank={sr})"
+        );
+
+        // At the floor itself, n = 25: equal weights are no weights. Kish's
+        // ratio of 25 × 0.3 rounds to 24.999999999999975, which would fire
+        // the gate on a design that clears it unweighted.
+        let x25 = synth_no_signal(25, 10, 8).0;
+        let equal = Col::<f64>::from_fn(25, |_| 0.3);
+        let absent = split_nb_gate(x25.as_ref(), None).unwrap();
+        assert!(!absent.fires, "n = 25 must clear the gate unweighted");
+        let got = split_nb_gate(x25.as_ref(), Some(equal.as_ref())).unwrap();
+        assert_eq!(
+            (got.fires, got.n_eff.to_bits()),
+            (false, 25.0_f64.to_bits())
         );
     }
 
@@ -4918,75 +4533,35 @@ mod tests {
         assert_eq!(r.n_splits, Some(12));
     }
 
-    #[test]
-    fn gate_not_evaluated_for_other_methods() {
-        let (x, y) = synth_no_signal(20, 4, 5);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 1,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitExact {
-                    n_perm: 100,
-                    n_splits: 10,
-                },
-                seed: Some(4242),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(r.stable_rank.is_none());
-    }
-
     // ── the public gate query ────────────────────────────────────────────────
     //
     // These are the whole contract of `split_nb_gate`: it must answer exactly
     // what the embedded gate decides, and it must reject bad input with the
     // same errors the test entry points do rather than reaching the SVD.
 
-    /// One flagged design and one clean one, checked against what
+    /// One flagged design, one clean one, and a weighted one (the `n_eff`
+    /// clause and the weighted-moment standardization behind the rank
+    /// clause have to travel with the weights), checked against what
     /// `pls1_confirmatory_test` actually did with the same X.
     #[test]
     #[allow(clippy::float_cmp)] // same rule on the same standardized X — bit-exact or it's a bug
     fn public_gate_answers_what_the_embedded_gate_decided() {
-        for (x, y, expect_fires) in [
-            (
-                synth_one_factor(40, 5, 6).0,
-                synth_one_factor(40, 5, 6).1,
-                true,
-            ),
-            (
-                synth_no_signal(60, 10, 7).0,
-                synth_no_signal(60, 10, 7).1,
-                false,
-            ),
+        let half = Col::<f64>::from_fn(40, |i| if i % 2 == 0 { 1.0 } else { 0.1 });
+        for ((x, y), w, expect_fires) in [
+            (synth_one_factor(40, 5, 6), None, true),
+            (synth_no_signal(60, 10, 7), None, false),
+            (synth_no_signal(40, 5, 8), Some(half.as_ref()), true),
         ] {
-            let embedded = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
-            let q = split_nb_gate(x.as_ref(), None).unwrap();
+            let embedded = gate_run(x.as_ref(), y.as_ref(), w, 20, false);
+            let q = split_nb_gate(x.as_ref(), w).unwrap();
             assert_eq!(q.fires, expect_fires);
             assert_eq!(q.fires, embedded.method == "split_exact");
             assert_eq!(q.stable_rank, embedded.stable_rank.unwrap());
             assert_eq!(q.n_eff, embedded.n_eff);
+            if w.is_some() {
+                assert!(q.n_eff < 40.0, "weights must reach n_eff: {}", q.n_eff);
+            }
         }
-    }
-
-    /// The weighted path: both the `n_eff` clause and the weighted-moment
-    /// standardization behind the rank clause have to travel with it.
-    #[test]
-    #[allow(clippy::float_cmp)]
-    fn public_gate_answers_under_weights() {
-        let (x, y) = synth_no_signal(40, 5, 8);
-        let w = Col::<f64>::from_fn(40, |i| if i % 2 == 0 { 1.0 } else { 0.1 });
-        let embedded = gate_run(x.as_ref(), y.as_ref(), Some(w.as_ref()), 20, false);
-        let q = split_nb_gate(x.as_ref(), Some(w.as_ref())).unwrap();
-        assert!(q.fires);
-        assert_eq!(q.fires, embedded.method == "split_exact");
-        assert_eq!(q.stable_rank, embedded.stable_rank.unwrap());
-        assert_eq!(q.n_eff, embedded.n_eff);
-        assert!(q.n_eff < 40.0, "weights must reach n_eff: {}", q.n_eff);
     }
 
     /// The reason the function repeats entry-point validation: without it a
@@ -5018,162 +4593,7 @@ mod tests {
         ));
     }
 
-    // ── Score test ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn score_returns_bounded_p() {
-        let (x, y) = synth_no_signal(50, 6, 31);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 1,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::Score,
-                seed: Some(1),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(r.method, "score");
-        assert!(r.pvalue >= 0.0 && r.pvalue <= 1.0);
-    }
-
-    // ── E-value test ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn e_returns_bounded_p() {
-        let (x, y) = synth_with_signal(80, 5, 3.0, 41);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 2,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::E,
-                seed: Some(5),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(r.method, "e");
-        assert!(r.pvalue >= 0.0 && r.pvalue <= 1.0);
-        // Universal inference always satisfies P(reject | H0) ≤ α exactly,
-        // so under signal we expect p < 0.5 typically.
-        assert!(r.pvalue < 0.5, "p={}", r.pvalue);
-    }
-
-    #[test]
-    fn ci_branch_populates_ci_field_when_requested() {
-        let (x, y) = synth_with_signal(80, 5, 4.0, 99);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 2,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb {
-                    n_splits: 30,
-                    force: false,
-                },
-                seed: Some(7),
-                ci: Some(CIOpts {
-                    n_boot: 200,
-                    m_rate: 0.7,
-                    level: 0.95,
-                    max_failure_rate: 0.01,
-                }),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let ci = r.ci.expect("ci should be populated");
-        assert_eq!(ci.n_boot, 200);
-        assert_eq!(ci.beta_sign_z.len(), 5);
-    }
-
-    #[test]
-    fn ci_none_keeps_ci_field_none() {
-        let (x, y) = synth_with_signal(80, 5, 4.0, 99);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 2,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb {
-                    n_splits: 30,
-                    force: false,
-                },
-                seed: Some(7),
-                ci: None,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(r.ci.is_none());
-    }
-
-    #[test]
-    fn confirmatory_keep_dense_endpoint_bit_parity() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
-        let mk = |keep: Option<usize>| {
-            pls1_confirmatory_test(
-                ConfirmatoryTestInput::Raw {
-                    x: x.as_ref(),
-                    y: y.as_ref(),
-                    k: 2,
-                    weights: None,
-                },
-                ConfirmatoryTestOpts {
-                    args: ConfirmatoryArgs::SplitNb {
-                        n_splits: 30,
-                        force: false,
-                    },
-                    seed: Some(2),
-                    keep,
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-        };
-        let dense = mk(None);
-        let endpoint = mk(Some(5));
-        assert_eq!(dense.pvalue.to_bits(), endpoint.pvalue.to_bits());
-        assert_eq!(dense.statistic.to_bits(), endpoint.statistic.to_bits());
-    }
-
-    #[test]
-    fn confirmatory_sparse_split_nb_runs() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
-        let r = pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: 2,
-                weights: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitNb {
-                    n_splits: 30,
-                    force: false,
-                },
-                seed: Some(2),
-                keep: Some(2),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!((0.0..=1.0).contains(&r.pvalue));
-    }
+    // ── input validation ─────────────────────────────────────────────────────
 
     #[test]
     fn confirmatory_rejects_keep_with_ci() {
@@ -5247,1002 +4667,8 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code(), "invalid_argument");
     }
-}
 
-#[cfg(test)]
-#[allow(
-    clippy::many_single_char_names,
-    clippy::similar_names,
-    clippy::too_many_lines,
-    clippy::too_many_arguments,
-    clippy::items_after_statements
-)]
-mod copy_free_reference {
-    use super::*;
-    use crate::linalg::{
-        normalize_weights, row_subset, standardize, standardize1, standardize_apply,
-        standardize_weighted,
-    };
-    use crate::test_support::{assert_bits_eq, copy_free_families, mat_vals, Layouts};
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::similar_names)]
-    fn split_half_r_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        k: usize,
-        sp: &SplitIdx,
-        w_norm: Option<ColRef<'_, f64>>,
-        keep: Option<usize>,
-    ) -> f64 {
-        use crate::fit::{pls1_fit, FitOpts, KSpec};
-        use crate::linalg::{
-            col_row_subset, normalize_weights, row_subset, standardize, standardize1,
-            standardize1_weighted, standardize_apply, standardize_weighted,
-        };
-
-        let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
-        let x_tr = row_subset(x, tr);
-        let y_tr = col_row_subset(y, tr);
-        let x_te = row_subset(x, te);
-        let y_te = col_row_subset(y, te);
-
-        // Per-half weights, re-normalized to mean 1 within the half (mirrors
-        // pls1_cv_r2's per-fold renormalization). √w of each half is applied
-        // *after* weighted standardization so the per-half fit matches what
-        // pls1_fit would compute on that half's (X, y, w).
-        let w_tr: Option<Col<f64>> = w_norm.map(|w| {
-            let s = col_row_subset(w, tr);
-            normalize_weights(s.as_ref()).unwrap_or_else(|| Col::from_fn(tr.len(), |_| 1.0))
-        });
-        let w_te: Option<Col<f64>> = w_norm.map(|w| {
-            let s = col_row_subset(w, te);
-            normalize_weights(s.as_ref()).unwrap_or_else(|| Col::from_fn(te.len(), |_| 1.0))
-        });
-        let w_tr_ref = w_tr.as_ref().map(Col::as_ref);
-
-        let (xs_tr, x_mean, x_scale) = if let Some(w) = w_tr_ref {
-            standardize_weighted(x_tr.as_ref(), Some(w))
-        } else {
-            standardize(x_tr.as_ref())
-        };
-        let xs_te = standardize_apply(x_te.as_ref(), x_mean.as_ref(), x_scale.as_ref());
-        let (ys_tr, _, _) = if let Some(w) = w_tr_ref {
-            standardize1_weighted(y_tr.as_ref(), Some(w))
-        } else {
-            standardize1(y_tr.as_ref())
-        };
-
-        // √w' row-scaling on top of weighted standardization (Convention A).
-        let (xs_tr, ys_tr) = match w_tr_ref {
-            Some(w) => (
-                Mat::<f64>::from_fn(xs_tr.nrows(), xs_tr.ncols(), |i, j| {
-                    xs_tr[(i, j)] * w[i].sqrt()
-                }),
-                Col::<f64>::from_fn(ys_tr.nrows(), |i| ys_tr[i] * w[i].sqrt()),
-            ),
-            None => (xs_tr, ys_tr),
-        };
-        let xs_te = match w_te.as_ref() {
-            Some(w) => Mat::<f64>::from_fn(xs_te.nrows(), xs_te.ncols(), |i, j| {
-                xs_te[(i, j)] * w[i].sqrt()
-            }),
-            None => xs_te,
-        };
-
-        let Ok(m) = pls1_fit(
-            xs_tr.as_ref(),
-            ys_tr.as_ref(),
-            KSpec::Fixed(k),
-            None,
-            FitOpts {
-                pre_standardized: true,
-                // check_n_eff: false. A per-half fit may truncate (small half,
-                // sparse keep); a truncated model still yields a valid r at
-                // k_used, which beats silently recording r=0 via the Err arm.
-                check_n_eff: false,
-                // Seq inside the per-half worker: outer Rayon owns the threadpool.
-                par: crate::fit::ParChoice::Seq,
-                keep,
-            },
-        ) else {
-            return 0.0;
-        };
-
-        // scores on test half = X_te * coef. Both scores (via √w-scaled
-        // xs_te) and y_te carry √w' so the Pearson r is taken on √w-scaled
-        // data, matching Convention A.
-        let scores_te: Col<f64> = &xs_te * &m.coef;
-        let n_te = scores_te.nrows();
-        let y_te: Col<f64> = match w_te.as_ref() {
-            Some(w) => Col::<f64>::from_fn(n_te, |i| y_te[i] * w[i].sqrt()),
-            None => y_te,
-        };
-
-        // Same moments, guard and arithmetic as split_perm_nr_zbars (both
-        // call the helpers below). The held-out y is the raw outcome, so it
-        // goes through `scaled_moments` rather than straight into the sums.
-        guarded_pearson(n_te, |i| scores_te[i], |i| y_te[i])
-    }
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::similar_names)]
-    fn pls1_cv_r2_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        k: usize,
-        folds: &[Vec<usize>],
-        weights: Option<ColRef<'_, f64>>,
-        keep: Option<usize>,
-    ) -> PlsKitResult<f64> {
-        use crate::fit::{pls1_fit, FitOpts, KSpec};
-        use crate::linalg::{
-            col_row_subset, normalize_weights, row_subset, standardize, standardize1,
-            standardize1_weighted, standardize_apply, standardize_weighted,
-        };
-
-        let mut ss_res = 0.0;
-        let mut ss_tot = 0.0;
-
-        for (fi, val_idx) in folds.iter().enumerate() {
-            let train_idx: Vec<usize> = folds
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != fi)
-                .flat_map(|(_, f)| f.iter().copied())
-                .collect();
-
-            let x_tr = row_subset(x, &train_idx);
-            let y_tr = col_row_subset(y, &train_idx);
-            let x_val = row_subset(x, val_idx);
-            let y_val = col_row_subset(y, val_idx);
-
-            // Slice and re-normalize weights for the training fold.
-            let w_tr_norm: Option<Col<f64>> = weights.map(|w| {
-                let w_slice = col_row_subset(w, &train_idx);
-                // Re-normalize so weights mean = 1 within this fold.
-                normalize_weights(w_slice.as_ref())
-                    .unwrap_or_else(|| Col::from_fn(train_idx.len(), |_| 1.0))
-            });
-            let w_tr_ref: Option<ColRef<'_, f64>> = w_tr_norm.as_ref().map(Col::as_ref);
-
-            let (xs_tr, x_mean, x_scale) = if let Some(w) = w_tr_ref {
-                standardize_weighted(x_tr.as_ref(), Some(w))
-            } else {
-                standardize(x_tr.as_ref())
-            };
-            let xs_val = standardize_apply(x_val.as_ref(), x_mean.as_ref(), x_scale.as_ref());
-            let (ys_tr, y_mean, y_scale) = if let Some(w) = w_tr_ref {
-                standardize1_weighted(y_tr.as_ref(), Some(w))
-            } else {
-                standardize1(y_tr.as_ref())
-            };
-            let ys_val = Col::<f64>::from_fn(y_val.nrows(), |i| (y_val[i] - y_mean) / y_scale);
-
-            let m = pls1_fit(
-                xs_tr.as_ref(),
-                ys_tr.as_ref(),
-                KSpec::Fixed(k),
-                w_tr_ref,
-                FitOpts {
-                    pre_standardized: true,
-                    // check_n_eff: false — per-fold slice may have low n_eff; let the math degrade
-                    // and rely on the parent statistic to absorb noise.
-                    check_n_eff: false,
-                    // Seq inside the per-fold worker — outer Rayon owns the threadpool.
-                    par: crate::fit::ParChoice::Seq,
-                    keep,
-                },
-            )?;
-
-            let y_pred: Col<f64> = &xs_val * &m.coef;
-
-            let n_val = ys_val.nrows();
-            let mean_val: f64 = (0..n_val).map(|i| ys_val[i]).sum::<f64>() / n_val as f64;
-
-            ss_res += (0..n_val)
-                .map(|i| (y_pred[i] - ys_val[i]).powi(2))
-                .sum::<f64>();
-            ss_tot += (0..n_val)
-                .map(|i| (ys_val[i] - mean_val).powi(2))
-                .sum::<f64>();
-        }
-
-        Ok(if ss_tot > 0.0 {
-            1.0 - ss_res / ss_tot
-        } else {
-            0.0
-        })
-    }
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::items_after_statements)]
-    #[allow(clippy::similar_names)]
-    #[allow(clippy::too_many_lines)] // per-half Convention A setup inflates the per-split closure
-    fn split_perm_nr_zbars_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        k: usize,
-        n_perm: usize,
-        n_splits: usize,
-        w_norm: Option<ColRef<'_, f64>>,
-        opts: &ConfirmatoryTestOpts,
-        rng: &mut crate::rng::Rng,
-    ) -> PlsKitResult<Vec<f64>> {
-        use crate::linalg::{
-            col_row_subset, normalize_weights, row_subset, standardize, standardize1,
-            standardize1_weighted, standardize_apply, standardize_weighted,
-        };
-        use crate::resample::{one_split, permute_indices, split_sizes};
-
-        // Scope limits, checked here (this route's own runner), never in
-        // split_half_correlations — that function is shared with run_split_perm and
-        // knows nothing of this formula. Guard, not fallback: ineligible input
-        // errors rather than silently running the run_split_perm route. Weights
-        // are *not* a scope limit: see "Under weights" above.
-        if k != 1 {
-            return Err(PlsKitError::InvalidArgument(format!(
-                "run_split_perm_nr requires k = 1 (got k={k}); use run_split_perm \
-                 (split_exact's refit route) for k > 1"
-            )));
-        }
-        if opts.keep.is_some() {
-            return Err(PlsKitError::InvalidArgument(
-                "run_split_perm_nr does not support sparse keep; use run_split_perm \
-                 (split_exact's refit route) instead"
-                    .into(),
-            ));
-        }
-
-        let n = x.nrows();
-        // Mirror of draw_splits' n ≥ k+5 guard — change together.
-        if n < k + 5 {
-            return Err(PlsKitError::InvalidArgument(format!(
-                "n={n} too small for k={k} under split methods (need n ≥ k+5)"
-            )));
-        }
-        let (n_train, n_test) = split_sizes(n, k);
-        let p_features = x.ncols();
-        let n_cols = n_perm + 1;
-
-        // Draw the J splits once, fixed across all B permutation draws: the fixed
-        // linear map in this function's "Why no refits" doc depends only on X and
-        // the split, so every permutation reuses it. Drawn sequentially off the
-        // parent RNG here rather than through draw_splits'
-        // parallel_for_each_seeded: the two split_exact
-        // routes are deliberately not stream-unified, so this route keeps the draw
-        // order its equivalence tests are anchored to. Only the (tr, te) index
-        // pairs are drawn here; standardization is deferred to per_split_z below so
-        // peak memory stays O(np) plus the (B+1)-column blocks. By contrast,
-        // materializing xs_tr/xs_te for all J splits up front would be O(J·n·p)
-        // (≈2.1 GB at the embedding-scale n=13365, p=400, J=50 case).
-        // standardize/standardize_apply are pure functions of x[tr]/x[te] with no
-        // RNG, so moving them into the (possibly parallel) per-split closure
-        // changes nothing about determinism or the parallel-order guarantee.
-        let splits: Vec<SplitIdx> = (0..n_splits)
-            .map(|_| {
-                let (tr, te) = one_split(n, n_train, rng);
-                SplitIdx { tr, te }
-            })
-            .collect();
-
-        // Outcome matrix Y (n x n_cols): column 0 is the observed y, columns
-        // 1..=n_perm are independent permutations drawn exactly as run_split_perm
-        // draws its null replicates (resample::permute_indices). No y
-        // standardization anywhere — see the identity note above; it would only
-        // rescale coef by a positive constant that the correlation divides out.
-        //
-        // Every column is `y` divided by one power of two near its largest
-        // absolute value (`linalg::pow2_scale`, the standardizers' kernel), so
-        // that the scores `t_te` and the gate's `‖y_tr‖`, `ȳ`, `σ` and `err`
-        // below stay finite and normal at any magnitude of `y` (formed on the
-        // raw `y`, `‖y_tr‖` is `inf` once `|y|` exceeds about `1e154`, and `0`
-        // below about `1e-162`). The division is exact, every one of those
-        // quantities is linear in `y`, and the gate and the correlation read
-        // only their ratios, so wherever the raw quantities were in range this
-        // changes no bit of the output. The fallback `split_half_r` gets the
-        // same divided column; its `r` does not depend on the scale of `y`
-        // either (the training `y` is standardized, the test one enters a
-        // correlation through `scaled_moments`).
-        let perms: Vec<Vec<usize>> = (0..n_perm).map(|_| permute_indices(n, rng)).collect();
-        let y_max_abs = (0..n).map(|i| y[i].abs()).fold(0.0_f64, f64::max);
-        let (_, y_inv) = crate::linalg::pow2_scale(y_max_abs);
-        let y_mat = Mat::<f64>::from_fn(n, n_cols, |i, col| {
-            if col == 0 {
-                y[i] * y_inv
-            } else {
-                y[perms[col - 1][i]] * y_inv
-            }
-        });
-        // The B·n index vectors are dead once y_mat is built.
-        drop(perms);
-
-        // Choose the association order once, outside the per-split loop: all
-        // splits share (n_train, n_test) since split_sizes depends only on
-        // (n, k). Route B wins when n_te·n_tr·(p+B) < n·p·B (flop counts of the
-        // two GEMM association orders). No caller-facing knob: the cost model decides.
-        let b_f = n_cols as f64;
-        let route_b = (n_test as f64) * (n_train as f64) * (p_features as f64 + b_f)
-            < (n as f64) * (p_features as f64) * b_f;
-
-        // Per-split z contribution (unsummed over J): standardize the half
-        // (train moments only, matching split_half_correlations), then the
-        // batched two-GEMM product, then per-column
-        // center/correlate/guard/clamp/atanh. Splits are independent given the
-        // (tr, te) index pairs drawn above, so this parallelizes over splits with
-        // no RNG involved — unlike split_half_correlations, which needs
-        // parallel_for_each_seeded's seeded-per-iteration RNG because each split
-        // there draws a fresh fit.
-        let per_split_z = |sp: &SplitIdx| -> Vec<f64> {
-            let x_tr = row_subset(x, &sp.tr);
-            let x_te = row_subset(x, &sp.te);
-
-            // Per-half weights renormalized to mean 1 within the half, weighted
-            // moments, then √w row-scaling — every step mirrored from
-            // split_half_correlations (change together; that function owns the
-            // Convention A explanation). `normalize_weights` only returns None on
-            // an all-zero half, which the parent's weight validation makes
-            // unreachable; fall back to uniform there exactly as that function
-            // does rather than growing an error path this route cannot hit.
-            let half_weights = |idx: &[usize]| -> Option<Col<f64>> {
-                w_norm.map(|w| {
-                    let s = col_row_subset(w, idx);
-                    normalize_weights(s.as_ref())
-                        .unwrap_or_else(|| Col::from_fn(idx.len(), |_| 1.0))
-                })
-            };
-            let w_tr = half_weights(&sp.tr);
-            let w_te = half_weights(&sp.te);
-            // Root taken once per row here, not once per (row, column) — with
-            // n_cols = B+1 columns of Y the inline form would repeat it B times.
-            let root = |w: &Col<f64>| Col::<f64>::from_fn(w.nrows(), |i| w[i].sqrt());
-            let sw_tr = w_tr.as_ref().map(root);
-            let sw_te = w_te.as_ref().map(root);
-
-            let (xs_tr, mean, scale) = match w_tr.as_ref() {
-                Some(w) => standardize_weighted(x_tr.as_ref(), Some(w.as_ref())),
-                None => standardize(x_tr.as_ref()),
-            };
-            let xs_te = standardize_apply(x_te.as_ref(), mean.as_ref(), scale.as_ref());
-
-            let y_tr = row_subset(y_mat.as_ref(), &sp.tr);
-            let y_te = row_subset(y_mat.as_ref(), &sp.te);
-            let n_te = sp.te.len();
-
-            // Convention A row-scaling. On the train side the √w_tr on Y is the
-            // `diag(√w_tr)` that sits *inside* the linear map (see "Under
-            // weights"): X̃_tr already carries one √w_tr, and the raw y needs the
-            // other. On the test side both the scores (through X̃_te) and the raw
-            // test y carry √w_te, so the Pearson r below is taken on √w_te-scaled
-            // data — matching what split_half_correlations reports.
-            let scale_rows = |m: Mat<f64>, sw: Option<&Col<f64>>| match sw {
-                Some(sw) => Mat::<f64>::from_fn(m.nrows(), m.ncols(), |i, j| m[(i, j)] * sw[i]),
-                None => m,
-            };
-            let xs_tr = scale_rows(xs_tr, sw_tr.as_ref());
-            let xs_te = scale_rows(xs_te, sw_te.as_ref());
-            let y_tr = scale_rows(y_tr, sw_tr.as_ref());
-            let y_te = scale_rows(y_te, sw_te.as_ref());
-
-            // Same two GEMM calls either way — only the operand grouping differs.
-            let t_te: Mat<f64> = if route_b {
-                let m = xs_te.as_ref() * xs_tr.transpose(); // n_te x n_tr
-                m.as_ref() * y_tr.as_ref() // n_te x n_cols
-            } else {
-                let g = xs_tr.transpose() * y_tr.as_ref(); // p x n_cols
-                xs_te.as_ref() * g.as_ref() // n_te x n_cols
-            };
-
-            // Once per split: the inputs of the truncation gate (see
-            // "Truncation and degenerate halves" above). `x_tr_fro` is the
-            // `‖X̃_tr‖_F` that `fit::pls1_kernel` computes for its floor, from the
-            // same matrix. `h = X̃_tr'u` is where the training `y`'s mean goes:
-            // it is exactly zero only in exact arithmetic. Plain index-order
-            // loops, so the gate's inputs cannot depend on the thread count.
-            let n_tr = sp.tr.len();
-            let x_tr_fro = xs_tr.norm_l2();
-            let x_te_fro = xs_te.norm_l2();
-            let u = |i: usize| sw_tr.as_ref().map_or(1.0, |sw| sw[i]);
-            let u_norm = (0..n_tr).map(|i| u(i) * u(i)).sum::<f64>().sqrt();
-            let h_norm = (0..p_features)
-                .map(|j| {
-                    let h_j: f64 = (0..n_tr).map(|i| xs_tr[(i, j)] * u(i)).sum();
-                    h_j * h_j
-                })
-                .sum::<f64>()
-                .sqrt();
-            let eps = f64::EPSILON;
-            let gemm_err = (p_features + n_tr + 4) as f64 * eps * x_te_fro * x_tr_fro;
-            let h_bound = x_te_fro * (h_norm + n_tr as f64 * eps * x_tr_fro * u_norm);
-
-            (0..n_cols)
-                .map(|col| {
-                    let s = |i: usize| t_te[(i, col)];
-                    let yv = |i: usize| y_te[(i, col)];
-                    let ms = scaled_moments(n_te, s, None);
-                    let my = scaled_moments(n_te, yv, None);
-
-                    // A degenerate test-half y gives r = 0.0 on both routes: its
-                    // moments are computed here from the same bits by the same
-                    // helper as in split_half_r, so this decision is the refit
-                    // route's exactly. Never skipped or NaN.
-                    let r = if my.is_constant(n_te) {
-                        0.0
-                    } else {
-                        // The refit route's training-y standardization, call for
-                        // call (split_half_r; change together).
-                        let y_tr_raw = Col::<f64>::from_fn(n_tr, |i| y_mat[(sp.tr[i], col)]);
-                        let (zs, y_bar, y_scale) = match w_tr.as_ref() {
-                            Some(w) => standardize1_weighted(y_tr_raw.as_ref(), Some(w.as_ref())),
-                            None => standardize1(y_tr_raw.as_ref()),
-                        };
-                        let z_norm = match sw_tr.as_ref() {
-                            Some(sw) => Col::<f64>::from_fn(n_tr, |i| zs[i] * sw[i]).norm_l2(),
-                            None => zs.norm_l2(),
-                        };
-                        if z_norm == 0.0 {
-                            // Constant training y: X̃'z is an exact zero on the
-                            // refit route, its fit keeps no component, and its
-                            // scores are exactly zero.
-                            0.0
-                        } else {
-                            let y_tr_norm = (0..n_tr)
-                                .map(|i| y_tr[(i, col)] * y_tr[(i, col)])
-                                .sum::<f64>()
-                                .sqrt();
-                            // `‖t_te‖` and `‖t_te,c‖` back in the units of
-                            // `err`: `ms` holds the sums of `t_te / ms.s`, and
-                            // `sqrt(sum)·ms.s` is exact.
-                            let t_norm = ms.sq.sqrt() * ms.s;
-                            let t_c = ms.ss.sqrt() * ms.s;
-                            let err = gemm_err * (y_tr_norm + y_bar.abs() * u_norm)
-                                + (n_te + 2) as f64 * eps * t_norm
-                                + y_bar.abs() * h_bound;
-                            let g_lower = (t_c - err) / (y_scale * x_te_fro);
-                            let w_floor =
-                                crate::fit::w_rel_floor(n_tr, p_features, x_tr_fro, z_norm);
-                            // `a >= b` conjunctions, so a NaN anywhere fails the
-                            // gate and takes the fallback.
-                            let resolved = t_c >= NR_RESOLVE_BAND * err
-                                && g_lower >= NR_RESOLVE_BAND * w_floor
-                                && g_lower >= NR_ABS_BAND * crate::fit::NIPALS_ABS_FLOOR
-                                && (g_lower / z_norm).powi(2)
-                                    >= NR_ABS_BAND * crate::fit::NIPALS_ABS_FLOOR
-                                && !ms.is_constant(n_te);
-                            if resolved {
-                                pearson_scaled(n_te, s, yv, &ms, &my)
-                            } else {
-                                // The refit route's own computation for this
-                                // split and column.
-                                let y_col = Col::<f64>::from_fn(n, |i| y_mat[(i, col)]);
-                                split_half_r_reference(x, y_col.as_ref(), 1, sp, w_norm, None)
-                            }
-                        }
-                    };
-                    // ±0.9999 pre-atanh clamp mirrored from nb_test (change
-                    // together): keeps the statistic identical to split_nb's and
-                    // z̄ finite at |r| = 1.
-                    r.clamp(-0.9999, 0.9999).atanh()
-                })
-                .collect()
-        };
-
-        Ok(zbars_over_splits(
-            &splits,
-            n_cols,
-            opts.disable_parallelism,
-            per_split_z,
-        ))
-    }
-
-    /// Pre-change body, verbatim except that its two scoring products take
-    /// `fit::par_fixed()` explicitly, as production does, instead of faer's
-    /// global parallelism.
-    #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::similar_names)]
-    fn run_e_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        k: usize,
-        w_norm: Option<ColRef<'_, f64>>,
-        opts: &ConfirmatoryTestOpts,
-        rng: &mut crate::rng::Rng,
-    ) -> PlsKitResult<RunResult> {
-        use crate::fit::{pls1_fit, FitOpts, KSpec};
-        use crate::linalg::{
-            col_row_subset, normalize_weights, row_subset, standardize, standardize1,
-            standardize1_weighted, standardize_apply, standardize_weighted,
-        };
-        use crate::resample::{one_split, split_sizes};
-
-        let n = x.nrows();
-        // Mirror of split_half_correlations' guard — change together.
-        if n < k + 5 {
-            return Err(PlsKitError::InvalidArgument(format!(
-                "n={n} too small for k={k} under split methods (need n ≥ k+5)"
-            )));
-        }
-        let (n_train, _) = split_sizes(n, k);
-        let (tr, te) = one_split(n, n_train, rng);
-
-        // Split the raw data, then per-half weighted-standardize-then-√w
-        // (Convention A, matching split_half_correlations / pls1_fit). Per-half
-        // weights are re-normalized to mean 1 within the half (mirrors pls1_cv_r2).
-        let x_tr = row_subset(x, &tr);
-        let y_tr = col_row_subset(y, &tr);
-        let x_te = row_subset(x, &te);
-        let y_te = col_row_subset(y, &te);
-
-        let w_tr: Option<Col<f64>> = w_norm.map(|w| {
-            let s = col_row_subset(w, &tr);
-            normalize_weights(s.as_ref()).unwrap_or_else(|| Col::from_fn(tr.len(), |_| 1.0))
-        });
-        let w_te: Option<Col<f64>> = w_norm.map(|w| {
-            let s = col_row_subset(w, &te);
-            normalize_weights(s.as_ref()).unwrap_or_else(|| Col::from_fn(te.len(), |_| 1.0))
-        });
-        let w_tr_ref = w_tr.as_ref().map(Col::as_ref);
-
-        let (xs_tr, x_mean, x_scale) = if let Some(w) = w_tr_ref {
-            standardize_weighted(x_tr.as_ref(), Some(w))
-        } else {
-            standardize(x_tr.as_ref())
-        };
-        let xs_te = standardize_apply(x_te.as_ref(), x_mean.as_ref(), x_scale.as_ref());
-        let (ys_tr, y_mean, y_scale) = if let Some(w) = w_tr_ref {
-            standardize1_weighted(y_tr.as_ref(), Some(w))
-        } else {
-            standardize1(y_tr.as_ref())
-        };
-        let n_te = y_te.nrows();
-        let ys_te = Col::<f64>::from_fn(n_te, |i| (y_te[i] - y_mean) / y_scale);
-
-        // √w' row-scaling on top of weighted standardization, train and test halves.
-        let (xs_tr, ys_tr) = match w_tr_ref {
-            Some(w) => (
-                Mat::<f64>::from_fn(xs_tr.nrows(), xs_tr.ncols(), |i, j| {
-                    xs_tr[(i, j)] * w[i].sqrt()
-                }),
-                Col::<f64>::from_fn(ys_tr.nrows(), |i| ys_tr[i] * w[i].sqrt()),
-            ),
-            None => (xs_tr, ys_tr),
-        };
-        let (xs_te, ys_te) = match w_te.as_ref() {
-            Some(w) => (
-                Mat::<f64>::from_fn(xs_te.nrows(), xs_te.ncols(), |i, j| {
-                    xs_te[(i, j)] * w[i].sqrt()
-                }),
-                Col::<f64>::from_fn(n_te, |i| ys_te[i] * w[i].sqrt()),
-            ),
-            None => (xs_te, ys_te),
-        };
-
-        let m = pls1_fit(
-            xs_tr.as_ref(),
-            ys_tr.as_ref(),
-            KSpec::Fixed(k),
-            None,
-            FitOpts {
-                pre_standardized: true,
-                // check_n_eff: false — train-half refit; n_eff was validated at the
-                // top-level entry, and the e-value remains valid at a truncated k_used.
-                check_n_eff: false,
-                keep: opts.keep,
-                ..FitOpts::default()
-            },
-        )?;
-
-        let par = crate::fit::par_fixed();
-        let y_pred = crate::linalg::mat_vec(xs_te.as_ref(), m.coef.as_ref(), par);
-
-        // Universal inference fixes the numerator density on the training half:
-        // σ²_alt is the residual MLE from predicting the training X with the fitted
-        // model, evaluated against training y. Computing it on the test half would
-        // make the likelihood ratio data-dependent and break the e-value guarantee.
-        let n_tr = ys_tr.nrows();
-        let y_pred_tr = crate::linalg::mat_vec(xs_tr.as_ref(), m.coef.as_ref(), par);
-        let sigma2_alt: f64 = (0..n_tr)
-            .map(|i| (ys_tr[i] - y_pred_tr[i]).powi(2))
-            .sum::<f64>()
-            / n_tr as f64;
-
-        // σ² under null: variance of test y
-        let mean_te: f64 = (0..n_te).map(|i| ys_te[i]).sum::<f64>() / n_te as f64;
-        let sigma2_null: f64 =
-            (0..n_te).map(|i| (ys_te[i] - mean_te).powi(2)).sum::<f64>() / n_te as f64;
-
-        let n_te_f = n_te as f64;
-        // Gaussian log-likelihoods with MLE variance
-        let ll = |sigma2: f64, residuals_sq_sum: f64| -> f64 {
-            let s = sigma2.max(1e-30);
-            -0.5 * n_te_f * (2.0 * std::f64::consts::PI * s).ln() - 0.5 * residuals_sq_sum / s
-        };
-
-        let resid_alt_ss: f64 = (0..n_te).map(|i| (ys_te[i] - y_pred[i]).powi(2)).sum();
-        let resid_null_ss: f64 = (0..n_te).map(|i| (ys_te[i] - mean_te).powi(2)).sum();
-
-        let ll_alt = ll(sigma2_alt, resid_alt_ss);
-        let ll_null = ll(sigma2_null, resid_null_ss);
-
-        let log_e = ll_alt - ll_null;
-        // Clip e below 1 so that p = 1/e ≤ 1.
-        let e = log_e.exp().max(1.0);
-        let p = (1.0 / e).min(1.0);
-
-        // opts unused by e method; pre_standardized has no effect (re-standardizes each half by
-        // design); disable_parallelism moot (single split, no inner loop).
-        let _ = opts;
-
-        Ok(RunResult {
-            pvalue: p,
-            statistic: log_e,
-            rho_hat: None,
-        })
-    }
-
-    /// Pre-change body, verbatim except that its products and its
-    /// eigendecomposition take `fit::par_fixed()` explicitly, as production
-    /// does, instead of faer's global parallelism.
-    #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::unnecessary_wraps)] // signature must match other run_* helpers returning PlsKitResult
-    fn run_score_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        w_norm: Option<ColRef<'_, f64>>,
-        opts: &ConfirmatoryTestOpts,
-    ) -> PlsKitResult<RunResult> {
-        use crate::linalg::{
-            standardize, standardize1, standardize1_weighted, standardize_weighted,
-        };
-
-        let n = x.nrows();
-
-        // Standardize with weighted moments when weights are present (matching
-        // pls1_fit's path); the √w row-scaling below then sits on top.
-        let (xs, _, _) = if opts.pre_standardized {
-            let d = x.ncols();
-            (
-                Mat::<f64>::from_fn(n, d, |i, j| x[(i, j)]),
-                Col::<f64>::zeros(d),
-                Col::<f64>::from_fn(d, |_| 1.0),
-            )
-        } else if w_norm.is_some() {
-            standardize_weighted(x, w_norm)
-        } else {
-            standardize(x)
-        };
-
-        let (ys, _, _) = if opts.pre_standardized {
-            (Col::<f64>::from_fn(n, |i| y[i]), 0.0_f64, 1.0_f64)
-        } else if w_norm.is_some() {
-            standardize1_weighted(y, w_norm)
-        } else {
-            standardize1(y)
-        };
-
-        // When weights are present, further row-scale the standardized data by √w'.
-        // T_w = ||X̃'ỹ||² where X̃ = diag(√w')·X_std, ỹ = diag(√w')·y_std.
-        // This equals the unweighted T on (X̃, ỹ).
-        let (xs_eff, ys_eff) = if let Some(w) = w_norm {
-            let xs_w = Mat::<f64>::from_fn(n, xs.ncols(), |i, j| xs[(i, j)] * w[i].sqrt());
-            let ys_w = Col::<f64>::from_fn(n, |i| ys[i] * w[i].sqrt());
-            (xs_w, ys_w)
-        } else {
-            (xs, ys)
-        };
-
-        // T_obs = ||X'y||² = y'XX'y
-        let par = crate::fit::par_fixed();
-        let xy = crate::linalg::mat_vec(xs_eff.transpose(), ys_eff.as_ref(), par);
-        let t_obs: f64 = (0..xy.nrows()).map(|i| xy[i].powi(2)).sum::<f64>();
-
-        // Eigenvalues of the smaller Gram matrix (X'X for d≤n, XX' otherwise).
-        let nn = xs_eff.nrows();
-        let d = xs_eff.ncols();
-        let lambdas: Col<f64> = if d <= nn {
-            let gram = crate::linalg::mat_mul(xs_eff.transpose(), xs_eff.as_ref(), par);
-            eigenvalues_symmetric(gram.as_ref(), par)
-        } else {
-            let gram = crate::linalg::mat_mul(xs_eff.as_ref(), xs_eff.transpose(), par);
-            eigenvalues_symmetric(gram.as_ref(), par)
-        };
-
-        // Welch-Satterthwaite: T ~ a·χ²(df) approximately.
-        let s1: f64 = (0..lambdas.nrows()).map(|i| lambdas[i]).sum();
-        let s2: f64 = (0..lambdas.nrows()).map(|i| lambdas[i].powi(2)).sum();
-
-        if s1.abs() < 1e-15 || s2 < 1e-30 {
-            return Ok(RunResult {
-                pvalue: 1.0,
-                statistic: t_obs,
-                rho_hat: None,
-            });
-        }
-
-        let scale = s2 / s1;
-        let df = s1 * s1 / s2;
-        let p = chi2_sf(t_obs / scale, df);
-
-        Ok(RunResult {
-            pvalue: p,
-            statistic: t_obs,
-            rho_hat: None,
-        })
-    }
-
-    #[test]
-    // No parallel axis: `run_score` runs once per call, not over a dp loop.
-    fn run_score_matches_reference() {
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let w = norm_w(f.w.as_ref());
-                let wr = w.as_ref().map(Col::as_ref);
-                let (xs, _, _) = standardize(f.x.as_ref());
-                let (ys, _, _) = standardize1(f.y.as_ref());
-                for pre in [false, true] {
-                    let (x0, y0) = if pre { (&xs, &ys) } else { (&f.x, &f.y) };
-                    let lay = Layouts::new(x0.as_ref());
-                    for (view, xv) in lay.all(x0) {
-                        let opts = ConfirmatoryTestOpts {
-                            pre_standardized: pre,
-                            ..Default::default()
-                        };
-                        assert_run_eq(
-                            run_score(xv, y0.as_ref(), wr, &opts),
-                            run_score_reference(xv, y0.as_ref(), wr, &opts),
-                            &format!("{} {view} pre={pre}", f.name),
-                        );
-                    }
-                }
-            }
-        });
-    }
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::similar_names)]
-    fn run_raw_perm_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        k: usize,
-        n_perm: usize,
-        n_folds: usize,
-        w_norm: Option<ColRef<'_, f64>>,
-        opts: &ConfirmatoryTestOpts,
-        rng: &mut crate::rng::Rng,
-    ) -> PlsKitResult<RunResult> {
-        use rand::seq::SliceRandom;
-
-        let n = x.nrows();
-
-        // Fixed fold indices: shuffle once, then split.
-        // Weights are passed through to pls1_cv_r2 which re-normalizes per fold.
-        let mut indices: Vec<usize> = (0..n).collect();
-        indices.shuffle(rng);
-        let folds = crate::linalg::fold_split(&indices, n_folds);
-
-        let cv_r2_obs;
-        let nulls_vec: Vec<f64>;
-
-        // Route choice: see `raw_perm_k1_gram_route`, which owns the rule.
-        let dual = raw_perm_k1_gram_route(
-            n,
-            n_folds,
-            x.ncols(),
-            n_perm,
-            k,
-            opts.keep.is_none(),
-            w_norm.is_some(),
-        );
-
-        if dual {
-            // Re-derive exactly the child-seed sequence
-            // `parallel_for_each_seeded` would draw, so both routes see the
-            // identical permutations at the same seed. Without this an input
-            // that changes route between releases would silently change its
-            // p-value.
-            let seeds = crate::rng::child_seeds(rng, n_perm);
-            // Draw and consume one permutation at a time. Holding all `n_perm`
-            // of them alive while `y_mat` is built doubles the peak allocation,
-            // and `y_mat` is not covered by the dual route's `n_tr` cap (see
-            // `DUAL_ROUTE_MAX_N_TR`) — that bounds only the Gram matrix.
-            let mut y_mat = Mat::<f64>::zeros(n, n_perm + 1);
-            for i in 0..n {
-                y_mat[(i, 0)] = y[i];
-            }
-            for (col, s) in seeds.iter().enumerate() {
-                let perm = crate::resample::permute_indices(n, &mut crate::rng::child_rng(*s));
-                for i in 0..n {
-                    y_mat[(i, col + 1)] = y[perm[i]];
-                }
-            }
-            let r2 = crate::dual_route::pls1_cv_r2_columns(
-                x,
-                y_mat.as_ref(),
-                &folds,
-                opts.disable_parallelism,
-            );
-            cv_r2_obs = r2[0];
-            nulls_vec = r2[1..].to_vec();
-        } else {
-            cv_r2_obs = pls1_cv_r2_reference(x, y, k, &folds, w_norm, opts.keep)?;
-            nulls_vec = crate::resample::parallel_for_each_seeded(
-                rng,
-                n_perm,
-                opts.disable_parallelism,
-                |_, child| {
-                    // Permute y rows; weights stay tied to row indices (not permuted).
-                    let perm = crate::resample::permute_indices(n, child);
-                    let y_perm = Col::<f64>::from_fn(n, |i| y[perm[i]]);
-                    pls1_cv_r2_reference(x, y_perm.as_ref(), k, &folds, w_norm, opts.keep)
-                        .unwrap_or(f64::NAN)
-                },
-            );
-        }
-
-        // A failed null fit surfaces as NaN (parallel_for_each_seeded has no error
-        // channel); count it as an exceedance so it biases p upward, never downward.
-        // That fail-soft rule is only sound for occasional failures: past half the
-        // nulls, p saturates toward 1 and the test silently stops measuring
-        // anything — error out instead (hardcoded 1/2; not worth a knob).
-        let nan_nulls = nulls_vec.iter().filter(|v| v.is_nan()).count();
-        if nan_nulls * 2 > n_perm {
-            return Err(PlsKitError::PermNullDegenerate {
-                failed: nan_nulls,
-                total: n_perm,
-            });
-        }
-        let exceedances = nulls_vec
-            .iter()
-            .filter(|v| v.is_nan() || **v >= cv_r2_obs)
-            .count();
-        let p = (exceedances as f64 + 1.0) / (n_perm as f64 + 1.0);
-
-        Ok(RunResult {
-            pvalue: p,
-            statistic: cv_r2_obs,
-            rho_hat: None,
-        })
-    }
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::too_many_arguments)]
-    fn split_half_correlations_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        k: usize,
-        splits: &[SplitIdx],
-        w_norm: Option<ColRef<'_, f64>>,
-        disable_parallelism: bool,
-        keep: Option<usize>,
-    ) -> Col<f64> {
-        let per_split = |sp: &SplitIdx| split_half_r_reference(x, y, k, sp, w_norm, keep);
-
-        // Same shape as split_perm_nr_zbars' per-split dispatch: collect preserves
-        // split order in both arms, so serial and parallel results are byte-equal.
-        let r_vec: Vec<f64> = if disable_parallelism {
-            splits.iter().map(per_split).collect()
-        } else {
-            use rayon::prelude::*;
-            splits.par_iter().map(per_split).collect()
-        };
-
-        Col::<f64>::from_fn(r_vec.len(), |i| r_vec[i])
-    }
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::too_many_arguments)]
-    fn run_split_perm_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        k: usize,
-        n_perm: usize,
-        n_splits: usize,
-        w_norm: Option<ColRef<'_, f64>>,
-        opts: &ConfirmatoryTestOpts,
-        rng: &mut crate::rng::Rng,
-    ) -> PlsKitResult<RunResult> {
-        let n = x.nrows();
-        // The J splits are drawn once and held fixed across all B permutation
-        // replicates. Redrawing them per replicate (what this function used to do)
-        // folds split-to-split scatter into the null, so the reference
-        // distribution stops isolating the y–X association the observed statistic
-        // measures. split_perm_nr_zbars has always worked this way; this is the
-        // route that had to move.
-        let splits = draw_splits(n, k, n_splits, opts.disable_parallelism, rng)?;
-
-        // Raw (X, y, weights) flow into split_half_correlations (Convention A
-        // weighted-standardize-then-√w internally); the permutation loop reuses the
-        // raw x and permutes raw y rows.
-        let r_obs = split_half_correlations_reference(
-            x,
-            y,
-            k,
-            &splits,
-            w_norm,
-            opts.disable_parallelism,
-            opts.keep,
-        );
-        let z_bar_obs = mean_fisher_z(&r_obs);
-
-        let null_zbars = crate::resample::parallel_for_each_seeded(
-            rng,
-            n_perm,
-            opts.disable_parallelism,
-            |_, outer_rng| {
-                let perm = crate::resample::permute_indices(n, outer_rng);
-                // Permute raw y rows; weights stay tied to row positions (w_norm is
-                // passed unpermuted), so w[i] always pairs with destination row i.
-                let y_perm = Col::<f64>::from_fn(n, |i| y[perm[i]]);
-                let r_null = split_half_correlations_reference(
-                    x,
-                    y_perm.as_ref(),
-                    k,
-                    &splits,
-                    w_norm,
-                    opts.disable_parallelism,
-                    opts.keep,
-                );
-                mean_fisher_z(&r_null)
-            },
-        );
-
-        // A non-finite null statistic counts as an exceedance so it biases p
-        // upward, never downward (mirrors run_raw_perm and run_split_perm_nr —
-        // change together). A failed per-half fit already degrades to r = 0 inside
-        // split_half_correlations rather than surfacing here.
-        let exceedances = null_zbars
-            .iter()
-            .filter(|v| !v.is_finite() || **v >= z_bar_obs)
-            .count();
-        let p = (exceedances as f64 + 1.0) / (n_perm as f64 + 1.0);
-
-        Ok(RunResult {
-            pvalue: p,
-            statistic: z_bar_obs.tanh(),
-            rho_hat: None,
-        })
-    }
-
-    /// The caller's mean-one weights, as `confirmatory_test_impl` hands them on.
-    pub(super) fn norm_w(w: Option<&Col<f64>>) -> Option<Col<f64>> {
-        w.map(|w| normalize_weights(w.as_ref()).expect("positive weights"))
-    }
-
-    /// Two run results agree bit for bit, or fail with the same error.
-    pub(super) fn assert_run_eq(
-        a: PlsKitResult<RunResult>,
-        b: PlsKitResult<RunResult>,
-        what: &str,
-    ) {
-        match (a, b) {
-            (Ok(a), Ok(b)) => {
-                assert_eq!(a.pvalue.to_bits(), b.pvalue.to_bits(), "{what}.pvalue");
-                assert_eq!(
-                    a.statistic.to_bits(),
-                    b.statistic.to_bits(),
-                    "{what}.statistic"
-                );
-                assert_eq!(
-                    a.rho_hat.map(f64::to_bits),
-                    b.rho_hat.map(f64::to_bits),
-                    "{what}.rho_hat"
-                );
-            }
-            (Err(a), Err(b)) => {
-                assert_eq!(a.code(), b.code(), "{what}: error code");
-                assert_eq!(a.to_string(), b.to_string(), "{what}: error message");
-            }
-            (a, b) => panic!("{what}: {a:?} vs {b:?}"),
-        }
-    }
+    // ── internals without a public-surface proof ─────────────────────────────
 
     #[test]
     fn the_route_override_restores_the_previous_value_even_on_panic() {
@@ -6262,987 +4688,192 @@ mod copy_free_reference {
     }
 
     #[test]
-    // No parallel axis: `prepare_split` is a per-unit body, called once per split.
-    fn prepared_split_x_side_is_the_reference_x_side() {
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let w = norm_w(f.w.as_ref());
-                let wr = w.as_ref().map(Col::as_ref);
-                let (_, mut rng) = crate::rng::resolve_seed(Some(5)).unwrap();
-                let splits = draw_splits(f.x.nrows(), 2, 3, true, &mut rng).unwrap();
-                for sp in &splits {
-                    let prep = prepare_split(f.x.as_ref(), sp, wr);
-                    let x_tr = row_subset(f.x.as_ref(), &sp.tr);
-                    let (xs, m, s) = match prep.w_tr.as_ref() {
-                        Some(wt) => standardize_weighted(x_tr.as_ref(), Some(wt.as_ref())),
-                        None => standardize(x_tr.as_ref()),
-                    };
-                    let xs = match prep.w_tr.as_ref() {
-                        Some(wt) => Mat::<f64>::from_fn(xs.nrows(), xs.ncols(), |i, j| {
-                            xs[(i, j)] * wt[i].sqrt()
-                        }),
-                        None => xs,
-                    };
-                    assert_bits_eq(
-                        &mat_vals(prep.xs_tr.as_ref()),
-                        &mat_vals(xs.as_ref()),
-                        f.name,
-                    );
-                    let te = standardize_apply(
-                        row_subset(f.x.as_ref(), &sp.te).as_ref(),
-                        m.as_ref(),
-                        s.as_ref(),
-                    );
-                    let te = match prep.w_te.as_ref() {
-                        Some(wt) => Mat::<f64>::from_fn(te.nrows(), te.ncols(), |i, j| {
-                            te[(i, j)] * wt[i].sqrt()
-                        }),
-                        None => te,
-                    };
-                    assert_bits_eq(
-                        &mat_vals(prep.xs_te.as_ref()),
-                        &mat_vals(te.as_ref()),
-                        f.name,
-                    );
-                }
-            }
-        });
-    }
-
-    #[test]
-    // No parallel axis: `split_half_r` is a per-unit body, called once per split.
-    fn split_half_r_matches_reference() {
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let w = norm_w(f.w.as_ref());
-                let wr = w.as_ref().map(Col::as_ref);
-                let lay = Layouts::new(f.x.as_ref());
-                for k in [1_usize, 2] {
-                    let (_, mut rng) = crate::rng::resolve_seed(Some(5)).unwrap();
-                    let splits = draw_splits(f.x.nrows(), k, 4, true, &mut rng).unwrap();
-                    for (view, xv) in lay.all(&f.x) {
-                        for keep in [None, Some(3)] {
-                            for (j, sp) in splits.iter().enumerate() {
-                                let a = split_half_r(xv, f.y.as_ref(), k, sp, wr, keep);
-                                let b = split_half_r_reference(xv, f.y.as_ref(), k, sp, wr, keep);
-                                assert_eq!(
-                                    a.to_bits(),
-                                    b.to_bits(),
-                                    "{} {view} k={k} keep={keep:?} split {j}",
-                                    f.name
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    #[test]
-    // No parallel axis: `pls1_cv_r2` folds sequentially inside one call.
-    fn pls1_cv_r2_matches_reference() {
-        use rand::seq::SliceRandom;
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let w = norm_w(f.w.as_ref());
-                let wr = w.as_ref().map(Col::as_ref);
-                let lay = Layouts::new(f.x.as_ref());
-                let (_, mut rng) = crate::rng::resolve_seed(Some(9)).unwrap();
-                let mut idx: Vec<usize> = (0..f.x.nrows()).collect();
-                idx.shuffle(&mut rng);
-                let folds = crate::linalg::fold_split(&idx, 5);
-                for (view, xv) in lay.all(&f.x) {
-                    for k in [1_usize, 2] {
-                        for keep in [None, Some(3)] {
-                            let a = pls1_cv_r2(xv, f.y.as_ref(), k, &folds, wr, keep).unwrap();
-                            let b = pls1_cv_r2_reference(xv, f.y.as_ref(), k, &folds, wr, keep)
-                                .unwrap();
-                            assert_eq!(
-                                a.to_bits(),
-                                b.to_bits(),
-                                "{} {view} k={k} keep={keep:?}",
-                                f.name
-                            );
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn split_perm_nr_zbars_matches_reference() {
-        // No-refit route: k = 1 and dense only, so no `keep` dimension.
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let w = norm_w(f.w.as_ref());
-                let wr = w.as_ref().map(Col::as_ref);
-                let lay = Layouts::new(f.x.as_ref());
-                for (view, xv) in lay.all(&f.x) {
-                    for dp in [true, false] {
-                        let opts = ConfirmatoryTestOpts {
-                            disable_parallelism: dp,
-                            ..Default::default()
-                        };
-                        let (_, mut r1) = crate::rng::resolve_seed(Some(13)).unwrap();
-                        let (_, mut r2) = crate::rng::resolve_seed(Some(13)).unwrap();
-                        let a = split_perm_nr_zbars(xv, f.y.as_ref(), 1, 9, 4, wr, &opts, &mut r1)
-                            .unwrap();
-                        let b = split_perm_nr_zbars_reference(
-                            xv,
-                            f.y.as_ref(),
-                            1,
-                            9,
-                            4,
-                            wr,
-                            &opts,
-                            &mut r2,
-                        )
-                        .unwrap();
-                        assert_bits_eq(&a, &b, &format!("{} {view} dp={dp}", f.name));
-                    }
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn run_e_matches_reference() {
-        // One split, no replicate loop: no parallel axis.
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let w = norm_w(f.w.as_ref());
-                let wr = w.as_ref().map(Col::as_ref);
-                let lay = Layouts::new(f.x.as_ref());
-                for (view, xv) in lay.all(&f.x) {
-                    for k in [1_usize, 2] {
-                        for keep in [None, Some(3)] {
-                            let opts = ConfirmatoryTestOpts {
-                                keep,
-                                ..Default::default()
-                            };
-                            let (_, mut r1) = crate::rng::resolve_seed(Some(17)).unwrap();
-                            let (_, mut r2) = crate::rng::resolve_seed(Some(17)).unwrap();
-                            assert_run_eq(
-                                run_e(xv, f.y.as_ref(), k, wr, &opts, &mut r1),
-                                run_e_reference(xv, f.y.as_ref(), k, wr, &opts, &mut r2),
-                                &format!("{} {view} k={k} keep={keep:?}", f.name),
-                            );
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn run_raw_perm_matches_reference() {
-        with_new_routes_disabled(|| {
-            // The copy-free families at 19 nulls, plus a p ≫ n shape that the
-            // K = 1 Gram closed form claims at k = 1 (n_tr = 24, p = 3000, 50
-            // columns), so the `Special` branch is compared too.
-            let (xw, yw) = crate::test_support::signal_data(30, 3000, 131);
-            let mut fams: Vec<(crate::test_support::Family, usize)> =
-                copy_free_families().into_iter().map(|f| (f, 19)).collect();
-            fams.push((
-                crate::test_support::Family {
-                    name: "dual_wide",
-                    x: xw,
-                    y: yw,
-                    w: None,
-                },
-                49,
-            ));
-            assert_eq!(
-                raw_perm_route(30, 5, 3000, 49, 1, None, false),
-                ReplicateRoute::Special
-            );
-            for (f, n_perm) in &fams {
-                let w = norm_w(f.w.as_ref());
-                let wr = w.as_ref().map(Col::as_ref);
-                let (xs, _, _) = standardize(f.x.as_ref());
-                let (ys, _, _) = standardize1(f.y.as_ref());
-                // raw_perm standardizes per fold whatever the flag says, so
-                // `pre` varies only the data handed in.
-                for pre in [false, true] {
-                    let (x0, y0) = if pre { (&xs, &ys) } else { (&f.x, &f.y) };
-                    let lay = Layouts::new(x0.as_ref());
-                    for (view, xv) in lay.all(x0) {
-                        for k in [1_usize, 2] {
-                            for keep in [None, Some(3)] {
-                                for dp in [true, false] {
-                                    let opts = ConfirmatoryTestOpts {
-                                        keep,
-                                        disable_parallelism: dp,
-                                        ..Default::default()
-                                    };
-                                    let (_, mut r1) = crate::rng::resolve_seed(Some(21)).unwrap();
-                                    let (_, mut r2) = crate::rng::resolve_seed(Some(21)).unwrap();
-                                    assert_run_eq(
-                                        run_raw_perm(
-                                            xv,
-                                            y0.as_ref(),
-                                            k,
-                                            *n_perm,
-                                            5,
-                                            wr,
-                                            &opts,
-                                            &mut r1,
-                                        ),
-                                        run_raw_perm_reference(
-                                            xv,
-                                            y0.as_ref(),
-                                            k,
-                                            *n_perm,
-                                            5,
-                                            wr,
-                                            &opts,
-                                            &mut r2,
-                                        ),
-                                        &format!(
-                                            "{} {view} pre={pre} k={k} keep={keep:?} dp={dp}",
-                                            f.name
-                                        ),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    /// Per-column, not just pooled: `pooled_cv_r2_columns(Primal, ...)[c]`
-    /// equals `pls1_cv_r2_reference` run on that column's own outcome, to
-    /// the bit, for every column of a batch at once. Same families and
-    /// layouts as `run_raw_perm_matches_reference`, `keep` and
-    /// `disable_parallelism` both ways, inside `with_new_routes_disabled`.
-    /// A second block covers a hand-built `folds` where one fold's training
-    /// rows are all zero-weight, with more than one column and
-    /// `disable_parallelism = false`.
-    #[test]
-    fn pooled_cv_r2_columns_matches_reference_per_column() {
-        with_new_routes_disabled(|| {
-            let (xw, yw) = crate::test_support::signal_data(30, 3000, 131);
-            let mut fams = copy_free_families();
-            fams.push(crate::test_support::Family {
-                name: "dual_wide",
-                x: xw,
-                y: yw,
-                w: None,
-            });
-            for f in &fams {
-                let w = norm_w(f.w.as_ref());
-                let wr = w.as_ref().map(Col::as_ref);
-                let (xs, _, _) = standardize(f.x.as_ref());
-                let (ys, _, _) = standardize1(f.y.as_ref());
-                for pre in [false, true] {
-                    let (x0, y0) = if pre { (&xs, &ys) } else { (&f.x, &f.y) };
-                    let lay = Layouts::new(x0.as_ref());
-                    for (view, xv) in lay.all(x0) {
-                        let n = xv.nrows();
-                        let folds = crate::linalg::fold_split(&(0..n).collect::<Vec<_>>(), 5);
-                        for k in [1_usize, 2] {
-                            for keep in [None, Some(3)] {
-                                for dp in [true, false] {
-                                    let (_, mut rng) = crate::rng::resolve_seed(Some(21)).unwrap();
-                                    let seeds = crate::rng::child_seeds(&mut rng, 5);
-                                    let cols = crate::resample::Columns {
-                                        y: y0.as_ref(),
-                                        seeds: &seeds,
-                                    };
-                                    let pooled = pooled_cv_r2_columns(
-                                        ReplicateRoute::Primal,
-                                        xv,
-                                        &folds,
-                                        wr,
-                                        k,
-                                        keep,
-                                        cols.len(),
-                                        dp,
-                                        &|c| cols.column(c),
-                                    )
-                                    .unwrap();
-                                    for (c, p) in pooled.iter().enumerate() {
-                                        let yc = cols.column(c);
-                                        let reference = pls1_cv_r2_reference(
-                                            xv,
-                                            yc.as_ref(),
-                                            k,
-                                            &folds,
-                                            wr,
-                                            keep,
-                                        )
-                                        .unwrap();
-                                        assert_eq!(
-                                            p.to_bits(),
-                                            reference.to_bits(),
-                                            "{} {view} pre={pre} k={k} keep={keep:?} dp={dp} \
-                                             column {c}",
-                                            f.name
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // A hand-built folds where fold 0's training rows are all
-            // zero-weight, with more than one column and dp = false.
-            let (x, y) = crate::test_support::signal_data(48, 7, 61);
-            let folds = crate::linalg::fold_split(&(0..48).collect::<Vec<_>>(), 4);
-            let w = Col::<f64>::from_fn(48, |i| if i < 12 { 1.0 + i as f64 } else { 0.0 });
-            let wn = normalize_weights(w.as_ref()).unwrap();
-            let (_, mut rng) = crate::rng::resolve_seed(Some(61)).unwrap();
-            let seeds = crate::rng::child_seeds(&mut rng, 2);
-            let cols = crate::resample::Columns {
-                y: y.as_ref(),
-                seeds: &seeds,
-            };
-            assert!(cols.len() > 1, "test premise: more than one column");
-            for k in [1_usize, 2] {
-                for keep in [None, Some(3)] {
-                    let pooled = pooled_cv_r2_columns(
-                        ReplicateRoute::Primal,
-                        x.as_ref(),
-                        &folds,
-                        Some(wn.as_ref()),
-                        k,
-                        keep,
-                        cols.len(),
-                        false,
-                        &|c| cols.column(c),
-                    )
-                    .unwrap();
-                    for (c, p) in pooled.iter().enumerate() {
-                        let yc = cols.column(c);
-                        let reference = pls1_cv_r2_reference(
-                            x.as_ref(),
-                            yc.as_ref(),
-                            k,
-                            &folds,
-                            Some(wn.as_ref()),
-                            keep,
-                        )
-                        .unwrap();
-                        assert_eq!(
-                            p.to_bits(),
-                            reference.to_bits(),
-                            "zero-weight fold k={k} keep={keep:?} column {c}"
-                        );
-                    }
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn leave_one_out_folds_and_a_single_null_match_reference() {
-        with_new_routes_disabled(|| {
-            let (x, y) = crate::test_support::signal_data(12, 5, 71);
-            for n_perm in [1_usize, 9] {
-                for k in [1_usize, 2] {
-                    for dp in [true, false] {
-                        let opts = ConfirmatoryTestOpts {
-                            disable_parallelism: dp,
-                            ..Default::default()
-                        };
-                        let (_, mut r1) = crate::rng::resolve_seed(Some(3)).unwrap();
-                        let (_, mut r2) = crate::rng::resolve_seed(Some(3)).unwrap();
-                        assert_run_eq(
-                            run_raw_perm(
-                                x.as_ref(),
-                                y.as_ref(),
-                                k,
-                                n_perm,
-                                12,
-                                None,
-                                &opts,
-                                &mut r1,
-                            ),
-                            run_raw_perm_reference(
-                                x.as_ref(),
-                                y.as_ref(),
-                                k,
-                                n_perm,
-                                12,
-                                None,
-                                &opts,
-                                &mut r2,
-                            ),
-                            &format!("LOO n_perm={n_perm} k={k} dp={dp}"),
-                        );
-                    }
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn k_zero_raw_perm_still_fails_with_the_fold_fit_error() {
-        with_new_routes_disabled(|| {
-            let fams = copy_free_families();
-            let f = &fams[0];
-            for dp in [true, false] {
-                let opts = ConfirmatoryTestOpts {
-                    disable_parallelism: dp,
-                    ..Default::default()
-                };
-                let (_, mut r1) = crate::rng::resolve_seed(Some(1)).unwrap();
-                let (_, mut r2) = crate::rng::resolve_seed(Some(1)).unwrap();
-                assert_run_eq(
-                    run_raw_perm(f.x.as_ref(), f.y.as_ref(), 0, 19, 5, None, &opts, &mut r1),
-                    run_raw_perm_reference(
-                        f.x.as_ref(),
-                        f.y.as_ref(),
-                        0,
-                        19,
-                        5,
-                        None,
-                        &opts,
-                        &mut r2,
-                    ),
-                    &format!("k = 0 dp={dp}"),
-                );
-            }
-            let e = pls1_confirmatory_test(
-                ConfirmatoryTestInput::Raw {
-                    x: f.x.as_ref(),
-                    y: f.y.as_ref(),
-                    k: 0,
-                    weights: None,
-                },
-                ConfirmatoryTestOpts {
-                    args: ConfirmatoryArgs::RawPerm {
-                        n_perm: 19,
-                        n_folds: 5,
-                    },
-                    seed: Some(1),
-                    ..Default::default()
-                },
-            )
-            .unwrap_err();
-            assert_eq!(e.code(), "invalid_argument");
-            assert!(e.to_string().contains("k must be >= 1"), "{e}");
-        });
-    }
-
-    #[test]
-    // No parallel axis: one prepared fold and the single-column `pls1_cv_r2`,
-    // whose folds run sequentially inside one call.
-    fn a_fold_whose_training_weights_are_all_zero_falls_back_to_uniform() {
-        with_new_routes_disabled(|| {
-            let (x, y) = crate::test_support::signal_data(48, 7, 61);
-            // fold 0 holds rows 0..12, the only rows with positive weight, so
-            // fold 0's training rows all carry zero weight.
-            let folds = crate::linalg::fold_split(&(0..48).collect::<Vec<_>>(), 4);
-            let w = Col::<f64>::from_fn(48, |i| if i < 12 { 1.0 + i as f64 } else { 0.0 });
-            let wn = normalize_weights(w.as_ref()).unwrap();
-            let fold0 = prepare_cv_fold(x.as_ref(), &folds, 0, Some(wn.as_ref())).unwrap();
-            let all_ones = |c: &Option<Col<f64>>| {
-                c.as_ref()
-                    .is_some_and(|v| (0..v.nrows()).all(|i| v[i].to_bits() == 1.0_f64.to_bits()))
-            };
-            assert!(all_ones(&fold0.w_tr), "uniform fallback");
-            assert!(all_ones(&fold0.sqw_fit), "√ of the fallback");
-            for k in [1_usize, 2] {
-                for keep in [None, Some(3)] {
-                    let a = pls1_cv_r2(x.as_ref(), y.as_ref(), k, &folds, Some(wn.as_ref()), keep)
-                        .unwrap();
-                    let b = pls1_cv_r2_reference(
-                        x.as_ref(),
-                        y.as_ref(),
-                        k,
-                        &folds,
-                        Some(wn.as_ref()),
-                        keep,
-                    )
-                    .unwrap();
-                    assert_eq!(a.to_bits(), b.to_bits(), "k={k} keep={keep:?}");
-                }
-            }
-        });
-    }
-
-    #[test]
     fn pooled_columns_fail_soft_on_a_null_and_hard_on_the_observed_column() {
-        with_new_routes_disabled(|| {
-            let fams = copy_free_families();
-            let f = &fams[0];
-            let n = f.x.nrows();
-            let folds = crate::linalg::fold_split(&(0..n).collect::<Vec<_>>(), 4);
-            let column = |c: usize, bad: Option<usize>| -> Col<f64> {
-                let mut y = Col::<f64>::from_fn(n, |i| f.y[(i + 3 * c) % n]);
-                if bad == Some(c) {
-                    y[5] = f64::NAN;
-                }
-                y
-            };
-            let primal = ReplicateRoute::Primal;
-            let clean =
-                pooled_cv_r2_columns(primal, f.x.as_ref(), &folds, None, 2, None, 4, true, &|c| {
-                    column(c, None)
+        let (x, y0) = signal_data(48, 7, 101);
+        let n = x.nrows();
+        let folds = crate::linalg::fold_split(&(0..n).collect::<Vec<_>>(), 4);
+        let column = |c: usize, bad: Option<usize>| -> Col<f64> {
+            let mut y = Col::<f64>::from_fn(n, |i| y0[(i + 3 * c) % n]);
+            if bad == Some(c) {
+                y[5] = f64::NAN;
+            }
+            y
+        };
+        let primal = ReplicateRoute::Primal;
+        let clean =
+            pooled_cv_r2_columns(primal, x.as_ref(), &folds, None, 2, None, 4, true, &|c| {
+                column(c, None)
+            })
+            .unwrap();
+        for dp in [true, false] {
+            let hit =
+                pooled_cv_r2_columns(primal, x.as_ref(), &folds, None, 2, None, 4, dp, &|c| {
+                    column(c, Some(2))
                 })
                 .unwrap();
-            for dp in [true, false] {
-                let hit = pooled_cv_r2_columns(
-                    primal,
-                    f.x.as_ref(),
-                    &folds,
-                    None,
-                    2,
-                    None,
-                    4,
-                    dp,
-                    &|c| column(c, Some(2)),
-                )
-                .unwrap();
-                assert!(hit[2].is_nan(), "a failed null column is NaN");
-                for c in [0, 1, 3] {
-                    assert_eq!(hit[c].to_bits(), clean[c].to_bits(), "column {c} untouched");
-                }
-                let err = pooled_cv_r2_columns(
-                    primal,
-                    f.x.as_ref(),
-                    &folds,
-                    None,
-                    2,
-                    None,
-                    4,
-                    dp,
-                    &|c| column(c, Some(0)),
-                )
-                .unwrap_err();
-                assert_eq!(
-                    err.code(),
-                    "non_finite_input",
-                    "column 0 propagates its error"
-                );
+            assert!(hit[2].is_nan(), "a failed null column is NaN");
+            for c in [0, 1, 3] {
+                assert_eq!(hit[c].to_bits(), clean[c].to_bits(), "column {c} untouched");
             }
-            // A non-finite X now fails once, in the preparation of the first
-            // fold that trains on it, with the error the replicate-outer loop
-            // returned from column 0 (row 7 sits in fold 0, so fold 1 fails).
-            let mut bad_x = f.x.clone();
-            bad_x[(7, 2)] = f64::NAN;
-            let a = pls1_cv_r2(bad_x.as_ref(), f.y.as_ref(), 2, &folds, None, None).unwrap_err();
-            let b = pls1_cv_r2_reference(bad_x.as_ref(), f.y.as_ref(), 2, &folds, None, None)
+            let err =
+                pooled_cv_r2_columns(primal, x.as_ref(), &folds, None, 2, None, 4, dp, &|c| {
+                    column(c, Some(0))
+                })
                 .unwrap_err();
-            assert_eq!((a.code(), a.to_string()), (b.code(), b.to_string()));
-        });
-    }
-
-    /// A zero statistic may change sign (`mean_fisher_z` sums from -0.0,
-    /// `zbars_over_splits` from +0.0); every other value must match bit for
-    /// bit. `a_zero_statistic_is_the_only_value_whose_sign_can_differ` pins
-    /// that this is the only case it lets through.
-    fn assert_stat_eq(a: f64, b: f64, what: &str) {
-        if a == 0.0 && b == 0.0 {
-            return;
+            assert_eq!(
+                err.code(),
+                "non_finite_input",
+                "column 0 propagates its error"
+            );
         }
-        assert_eq!(a.to_bits(), b.to_bits(), "{what}: {a:e} vs {b:e}");
+        // A non-finite X fails once, in the preparation of the first fold
+        // that trains on it (row 7 sits in fold 0, so fold 1 fails).
+        let mut bad_x = x.clone();
+        bad_x[(7, 2)] = f64::NAN;
+        let a = pls1_cv_r2(bad_x.as_ref(), y0.as_ref(), 2, &folds, None, None).unwrap_err();
+        assert_eq!(a.code(), "non_finite_input");
     }
 
-    /// The replicate-outer loop on given splits and seeds: column 0 the
-    /// observed y, column c the permutation of `seeds[c - 1]`.
-    fn zbars_replicate_outer_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        k: usize,
-        splits: &[SplitIdx],
-        seeds: &[u64],
-        w_norm: Option<ColRef<'_, f64>>,
-        dp: bool,
-        keep: Option<usize>,
-    ) -> Vec<f64> {
-        let n = x.nrows();
-        let mut z = vec![mean_fisher_z(&split_half_correlations_reference(
-            x, y, k, splits, w_norm, dp, keep,
-        ))];
-        for s in seeds {
-            let perm = crate::resample::permute_indices(n, &mut crate::rng::child_rng(*s));
-            let yp = Col::<f64>::from_fn(n, |i| y[perm[i]]);
-            z.push(mean_fisher_z(&split_half_correlations_reference(
-                x,
-                yp.as_ref(),
-                k,
-                splits,
-                w_norm,
-                dp,
-                keep,
-            )));
+    /// A CV fold or a split half whose training weights are all zero or all
+    /// equal trains unweighted, as `pls1_fit` does with all-equal weights.
+    #[test]
+    fn all_equal_training_weights_train_unweighted() {
+        // fold 0 holds rows 0..12; its training rows are 12..48.
+        let (x, _) = signal_data(48, 7, 61);
+        let folds = crate::linalg::fold_split(&(0..48).collect::<Vec<_>>(), 4);
+        for rest in [0.0, 3.0] {
+            let w = Col::<f64>::from_fn(48, |i| if i < 12 { 1.0 + i as f64 } else { rest });
+            let wn = normalize_weights(w.as_ref()).unwrap();
+            let fold = prepare_cv_fold(x.as_ref(), &folds, 0, Some(wn.as_ref())).unwrap();
+            assert!(
+                fold.w_tr.is_none() && fold.sqw_fit.is_none(),
+                "fold, rest = {rest}"
+            );
         }
-        z
+
+        // This split trains on zero-weight rows only; its test half is weighted.
+        let (x, _) = signal_data(40, 6, 81);
+        let w = Col::<f64>::from_fn(40, |i| if i < 5 { 1.0 + i as f64 } else { 0.0 });
+        let wn = normalize_weights(w.as_ref()).unwrap();
+        let split = SplitIdx {
+            tr: (5..25).collect(),
+            te: (0..5).chain(25..40).collect(),
+        };
+        let prep = prepare_split(x.as_ref(), &split, Some(wn.as_ref()));
+        assert!(prep.w_tr.is_none(), "training half: unweighted");
+        assert!(prep.w_te.is_some(), "test half keeps its weights");
     }
 
+    /// The X finiteness check sits in `prepare_split`, not in every per-half
+    /// fit; a split whose training half is not finite gives r = +0.
     #[test]
-    fn run_split_perm_matches_reference() {
-        with_new_routes_disabled(|| {
-            // The copy-free families plus the p ≫ n shape of the raw_perm
-            // test, each raw and pre-standardized, in every layout.
-            let (xw, yw) = crate::test_support::signal_data(30, 3000, 131);
-            let mut fams = copy_free_families();
-            fams.push(crate::test_support::Family {
-                name: "dual_wide",
-                x: xw,
-                y: yw,
-                w: None,
-            });
-            for f in &fams {
-                let w = norm_w(f.w.as_ref());
-                let wr = w.as_ref().map(Col::as_ref);
-                let (xs, _, _) = standardize(f.x.as_ref());
-                let (ys, _, _) = standardize1(f.y.as_ref());
-                for pre in [false, true] {
-                    let (x0, y0) = if pre { (&xs, &ys) } else { (&f.x, &f.y) };
-                    let lay = Layouts::new(x0.as_ref());
-                    for (view, xv) in lay.all(x0) {
-                        for (k, keep) in [(2, None), (2, Some(3)), (3, None), (1, Some(3))] {
-                            // Every case here refits: the selector must hand
-                            // it to `run_split_perm`.
-                            let route = split_exact_refit_route(
-                                xv.nrows(),
-                                xv.ncols(),
-                                9,
-                                k,
-                                keep,
-                                wr.is_some(),
-                            );
-                            assert_eq!(
-                                route,
-                                ReplicateRoute::Primal,
-                                "{} k={k} keep={keep:?}",
-                                f.name
-                            );
-                            for dp in [true, false] {
-                                let opts = ConfirmatoryTestOpts {
-                                    keep,
-                                    disable_parallelism: dp,
-                                    ..Default::default()
-                                };
-                                let (_, mut r1) = crate::rng::resolve_seed(Some(29)).unwrap();
-                                let (_, mut r2) = crate::rng::resolve_seed(Some(29)).unwrap();
-                                // Cloned before run_split_perm consumes r1, so
-                                // it starts from the same state and the draw
-                                // below (draw_splits then child_seeds, r1's
-                                // own sequence) reproduces exactly what
-                                // run_split_perm draws.
-                                let mut r3 = r1.clone();
-                                let a = run_split_perm(
-                                    route,
-                                    xv,
-                                    y0.as_ref(),
-                                    k,
-                                    9,
-                                    4,
-                                    wr,
-                                    &opts,
-                                    &mut r1,
-                                )
-                                .unwrap();
-                                let b = run_split_perm_reference(
-                                    xv,
-                                    y0.as_ref(),
-                                    k,
-                                    9,
-                                    4,
-                                    wr,
-                                    &opts,
-                                    &mut r2,
-                                )
-                                .unwrap();
-                                let what = format!(
-                                    "{} {view} pre={pre} k={k} keep={keep:?} dp={dp}",
-                                    f.name
-                                );
-                                assert_eq!(a.pvalue.to_bits(), b.pvalue.to_bits(), "{what}.pvalue");
-                                assert_stat_eq(a.statistic, b.statistic, &what);
-
-                                // Per column: split_zbars_columns(Primal, ..)
-                                // against the verbatim per-column reference
-                                // zbars_replicate_outer_reference, on the
-                                // same splits and seeds run_split_perm drew
-                                // (through -0.0-masked assert_stat_eq).
-                                let splits3 = draw_splits(xv.nrows(), k, 4, dp, &mut r3).unwrap();
-                                let seeds3 = crate::rng::child_seeds(&mut r3, 9);
-                                let cols3 = crate::resample::Columns {
-                                    y: y0.as_ref(),
-                                    seeds: &seeds3,
-                                };
-                                let zc = split_zbars_columns(
-                                    route,
-                                    xv,
-                                    &splits3,
-                                    wr,
-                                    k,
-                                    keep,
-                                    cols3.len(),
-                                    dp,
-                                    &|c| cols3.column(c),
-                                );
-                                let zref = zbars_replicate_outer_reference(
-                                    xv,
-                                    y0.as_ref(),
-                                    k,
-                                    &splits3,
-                                    &seeds3,
-                                    wr,
-                                    dp,
-                                    keep,
-                                );
-                                assert_eq!(zc.len(), zref.len(), "{what}: column count");
-                                for (c, (za, zb)) in zc.iter().zip(&zref).enumerate() {
-                                    assert_stat_eq(*za, *zb, &format!("{what} column {c}"));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
+    fn a_non_finite_training_half_gives_r_zero() {
+        let (mut x, y) = signal_data(40, 6, 83);
+        x[(3, 1)] = f64::INFINITY;
+        let sp = SplitIdx {
+            tr: (0..20).collect(),
+            te: (20..40).collect(),
+        };
+        assert!(!prepare_split(x.as_ref(), &sp, None).x_finite);
+        for k in [1_usize, 2] {
+            let r = split_half_r(x.as_ref(), y.as_ref(), k, &sp, None, None);
+            assert_eq!(r.to_bits(), 0.0_f64.to_bits(), "k={k}");
+        }
     }
 
+    /// Every confirmatory runner reads X through owned row gathers
+    /// (`prepare_split`, `prepare_cv_fold`, `standardize_rows`), a
+    /// standardized owned copy (`score`, the `split_nb` gate) or
+    /// `linalg::col_major_or_copy` (`score` with `pre_standardized`), so a
+    /// padded submatrix, a row-major view and a negative-column-stride view
+    /// give the owned matrix's whole output to the bit (decisions D1;
+    /// replaces the retired copy-free reference tests). Run on the default
+    /// route set and again primal-only. No CI: its reference fit is
+    /// `pls1_fit` on the input view, layout-invariant only to rounding
+    /// since 0.6.1.
     #[test]
-    fn split_exact_dispatch_matches_the_pre_change_dispatch() {
-        // The route is decided in `confirmatory_test_impl` before any draw
-        // from the parent rng: `Special` runs the no-refit route on the
-        // untouched rng, anything else the refit runner.
-        with_new_routes_disabled(|| {
-            let (x, y) = crate::test_support::signal_data(30, 3000, 131);
-            for w in [None, Some(crate::test_support::test_weights(30))] {
-                let wn = norm_w(w.as_ref());
-                let wnr = wn.as_ref().map(Col::as_ref);
-                for (k, keep) in [(1_usize, None), (1, Some(3)), (2, None)] {
-                    let special = k == 1 && keep.is_none();
-                    assert_eq!(
-                        split_exact_refit_route(30, 3000, 49, k, keep, w.is_some())
-                            == ReplicateRoute::Special,
-                        special
-                    );
-                    for dp in [true, false] {
-                        let a = pls1_confirmatory_test(
+    fn confirmatory_output_is_bit_identical_across_x_layouts() {
+        use crate::test_support::{assert_layout_invariant, copy_free_families};
+        // n_perm 49 puts the unweighted wide family's k = 1 raw_perm on the
+        // K = 1 Gram route.
+        assert_eq!(
+            raw_perm_route(30, 5, 400, 49, 1, None, false),
+            ReplicateRoute::Special
+        );
+        let raw_perm = ConfirmatoryArgs::RawPerm {
+            n_perm: 49,
+            n_folds: 5,
+        };
+        let split_exact = ConfirmatoryArgs::SplitExact {
+            n_perm: 9,
+            n_splits: 4,
+        };
+        let split_nb = ConfirmatoryArgs::SplitNb {
+            n_splits: 4,
+            force: true,
+        };
+        let four = [(1, None), (1, Some(3)), (2, None), (2, Some(3))];
+        let mut rows: Vec<(ConfirmatoryArgs, usize, Option<usize>)> = Vec::new();
+        for args in [raw_perm, split_nb, ConfirmatoryArgs::E] {
+            rows.extend(four.iter().map(|&(k, keep)| (args, k, keep)));
+        }
+        // A single null column: the reachable edge of leave-one-out folds.
+        let one_null = ConfirmatoryArgs::RawPerm {
+            n_perm: 1,
+            n_folds: 5,
+        };
+        rows.push((one_null, 1, None));
+        rows.extend(four.iter().map(|&(k, keep)| (split_exact, k, keep)));
+        rows.push((split_exact, 3, None));
+
+        let table = || {
+            for f in copy_free_families() {
+                let w = f.w.as_ref().map(Col::as_ref);
+                for &(args, k, keep) in &rows {
+                    let what = format!("{} {args:?} k={k} keep={keep:?}", f.name);
+                    assert_layout_invariant(&f.x, &what, |xv| {
+                        pls1_confirmatory_test(
                             ConfirmatoryTestInput::Raw {
-                                x: x.as_ref(),
-                                y: y.as_ref(),
+                                x: xv,
+                                y: f.y.as_ref(),
                                 k,
-                                weights: w.as_ref().map(Col::as_ref),
+                                weights: w,
                             },
                             ConfirmatoryTestOpts {
-                                args: ConfirmatoryArgs::SplitExact {
-                                    n_perm: 49,
-                                    n_splits: 4,
-                                },
-                                seed: Some(37),
+                                args,
+                                seed: Some(21),
                                 keep,
-                                disable_parallelism: dp,
                                 ..Default::default()
                             },
                         )
-                        .unwrap();
-                        // Pre-change dispatch: `k == 1 && keep.is_none()` picks
-                        // the no-refit runner, on the rng `resolve_seed` built.
-                        let opts = ConfirmatoryTestOpts {
-                            keep,
-                            disable_parallelism: dp,
-                            ..Default::default()
-                        };
-                        let (_, mut rng) = crate::rng::resolve_seed(Some(37)).unwrap();
-                        let b = if special {
-                            run_split_perm_nr(
-                                x.as_ref(),
-                                y.as_ref(),
-                                k,
-                                49,
-                                4,
-                                wnr,
-                                &opts,
-                                &mut rng,
-                            )
-                        } else {
-                            run_split_perm_reference(
-                                x.as_ref(),
-                                y.as_ref(),
-                                k,
-                                49,
-                                4,
-                                wnr,
-                                &opts,
-                                &mut rng,
-                            )
-                        }
-                        .unwrap();
-                        let what = format!("weighted={} k={k} keep={keep:?} dp={dp}", w.is_some());
-                        assert_eq!(a.pvalue.to_bits(), b.pvalue.to_bits(), "{what}.pvalue");
-                        assert_stat_eq(a.statistic, b.statistic, &what);
-                    }
+                        .unwrap()
+                    });
+                }
+                for pre in [false, true] {
+                    let (x0, y0) = f.inputs(pre);
+                    let what = format!("{} score pre={pre}", f.name);
+                    assert_layout_invariant(&x0, &what, |xv| {
+                        pls1_confirmatory_test(
+                            ConfirmatoryTestInput::Raw {
+                                x: xv,
+                                y: y0.as_ref(),
+                                k: 1,
+                                weights: w,
+                            },
+                            ConfirmatoryTestOpts {
+                                args: ConfirmatoryArgs::Score,
+                                pre_standardized: pre,
+                                seed: Some(21),
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap()
+                    });
                 }
             }
-        });
-    }
-
-    #[test]
-    fn a_half_whose_training_weights_are_all_zero_falls_back_to_uniform() {
-        with_new_routes_disabled(|| {
-            let (x, y) = crate::test_support::signal_data(40, 6, 81);
-            let w = Col::<f64>::from_fn(40, |i| if i < 5 { 1.0 + i as f64 } else { 0.0 });
-            let wn = normalize_weights(w.as_ref()).unwrap();
-            // Split 0 trains on zero-weight rows only; split 1 tests on them only.
-            let splits = vec![
-                SplitIdx {
-                    tr: (5..25).collect(),
-                    te: (0..5).chain(25..40).collect(),
-                },
-                SplitIdx {
-                    tr: (0..20).collect(),
-                    te: (20..40).collect(),
-                },
-            ];
-            let prep = prepare_split(x.as_ref(), &splits[0], Some(wn.as_ref()));
-            let w_tr = prep.w_tr.as_ref().expect("weighted");
-            assert!((0..w_tr.nrows()).all(|i| w_tr[i].to_bits() == 1.0_f64.to_bits()));
-            let (_, mut rng) = crate::rng::resolve_seed(Some(4)).unwrap();
-            let seeds = crate::rng::child_seeds(&mut rng, 7);
-            let cols = crate::resample::Columns {
-                y: y.as_ref(),
-                seeds: &seeds,
-            };
-            for k in [1_usize, 2] {
-                for keep in [None, Some(3)] {
-                    for dp in [true, false] {
-                        let a = split_zbars_columns(
-                            ReplicateRoute::Primal,
-                            x.as_ref(),
-                            &splits,
-                            Some(wn.as_ref()),
-                            k,
-                            keep,
-                            cols.len(),
-                            dp,
-                            &|c| cols.column(c),
-                        );
-                        let b = zbars_replicate_outer_reference(
-                            x.as_ref(),
-                            y.as_ref(),
-                            k,
-                            &splits,
-                            &seeds,
-                            Some(wn.as_ref()),
-                            dp,
-                            keep,
-                        );
-                        assert_eq!(a.len(), b.len());
-                        for (c, (za, zb)) in a.iter().zip(&b).enumerate() {
-                            assert_stat_eq(
-                                *za,
-                                *zb,
-                                &format!("k={k} keep={keep:?} dp={dp} column {c}"),
-                            );
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    #[test]
-    // No parallel axis: `split_half_r` is a per-unit body, called once per split.
-    fn a_non_finite_training_half_gives_r_zero_as_before() {
-        // The X check moved from every per-half fit into `prepare_split`;
-        // a split whose training half is not finite still gives r = 0.
-        with_new_routes_disabled(|| {
-            let (mut x, y) = crate::test_support::signal_data(40, 6, 83);
-            x[(3, 1)] = f64::INFINITY;
-            let sp = SplitIdx {
-                tr: (0..20).collect(),
-                te: (20..40).collect(),
-            };
-            assert!(!prepare_split(x.as_ref(), &sp, None).x_finite);
-            for k in [1_usize, 2] {
-                let a = split_half_r(x.as_ref(), y.as_ref(), k, &sp, None, None);
-                let b = split_half_r_reference(x.as_ref(), y.as_ref(), k, &sp, None, None);
-                assert_eq!(a.to_bits(), b.to_bits(), "k={k}");
-                assert_eq!(a.to_bits(), 0.0_f64.to_bits(), "k={k}");
-            }
-        });
-    }
-
-    #[test]
-    fn k_zero_split_exact_refit_still_reports_zero_and_p_one() {
-        with_new_routes_disabled(|| {
-            let fams = copy_free_families();
-            let f = &fams[0];
-            let route = split_exact_refit_route(f.x.nrows(), f.x.ncols(), 9, 0, None, false);
-            assert_eq!(
-                route,
-                ReplicateRoute::Primal,
-                "k = 0 is not the K = 1 shortcut"
-            );
-            for dp in [true, false] {
-                let opts = ConfirmatoryTestOpts {
-                    disable_parallelism: dp,
-                    ..Default::default()
-                };
-                let (_, mut r1) = crate::rng::resolve_seed(Some(2)).unwrap();
-                let (_, mut r2) = crate::rng::resolve_seed(Some(2)).unwrap();
-                let a = run_split_perm(
-                    route,
-                    f.x.as_ref(),
-                    f.y.as_ref(),
-                    0,
-                    9,
-                    4,
-                    None,
-                    &opts,
-                    &mut r1,
-                )
-                .unwrap();
-                let b = run_split_perm_reference(
-                    f.x.as_ref(),
-                    f.y.as_ref(),
-                    0,
-                    9,
-                    4,
-                    None,
-                    &opts,
-                    &mut r2,
-                )
-                .unwrap();
-                for r in [&a, &b] {
-                    assert!(r.statistic == 0.0, "every per-half fit fails, so r = 0");
-                    assert_eq!(r.pvalue.to_bits(), 1.0_f64.to_bits());
-                }
-            }
-        });
-    }
-
-    #[test]
-    // No parallel axis: pure arithmetic on two one-row splits.
-    fn a_zero_statistic_is_the_only_value_whose_sign_can_differ() {
-        // `mean_fisher_z` sums from -0.0 and `zbars_over_splits` from +0.0:
-        // an all -0.0 statistic flips sign, and nothing else moves.
-        let splits = vec![
-            SplitIdx {
-                tr: vec![0],
-                te: vec![1],
-            },
-            SplitIdx {
-                tr: vec![1],
-                te: vec![0],
-            },
-        ];
-        let z_of = |r: f64| r.clamp(-0.9999, 0.9999).atanh();
-        let zeros = Col::<f64>::from_fn(2, |_| -0.0);
-        assert_eq!(mean_fisher_z(&zeros).to_bits(), (-0.0_f64).to_bits());
-        let z = zbars_over_splits(&splits, 1, true, |_| vec![z_of(-0.0)]);
-        assert_eq!(z[0].to_bits(), 0.0_f64.to_bits());
-        for pair in [[0.3, -0.1], [-0.0, 0.2], [0.9999, -0.5]] {
-            let r = Col::<f64>::from_fn(2, |i| pair[i]);
-            let z = zbars_over_splits(&splits, 1, true, |sp| vec![z_of(r[sp.tr[0]])]);
-            assert_eq!(z[0].to_bits(), mean_fisher_z(&r).to_bits(), "{pair:?}");
-        }
+        };
+        table();
+        with_new_routes_disabled(table);
     }
 }
 
@@ -7805,12 +5436,13 @@ mod tests_gram_p {
                     let Some(fit) = gram.block.fit_replicate_full(ys_tr.as_ref(), k, keep) else {
                         continue;
                     };
-                    let xf = crate::fit::pls1_fit_prepared(
+                    let xf = crate::fit::pls1_fit_prepared_fro(
                         prep.xs_tr.as_ref(),
                         ys_tr.as_ref(),
                         k,
                         keep,
                         crate::fit::ParChoice::Seq,
+                        prep.x_fro,
                     )
                     .expect("X backend");
                     let s_g: Col<f64> = &prep.xs_te * &fit.coef;

@@ -1,0 +1,17 @@
+# Windows (Rtools, GNU toolchain). The Rust target must be installed:
+#   rustup target add x86_64-pc-windows-gnu
+# The system libraries are the ones a Rust staticlib needs on Windows.
+TARGET = x86_64-pc-windows-gnu
+LIBDIR = ./rust/target/$(TARGET)/release
+STATLIB = $(LIBDIR)/libplskit_r.a
+PKG_LIBS = -L$(LIBDIR) -lplskit_r -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll
+
+.PHONY: $(STATLIB)
+
+$(SHLIB): $(STATLIB)
+
+$(STATLIB):
+	"$(R_HOME)/bin$(R_ARCH_BIN)/Rscript.exe" ../tools/cargo-build.R --target=$(TARGET)
+
+clean:
+	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) ./rust/target

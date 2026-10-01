@@ -1,17 +1,15 @@
-TARGET_DIR = ./rust/target
-LIBDIR = $(TARGET_DIR)/release
+# The Rust static library is built by tools/cargo-build.R, which also
+# handles the PLSKIT_CARGO_CONFIG dev mode (in-repo crates via [patch]).
+LIBDIR = ./rust/target/release
 STATLIB = $(LIBDIR)/libplskit_r.a
 PKG_LIBS = -L$(LIBDIR) -lplskit_r
 
-all: C_clean
+.PHONY: $(STATLIB)
 
 $(SHLIB): $(STATLIB)
 
 $(STATLIB):
-	cd rust && cargo build --release --offline 2>/dev/null || cd rust && cargo build --release
-
-C_clean:
-	rm -Rf $(SHLIB) $(OBJECTS)
+	"$(R_HOME)/bin/Rscript" ../tools/cargo-build.R
 
 clean:
-	rm -Rf $(SHLIB) $(OBJECTS) $(TARGET_DIR)
+	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) ./rust/target

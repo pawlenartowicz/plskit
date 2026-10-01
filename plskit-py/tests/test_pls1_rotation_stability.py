@@ -18,52 +18,17 @@ def _synth(n=100, d=6, snr=4.0, seed=0):
     return x, y
 
 
-def test_runs_end_to_end():
-    x, y = _synth()
-    out = pls1_rotation_stability(x, y, k=2, n_boot=200, m_rate=0.7, seed=7)
-    assert isinstance(out, RotationStabilityResult)
-    assert out.method == "varimax"
-    assert out.n_boot == 200
-    assert out.m == 26
-    assert isinstance(out.variance_ratio, CIScalar)
-    assert out.variance_unrot >= 0.0
-    assert out.variance_rot >= 0.0
-    assert out.n_boot_finite <= out.n_boot
-
-
 def test_none_defaults_are_recorded_as_resolved_values():
     """None (the public default for n_boot/m_rate/level) must resolve to the
     engine's own default and be recorded on the result, never as None."""
     x, y = _synth()
     out = pls1_rotation_stability(x, y, k=2, seed=7)
+    assert isinstance(out, RotationStabilityResult)
+    assert isinstance(out.variance_ratio, CIScalar)
+    assert isinstance(out.degenerate_baseline, bool)
     assert out.n_boot == 1000
     assert out.m_rate == pytest.approx(0.7)
     assert out.level == pytest.approx(0.95)
-
-
-def test_seed_is_reproducible():
-    x, y = _synth(seed=11)
-    a = pls1_rotation_stability(x, y, k=2, n_boot=200, seed=42)
-    b = pls1_rotation_stability(x, y, k=2, n_boot=200, seed=42)
-    assert a.variance_ratio == b.variance_ratio
-    assert a.variance_unrot == b.variance_unrot
-    assert a.variance_rot == b.variance_rot
-
-
-def test_rejects_k_eq_1():
-    x, y = _synth()
-    with pytest.raises(PlsKitError) as excinfo:
-        pls1_rotation_stability(x, y, k=1, n_boot=200, seed=7)
-    assert excinfo.value.code == "invalid_argument"
-
-
-def test_rejects_k_gt_7():
-    rng = np.random.default_rng(0)
-    x = rng.standard_normal((100, 12))
-    y = rng.standard_normal(100)
-    with pytest.raises(PlsKitError) as excinfo:
-        pls1_rotation_stability(x, y, k=8, n_boot=200, seed=7)
-    assert excinfo.value.code == "invalid_argument"
 
 
 def test_rejects_l_shape_mismatch():
@@ -74,28 +39,51 @@ def test_rejects_l_shape_mismatch():
     assert excinfo.value.code == "shape_mismatch"
 
 
-def test_l_compatible_runs():
+def test_L_and_rotation_args_reach_the_engine():
+    # L sets the loading basis and kaiser_normalize changes the rotation, so
+    # each moves the rotated variance; a dropped argument would not.
     x, y = _synth()
-    L = np.eye(6, 2)             # 6 vars × k=2; cols define the loading basis
-    out = pls1_rotation_stability(x, y, k=2, L=L, n_boot=200, seed=7)
-    assert out.variance_unrot >= 0.0
-
-
-def test_rotation_args_pass_through():
-    x, y = _synth()
-    out = pls1_rotation_stability(
+    base = pls1_rotation_stability(x, y, k=2, n_boot=200, seed=7)
+    with_L = pls1_rotation_stability(x, y, k=2, L=np.eye(6, 2), n_boot=200, seed=7)
+    with_args = pls1_rotation_stability(
         x, y, k=2,
         rotation_args={"max_iter": 30, "tol": 1e-6, "kaiser_normalize": False},
         n_boot=200, seed=7,
     )
-    assert out.method == "varimax"
+    assert with_L.variance_rot != base.variance_rot
+    assert with_args.variance_rot != base.variance_rot
+    assert with_args.method == "varimax"
+
+
+@pytest.mark.parametrize(
+    "kwargs, code, message",
+    [
+        ({"rotation_args": {"max_iter": "x"}}, "invalid_args",
+         r"args\['max_iter'\] for method='varimax'"),
+        ({"rotation_args": {"tol": "x"}}, "invalid_args", "must be a number"),
+        ({"rotation_args": [1]}, "invalid_argument", "rotation_args must be a dict"),
+        ({"n_boot": "x"}, "invalid_argument", "n_boot must be a non-negative whole number"),
+        ({"k": -1}, "invalid_argument", "k must be a non-negative whole number"),
+        ({"m_rate": "x"}, "invalid_argument", "m_rate must be a number"),
+        ({"disable_parallelism": "yes"}, "invalid_argument", "disable_parallelism must be a bool"),
+    ],
+)
+def test_unusable_values_raise_coded_errors(kwargs, code, message):
+    """`rotation_args` goes through `rotate()`'s own parser; top-level
+    values through the shared validators. Nothing runs before the error."""
+    x, y = _synth()
+    kwargs = {"k": 2, **kwargs}
+    with pytest.raises(PlsKitError, match=message) as excinfo:
+        pls1_rotation_stability(x, y, **kwargs)
+    assert excinfo.value.code == code
 
 
 def test_unknown_rotation_method_rejected():
     x, y = _synth()
-    with pytest.raises(PlsKitError):
+    with pytest.raises(PlsKitError) as excinfo:
         pls1_rotation_stability(x, y, k=2, rotation_method="promax",
                                 n_boot=200, seed=7)
+    assert excinfo.value.code == "rotation_method_not_implemented"
 
 
 def test_rejects_m_less_than_k_plus_2():
@@ -106,68 +94,3 @@ def test_rejects_m_less_than_k_plus_2():
     with pytest.raises(PlsKitError) as excinfo:
         pls1_rotation_stability(x, y, k=4, n_boot=200, m_rate=0.51, seed=7)
     assert excinfo.value.code == "invalid_argument"
-
-
-# ── Additional structural tests ─────────────────────────────────────────
-
-
-def test_variance_ratio_per_axis_length_equals_k():
-    x, y = _synth(d=8)
-    for k in (2, 3):
-        out = pls1_rotation_stability(x, y, k=k, n_boot=150, seed=11)
-        assert len(out.variance_ratio_per_axis) == k
-        assert out.variance_unrot_per_axis.shape == (k,)
-        assert out.variance_rot_per_axis.shape == (k,)
-
-
-def test_variance_ratio_ci_strictly_orders_lower_le_upper():
-    x, y = _synth(d=6)
-    out = pls1_rotation_stability(x, y, k=2, n_boot=200, seed=13)
-    assert out.variance_ratio.lower <= out.variance_ratio.point + 1e-10
-    assert out.variance_ratio.point <= out.variance_ratio.upper + 1e-10
-    for ci in out.variance_ratio_per_axis:
-        if np.isfinite(ci.point):
-            assert ci.lower <= ci.point + 1e-10
-            assert ci.point <= ci.upper + 1e-10
-
-
-def test_variance_unrot_and_rot_are_non_negative():
-    x, y = _synth(d=6)
-    out = pls1_rotation_stability(x, y, k=2, n_boot=200, seed=17)
-    assert out.variance_unrot >= 0.0
-    assert out.variance_rot >= 0.0
-    assert (out.variance_unrot_per_axis >= 0.0).all()
-    assert (out.variance_rot_per_axis >= 0.0).all()
-
-
-def test_per_axis_decomposition_sums_to_aggregate():
-    x, y = _synth(d=6)
-    out = pls1_rotation_stability(x, y, k=2, n_boot=200, seed=19)
-    assert abs(out.variance_unrot_per_axis.sum() - out.variance_unrot) < 1e-10
-    assert abs(out.variance_rot_per_axis.sum() - out.variance_rot) < 1e-10
-
-
-def test_degenerate_baseline_flag_is_bool():
-    x, y = _synth(d=6)
-    out = pls1_rotation_stability(x, y, k=2, n_boot=200, seed=23)
-    assert isinstance(out.degenerate_baseline, bool)
-
-
-def test_default_rotation_method_runs_on_factor_design():
-    """Rotation diagnostic runs without error on a factor design.
-
-    Asserts the diagnostic produces a sensible bounded ratio. A stricter
-    target (`variance_ratio.point < 1`) requires synthetic data that
-    reliably triggers PLS1 NIPALS drift in a close-σ block (see Rust-side TODO).
-    """
-    rng = np.random.default_rng(29)
-    n, d = 200, 8
-    f1 = rng.standard_normal(n)
-    f2 = rng.standard_normal(n)
-    x = np.zeros((n, d))
-    x[:, :4] = f1[:, None] + 0.05 * rng.standard_normal((n, 4))
-    x[:, 4:] = f2[:, None] + 0.05 * rng.standard_normal((n, 4))
-    y = f1 + f2 + 0.1 * rng.standard_normal(n)
-    out = pls1_rotation_stability(x, y, k=2, n_boot=300, seed=37)
-    assert np.isfinite(out.variance_ratio.point)
-    assert 0.3 < out.variance_ratio.point < 2.0

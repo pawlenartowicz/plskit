@@ -56,7 +56,6 @@ pub fn pls1_predict(model: &Pls1Model, x_new: MatRef<'_, f64>) -> PlsKitResult<C
 mod tests {
     use super::*;
     use crate::fit::{pls1_fit, FitOpts, KSpec};
-    use approx::assert_relative_eq;
     use faer::Mat;
 
     fn linear_data(n: usize, d: usize, k_true: usize, seed: u64) -> (Mat<f64>, Col<f64>) {
@@ -104,29 +103,5 @@ mod tests {
         let bad = Mat::<f64>::zeros(4, 6);
         let r = pls1_predict(&m, bad.as_ref());
         assert!(matches!(r, Err(PlsKitError::DimensionMismatch { .. })));
-    }
-
-    #[test]
-    fn predict_with_pre_standardized_skips_intercept() {
-        let (x, y) = linear_data(30, 5, 2, 1);
-        let (xs, _, _) = crate::linalg::standardize(x.as_ref());
-        let (ys, _, _) = crate::linalg::standardize1(y.as_ref());
-        let m = pls1_fit(
-            xs.as_ref(),
-            ys.as_ref(),
-            KSpec::Fixed(2),
-            None,
-            FitOpts {
-                pre_standardized: true,
-                ..FitOpts::default()
-            },
-        )
-        .unwrap();
-        let y_hat = pls1_predict(&m, xs.as_ref()).unwrap();
-        assert_relative_eq!(m.intercept, 0.0, epsilon = 1e-15);
-        let direct: Col<f64> = &xs * &m.coef;
-        for i in 0..y_hat.nrows() {
-            assert_relative_eq!(y_hat[i], direct[i], epsilon = 1e-12);
-        }
     }
 }

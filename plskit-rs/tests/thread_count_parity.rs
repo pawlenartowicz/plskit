@@ -250,6 +250,24 @@ fn pls1_fit_auto_is_pool_size_invariant() {
         )
         .unwrap()
     });
+    // Pool: a row-major view at least 2048 columns wide forms `Xs'·t` with
+    // plskit's own row split (a fixed number of row pieces, summed in piece
+    // order), not faer's GEMV, so it is pinned here on its own. At k = 3,
+    // n·d·k = 3.0e6 clears the 1e6 Rayon threshold threefold, so a retuned
+    // threshold keeps this case on the row split. The transpose of a stored
+    // transpose is a row-major view.
+    let (x_wide, y_wide) = synth(203, 5000, 1.0, 5);
+    let x_wide_t = x_wide.transpose().to_owned();
+    c.check("pls1_fit row-major view 203x5000 k=3", || {
+        pls1_fit(
+            x_wide_t.transpose(),
+            y_wide.as_ref(),
+            KSpec::Fixed(3),
+            None,
+            FitOpts::default(),
+        )
+        .unwrap()
+    });
 
     let (x, y) = synth(2000, 600, 1.0, 4);
     let w = row_weights(2000);
@@ -302,6 +320,33 @@ fn pls3_fits_auto_are_pool_size_invariant() {
         )
         .unwrap()
     });
+    // The Python seam hands both fits a C-ordered `X` as a row-major view,
+    // standardized or `pre_standardized_x` (copied column-major by the
+    // fit): each must be pool-invariant in that layout too.
+    let row_major = |x: &Mat<f64>| -> Vec<f64> {
+        (0..x.nrows())
+            .flat_map(|i| (0..x.ncols()).map(move |j| (i, j)))
+            .map(|(i, j)| x[(i, j)])
+            .collect()
+    };
+    let dense_buf = row_major(&x);
+    let dense_view = MatRef::from_row_major_slice(&dense_buf, x.nrows(), x.ncols());
+    let sparse_buf = row_major(&xs);
+    let sparse_view = MatRef::from_row_major_slice(&sparse_buf, xs.nrows(), xs.ncols());
+    for pre in [false, true] {
+        let opts = Pls3FitOpts {
+            pre_standardized_x: pre,
+            ..Pls3FitOpts::default()
+        };
+        c.check(
+            &format!("pls3_fit row-major 200x2000x6 k=3 pre={pre}"),
+            || pls3_fit(dense_view, y.as_ref(), 3, None, opts).unwrap(),
+        );
+        c.check(
+            &format!("spls3_fit row-major 100x20000x4 k=2 keep=500,2 pre={pre}"),
+            || spls3_fit(sparse_view, ys.as_ref(), 2, 500, 2, None, opts).unwrap(),
+        );
+    }
     c.finish();
 }
 
@@ -375,6 +420,32 @@ fn split_exact_primal_is_pool_size_invariant() {
             Some(CI),
             26,
         )
+    });
+    c.finish();
+}
+
+#[test]
+fn split_exact_nspace_is_pool_size_invariant() {
+    let mut c = Checker::default();
+    // Guard only: the n-space refit route (dense k = 2, 40x2000; the shape
+    // and `n_perm` are pinned in
+    // `fixture_route_pins::byte_parity_shapes_take_their_routes`). Its 58
+    // outcome columns run as three full runs of `dual_route::NSPACE_BATCH`
+    // (16) and a partial one of 10.
+    let (x, y) = synth(40, 2000, 1.0, 31);
+    let split_exact = ConfirmatoryArgs::SplitExact {
+        n_perm: 57,
+        n_splits: 10,
+    };
+    c.check("split_exact n-space 40x2000 k=2", || {
+        confirmatory(&x, &y, 2, None, split_exact, None, 32)
+    });
+    // Same route on a rank-1 X: k = 2 exceeds the rank, so every column
+    // leaves the kernel unresolved and runs the primal fallback map.
+    let (left, right) = (synth(40, 2, 0.0, 33).0, synth(2000, 2, 0.0, 34).0);
+    let x1 = Mat::<f64>::from_fn(40, 2000, |i, j| left[(i, 0)] * right[(j, 0)]);
+    c.check("split_exact n-space rank-1 40x2000 k=2", || {
+        confirmatory(&x1, &y, 2, None, split_exact, None, 35)
     });
     c.finish();
 }
@@ -465,6 +536,26 @@ fn perm_null_is_pool_size_invariant() {
     let (x, y) = synth(40, 4000, 1.0, 10);
     c.check("perm_null 40x4000 k=3", || {
         pls1_perm_null(x.as_ref(), y.as_ref(), 3, None, perm_opts(), Some(16)).unwrap()
+    });
+    // Guard only (pool sensitivity not measured before a fix): the public
+    // calls on the n-space and the p-space Gram routes (shapes pinned in
+    // `fixture_route_pins::byte_parity_shapes_take_their_routes`). Their
+    // block builds are pinned kernel-level by
+    // `dual_route::multi_k::tests::gram_products_are_thread_count_invariant_at_the_route_shapes`
+    // and `gram_p::tests_block::c_build_is_thread_count_invariant_at_the_route_shapes`.
+    let (x, y) = synth(40, 2000, 1.0, 12);
+    c.check("perm_null n-space 40x2000 k=2", || {
+        pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, perm_opts(), Some(17)).unwrap()
+    });
+    // `n_perm = 300`: at `perm_opts()`'s 100 this shape is under the p-space
+    // work floor and runs the primal route.
+    let (x, y) = synth(2000, 50, 0.3, 13);
+    c.check("perm_null gram-p 2000x50 k=2", || {
+        let opts = PermNullOpts {
+            n_perm: 300,
+            ..perm_opts()
+        };
+        pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts, Some(18)).unwrap()
     });
     c.finish();
 }

@@ -9,20 +9,21 @@
 //!   (Σw = n) and row duplication (Σ1 = total) give bit-equal weighted moments,
 //!   so β matches. (The permutation SD/z are resampling-dependent and NOT
 //!   asserted here.)
-//! - `pls1_find_k_optimal` with `Selector::Bic` → PARITY on k_star only.
-//!   `select_bic` draws no RNG, but its bic_scores use `n_eff` directly
-//!   (`n_eff·log(SSR/n_eff) + k·log(n_eff)`): mean-1 weights carry n_eff = n,
-//!   row duplication carries n_eff = total, so the *scores* legitimately differ
-//!   by the sample-size inflation. The selected k_star (argmin) is what the
-//!   entry point returns and is replication-stable — that is the parity claim.
+//! - `pls1_find_k_optimal` with `Selector::Bic` → PARITY on k_star and on the
+//!   SSR behind every bic score. `select_bic` draws no RNG, but its bic_scores
+//!   use `n_eff` directly (`n_eff·log(SSR/n_eff) + k·log(n_eff)`) and the SSR
+//!   is formed with mean-1 weights, so the *scores* legitimately differ from
+//!   row duplication's. Inverting the formula recovers each SSR, and
+//!   SSR_weighted · (total / n) = SSR_dup is replication-invariant.
 //! - cross-entry-point consistency → weighted `pls1_perm_null(..).beta_ref`
 //!   equals weighted `pls1_fit(..).coef` (standardized scale). Pins the
 //!   convention unification (perm_null standardizes with weighted moments then
 //!   fits pre_standardized; pls1_fit standardizes internally — same coef).
 //!
 //! Methods deliberately NOT given a parity test here (split_nb/split_exact/score
-//! are FPR-calibrated in `calibration_mc.rs`; raw_perm, e, and the find_k
-//! selectors get weighted end-to-end tests below):
+//! are FPR-calibrated in `calibration_mc.rs`; the CV selector gets a weighted
+//! end-to-end test below; weighted raw_perm / e numbers are pinned by the
+//! corpus):
 //! - `score` → its statistic `T = ‖X̃'ỹ‖²` and the χ² p-value scale with the
 //!   *total* weight: row duplication inflates n_eff from n to total, so weighted
 //!   and duplicated p-values genuinely differ (more rows ⇒ more power). The test
@@ -39,8 +40,7 @@
 
 use faer::{Col, ColRef, Mat, MatRef};
 use plskit::{
-    pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_null,
-    ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
+    pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_null, ConfirmatoryMethod,
     FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, PermNullOpts, Selector,
 };
 
@@ -122,12 +122,11 @@ fn perm_null_beta_ref_integer_weights_match_row_duplication() {
 
 #[test]
 fn find_k_optimal_bic_integer_weights_match_row_duplication() {
-    // PARITY on k_star only. select_bic draws no RNG, but its bic_scores use
-    // n_eff directly: weighted carries n_eff = n, row duplication carries
-    // n_eff = total, so the scores differ by the sample-size inflation. The
-    // argmin k_star is the entry point's output and is replication-stable; that
-    // is the parity claim. The per-feature β the fit is selecting over is
-    // scale-free (cf. perm_null beta_ref above), so the same k wins.
+    // PARITY on k_star and on the SSR behind each score. select_bic draws no
+    // RNG, but its bic_scores use n_eff directly (Kish n_eff weighted, total
+    // for row duplication), so the scores themselves differ by the sample-size
+    // inflation. The per-feature β the fit is selecting over is scale-free
+    // (cf. perm_null beta_ref above), so the same k wins.
     let (x, y) = synth(40, 5, 3.0, 3);
     let w_int = integer_weights(40);
     let w = Col::<f64>::from_fn(40, |i| f64::from(w_int[i]));
@@ -149,6 +148,28 @@ fn find_k_optimal_bic_integer_weights_match_row_duplication() {
         "BIC k_star differs: weighted={} dup={}",
         weighted.k_star, dup.k_star
     );
+
+    // SSR recovered from each score (inverse of bic = n_eff·ln(SSR/n_eff) +
+    // k·ln(n_eff)). select_bic sums w·r² with mean-1 weights, i.e.
+    // (n / total)·Σ w_int·r², which is (n / total)·SSR_dup when the weighted
+    // and duplicated fits agree. Ignoring the weights breaks it.
+    let ssr =
+        |bic: f64, k: usize, n_eff: f64| n_eff * ((bic - k as f64 * n_eff.ln()) / n_eff).exp();
+    let total = f64::from(w_int.iter().sum::<u32>());
+    let (bw, bd) = (
+        weighted.bic_scores.as_ref().expect("bic scores"),
+        dup.bic_scores.as_ref().expect("bic scores"),
+    );
+    assert!(!bw.is_empty());
+    assert_eq!(bw.keys().collect::<Vec<_>>(), bd.keys().collect::<Vec<_>>());
+    for (&k, &b) in bw {
+        let got = ssr(b, k, weighted.n_eff) * (total / 40.0);
+        let want = ssr(bd[&k], k, dup.n_eff);
+        assert!(
+            (got - want).abs() <= 1e-9 * want.abs(),
+            "k={k}: weighted SSR·total/n={got} dup SSR={want}"
+        );
+    }
 }
 
 #[test]
@@ -214,87 +235,6 @@ fn perm_null_beta_ref_matches_weighted_fit_coef() {
 /// Strongly non-uniform weights, mean ≈ 1, every weight positive.
 fn nonuniform_weights(n: usize) -> Col<f64> {
     Col::<f64>::from_fn(n, |i| 0.5 + (i as f64).cos().abs())
-}
-
-#[test]
-fn raw_perm_weighted_runs_end_to_end() {
-    // raw_perm: CV folds + permuted-y nulls are RNG-drawn ⇒ resampling, not
-    // parity. Pin that the weighted path produces a bounded p and a reduced
-    // n_eff. The weighted raw_perm path is exercised through the public API.
-    let (x, y) = synth(40, 5, 3.0, 5);
-    let w = nonuniform_weights(40);
-    let r = pls1_confirmatory_test(
-        ConfirmatoryTestInput::Raw {
-            x: x.as_ref(),
-            y: y.as_ref(),
-            k: 2,
-            weights: Some(w.as_ref()),
-        },
-        ConfirmatoryTestOpts {
-            args: ConfirmatoryArgs::RawPerm {
-                n_perm: 100,
-                n_folds: 5,
-            },
-            seed: Some(7),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(r.method, "raw_perm");
-    assert!((0.0..=1.0).contains(&r.pvalue));
-    assert!(r.n_eff > 1.0 && r.n_eff < 40.0, "n_eff={}", r.n_eff);
-}
-
-#[test]
-fn e_weighted_runs_end_to_end() {
-    // e: single random train/test split ⇒ resampling, not parity. e-method H0
-    // calibration is covered by calibration_mc.rs; here we pin the
-    // weighted path returns a bounded p with reduced n_eff.
-    let (x, y) = synth(60, 5, 3.0, 6);
-    let w = nonuniform_weights(60);
-    let r = pls1_confirmatory_test(
-        ConfirmatoryTestInput::Raw {
-            x: x.as_ref(),
-            y: y.as_ref(),
-            k: 2,
-            weights: Some(w.as_ref()),
-        },
-        ConfirmatoryTestOpts {
-            args: ConfirmatoryArgs::E,
-            seed: Some(5),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(r.method, "e");
-    assert!((0.0..=1.0).contains(&r.pvalue));
-    assert!(r.n_eff > 1.0 && r.n_eff < 60.0, "n_eff={}", r.n_eff);
-}
-
-#[test]
-fn find_k_sequence_weighted_runs_end_to_end() {
-    // find_k_sequence drives the per-step split_nb test (RNG-drawn splits) ⇒
-    // resampling. Pin that the weighted path returns a full pvalue vector and a
-    // reduced n_eff.
-    let (x, y) = synth(60, 5, 4.0, 7);
-    let w = nonuniform_weights(60);
-    let r = pls1_find_k_sequence(
-        x.as_ref(),
-        y.as_ref(),
-        3,
-        Some(w.as_ref()),
-        FindKSequenceOpts {
-            test_method: ConfirmatoryMethod::SplitNb,
-            n_splits: 30,
-            alpha: 0.05,
-            seed: Some(13),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(r.pvalues.nrows(), 3);
-    assert_eq!(r.test_method, "split_nb");
-    assert!(r.n_eff > 1.0 && r.n_eff < 60.0, "n_eff={}", r.n_eff);
 }
 
 #[test]

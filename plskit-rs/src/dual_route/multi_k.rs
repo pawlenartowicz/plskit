@@ -29,9 +29,7 @@ use super::{use_dual_route, ABS_BAND, RESOLVE_BAND, SCORE_BAND};
 use crate::error::PlsKitResult;
 use crate::fit::{w_rel_floor, NIPALS_ABS_FLOOR};
 use crate::linalg::{scaled_moments, standardize1};
-use crate::signal_test::{
-    cv_fold_contribution, pearson_scaled, split_column_r, CvFold, PreparedSplit, SplitIdx,
-};
+use crate::signal_test::{cv_fold_contribution, pearson_scaled, CvFold, PreparedSplit, SplitIdx};
 
 /// Largest component count the n-space route serves. Set by the
 /// feasibility spike `scripts/gate_feasibility.py`: the largest `k ≤ 10`
@@ -258,6 +256,12 @@ impl NspaceGram {
             g2,
             p: xs.ncols(),
         }
+    }
+
+    /// `‖xs‖_F`: `xs.norm_l2()`, the norm the primal kernel takes of the
+    /// same block, so a fallback to it reads the same bits.
+    pub(crate) fn x_fro(&self) -> f64 {
+        self.x_fro
     }
 
     /// The kernel's read-only view.
@@ -504,7 +508,27 @@ pub(crate) fn pls1_nspace_kernel(
     z: ColRef<'_, f64>,
     k: usize,
 ) -> NspaceOutcome {
-    nspace_kernel(block, z, k, None)
+    one_outcome(nspace_kernel_cols(block, z.as_mat(), k, None))
+}
+
+/// [`pls1_nspace_kernel`] on every column of `zs` (`n_tr × m`), with the
+/// `m` products of each component taken as one `G·R` product: element `j`
+/// is column `j`'s outcome. A column's bits can differ from the
+/// single-column call's in the last places (the product's summation order),
+/// within the same rounding bounds; for thread-count invariance a caller
+/// fixes the column sets it passes independently of the pool (see
+/// [`NSPACE_BATCH`]).
+pub(crate) fn pls1_nspace_kernel_cols(
+    block: &NspaceBlock<'_>,
+    zs: MatRef<'_, f64>,
+    k: usize,
+) -> Vec<NspaceOutcome> {
+    nspace_kernel_cols(block, zs, k, None)
+}
+
+fn one_outcome(mut v: Vec<NspaceOutcome>) -> NspaceOutcome {
+    debug_assert_eq!(v.len(), 1);
+    v.pop().unwrap_or(NspaceOutcome::Unresolved)
 }
 
 /// [`pls1_nspace_kernel`] with its per-component bounds recorded.
@@ -515,134 +539,207 @@ pub(crate) fn pls1_nspace_kernel_traced(
     k: usize,
 ) -> (NspaceOutcome, Vec<ComponentTrace>) {
     let mut trace = Vec::with_capacity(k);
-    let out = nspace_kernel(block, z, k, Some(&mut trace));
+    let out = one_outcome(nspace_kernel_cols(block, z.as_mat(), k, Some(&mut trace)));
     (out, trace)
 }
 
+/// Per-column state of [`nspace_kernel_cols`] between components.
+struct KernelColumn {
+    /// `y_a`, deflated after each component.
+    y: Col<f64>,
+    ts: Vec<Col<f64>>,
+    vs: Vec<Col<f64>>,
+    u_mat: Mat<f64>,
+    g_mat: Mat<f64>,
+    q: Col<f64>,
+    zz: f64,
+    w_floor: f64,
+    /// `Σ_{i<a} ρ_i`, the history term's weight.
+    rho_sum: f64,
+    /// `None` while the column is live; its outcome once decided.
+    done: Option<NspaceOutcome>,
+}
+
+/// [`pls1_nspace_kernel`] on the `m` columns of `zs` at once: the same
+/// per-column arithmetic, with the `m` products `h_a = G r_a` of one
+/// component taken as a single `G·R` product (`Par::Seq`). Element `j` of
+/// the result is the outcome for column `j`. The per-column steps (the
+/// gates, projections, deflation, `P'W` and its solve) are the single
+/// column kernel's, call for call; only the `G·R` product changes, and a
+/// column of it can differ from the `m = 1` product in the last bits,
+/// which the gates' rounding bounds cover (each entry is still one
+/// length-`n_tr` dot product). At `m = 1` it is the single-column kernel.
+/// A column that leaves early (a gate, `ZeroModel`) keeps a zero column in
+/// `R`, which changes no other column. `trace` records column 0's
+/// components and needs `m = 1`.
 #[allow(
     clippy::many_single_char_names,
     clippy::similar_names,
     clippy::too_many_lines
 )]
-fn nspace_kernel(
+fn nspace_kernel_cols(
     block: &NspaceBlock<'_>,
-    z: ColRef<'_, f64>,
+    zs: MatRef<'_, f64>,
     k: usize,
     mut trace: Option<&mut Vec<ComponentTrace>>,
-) -> NspaceOutcome {
+) -> Vec<NspaceOutcome> {
+    debug_assert!(trace.is_none() || zs.ncols() == 1);
     let n = block.g.nrows();
-    if z.nrows() != n || block.g.ncols() != n {
-        return NspaceOutcome::Unresolved;
+    let m = zs.ncols();
+    if zs.nrows() != n || block.g.ncols() != n {
+        return (0..m).map(|_| NspaceOutcome::Unresolved).collect();
     }
-    // `z` exactly zero: `X̃'z` is an exact zero on the primal route too.
-    if (0..n).all(|i| z[i] == 0.0) {
-        return NspaceOutcome::ZeroModel;
-    }
-    if !(1..n).contains(&k) {
-        return NspaceOutcome::Unresolved;
-    }
-    let z_norm = z.norm_l2();
-    let zz = z_norm * z_norm;
-    let w_floor = w_rel_floor(n, block.p, block.x_fro, z_norm);
-
-    let mut y: Col<f64> = z.to_owned();
-    let mut ts: Vec<Col<f64>> = Vec::with_capacity(k);
-    let mut vs: Vec<Col<f64>> = Vec::with_capacity(k);
-    let mut u_mat = Mat::<f64>::zeros(n, k);
-    let mut g_mat = Mat::<f64>::zeros(n, k);
-    let mut q = Col::<f64>::zeros(k);
-    let mut h = Col::<f64>::zeros(n);
-    // Σ_{i<a} ρ_i, the history term's weight (see the doc comment).
-    let mut rho_sum = 0.0_f64;
+    let mut cols: Vec<KernelColumn> = (0..m)
+        .map(|j| {
+            let z = zs.col(j);
+            // `z` exactly zero: `X̃'z` is an exact zero on the primal route too.
+            let done = if (0..n).all(|i| z[i] == 0.0) {
+                Some(NspaceOutcome::ZeroModel)
+            } else if (1..n).contains(&k) {
+                None
+            } else {
+                Some(NspaceOutcome::Unresolved)
+            };
+            let (zz, w_floor) = if done.is_none() {
+                let z_norm = z.norm_l2();
+                (
+                    z_norm * z_norm,
+                    w_rel_floor(n, block.p, block.x_fro, z_norm),
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            KernelColumn {
+                y: z.to_owned(),
+                ts: Vec::with_capacity(k),
+                vs: Vec::with_capacity(k),
+                u_mat: Mat::<f64>::zeros(n, if done.is_none() { k } else { 0 }),
+                g_mat: Mat::<f64>::zeros(n, if done.is_none() { k } else { 0 }),
+                q: Col::<f64>::zeros(k),
+                zz,
+                w_floor,
+                rho_sum: 0.0,
+                done,
+            }
+        })
+        .collect();
+    let mut r_mat = Mat::<f64>::zeros(n, m);
+    let mut h_mat = Mat::<f64>::zeros(n, m);
 
     for a in 0..k {
-        let (base_w, base_t) = nspace_base_bounds(a + 1, n, block.p, block.x_fro);
-        let wn_err = base_w + HISTORY_COEF * rho_sum * block.g2;
-        let tt_err = base_t + HISTORY_COEF * rho_sum * block.g2 * block.g2;
-
-        // r_a = D_a' y_a = P_1 ⋯ P_{a−1} y_a: P_{a−1} first.
-        let mut r = y.clone();
-        for (t_i, v_i) in ts.iter().zip(&vs).rev() {
-            project_off_score(&mut r, t_i, v_i);
+        if cols.iter().all(|c| c.done.is_some()) {
+            break;
         }
-        // h_a = G r_a
+        let (base_w, base_t) = nspace_base_bounds(a + 1, n, block.p, block.x_fro);
+        // r_a = D_a' y_a = P_1 ⋯ P_{a−1} y_a: P_{a−1} first.
+        for (j, c) in cols.iter().enumerate() {
+            if c.done.is_some() {
+                r_mat.col_mut(j).fill(0.0);
+                continue;
+            }
+            let mut r = c.y.clone();
+            for (t_i, v_i) in c.ts.iter().zip(&c.vs).rev() {
+                project_off_score(&mut r, t_i, v_i);
+            }
+            r_mat.col_mut(j).copy_from(&r);
+        }
+        // h_a = G r_a, every live column at once.
         matmul(
-            h.as_mut().as_mat_mut(),
+            h_mat.as_mut(),
             Accum::Replace,
             block.g,
-            r.as_ref().as_mat(),
+            r_mat.as_ref(),
             1.0,
             Par::Seq,
         );
-        let wn2: f64 = (0..n).map(|i| r[i] * h[i]).sum();
-        let wn = wn2.max(0.0).sqrt();
-        let rho = wn_err * zz / wn2;
-        if let Some(tr) = trace.as_deref_mut() {
-            tr.push(ComponentTrace {
-                wn2,
-                e_w: wn_err,
-                e_t: tt_err,
-                rho,
+        for (j, c) in cols.iter_mut().enumerate() {
+            if c.done.is_some() {
+                continue;
+            }
+            let r = r_mat.col(j);
+            let h = h_mat.col(j);
+            let wn_err = base_w + HISTORY_COEF * c.rho_sum * block.g2;
+            let tt_err = base_t + HISTORY_COEF * c.rho_sum * block.g2 * block.g2;
+            let wn2: f64 = (0..n).map(|i| r[i] * h[i]).sum();
+            let wn = wn2.max(0.0).sqrt();
+            let rho = wn_err * c.zz / wn2;
+            if let Some(tr) = trace.as_deref_mut() {
+                tr.push(ComponentTrace {
+                    wn2,
+                    e_w: wn_err,
+                    e_t: tt_err,
+                    rho,
+                });
+            }
+            // Gates 1, 3, 4 (see the doc comment). `a >= b`, so NaN fails.
+            let keep_w = wn2 >= BOUND_BAND * wn_err * c.zz
+                && wn >= RESOLVE_BAND * c.w_floor
+                && wn >= ABS_BAND * NIPALS_ABS_FLOOR;
+            if !keep_w {
+                c.done = Some(NspaceOutcome::Unresolved);
+                continue;
+            }
+            c.rho_sum += rho;
+            let inv_wn = 1.0 / wn;
+
+            // g_a = h_a / wn_a; t_a = D_a g_a = P_{a−1} ⋯ P_1 g_a: P_1 first.
+            let g = Col::<f64>::from_fn(n, |i| h[i] * inv_wn);
+            let mut t = g.clone();
+            for (t_i, v_i) in c.ts.iter().zip(&c.vs) {
+                project_off_score(&mut t, t_i, v_i);
+            }
+            let tt: f64 = (0..n).map(|i| t[i] * t[i]).sum();
+            // Gates 2 and 5.
+            let keep_t =
+                tt * wn2 >= BOUND_BAND * tt_err * c.zz && tt >= ABS_BAND * NIPALS_ABS_FLOOR;
+            if !keep_t {
+                c.done = Some(NspaceOutcome::Unresolved);
+                continue;
+            }
+            let inv_tt = 1.0 / tt;
+            let v = Col::<f64>::from_fn(n, |i| t[i] * inv_tt);
+            let qa: f64 = (0..n).map(|i| c.y[i] * t[i]).sum::<f64>() * inv_tt;
+            for i in 0..n {
+                c.y[i] -= qa * t[i];
+            }
+            for i in 0..n {
+                c.u_mat[(i, a)] = r[i] * inv_wn;
+                c.g_mat[(i, a)] = g[i];
+            }
+            c.q[a] = qa;
+            c.ts.push(t);
+            c.vs.push(v);
+        }
+    }
+
+    cols.into_iter()
+        .map(|c| {
+            if let Some(done) = c.done {
+                return done;
+            }
+            // P'W = V' [g_1 … g_k], dots in ascending index order.
+            let pw = Mat::<f64>::from_fn(k, k, |i, j| {
+                (0..n).map(|l| c.vs[i][l] * c.g_mat[(l, j)]).sum::<f64>()
             });
-        }
-        // Gates 1, 3, 4 (see the doc comment). `a >= b`, so NaN fails.
-        let keep_w = wn2 >= BOUND_BAND * wn_err * zz
-            && wn >= RESOLVE_BAND * w_floor
-            && wn >= ABS_BAND * NIPALS_ABS_FLOOR;
-        if !keep_w {
-            return NspaceOutcome::Unresolved;
-        }
-        rho_sum += rho;
-        let inv_wn = 1.0 / wn;
-
-        // g_a = h_a / wn_a; t_a = D_a g_a = P_{a−1} ⋯ P_1 g_a: P_1 first.
-        let g = Col::<f64>::from_fn(n, |i| h[i] * inv_wn);
-        let mut t = g.clone();
-        for (t_i, v_i) in ts.iter().zip(&vs) {
-            project_off_score(&mut t, t_i, v_i);
-        }
-        let tt: f64 = (0..n).map(|i| t[i] * t[i]).sum();
-        // Gates 2 and 5.
-        let keep_t = tt * wn2 >= BOUND_BAND * tt_err * zz && tt >= ABS_BAND * NIPALS_ABS_FLOOR;
-        if !keep_t {
-            return NspaceOutcome::Unresolved;
-        }
-        let inv_tt = 1.0 / tt;
-        let v = Col::<f64>::from_fn(n, |i| t[i] * inv_tt);
-        let qa: f64 = (0..n).map(|i| y[i] * t[i]).sum::<f64>() * inv_tt;
-        for i in 0..n {
-            y[i] -= qa * t[i];
-        }
-        for i in 0..n {
-            u_mat[(i, a)] = r[i] * inv_wn;
-            g_mat[(i, a)] = g[i];
-        }
-        q[a] = qa;
-        ts.push(t);
-        vs.push(v);
-    }
-
-    // P'W = V' [g_1 … g_k], dots in ascending index order.
-    let pw = Mat::<f64>::from_fn(k, k, |i, j| {
-        (0..n).map(|l| vs[i][l] * g_mat[(l, j)]).sum::<f64>()
-    });
-    // The same solve as `fit::pls1_coef_at_k`.
-    let mut c: Col<f64> = q.clone();
-    crate::linalg::lu_solve_in_place(pw.as_ref(), c.as_mut().as_mat_mut());
-    let mut alpha = Col::<f64>::zeros(n);
-    matmul(
-        alpha.as_mut().as_mat_mut(),
-        Accum::Replace,
-        u_mat.as_ref(),
-        c.as_ref().as_mat(),
-        1.0,
-        Par::Seq,
-    );
-    if (0..n).all(|i| alpha[i].is_finite()) {
-        NspaceOutcome::Resolved { alpha, k_used: k }
-    } else {
-        NspaceOutcome::Unresolved
-    }
+            // The same solve as `fit::pls1_coef_at_k`.
+            let mut sol: Col<f64> = c.q.clone();
+            crate::linalg::lu_solve_in_place(pw.as_ref(), sol.as_mut().as_mat_mut());
+            let mut alpha = Col::<f64>::zeros(n);
+            matmul(
+                alpha.as_mut().as_mat_mut(),
+                Accum::Replace,
+                c.u_mat.as_ref(),
+                sol.as_ref().as_mat(),
+                1.0,
+                Par::Seq,
+            );
+            if (0..n).all(|i| alpha[i].is_finite()) {
+                NspaceOutcome::Resolved { alpha, k_used: k }
+            } else {
+                NspaceOutcome::Unresolved
+            }
+        })
+        .collect()
 }
 
 /// One `pls1_perm_null` permutation row on the n-space route: the kernel on
@@ -758,59 +855,96 @@ impl NspaceSplit {
     }
 }
 
-/// One (split, column) unit of the n-space `split_exact` refit route: the
-/// split-half Pearson `r` for the outcome `y_of` (`y_of(i)` is the raw
-/// outcome of full-data row `i`), before the driver's clamp and Fisher z.
-/// The training outcome is standardized as `split_column_r` does it; the
-/// test-half scores are `s = M·alpha`; the correlation is
-/// `guarded_pearson`'s, formed from the same `scaled_moments` and
-/// `pearson_scaled` calls.
+/// Columns per batched call of the n-space `split_exact` refit route
+/// ([`split_columns_r_nspace`]): the driver cuts the `B + 1` outcome
+/// columns into consecutive runs of this many, starting at column 0, and
+/// hands each run to one call, so which columns share a product never
+/// depends on the thread count. Measured on an Apple M4 at `n_tr = 500`:
+/// one `G·R` product of 8 to 256 columns runs at the same rate as one of
+/// 1001 columns, about 3.3x the rate of 1001 matrix-vector products, so a
+/// small run keeps that rate and leaves the runs enough to map in parallel.
+pub(crate) const NSPACE_BATCH: usize = 16;
+
+/// A run of `m` (split, column) units of the n-space `split_exact` refit
+/// route: element `j` is `Some(r)`, the split-half Pearson `r` for the
+/// outcome `y_of(j, ·)`, or `None` when the column needs the Primal arm
+/// (`y_of(j, i)` is column `j`'s raw outcome at full-data row `i`; `r` is
+/// taken before the driver's clamp and Fisher z). Each training outcome
+/// is standardized as `split_column_r` does it; the kernel runs on all `m`
+/// columns at once ([`pls1_nspace_kernel_cols`]); the test-half scores are
+/// `S = M·A` for the resolved columns' dual coefficients `A`, one product;
+/// each correlation is `guarded_pearson`'s, formed from the same
+/// `scaled_moments` and `pearson_scaled` calls.
 ///
 /// Two discontinuities decide `r`: truncation (the kernel's gates) and
-/// `guarded_pearson`'s `constant_to_rounding` test. The scores are kept
-/// only when they are not constant to rounding and their centered norm is
-/// at least `dual_route::SCORE_BAND` times their norm; otherwise, and
-/// whenever the kernel is `Unresolved`, the unit is `split_column_r` itself
-/// (the Primal arm) and its `r` is the primal route's to the bit. Decided
-/// directly, because they are exact on both routes: `ZeroModel` (the
-/// primal keeps no component, its scores are exactly zero, its guard
+/// `guarded_pearson`'s `constant_to_rounding` test. A column's scores are
+/// kept only when they are not constant to rounding and their centered
+/// norm is at least `dual_route::SCORE_BAND` times their norm; otherwise,
+/// and whenever the kernel is `Unresolved`, the column is `None`: the
+/// caller runs `split_column_r` (the Primal arm) on it, so its `r` is the
+/// primal route's to the bit. The fallbacks are left to the caller so that
+/// it can spread them over the pool rather than run them inside this run
+/// (`signal_test::split_columns_nspace`).
+/// Decided directly, because they are exact on both routes: `ZeroModel`
+/// (the primal keeps no component, its scores are exactly zero, its guard
 /// returns `0.0`) and a test-half outcome constant to rounding (the same
-/// bits through the same helper). The driver's `split_unit` has already
-/// returned `0.0` for a split whose X is not finite.
+/// bits through the same helper). The caller has already returned `0.0`
+/// for a split whose X is not finite.
 #[allow(clippy::similar_names)]
-pub(crate) fn split_column_r_nspace(
-    prep: &PreparedSplit,
+pub(crate) fn split_columns_r_nspace(
     sp: &SplitIdx,
     ns: &NspaceSplit,
-    y_of: &dyn Fn(usize) -> f64,
+    m: usize,
+    y_of: &dyn Fn(usize, usize) -> f64,
     k: usize,
-) -> f64 {
+) -> Vec<Option<f64>> {
     debug_assert!(k >= 1);
     let n_tr = sp.tr.len();
     let n_te = sp.te.len();
-    let y_tr = Col::<f64>::from_fn(n_tr, |i| y_of(sp.tr[i]));
-    let (z, _, _) = standardize1(y_tr.as_ref());
-    let alpha = match pls1_nspace_kernel(&ns.gram.block(), z.as_ref(), k) {
-        NspaceOutcome::Resolved { alpha, k_used } => {
-            debug_assert_eq!(k_used, k);
-            alpha
+    let mut zs = Mat::<f64>::zeros(n_tr, m);
+    for j in 0..m {
+        let y_tr = Col::<f64>::from_fn(n_tr, |i| y_of(j, sp.tr[i]));
+        let (z, _, _) = standardize1(y_tr.as_ref());
+        zs.col_mut(j).copy_from(&z);
+    }
+    let outcomes = pls1_nspace_kernel_cols(&ns.gram.block(), zs.as_ref(), k);
+    let mut alphas = Mat::<f64>::zeros(n_tr, m);
+    for (j, out) in outcomes.iter().enumerate() {
+        if let NspaceOutcome::Resolved { alpha, k_used } = out {
+            debug_assert_eq!(*k_used, k);
+            alphas.col_mut(j).copy_from(alpha);
         }
-        NspaceOutcome::ZeroModel => return 0.0,
-        NspaceOutcome::Unresolved => return split_column_r(prep, sp, y_of, k, None),
-    };
-    let s = seq_gemv(ns.m.as_ref(), &alpha);
-    let y_te = Col::<f64>::from_fn(n_te, |i| y_of(sp.te[i]));
-    let ms = scaled_moments(n_te, |i| s[i], None);
-    let my = scaled_moments(n_te, |i| y_te[i], None);
-    if my.is_constant(n_te) {
-        return 0.0;
     }
-    // Score gate: `a >= b`, so a NaN fails it.
-    if !ms.is_constant(n_te) && ms.ss.sqrt() >= SCORE_BAND * ms.sq.sqrt() {
-        pearson_scaled(n_te, |i| s[i], |i| y_te[i], &ms, &my)
-    } else {
-        split_column_r(prep, sp, y_of, k, None)
-    }
+    let mut scores = Mat::<f64>::zeros(n_te, m);
+    matmul(
+        scores.as_mut(),
+        Accum::Replace,
+        ns.m.as_ref(),
+        alphas.as_ref(),
+        1.0,
+        Par::Seq,
+    );
+    outcomes
+        .iter()
+        .enumerate()
+        .map(|(j, out)| {
+            match out {
+                NspaceOutcome::ZeroModel => return Some(0.0),
+                NspaceOutcome::Unresolved => return None,
+                NspaceOutcome::Resolved { .. } => {}
+            }
+            let s = scores.col(j);
+            let y_te = Col::<f64>::from_fn(n_te, |i| y_of(j, sp.te[i]));
+            let ms = scaled_moments(n_te, |i| s[i], None);
+            let my = scaled_moments(n_te, |i| y_te[i], None);
+            if my.is_constant(n_te) {
+                return Some(0.0);
+            }
+            // Score gate: `a >= b`, so a NaN fails it.
+            (!ms.is_constant(n_te) && ms.ss.sqrt() >= SCORE_BAND * ms.sq.sqrt())
+                .then(|| pearson_scaled(n_te, |i| s[i], |i| y_te[i], &ms, &my))
+        })
+        .collect()
 }
 
 #[cfg(test)]

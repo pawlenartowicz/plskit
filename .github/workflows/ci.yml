@@ -15,6 +15,11 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
+      # check-profile-sync.py needs tomllib (Python 3.11+); pin one version
+      # so the plain-python3 gates behave the same on every runner image.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
       - name: Check docs drift (API surface / result fields)
         run: python3 scripts/check-docs-drift.py
       - uses: dtolnay/rust-toolchain@stable
@@ -29,10 +34,21 @@ jobs:
         run: cargo test --workspace --release --doc
       - name: cargo test (workspace)
         run: cargo test --workspace --release
-      - name: byte-parity test
-        run: cargo test -p plskit --release --test byte_parity
       - name: Verify testdata content hashes
         run: python3 scripts/check_corpus_hash.py
+      - name: plskit-bind registry matches the Python signatures
+        shell: bash
+        run: |
+          cargo run -p plskit-bind --release --bin plskit-bind-dump > "$RUNNER_TEMP/plskit-registry.json"
+          python3 scripts/check-bind-registry.py "$RUNNER_TEMP/plskit-registry.json"
+      - name: R stubs match a fresh render of the registry
+        shell: bash
+        run: python3 scripts/render-r-stubs.py --dump "$RUNNER_TEMP/plskit-registry.json" --check
+      - name: R crate profile and [workspace] table in sync with the workspace
+        run: python3 scripts/check-profile-sync.py
+      - name: Julia stubs match the plskit-bind registry
+        shell: bash
+        run: python3 scripts/render-jl-stubs.py --dump "$RUNNER_TEMP/plskit-registry.json" --check
 
   # MSRV + beta tripwire — ubuntu-only, narrower test set than rust-tests.
   # Catches MSRV drift (1.85 row) and upcoming-rustc regressions (beta row).
@@ -93,3 +109,153 @@ jobs:
         run: |
           cd plskit-py
           pytest -v --tb=short
+
+  # R package (spec 8): R CMD check through r-lib/actions on three OSes, in
+  # dev mode (spec 4.6): a cargo config outside the package patches plskit
+  # and plskit-bind to this checkout. Until P4 there is no committed R
+  # Cargo.lock, so dev mode is the only way the package builds.
+  r-package:
+    name: R package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: rust-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      PLSKIT_TESTDATA: ${{ github.workspace }}/testdata
+      PLSKIT_REQUIRE_CORPUS: "1"
+      PKG_SYSREQS: "false"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Rust target for Rtools (Windows)
+        if: runner.os == 'Windows'
+        run: rustup target add x86_64-pc-windows-gnu
+      # Caches the Linux clippy build and the canary install; R CMD check
+      # itself compiles in a temporary copy of the package. Until P4 publishes
+      # plskit-bind, rust-cache's `cargo metadata` cannot resolve the pinned
+      # crates.io requirements and logs an error; the step still succeeds.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plskit-r/src/rust
+      - name: Dev-mode cargo config (spec 4.6)
+        shell: bash
+        run: |
+          root="$(pwd -W 2>/dev/null || pwd)"
+          cfg="$RUNNER_TEMP/plskit-dev.toml"
+          printf "[patch.crates-io]\nplskit = { path = '%s/plskit-rs' }\nplskit-bind = { path = '%s/plskit-bind' }\n" "$root" "$root" > "$cfg"
+          cat "$cfg"
+          echo "PLSKIT_CARGO_CONFIG=$cfg" >> "$GITHUB_ENV"
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: plskit-r
+          # roxygen2 pinned to DESCRIPTION's RoxygenNote, so the docs gate
+          # below compares against the same generator.
+          extra-packages: any::rcmdcheck, roxygen2@7.3.3
+          needs: check
+      - name: Seam fmt, clippy and dev lock versions (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo fmt --manifest-path plskit-r/src/rust/Cargo.toml --check
+          (cd plskit-r/src && Rscript ../tools/cargo-build.R --clippy)
+          python3 scripts/check-profile-sync.py --r-lock plskit-r/src/rust/target/dev-crate/Cargo.lock
+      - name: Generated R docs are up to date (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          Rscript -e 'roxygen2::roxygenise("plskit-r", roclets = c("rd", "namespace"), load_code = roxygen2::load_source)'
+          git status --porcelain -- plskit-r/man plskit-r/NAMESPACE
+          test -z "$(git status --porcelain -- plskit-r/man plskit-r/NAMESPACE)"
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          working-directory: plskit-r
+          args: 'c("--no-manual")'
+          error-on: '"error"'
+          check-dir: '"check"'
+      # error-on "error" lets WARNINGs through; the one accepted WARNING is
+      # "checking compiled code" (the Rust std library references _abort).
+      # Any other WARNING fails here.
+      - name: No R CMD check WARNING other than compiled code
+        shell: bash
+        run: |
+          log=plskit-r/check/plskit.Rcheck/00check.log
+          test -f "$log"
+          if grep -E '\.\.\. WARNING' "$log" | grep -v 'checking compiled code'; then
+            echo "::error::unexpected WARNING in $log"
+            exit 1
+          fi
+      # Spec 7 cross-wrapper bit canary, R half: R against the corpus at
+      # atol 0 on the host class the fixtures come from. Non-blocking.
+      - name: Bit canary, R vs the corpus at atol 0 (Linux, non-blocking)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        env:
+          PLSKIT_CORPUS_EXACT: "1"
+        run: |
+          R CMD INSTALL plskit-r
+          Rscript -e 'testthat::test_file("plskit-r/tests/testthat/test-corpus.R", package = "plskit", load_package = "installed", reporter = "check")'
+
+  # PLSKit.jl runs the Python package through PythonCall.jl, so this job
+  # builds plskit-py into a virtualenv and points PythonCall at it, with
+  # CondaPkg switched off (spec 8).
+  julia-tests:
+    name: Julia tests (${{ matrix.os }}, julia ${{ matrix.julia }})
+    runs-on: ${{ matrix.os }}
+    needs: rust-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        julia: ["lts", "1"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      # PLSKit.jl pins one plskit-py release. Same version in the tree: build
+      # it from source. Tree already newer: test the pinned wheel from PyPI.
+      # Tree older than the pin (Julia leading Python): fail.
+      - name: Choose the plskit-py the Julia tests run against
+        id: pypin
+        shell: bash
+        run: python scripts/julia-python-pin.py >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.pypin.outputs.mode == 'source'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.pypin.outputs.mode == 'source'
+        with:
+          save-if: ${{ matrix.julia == 'lts' }}
+      - name: Install plskit-py into a virtualenv
+        shell: bash
+        env:
+          MODE: ${{ steps.pypin.outputs.mode }}
+          PIN: ${{ steps.pypin.outputs.pin }}
+        run: |
+          python -m venv "$RUNNER_TEMP/jlpy"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            source "$RUNNER_TEMP/jlpy/Scripts/activate"
+          else
+            source "$RUNNER_TEMP/jlpy/bin/activate"
+          fi
+          if [ "$MODE" = "source" ]; then
+            pip install maturin numpy
+            maturin develop --release
+          else
+            pip install "plskit==$PIN"
+          fi
+          echo "JULIA_PYTHONCALL_EXE=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+          echo "JULIA_CONDAPKG_BACKEND=Null" >> "$GITHUB_ENV"
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - uses: julia-actions/cache@v2
+      - name: Pkg.test()
+        shell: bash
+        env:
+          PLSKIT_REQUIRE_CORPUS: "1"
+        run: julia --color=yes --project=plskit-jl -e 'using Pkg; Pkg.instantiate(); Pkg.test()'

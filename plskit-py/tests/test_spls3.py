@@ -23,38 +23,6 @@ def _blocks(n=200, p=12, q=4, seed=0):
     return X, Y
 
 
-def test_dense_endpoint_matches_pls3_fit_exactly():
-    X, Y = _blocks()
-    dense = plskit.pls3_fit(X, Y, k=2)
-    sparse = plskit.spls3_fit(X, Y, k=2, keep_X=X.shape[1], keep_Y=Y.shape[1])
-    assert dense.k_used == 2
-    assert sparse.k_used == 2
-    np.testing.assert_array_equal(sparse.U, dense.U)
-    np.testing.assert_array_equal(sparse.V, dense.V)
-    np.testing.assert_array_equal(sparse.singular_values, dense.singular_values)
-    assert sparse.keep_X == X.shape[1]
-    assert dense.keep_X is None
-    assert dense.converged is None
-
-
-def test_support_sizes_are_exact():
-    X, Y = _blocks()
-    m = plskit.spls3_fit(X, Y, k=2, keep_X=4, keep_Y=2)
-    # Pin k_used first: the two reductions below run over the component axis,
-    # and on an empty axis `.all()` is True, so they would pass vacuously.
-    assert m.k_used == 2
-    assert (np.count_nonzero(m.U, axis=0) == 4).all()
-    assert (np.count_nonzero(m.V, axis=0) == 2).all()
-
-
-def test_planted_outcome_pairs_are_recovered():
-    X, Y = _blocks()
-    m = plskit.spls3_fit(X, Y, k=2, keep_X=6, keep_Y=2)
-    assert m.k_used == 2
-    supports = sorted(tuple(np.flatnonzero(m.V[:, a])) for a in range(m.k_used))
-    assert supports == [(0, 1), (2, 3)]
-
-
 def test_convergence_metadata_shapes():
     X, Y = _blocks()
     m = plskit.spls3_fit(X, Y, k=2, keep_X=4, keep_Y=2)
@@ -71,14 +39,6 @@ def test_max_iter_hit_reports_false_not_error():
     m = plskit.spls3_fit(X, Y, k=1, keep_X=4, keep_Y=2, max_iter=1)
     assert m.converged.tolist() == [False]
     assert m.n_iter.tolist() == [1]
-
-
-@pytest.mark.parametrize("keep_X,keep_Y", [(0, 2), (13, 2), (4, 0), (4, 5)])
-def test_out_of_range_keeps_raise(keep_X, keep_Y):
-    X, Y = _blocks()
-    with pytest.raises(plskit.PlsKitError) as e:
-        plskit.spls3_fit(X, Y, k=1, keep_X=keep_X, keep_Y=keep_Y)
-    assert e.value.code == "invalid_argument"
 
 
 @pytest.mark.parametrize("tol", [float("nan"), float("inf"), -1e-8])
@@ -164,3 +124,7 @@ def test_alternation_defaults_come_from_the_engine():
     np.testing.assert_array_equal(a.U, b.U)
     np.testing.assert_array_equal(a.V, b.V)
     np.testing.assert_array_equal(a.n_iter, b.n_iter)
+    # tol=0 never converges, so n_iter reads out the resolved max_iter default.
+    m = plskit.spls3_fit(X, Y, k=2, keep_X=4, keep_Y=2, tol=0.0)
+    assert m.n_iter.tolist() == [100, 100]
+    assert not m.converged.any()

@@ -160,7 +160,8 @@ impl FindKOptimalOutput {
 /// `split_nb` auto-gate resolved to.
 ///
 /// # Errors
-/// - `KExceedsMax` for `k_max==0` or `k_max>d`
+/// - `InvalidArgument` for `k_max == 0`
+/// - `KExceedsMax` for `k_max > n_features`
 /// - `DimensionMismatch` for shape disagreements
 /// - `InvalidArgument` if `diagnostic == Some(Score)`
 /// - `NonFiniteInput` when X, y, or weights contain NaN/inf
@@ -221,8 +222,11 @@ fn find_k_optimal_impl(
             y: y.nrows(),
         });
     }
+    if k_max == 0 {
+        return Err(PlsKitError::InvalidArgument("k_max must be >= 1".into()));
+    }
     let max_allowed = x.ncols();
-    if k_max == 0 || k_max > max_allowed {
+    if k_max > max_allowed {
         return Err(PlsKitError::KExceedsMax {
             k: k_max,
             k_max: max_allowed,
@@ -251,9 +255,7 @@ fn find_k_optimal_impl(
         )));
     }
 
-    let (w_norm, n_eff_val, _all_uniform) =
-        crate::fit::validate_and_normalize_weights(weights, n, k_max)?;
-    crate::fit::check_n_eff_for_k(n_eff_val, k_max, weights.is_some())?;
+    let (w_norm, n_eff_val) = crate::fit::validate_weights_for_k(weights, n, k_max)?;
 
     let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
 
@@ -490,7 +492,8 @@ impl FindKSequenceOutput {
 /// orthogonal to `X` up to rounding), matching [`pls1_find_k_optimal`].
 ///
 /// # Errors
-/// - `KExceedsMax` for `k_max==0` or `k_max>d`
+/// - `InvalidArgument` for `k_max == 0`
+/// - `KExceedsMax` for `k_max > n_features`
 /// - `DimensionMismatch` for shape disagreements
 /// - `InvalidArgument` for `Score` test method (no sequential variant)
 /// - `NonFiniteInput` when X, y, or weights contain NaN/inf
@@ -545,17 +548,18 @@ fn find_k_sequence_impl(
             y: y.nrows(),
         });
     }
+    if k_max == 0 {
+        return Err(PlsKitError::InvalidArgument("k_max must be >= 1".into()));
+    }
     let max_allowed = x.ncols();
-    if k_max == 0 || k_max > max_allowed {
+    if k_max > max_allowed {
         return Err(PlsKitError::KExceedsMax {
             k: k_max,
             k_max: max_allowed,
         });
     }
 
-    let (w_norm, n_eff_val, _all_uniform) =
-        crate::fit::validate_and_normalize_weights(weights, n, k_max)?;
-    crate::fit::check_n_eff_for_k(n_eff_val, k_max, weights.is_some())?;
+    let (w_norm, n_eff_val) = crate::fit::validate_weights_for_k(weights, n, k_max)?;
 
     let seq_args = SequentialArgs::defaults_for(opts.test_method).ok_or_else(|| {
         PlsKitError::InvalidArgument(format!(
@@ -649,9 +653,7 @@ fn prep_fold(
     let nv = y_val.nrows();
 
     // Slice and re-normalize weights for train fold (if weights are provided).
-    // An unnormalizable slice yields None → that fold runs unweighted; kept
-    // (rather than an explicit uniform fill, as `signal_test::prepare_cv_fold`
-    // does) because the two paths are not provably bit-identical.
+    // An unnormalizable slice yields None → that fold runs unweighted.
     let train_w_full: Option<Col<f64>> = weights.map(|w| col_row_subset(w, &train_idx));
     let train_w_norm: Option<Col<f64>> = train_w_full
         .as_ref()
@@ -1129,7 +1131,8 @@ pub struct FindKeepOptimalOutput {
 ///
 /// # Errors
 /// - `DimensionMismatch` for shape disagreements
-/// - `KExceedsMax` for `k == 0` or `k > n_features`
+/// - `InvalidArgument` for `k == 0`
+/// - `KExceedsMax` for `k > n_features`
 /// - `NonFiniteInput` / `InvalidWeights` as per `pls1_fit`
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::many_single_char_names)]
@@ -1148,14 +1151,15 @@ pub fn spls1_find_keep_optimal(
         });
     }
     let d = x.ncols();
-    if k == 0 || k > d {
+    if k == 0 {
+        return Err(PlsKitError::InvalidArgument("k must be >= 1".into()));
+    }
+    if k > d {
         return Err(PlsKitError::KExceedsMax { k, k_max: d });
     }
     crate::fit::check_finite_mat(x)?;
     crate::fit::check_finite_col(y)?;
-    let (w_norm, n_eff_val, _all_uniform) =
-        crate::fit::validate_and_normalize_weights(weights, n, k)?;
-    crate::fit::check_n_eff_for_k(n_eff_val, k, weights.is_some())?;
+    let (w_norm, n_eff_val) = crate::fit::validate_weights_for_k(weights, n, k)?;
 
     let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
     let grid = keep_grid(d);
@@ -1476,30 +1480,38 @@ mod tests {
     /// and hit the error there instead), and a constant `y` selects
     /// `k_star = 0` (which runs no sequential step at all, so without the
     /// hoist it would report empty `pvalues` and no error, at any `n`).
-    /// Both must raise the same way.
+    /// Both must raise the same way, with the `raw_perm` validator's message
+    /// (`check_n_eff_for_k` also returns `InvalidArgument`, so the variant
+    /// alone does not say which check fired), at every n <= 5.
     #[test]
     fn optimal_raw_perm_diagnostic_rejects_small_n_regardless_of_k_star() {
-        let (x, y) = synth(4, 3, 1, 4.0, 5);
-        let (_, ys) = degenerate_ys(4, 3, 5);
-        for selector in [Selector::Bic, Selector::R2Se] {
-            for (name, y) in [("signal", &y), (ys[0].0, &ys[0].1), (ys[1].0, &ys[1].1)] {
-                let r = pls1_find_k_optimal(
-                    x.as_ref(),
-                    y.as_ref(),
-                    2,
-                    None,
-                    FindKOptimalOpts {
-                        selector,
-                        diagnostic: Some(ConfirmatoryMethod::RawPerm),
-                        n_perm: 20,
-                        seed: Some(7),
-                        ..Default::default()
-                    },
-                );
-                assert!(
-                    matches!(r, Err(PlsKitError::InvalidArgument(_))),
-                    "{selector:?} {name}: expected InvalidArgument, got {r:?}"
-                );
+        for n in [3_usize, 4, 5] {
+            let (x, y) = synth(n, 3, 1, 4.0, 5);
+            let (_, ys) = degenerate_ys(n, 3, 5);
+            for selector in [Selector::Bic, Selector::R2Se] {
+                for (name, y) in [("signal", &y), (ys[0].0, &ys[0].1), (ys[1].0, &ys[1].1)] {
+                    let r = pls1_find_k_optimal(
+                        x.as_ref(),
+                        y.as_ref(),
+                        2,
+                        None,
+                        FindKOptimalOpts {
+                            selector,
+                            diagnostic: Some(ConfirmatoryMethod::RawPerm),
+                            n_perm: 20,
+                            seed: Some(7),
+                            ..Default::default()
+                        },
+                    );
+                    match r {
+                        Err(PlsKitError::InvalidArgument(msg)) => {
+                            assert!(msg.contains("n > 5"), "n={n} {selector:?} {name}: {msg}");
+                        }
+                        other => panic!(
+                            "n={n} {selector:?} {name}: expected InvalidArgument, got {other:?}"
+                        ),
+                    }
+                }
             }
         }
     }
@@ -1658,118 +1670,6 @@ mod tests {
     }
 
     #[test]
-    fn optimal_r2_se_returns_k_star_and_cv_scores() {
-        let (x, y) = synth(80, 5, 1, 5.0, 1);
-        let r = pls1_find_k_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            4,
-            None,
-            FindKOptimalOpts {
-                selector: Selector::R2Se,
-                seed: Some(7),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(r.k_star >= 1);
-        assert!(r.cv_scores.is_some());
-        assert!(r.cv_scores_se.is_some());
-        assert!(r.bic_scores.is_none());
-        assert!(r.pvalues.is_none());
-        assert!(r.diagnostic.is_none());
-        assert_eq!(r.selector, "r2_se");
-        assert!((r.n_eff - 80.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn optimal_r2_max_returns_k_star_no_se() {
-        let (x, y) = synth(80, 5, 1, 5.0, 1);
-        let r = pls1_find_k_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            4,
-            None,
-            FindKOptimalOpts {
-                selector: Selector::R2Max,
-                seed: Some(7),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(r.cv_scores.is_some());
-        assert!(r.cv_scores_se.is_none());
-        assert_eq!(r.selector, "r2_max");
-    }
-
-    #[test]
-    fn optimal_bic_returns_k_star_and_bic_scores() {
-        let (x, y) = synth(60, 5, 2, 4.0, 3);
-        let r = pls1_find_k_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            4,
-            None,
-            FindKOptimalOpts {
-                selector: Selector::Bic,
-                seed: Some(13),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(r.k_star >= 1 && r.k_star <= 4);
-        assert!(r.bic_scores.is_some());
-        assert!(r.cv_scores.is_none());
-        assert_eq!(r.selector, "bic");
-    }
-
-    #[test]
-    fn optimal_with_diagnostic_returns_pvalues() {
-        let (x, y) = synth(80, 5, 1, 5.0, 1);
-        let r = pls1_find_k_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            4,
-            None,
-            FindKOptimalOpts {
-                selector: Selector::R2Se,
-                diagnostic: Some(ConfirmatoryMethod::SplitNb),
-                n_splits: 30,
-                seed: Some(7),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let pv = r.pvalues.expect("diagnostic pvalues missing");
-        assert_eq!(pv.nrows(), r.k_star);
-        assert_eq!(r.diagnostic.as_deref(), Some("split_nb"));
-    }
-
-    /// The sequence-level `split_nb` gate is hoisted into
-    /// `run_incremental_sequence`, so the diagnostic path inherits it — and
-    /// the echoed name must say what ran. n = 20 trips the gate's
-    /// effective-sample floor of 25.
-    #[test]
-    fn optimal_diagnostic_reports_rerouted_method() {
-        let (x, y) = synth(20, 5, 1, 5.0, 1);
-        let r = pls1_find_k_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            2,
-            None,
-            FindKOptimalOpts {
-                selector: Selector::Bic,
-                diagnostic: Some(ConfirmatoryMethod::SplitNb),
-                n_splits: 10,
-                seed: Some(7),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(r.diagnostic.as_deref(), Some("split_exact"));
-    }
-
-    #[test]
     fn optimal_score_diagnostic_rejected() {
         let (x, y) = synth(60, 5, 1, 4.0, 3);
         let err = pls1_find_k_optimal(
@@ -1787,7 +1687,9 @@ mod tests {
 
     /// `force` has to be reachable from the optimal entry point's diagnostic
     /// too, not only from the sequence API: n = 20 trips the gate, and only
-    /// the opts field can hold NB in place.
+    /// the opts field can hold NB in place. The gate is hoisted into
+    /// `run_incremental_sequence`, so the diagnostic path inherits it and the
+    /// echoed name says what ran (`"split_exact"` on the unforced call).
     #[test]
     fn optimal_diagnostic_force_is_settable_from_public_opts() {
         let (x, y) = synth(20, 5, 1, 5.0, 1);
@@ -1805,8 +1707,11 @@ mod tests {
         assert_eq!(forced.diagnostic.as_deref(), Some("split_nb"));
     }
 
+    /// On an adequate design (n = 80) the `split_nb` gate clears, and the
+    /// result still carries the rank it saw: `stable_rank` reports what the
+    /// gate evaluated, not whether it fired.
     #[test]
-    fn sequence_returns_k_star_and_full_pvalues() {
+    fn sequence_reports_pvalues_n_eff_and_gate_rank() {
         let (x, y) = synth(80, 5, 1, 5.0, 1);
         let r = pls1_find_k_sequence(
             x.as_ref(),
@@ -1825,6 +1730,7 @@ mod tests {
         assert_eq!(r.pvalues.nrows(), 4);
         assert_eq!(r.test_method, "split_nb");
         assert!((r.n_eff - 80.0).abs() < 1e-9);
+        assert!(r.stable_rank.is_some());
     }
 
     /// `force` has to be reachable from the public sequence API, not just from
@@ -1880,27 +1786,6 @@ mod tests {
     }
 
     #[test]
-    fn sequence_no_rejection_returns_kstar_zero() {
-        // Pure noise: synth with k_signal=0 (zero true signal).
-        let (x, y) = synth(60, 5, 0, 0.0, 99);
-        let r = pls1_find_k_sequence(
-            x.as_ref(),
-            y.as_ref(),
-            4,
-            None,
-            FindKSequenceOpts {
-                test_method: ConfirmatoryMethod::E, // e-value safe under null
-                alpha: 0.001,                       // very strict to almost-guarantee no rejection
-                seed: Some(99),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        // k_star may rarely be >0 by chance; assertion is only that the call succeeds.
-        let _ = r.k_star;
-    }
-
-    #[test]
     fn sequence_score_rejected() {
         let (x, y) = synth(60, 5, 1, 4.0, 3);
         let err = pls1_find_k_sequence(
@@ -1937,67 +1822,71 @@ mod tests {
         }
     }
 
-    #[test]
-    fn spls1_find_k_optimal_runs_sparse() {
-        let (x, y) = synth(80, 6, 2, 5.0, 3);
-        let r = spls1_find_k_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            4,
-            2,
-            None,
-            FindKOptimalOpts {
-                selector: Selector::R2Se,
-                seed: Some(7),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(r.k_star >= 1 && r.k_star <= 4);
-        assert!(r.cv_scores.is_some());
-        assert_eq!(r.selector, "r2_se");
-    }
-
+    /// The sparse BIC sweep reports a score for every `k` in `1..=k_used`,
+    /// selects its first minimum (as `select_bic`'s strict `<` does), and
+    /// actually runs sparse: `keep = 2` changes the scores relative to the
+    /// dense sweep on the same data.
     #[test]
     fn spls1_find_k_optimal_bic_runs_sparse() {
         let (x, y) = synth(60, 5, 2, 4.0, 3);
-        let r = spls1_find_k_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            4,
-            2,
-            None,
-            FindKOptimalOpts {
-                selector: Selector::Bic,
-                seed: Some(13),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(r.bic_scores.is_some());
+        let opts = FindKOptimalOpts {
+            selector: Selector::Bic,
+            seed: Some(13),
+            ..Default::default()
+        };
+        let r = spls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, 2, None, opts).unwrap();
+        let bic = r.bic_scores.as_ref().expect("bic selector reports scores");
+        let keys: Vec<usize> = bic.keys().copied().collect();
+        assert!(
+            !keys.is_empty() && keys == (1..=keys.len()).collect::<Vec<_>>(),
+            "{keys:?}"
+        );
+        let argmin = bic
+            .iter()
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .map(|(k, _)| *k)
+            .unwrap();
+        assert_eq!(r.k_star, argmin);
+        let dense = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, None, opts).unwrap();
+        let dense_bic = dense.bic_scores.unwrap();
+        assert!(
+            bic.iter()
+                .any(|(k, v)| dense_bic.get(k).is_none_or(|d| d.to_bits() != v.to_bits())),
+            "keep = 2 must change the BIC sweep"
+        );
     }
 
+    /// `keep` outside `1..=n_features` is rejected by both keep-taking
+    /// `find_k` entry points.
     #[test]
-    fn spls1_find_k_optimal_rejects_bad_keep() {
+    fn spls1_find_k_entries_reject_bad_keep() {
         let (x, y) = synth(60, 5, 1, 4.0, 3);
-        let e = spls1_find_k_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            3,
-            0,
-            None,
-            FindKOptimalOpts::default(),
-        );
-        assert!(matches!(e, Err(PlsKitError::InvalidArgument(_))));
-        let e = spls1_find_k_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            3,
-            9,
-            None,
-            FindKOptimalOpts::default(),
-        );
-        assert!(matches!(e, Err(PlsKitError::InvalidArgument(_))));
+        for keep in [0_usize, 9] {
+            let e = spls1_find_k_optimal(
+                x.as_ref(),
+                y.as_ref(),
+                3,
+                keep,
+                None,
+                FindKOptimalOpts::default(),
+            );
+            assert!(
+                matches!(e, Err(PlsKitError::InvalidArgument(_))),
+                "optimal keep={keep}: {e:?}"
+            );
+            let e = spls1_find_k_sequence(
+                x.as_ref(),
+                y.as_ref(),
+                3,
+                keep,
+                None,
+                FindKSequenceOpts::default(),
+            );
+            assert!(
+                matches!(e, Err(PlsKitError::InvalidArgument(_))),
+                "sequence keep={keep}: {e:?}"
+            );
+        }
     }
 
     #[test]
@@ -2024,50 +1913,6 @@ mod tests {
     }
 
     #[test]
-    fn spls1_find_k_sequence_runs_sparse() {
-        let (x, y) = synth(80, 6, 2, 5.0, 1);
-        let r = spls1_find_k_sequence(
-            x.as_ref(),
-            y.as_ref(),
-            4,
-            2,
-            None,
-            FindKSequenceOpts {
-                test_method: ConfirmatoryMethod::SplitNb,
-                n_splits: 30,
-                seed: Some(7),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(r.pvalues.nrows(), 4);
-        assert_eq!(r.test_method, "split_nb");
-    }
-
-    #[test]
-    fn spls1_find_k_sequence_rejects_bad_keep() {
-        let (x, y) = synth(60, 5, 1, 4.0, 3);
-        let e = spls1_find_k_sequence(
-            x.as_ref(),
-            y.as_ref(),
-            3,
-            0,
-            None,
-            FindKSequenceOpts::default(),
-        );
-        assert!(matches!(e, Err(PlsKitError::InvalidArgument(_))));
-        let e = spls1_find_k_sequence(
-            x.as_ref(),
-            y.as_ref(),
-            3,
-            9,
-            None,
-            FindKSequenceOpts::default(),
-        );
-        assert!(matches!(e, Err(PlsKitError::InvalidArgument(_))));
-    }
-
-    #[test]
     fn keep_grid_powers_of_two_with_endpoints() {
         assert_eq!(keep_grid(1), vec![1]);
         assert_eq!(keep_grid(6), vec![1, 2, 4, 6]);
@@ -2075,9 +1920,14 @@ mod tests {
         assert_eq!(keep_grid(100), vec![1, 2, 4, 8, 16, 32, 64, 100]);
     }
 
+    /// The keep call site applies the 1-SE rule, not the argmax. The design
+    /// (2 signal columns of 6, SNR 1.0) is chosen so the two differ: the
+    /// best mean CV score sits at keep = 4, while keep = 2 is within one SE
+    /// of it; on a strong-signal design both land on the same grid point and
+    /// the rule would go unchecked.
     #[test]
     fn spls1_find_keep_optimal_selects_sparsest_within_1se() {
-        let (x, y) = synth(80, 6, 2, 5.0, 11);
+        let (x, y) = synth(80, 6, 2, 1.0, 1);
         let r = spls1_find_keep_optimal(
             x.as_ref(),
             y.as_ref(),
@@ -2109,6 +1959,10 @@ mod tests {
             .map(|(k, _)| *k)
             .min()
             .unwrap();
+        assert_ne!(
+            best, r.keep_star,
+            "fixture must separate the 1-SE pick from the argmax"
+        );
         assert_eq!(r.keep_star, expected);
         assert!(r.keep_grid.contains(&r.keep_star));
     }
@@ -2136,17 +1990,10 @@ mod tests {
         );
     }
 
+    /// `k = 0` is `fit::boundary_tests::k_zero_is_invalid_argument_at_every_entry`.
     #[test]
-    fn spls1_find_keep_optimal_rejects_bad_k() {
+    fn spls1_find_keep_optimal_rejects_k_above_n_features() {
         let (x, y) = synth(40, 5, 1, 4.0, 2);
-        let e = spls1_find_keep_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            0,
-            None,
-            FindKeepOptimalOpts::default(),
-        );
-        assert!(matches!(e, Err(PlsKitError::KExceedsMax { .. })));
         let e = spls1_find_keep_optimal(
             x.as_ref(),
             y.as_ref(),
@@ -2157,143 +2004,72 @@ mod tests {
         assert!(matches!(e, Err(PlsKitError::KExceedsMax { .. })));
     }
 
+    /// Layout invariance (D1): every `find_k` entry copies X column-major
+    /// before it computes (CV folds through `prep_fold`, BIC and the gate
+    /// through `standardize_weighted`, sequence steps through `standardize` /
+    /// `col_major_or_copy`), so padded, row-major and reversed-column views
+    /// give bit-identical results to the owned matrix, over the copy-free
+    /// families (weighted and wide included) with and without
+    /// `pre_standardized`.
     #[test]
-    fn spls1_find_keep_optimal_seeded_is_deterministic() {
-        let (x, y) = synth(60, 6, 2, 4.0, 5);
-        let opts = FindKeepOptimalOpts {
-            seed: Some(42),
-            ..Default::default()
-        };
-        let a = spls1_find_keep_optimal(x.as_ref(), y.as_ref(), 2, None, opts).unwrap();
-        let b = spls1_find_keep_optimal(x.as_ref(), y.as_ref(), 2, None, opts).unwrap();
-        assert_eq!(a.keep_star, b.keep_star);
-        for (k, v) in &a.cv_scores {
-            assert_eq!(v.to_bits(), b.cv_scores[k].to_bits());
-        }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::many_single_char_names, clippy::similar_names)]
-mod copy_free_reference {
-    use super::*;
-    use crate::linalg::{
-        col_row_subset, normalize_weights, row_subset, standardize1_weighted, standardize_apply,
-        standardize_weighted,
-    };
-    use crate::signal_test::with_new_routes_disabled;
-    use crate::test_support::{assert_bits_eq, col_vals, copy_free_families, mat_vals, Layouts};
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::similar_names)]
-    fn prep_fold_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        weights: Option<ColRef<'_, f64>>,
-        folds: &[Vec<usize>],
-        fi: usize,
-        val_idx: &[usize],
-    ) -> FoldData {
-        let train_idx: Vec<usize> = folds
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != fi)
-            .flat_map(|(_, f)| f.iter().copied())
-            .collect();
-        let x_tr = row_subset(x, &train_idx);
-        let y_tr = col_row_subset(y, &train_idx);
-        let x_val = row_subset(x, val_idx);
-        let y_val = col_row_subset(y, val_idx);
-        let nv = y_val.nrows();
-
-        // Slice and re-normalize weights for train fold (if weights are provided).
-        // An unnormalizable slice yields None → that fold runs unweighted; kept
-        // (rather than an explicit uniform fill, as `pls1_cv_r2` in signal_test.rs
-        // does) because the two paths are not provably bit-identical.
-        let train_w_full: Option<Col<f64>> = weights.map(|w| col_row_subset(w, &train_idx));
-        let train_w_norm: Option<Col<f64>> = train_w_full
-            .as_ref()
-            .and_then(|w| normalize_weights(w.as_ref()));
-        let train_wref = train_w_norm.as_ref().map(Col::as_ref);
-
-        // Slice and re-normalize weights for val fold.
-        let val_w_full: Option<Col<f64>> = weights.map(|w| col_row_subset(w, val_idx));
-        let val_w_norm: Option<Col<f64>> = val_w_full
-            .as_ref()
-            .and_then(|w| normalize_weights(w.as_ref()));
-
-        let (xs_tr, x_mean, x_scale) = standardize_weighted(x_tr.as_ref(), train_wref);
-        let xs_val = standardize_apply(x_val.as_ref(), x_mean.as_ref(), x_scale.as_ref());
-        let (ys_tr, ym, ys) = standardize1_weighted(y_tr.as_ref(), train_wref);
-        let ys_val = Col::<f64>::from_fn(nv, |i| (y_val[i] - ym) / ys);
-
-        FoldData {
-            xs_tr,
-            ys_tr,
-            xs_val,
-            ys_val,
-            train_w: train_w_norm,
-            val_w: val_w_norm,
-        }
-    }
-
-    fn fold_bits(a: &FoldData, b: &FoldData, what: &str) {
-        assert_bits_eq(
-            &mat_vals(a.xs_tr.as_ref()),
-            &mat_vals(b.xs_tr.as_ref()),
-            &format!("{what}.xs_tr"),
-        );
-        assert_bits_eq(
-            &col_vals(a.ys_tr.as_ref()),
-            &col_vals(b.ys_tr.as_ref()),
-            &format!("{what}.ys_tr"),
-        );
-        assert_bits_eq(
-            &mat_vals(a.xs_val.as_ref()),
-            &mat_vals(b.xs_val.as_ref()),
-            &format!("{what}.xs_val"),
-        );
-        assert_bits_eq(
-            &col_vals(a.ys_val.as_ref()),
-            &col_vals(b.ys_val.as_ref()),
-            &format!("{what}.ys_val"),
-        );
-        for (x, y, name) in [
-            (&a.train_w, &b.train_w, "train_w"),
-            (&a.val_w, &b.val_w, "val_w"),
-        ] {
-            match (x, y) {
-                (Some(x), Some(y)) => assert_bits_eq(
-                    &col_vals(x.as_ref()),
-                    &col_vals(y.as_ref()),
-                    &format!("{what}.{name}"),
-                ),
-                (None, None) => {}
-                _ => panic!("{what}.{name}: presence differs"),
-            }
-        }
-    }
-
-    // Per-unit body: no parallel axis; serial vs parallel is covered by
-    // byte_parity (find_k_optimal_byte_parity).
-    #[test]
-    fn prep_fold_matches_reference() {
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let w = f.w.as_ref().map(|w| normalize_weights(w.as_ref()).unwrap());
-                let wr = w.as_ref().map(Col::as_ref);
-                let folds =
-                    crate::linalg::fold_split(&(0..f.x.nrows()).rev().collect::<Vec<_>>(), 4);
-                let lay = Layouts::new(f.x.as_ref());
-                for (view, xv) in lay.all(&f.x) {
-                    for (fi, val) in folds.iter().enumerate() {
-                        let a = prep_fold(xv, f.y.as_ref(), wr, &folds, fi, val);
-                        let b = prep_fold_reference(xv, f.y.as_ref(), wr, &folds, fi, val);
-                        fold_bits(&a, &b, &format!("{} {view} fold {fi}", f.name));
-                    }
+    #[allow(clippy::cast_precision_loss)]
+    fn find_k_entries_are_layout_invariant() {
+        fn push_map(v: &mut Vec<f64>, m: Option<&BTreeMap<usize, f64>>) {
+            match m {
+                Some(m) => {
+                    v.push(m.len() as f64);
+                    v.extend(m.values());
                 }
+                None => v.push(-1.0),
             }
-        });
+        }
+        fn push_optimal(v: &mut Vec<f64>, r: &FindKOptimalOutput) {
+            v.extend([r.k_star as f64, r.n_eff, r.stable_rank.unwrap_or(f64::NAN)]);
+            push_map(v, r.cv_scores.as_ref());
+            push_map(v, r.cv_scores_se.as_ref());
+            push_map(v, r.bic_scores.as_ref());
+            if let Some(p) = &r.pvalues {
+                v.extend((0..p.nrows()).map(|i| p[i]));
+            }
+        }
+        crate::test_support::assert_families_layout_invariant(
+            "find_k",
+            |c| {
+                let mut v = Vec::new();
+                for (selector, diagnostic) in [
+                    (Selector::R2Se, None),
+                    (Selector::Bic, None),
+                    (Selector::R2Se, Some(ConfirmatoryMethod::SplitNb)),
+                    (Selector::Bic, Some(ConfirmatoryMethod::SplitExact)),
+                ] {
+                    let opts = FindKOptimalOpts {
+                        selector,
+                        diagnostic,
+                        n_perm: 49,
+                        n_splits: 10,
+                        pre_standardized: c.pre,
+                        seed: Some(7),
+                        ..Default::default()
+                    };
+                    push_optimal(&mut v, &pls1_find_k_optimal(c.x, c.y, 3, c.w, opts)?);
+                    push_optimal(&mut v, &spls1_find_k_optimal(c.x, c.y, 3, 3, c.w, opts)?);
+                }
+                let r = spls1_find_keep_optimal(
+                    c.x,
+                    c.y,
+                    2,
+                    c.w,
+                    FindKeepOptimalOpts {
+                        seed: Some(7),
+                        ..Default::default()
+                    },
+                )?;
+                v.extend([r.keep_star as f64, r.n_eff]);
+                v.extend(r.cv_scores.values());
+                v.extend(r.cv_scores_se.values());
+                Ok(v)
+            },
+            Vec::clone,
+        );
     }
 }

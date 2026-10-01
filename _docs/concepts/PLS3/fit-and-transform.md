@@ -7,7 +7,9 @@ functions.)
 
 ## Inputs
 
-- `X (n × p)`, `Y (n × q)`: both 2-D, same number of rows.
+- `X (n × p)`, `Y (n × q)`: both 2-D, same number of rows, at least one.
+  Zero rows raise `invalid_argument` (the standardization moments of an
+  empty column are undefined), as in `pls1_fit`.
 - `k`: `1 ≤ k ≤ min(p, q)`, default `1`. `k = 0` raises
   `invalid_argument`; `k > min(p, q)` raises `k_exceeds_max`. Note that the
   bound does not involve `n`; see Truncation below.

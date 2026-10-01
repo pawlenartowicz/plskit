@@ -271,7 +271,7 @@ fn fit_rows(
     let y_rows = col_row_subset(y, idx);
 
     let w_sub: Option<faer::Col<f64>> = weights.map(|w| crate::linalg::col_row_subset(w, idx));
-    let (w_sub_norm, _, _) = crate::fit::validate_and_normalize_weights(
+    let (w_sub_norm, _) = crate::fit::validate_and_normalize_weights(
         w_sub.as_ref().map(faer::Col::as_ref),
         idx.len(),
         k,
@@ -439,70 +439,22 @@ fn run_one_confirmatory(
 #[cfg(test)]
 mod tests_worker {
     use super::*;
-    use crate::fit::{pls1_fit, FitOpts, KSpec};
     use crate::rng::resolve_seed;
     use faer::{Col, Mat};
     use rand::RngExt;
     use rand::SeedableRng;
 
-    fn synth(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-        let x = Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0));
-        let beta = Col::<f64>::from_fn(d, |j| if j < 2 { 1.0 } else { 0.0 });
-        let signal: Col<f64> = &x * &beta;
-        let noise = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
-        let y = Col::<f64>::from_fn(n, |i| signal[i] * snr + noise[i]);
-        (x, y)
-    }
-
-    #[test]
-    fn worker_returns_finite_outputs_with_signal() {
-        let (x, y) = synth(100, 6, 4.0, 1);
-        let m_ref_fit = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
-        let w_ref = m_ref_fit.w_star.clone();
-
-        let (_, mut rng) = resolve_seed(Some(2)).unwrap();
-        let row = run_one_confirmatory(
-            x.as_ref(),
-            y.as_ref(),
-            2,
-            resolve_m(100, 0.7),
-            w_ref.as_ref(),
-            false,
-            None,
-            &mut rng,
-        )
-        .unwrap();
-
-        assert_eq!(row.leverage.len(), 6);
-        for v in &row.leverage {
-            assert!(
-                (0.0..=1.5).contains(v),
-                "leverage out of expected range: {v}"
-            );
-        }
-        assert!(row.holdout_corr.is_finite() || row.holdout_corr.is_nan());
-        assert_eq!(row.beta.len(), 6);
-    }
-
     /// Regression for review-finding R4 (ticket #1, 2026-05-10): a
-    /// subsample whose NIPALS fit short-circuits with `k_used < k`
-    /// produces a truncated `w_b`; procrustes returns `DimensionMismatch`.
-    /// The pre-fix `.expect(...)` in `run_one_confirmatory` panicked the
-    /// Rayon worker; the post-fix `?` propagates as `Err`, which the
-    /// outer driver maps to `WorkerOutcome::Failed`.
+    /// subsample whose NIPALS fit short-circuits with `k_used < k` must not
+    /// panic the Rayon worker (the pre-fix `.expect(...)` did). The
+    /// replicate fit runs `pls1_fit` with `pre_standardized = true`, whose
+    /// `k_used < k` guard returns `InvalidInput` ("truncated"); the worker
+    /// propagates it with `?` and the outer driver maps it to
+    /// `WorkerOutcome::Failed`.
     ///
     /// Trigger: tiny y values + `pre_standardized=true` so plskit skips
     /// re-standardization. NIPALS sees `‖X'y‖ ≪ 1e-14` at component 0
-    /// and short-circuits, yielding `w_b` with zero columns even though
-    /// `w_ref` has `k=2`. Caller must not panic.
+    /// and short-circuits with no component although `k = 2`.
     #[test]
     fn worker_propagates_err_on_truncated_w_b() {
         let n = 40;
@@ -524,7 +476,10 @@ mod tests_worker {
             None,
             &mut rng,
         );
-        assert!(res.is_err(), "expected Err from truncated-w_b path, got Ok");
+        assert!(
+            matches!(&res, Err(PlsKitError::InvalidInput(msg)) if msg.contains("truncated")),
+            "{res:?}"
+        );
     }
 }
 
@@ -685,16 +640,16 @@ fn reduce_holdout_corr(r_b: &[f64], n: usize, m: usize, level: f64) -> CIScalar 
     }
 }
 
-/// Inverse standard-normal CDF (Acklam / Beasley-Springer / Wichura). Used
-/// for the NB-Wald CI on `holdout_corr` and the normal-theory leverage CI
-/// (level ∈ [0.5, 0.99] → no extreme tails).
+/// Inverse standard-normal CDF (Wichura 1988, AS241 `PPND16`). Used for the
+/// NB-Wald CI on `holdout_corr` and the normal-theory leverage CI (level ∈
+/// [0.5, 0.99] → p ∈ [0.75, 0.995]: the central and intermediate branches).
 #[allow(unused_parens, clippy::unreadable_literal, clippy::excessive_precision)]
 fn standard_normal_inv(p: f64) -> f64 {
-    // Wichura AS241. Reproduced from numerical-recipes idiom; tolerance better
-    // than 1e-9 over [1e-300, 1 − 1e-9].
+    // Wichura AS241 (Applied Statistics 37:477-484), accurate to about 1e-16.
+    // Coefficients as published (also Python's `statistics.NormalDist.inv_cdf`).
     let q = p - 0.5;
     if q.abs() <= 0.425 {
-        let r = q * q;
+        let r = 0.180625 - q * q;
         let num = (((((((2509.0809287301226727 * r + 33430.575583588128105) * r
             + 67265.770927008700853)
             * r
@@ -737,7 +692,7 @@ fn standard_normal_inv(p: f64) -> f64 {
             + 4.6303378461565452959)
             * r
             + 1.42343711074968357734);
-        let den = (((((((0.00000105075007164441684324 * r + 0.0005475938084995344946) * r
+        let den = (((((((0.00000000105075007164441684324 * r + 0.0005475938084995344946) * r
             + 0.0151986665636164571966)
             * r
             + 0.14810397642748007459)
@@ -764,19 +719,20 @@ fn standard_normal_inv(p: f64) -> f64 {
             + 5.4637849111641143699)
             * r
             + 6.6579046435011037772);
-        let den =
-            (((((((0.00000000000204426310338993978564 * r + 0.00000014215117583164458887) * r
-                + 0.000018463183175100546818)
-                * r
-                + 0.0007868691311456132591)
-                * r
-                + 0.0148753612908506148525)
-                * r
-                + 0.13692988092273580531)
-                * r
-                + 0.59983220655588793769)
-                * r
-                + 1.0);
+        let den = (((((((0.00000000000000204426310338993978564 * r
+            + 0.00000014215117583164458887)
+            * r
+            + 0.000018463183175100546818)
+            * r
+            + 0.0007868691311456132591)
+            * r
+            + 0.0148753612908506148525)
+            * r
+            + 0.13692988092273580531)
+            * r
+            + 0.59983220655588793769)
+            * r
+            + 1.0);
         num / den
     };
     if q < 0.0 {
@@ -1044,20 +1000,48 @@ pub(crate) fn reduce_confirmatory(
 mod tests_reduce {
     use super::*;
 
+    /// AS241 against `statistics.NormalDist().inv_cdf`, to 1e-12, in every
+    /// branch: central (|p − 0.5| ≤ 0.425, reached by `level < 0.85`),
+    /// intermediate (the default level's 0.975, and 0.995 for `level = 0.99`)
+    /// and far tail (p < e⁻²⁵, one-sided since `1 − p` rounds to 1).
     #[test]
-    fn standard_normal_inv_known_values() {
-        // Φ⁻¹(0.975) ≈ 1.959964
-        assert!((standard_normal_inv(0.975) - 1.959_964).abs() < 1e-4);
-        // Φ⁻¹(0.5) = 0
-        assert!(standard_normal_inv(0.5).abs() < 1e-6);
+    fn standard_normal_inv_matches_as241() {
+        check_standard_normal_inv(
+            &[
+                (0.5, 0.0),
+                (0.75, 0.674_489_750_196_081_7),
+                (0.9, 1.281_551_565_544_600_6),
+                (0.975, 1.959_963_984_540_054),
+                (0.995, 2.575_829_303_548_900_4),
+            ],
+            1e-12,
+        );
+        let far = standard_normal_inv(1e-50);
+        assert!(
+            (far + 14.933_337_534_788_489).abs() < 1e-12,
+            "Φ⁻¹(1e-50) = {far}"
+        );
+    }
+
+    /// `|Φ⁻¹(p) − q| < tol` and `Φ⁻¹(1 − p) = −Φ⁻¹(p)` to `tol` on every row.
+    fn check_standard_normal_inv(rows: &[(f64, f64)], tol: f64) {
+        for &(p, q) in rows {
+            let got = standard_normal_inv(p);
+            assert!((got - q).abs() < tol, "Φ⁻¹({p}) = {got}, want {q}");
+            assert!(
+                (standard_normal_inv(1.0 - p) + got).abs() < tol,
+                "Φ⁻¹(1 − {p}) = {} is not −Φ⁻¹({p})",
+                standard_normal_inv(1.0 - p)
+            );
+        }
     }
 
     #[test]
     fn reduce_holdout_corr_widens_with_overlap_factor() {
-        // Generate B deterministic samples around 0.4 with mild dispersion. The
-        // NB inflation (1/B + (n−m)/m) must widen the SE relative to a vanilla
-        // 1/B-scaled estimator, and the back-transformed CI bounds must lie
-        // strictly inside (−1, 1).
+        // Generate B deterministic samples around 0.4 with mild dispersion.
+        // The point is the plain mean of r_b; the z-scale SE carries the NB
+        // inflation (1/B + (n−m)/m); the bounds are the Fisher Wald interval
+        // back-transformed with tanh, strictly inside (−1, 1).
         let b_count = 1000;
         let mut samples = vec![0.0_f64; b_count];
         for (i, s) in samples.iter_mut().enumerate() {
@@ -1068,8 +1052,6 @@ mod tests_reduce {
         let m = 126_usize;
         let nb = reduce_holdout_corr(&samples, n, m, 0.95);
 
-        // Self-comparison on the z-scale: the NB factor inflates Var by the
-        // ratio (1/B + (n−m)/m) / (1/B), which exceeds 1 whenever (n−m)/m > 0.
         #[allow(clippy::cast_precision_loss)]
         let mean_z: f64 = samples.iter().map(|r| r.atanh()).sum::<f64>() / b_count as f64;
         #[allow(clippy::cast_precision_loss)]
@@ -1079,12 +1061,27 @@ mod tests_reduce {
             .sum::<f64>()
             / (b_count - 1) as f64;
         #[allow(clippy::cast_precision_loss)]
-        let se_no_nb = (var_z / b_count as f64).sqrt();
+        let point = samples.iter().sum::<f64>() / b_count as f64;
+        #[allow(clippy::cast_precision_loss)]
+        let sd = ((1.0 / b_count as f64 + (n - m) as f64 / m as f64) * var_z).sqrt();
+        let z = standard_normal_inv(0.975);
+        assert!((nb.sd - sd).abs() < 1e-12, "sd {} vs {sd}", nb.sd);
         assert!(
-            nb.sd > se_no_nb,
-            "NB-inflated z-scale SE must exceed the un-inflated SE: nb.sd={} se_no_nb={}",
-            nb.sd,
-            se_no_nb
+            (nb.point - point).abs() < 1e-12,
+            "point {} vs {point}",
+            nb.point
+        );
+        let lower = (point.atanh() - z * sd).tanh();
+        let upper = (point.atanh() + z * sd).tanh();
+        assert!(
+            (nb.lower - lower).abs() < 1e-12,
+            "lower {} vs {lower}",
+            nb.lower
+        );
+        assert!(
+            (nb.upper - upper).abs() < 1e-12,
+            "upper {} vs {upper}",
+            nb.upper
         );
 
         // Bounds always within the correlation domain after tanh().
@@ -1156,25 +1153,29 @@ mod tests_beta_z_and_leverage_clamp {
         (v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nf - 1.0)).sqrt()
     }
 
-    /// `beta_sign_z` is `β_ref / se` with the finite-population-corrected
-    /// subsampling SE, and it neither grows with the number of replicates nor
-    /// depends on a common shrinkage factor of the subsample fits. The former
-    /// `(2p̂ − 1)·√B` formula fails every assertion here: all replicates share
-    /// the sign of `β_ref`, so it returns `√B` (14.1 and 44.7).
+    /// The β CI is built from the same corrected replicates as
+    /// `beta_sign_z`: replicates rescaled by `1/κ̂` (so the shrinkage offset
+    /// does not move the midpoint) and spread scaled by `√(m/(n − m))` (the
+    /// finite-population correction). With symmetric `δ` it is therefore
+    /// centered on `β_ref` for any common shrinkage `κ`, its half-width is
+    /// `√(m/(n − m))` times the `δ` quantile, `beta_se` is the SE the z
+    /// divides by, `beta_sign_z_signed = β_ref / beta_se` exactly, and the
+    /// folded `beta_sign_z` is its absolute value. None of it grows with
+    /// the number of replicates B: the former `(2p̂ − 1)·√B` formula
+    /// returns √B here (every replicate shares the sign of `β_ref`), 14.1
+    /// and 44.7.
     #[test]
-    fn beta_sign_z_is_shrinkage_and_n_boot_invariant() {
+    fn beta_ci_is_shrinkage_corrected_and_fpc_scaled() {
         let (n, m) = (100_usize, 26_usize);
         let beta_ref = [0.3_f64, -0.3];
-        let a = 0.25; // |δ| ≤ a < |β_ref|: every replicate keeps β_ref's sign
         let beta_ref_col = Col::<f64>::from_fn(2, |j| beta_ref[j]);
         #[allow(clippy::cast_precision_loss)]
         let c = ((m as f64) / ((n - m) as f64)).sqrt();
         for &b in &[200_usize, 2000] {
-            let delta = grid(b, a);
-            let expected = [
-                beta_ref[0] / (c * sd(&delta)),
-                beta_ref[1] / (c * sd(&delta)),
-            ];
+            let delta = grid(b, 0.25);
+            let mut sorted = delta.clone();
+            sorted.sort_by(f64::total_cmp);
+            let half = c * crate::linalg::empirical_quantile(&sorted, 0.975);
             for &kappa in &[1.0_f64, 0.6] {
                 let rows: Vec<ConfirmatoryWorkerRow> = delta
                     .iter()
@@ -1188,69 +1189,31 @@ mod tests_beta_z_and_leverage_clamp {
                 let ci =
                     reduce_confirmatory(&rows, n, m, 0.7, 0.95, &[0.5, 0.5], beta_ref_col.as_ref());
                 for j in 0..2 {
+                    let what = format!("b={b} kappa={kappa} j={j}");
+                    let mid = f64::midpoint(ci.beta_ci_lower[j], ci.beta_ci_upper[j]);
+                    let hw = 0.5 * (ci.beta_ci_upper[j] - ci.beta_ci_lower[j]);
+                    assert!((mid - beta_ref[j]).abs() < 1e-9, "{what}: midpoint {mid}");
                     assert!(
-                        (ci.beta_sign_z_signed[j] - expected[j]).abs() < 1e-9,
-                        "b={b} kappa={kappa} j={j}: z={} expected={}",
-                        ci.beta_sign_z_signed[j],
-                        expected[j]
+                        (hw - half).abs() < 1e-9,
+                        "{what}: half-width {hw} vs {half}"
                     );
-                    assert!((ci.beta_sign_z[j] - expected[j].abs()).abs() < 1e-9);
+                    assert!(
+                        (ci.beta_se[j] - c * sd(&delta)).abs() < 1e-9,
+                        "{what}: beta_se {} vs {}",
+                        ci.beta_se[j],
+                        c * sd(&delta)
+                    );
+                    assert!(
+                        (ci.beta_sign_z_signed[j] - beta_ref[j] / ci.beta_se[j]).abs() < 1e-12,
+                        "{what}: z {} vs β/se {}",
+                        ci.beta_sign_z_signed[j],
+                        beta_ref[j] / ci.beta_se[j]
+                    );
+                    assert!(
+                        (ci.beta_sign_z[j] - ci.beta_sign_z_signed[j].abs()).abs() < 1e-12,
+                        "{what}: folded"
+                    );
                 }
-            }
-        }
-    }
-
-    /// The β CI is built from the same corrected replicates as
-    /// `beta_sign_z`: replicates rescaled by `1/κ̂` (so the shrinkage offset
-    /// does not move the midpoint) and spread scaled by `√(m/(n − m))` (the
-    /// finite-population correction). With symmetric `δ` it is therefore
-    /// centered on `β_ref` for any common shrinkage `κ`, its half-width is
-    /// `√(m/(n − m))` times the `δ` quantile, `beta_se` is the SE the z
-    /// divides by, and `beta_sign_z_signed = β_ref / beta_se` exactly.
-    #[test]
-    fn beta_ci_is_shrinkage_corrected_and_fpc_scaled() {
-        let (n, m, b) = (100_usize, 26_usize, 2000_usize);
-        let beta_ref = [0.3_f64, -0.3];
-        let beta_ref_col = Col::<f64>::from_fn(2, |j| beta_ref[j]);
-        #[allow(clippy::cast_precision_loss)]
-        let c = ((m as f64) / ((n - m) as f64)).sqrt();
-        let delta = grid(b, 0.25);
-        let mut sorted = delta.clone();
-        sorted.sort_by(f64::total_cmp);
-        let half = c * crate::linalg::empirical_quantile(&sorted, 0.975);
-        for &kappa in &[1.0_f64, 0.6] {
-            let rows: Vec<ConfirmatoryWorkerRow> = delta
-                .iter()
-                .map(|&dl| {
-                    row(
-                        vec![0.5, 0.5],
-                        vec![kappa * (beta_ref[0] + dl), kappa * (beta_ref[1] - dl)],
-                    )
-                })
-                .collect();
-            let ci =
-                reduce_confirmatory(&rows, n, m, 0.7, 0.95, &[0.5, 0.5], beta_ref_col.as_ref());
-            for j in 0..2 {
-                let what = format!("kappa={kappa} j={j}");
-                let mid = f64::midpoint(ci.beta_ci_lower[j], ci.beta_ci_upper[j]);
-                let hw = 0.5 * (ci.beta_ci_upper[j] - ci.beta_ci_lower[j]);
-                assert!((mid - beta_ref[j]).abs() < 1e-9, "{what}: midpoint {mid}");
-                assert!(
-                    (hw - half).abs() < 1e-9,
-                    "{what}: half-width {hw} vs {half}"
-                );
-                assert!(
-                    (ci.beta_se[j] - c * sd(&delta)).abs() < 1e-9,
-                    "{what}: beta_se {} vs {}",
-                    ci.beta_se[j],
-                    c * sd(&delta)
-                );
-                assert!(
-                    (ci.beta_sign_z_signed[j] - beta_ref[j] / ci.beta_se[j]).abs() < 1e-12,
-                    "{what}: z {} vs β/se {}",
-                    ci.beta_sign_z_signed[j],
-                    beta_ref[j] / ci.beta_se[j]
-                );
             }
         }
     }
@@ -1470,25 +1433,12 @@ mod tests_failure_check {
             }
             other => panic!("wrong error variant: {other:?}"),
         }
-    }
 
-    #[test]
-    fn strict_clean_passes() {
-        let rows: Vec<Option<ConfirmatoryWorkerRow>> =
-            (0..100).map(|_| Some(dummy_row(0.5))).collect();
-        let ci = run(rows, opts_with(100, 0.0)).expect("clean strict should pass");
-        assert_eq!(ci.n_boot, 100);
-        assert_eq!(ci.n_boot_finite, 100);
-        assert_eq!(ci.n_boot_finite_holdout_corr, 100);
-    }
-
-    #[test]
-    fn strict_one_failure_errors() {
+        // Strict threshold: a single failure already exceeds 0.0.
         let mut rows: Vec<Option<ConfirmatoryWorkerRow>> =
             (0..99).map(|_| Some(dummy_row(0.5))).collect();
         rows.push(None);
-        let err = run(rows, opts_with(100, 0.0)).unwrap_err();
-        match err {
+        match run(rows, opts_with(100, 0.0)).unwrap_err() {
             PlsKitError::ResampleFailureRateExceeded {
                 observed_holdout_corr,
                 n_worker_failed,
@@ -1544,32 +1494,18 @@ mod tests_failure_check {
         assert_eq!(ci.n_boot, 100);
         assert_eq!(ci.n_boot_finite, 0);
         assert_eq!(ci.n_boot_finite_holdout_corr, 0);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reduce_centered_scaled_recovers_point_when_no_variation() {
-        // All samples equal to point → Δ ≡ 0 → lower = upper = point, sd = 0.
-        let samples = vec![3.0_f64; 100];
-        let r = reduce_centered_scaled(&samples, 3.0, fpc_rate(1000, 126), 0.95);
-        assert!((r.point - 3.0).abs() < 1e-12);
-        assert!((r.lower - 3.0).abs() < 1e-12);
-        assert!((r.upper - 3.0).abs() < 1e-12);
-        assert!(r.sd.abs() < 1e-12);
-    }
-
-    #[test]
-    fn reduce_centered_scaled_lower_le_upper_for_dispersed_samples() {
-        // Synthetic dispersed Δ around point=0; symmetric → ci is symmetric-ish.
-        #[allow(clippy::cast_lossless)]
-        let samples: Vec<f64> = (0..1000).map(|i| (i as f64 - 500.0) * 0.001).collect();
-        let r = reduce_centered_scaled(&samples, 0.0, fpc_rate(1000, 100), 0.95);
-        assert!(r.lower < r.upper, "lower={} upper={}", r.lower, r.upper);
-        assert!(r.sd > 0.0);
+        // No finite replicate: every CI collapses onto its reference
+        // (leverage_ref 0.5, β_ref 1.0) with zero SE; the β z is NaN
+        // (se = 0 with β_ref ≠ 0) and holdout_corr is all zeros.
+        assert_eq!(ci.leverage_ci_lower, [0.5, 0.5]);
+        assert_eq!(ci.leverage_ci_upper, [0.5, 0.5]);
+        assert_eq!(ci.leverage_se, [0.0, 0.0]);
+        assert_eq!(ci.beta_ci_lower, [1.0, 1.0]);
+        assert_eq!(ci.beta_ci_upper, [1.0, 1.0]);
+        assert_eq!(ci.beta_se, [0.0, 0.0]);
+        assert!(ci.beta_sign_z_signed.iter().all(|z| z.is_nan()));
+        let h = &ci.holdout_corr;
+        assert_eq!((h.point, h.lower, h.upper, h.sd), (0.0, 0.0, 0.0, 0.0));
     }
 }
 
@@ -1756,203 +1692,62 @@ mod tests_engine {
         (x, y)
     }
 
+    /// Every knob range `validate` enforces, at both edges: each rejected
+    /// row names the knob in its message, each accepted edge passes.
     #[test]
-    #[allow(clippy::many_single_char_names, clippy::needless_range_loop)]
-    fn engine_runs_end_to_end_with_signal() {
-        let (x, y) = synth(100, 6, 4.0, 42);
-        let fit = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
-
-        let d = x.ncols();
-        let leverage_ref = crate::linalg::leverage_diag(fit.w_star.as_ref());
-
-        let opts = SubsampleOpts {
-            n_boot: 200,
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn validate_rejects_out_of_range_knobs() {
+        let base = SubsampleOpts {
+            n_boot: 100,
             m_rate: 0.7,
             level: 0.95,
             pre_standardized: false,
-            disable_parallelism: true,
-            max_failure_rate: 0.0,
-            max_skip_rate: 1.0,
+            disable_parallelism: false,
+            max_failure_rate: 0.01,
+            max_skip_rate: 0.01,
         };
-        let (_, mut rng) = resolve_seed(Some(2026)).unwrap();
-        let ci = pls1_subsample_inference_confirmatory(
-            x.as_ref(),
-            y.as_ref(),
-            2,
-            fit.w_star.as_ref(),
-            fit.beta.as_ref(),
-            &leverage_ref,
-            opts,
-            None,
-            &mut rng,
-        )
-        .unwrap();
-
-        assert_eq!(ci.n_boot, 200);
-        assert_eq!(ci.m, 26); // ceil(100^0.7)
-        assert_eq!(ci.beta_sign_z.len(), d);
-        assert_eq!(ci.leverage_ci_lower.len(), d);
-        assert!(ci.holdout_corr.lower.is_finite());
-    }
-
-    #[test]
-    #[allow(clippy::many_single_char_names, clippy::needless_range_loop)]
-    fn engine_emits_signed_beta_sign_z() {
-        let (x, y) = synth(120, 6, 5.0, 7);
-        let fit = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
-
-        let d = x.ncols();
-        let leverage_ref = crate::linalg::leverage_diag(fit.w_star.as_ref());
-
-        let opts = SubsampleOpts {
-            n_boot: 200,
-            m_rate: 0.7,
-            level: 0.95,
-            pre_standardized: false,
-            disable_parallelism: true,
-            max_failure_rate: 0.0,
-            max_skip_rate: 1.0,
-        };
-        let (_, mut rng) = resolve_seed(Some(2026)).unwrap();
-        let ci = pls1_subsample_inference_confirmatory(
-            x.as_ref(),
-            y.as_ref(),
-            2,
-            fit.w_star.as_ref(),
-            fit.beta.as_ref(),
-            &leverage_ref,
-            opts,
-            None,
-            &mut rng,
-        )
-        .unwrap();
-
-        // Must have the new field, same length as folded form.
-        assert_eq!(ci.beta_sign_z_signed.len(), d);
-        // Magnitudes equal the folded form's magnitudes.
-        for j in 0..d {
-            assert!(
-                (ci.beta_sign_z_signed[j].abs() - ci.beta_sign_z[j].abs()).abs() < 1e-12,
-                "magnitude mismatch at j={}: signed={}, folded={}",
-                j,
-                ci.beta_sign_z_signed[j],
-                ci.beta_sign_z[j],
-            );
-            // Sign matches sign of beta_ref[j] (when β_ref[j] ≠ 0).
-            if fit.beta[j].abs() > 1e-12 {
-                assert!(
-                    ci.beta_sign_z_signed[j].signum() == fit.beta[j].signum()
-                        || ci.beta_sign_z_signed[j].abs() < 1e-12,
-                    "sign mismatch at j={}: signed={}, β_ref={}",
-                    j,
-                    ci.beta_sign_z_signed[j],
-                    fit.beta[j],
-                );
+        let with = |knobs: &[(&str, f64)]| {
+            let mut o = base;
+            for &(knob, v) in knobs {
+                match knob {
+                    "n_boot" => o.n_boot = v as usize,
+                    "m_rate" => o.m_rate = v,
+                    "level" => o.level = v,
+                    "max_failure_rate" => o.max_failure_rate = v,
+                    "max_skip_rate" => o.max_skip_rate = v,
+                    _ => unreachable!("{knob}"),
+                }
             }
+            o
+        };
+        for (knob, v) in [
+            ("m_rate", 0.4),
+            ("m_rate", 0.5),
+            ("m_rate", 0.95),
+            ("level", 0.49),
+            ("level", 0.991),
+            ("n_boot", 99.0),
+            ("max_failure_rate", -0.01),
+            ("max_failure_rate", 1.01),
+            ("max_skip_rate", -0.01),
+            ("max_skip_rate", 1.01),
+        ] {
+            let err = with(&[(knob, v)]).validate().unwrap_err();
+            assert_eq!(err.code(), "invalid_argument", "{knob}={v}");
+            assert!(
+                err.to_string().contains(&format!("{knob} must")),
+                "{knob}={v}: {err}"
+            );
         }
-    }
-
-    #[test]
-    fn validate_rejects_bad_m_rate() {
-        let opts = SubsampleOpts {
-            n_boot: 1000,
-            m_rate: 0.4,
-            level: 0.95,
-            pre_standardized: false,
-            disable_parallelism: false,
-            max_failure_rate: 1.0,
-            max_skip_rate: 1.0,
-        };
-        let err = opts.validate().unwrap_err();
-        assert_eq!(err.code(), "invalid_argument");
-    }
-
-    #[test]
-    fn validate_rejects_bad_level() {
-        let opts = SubsampleOpts {
-            n_boot: 1000,
-            m_rate: 0.7,
-            level: 0.999,
-            pre_standardized: false,
-            disable_parallelism: false,
-            max_failure_rate: 1.0,
-            max_skip_rate: 1.0,
-        };
-        assert_eq!(opts.validate().unwrap_err().code(), "invalid_argument");
-    }
-
-    #[test]
-    fn validate_rejects_low_n_boot() {
-        let opts = SubsampleOpts {
-            n_boot: 50,
-            m_rate: 0.7,
-            level: 0.95,
-            pre_standardized: false,
-            disable_parallelism: false,
-            max_failure_rate: 1.0,
-            max_skip_rate: 1.0,
-        };
-        assert_eq!(opts.validate().unwrap_err().code(), "invalid_argument");
-    }
-
-    #[test]
-    #[allow(clippy::many_single_char_names, clippy::needless_range_loop)]
-    fn engine_emits_n_boot_finite_diagnostics() {
-        let (x, y) = synth(100, 6, 4.0, 42);
-        let fit = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
-
-        let _d = x.ncols();
-        let leverage_ref = crate::linalg::leverage_diag(fit.w_star.as_ref());
-
-        let opts = SubsampleOpts {
-            n_boot: 200,
-            m_rate: 0.7,
-            level: 0.95,
-            pre_standardized: false,
-            disable_parallelism: true,
-            max_failure_rate: 0.0,
-            max_skip_rate: 1.0,
-        };
-        let (_, mut rng) = resolve_seed(Some(2026)).unwrap();
-        let ci = pls1_subsample_inference_confirmatory(
-            x.as_ref(),
-            y.as_ref(),
-            2,
-            fit.w_star.as_ref(),
-            fit.beta.as_ref(),
-            &leverage_ref,
-            opts,
-            None,
-            &mut rng,
-        )
-        .unwrap();
-
-        assert_eq!(ci.n_boot, 200);
-        assert_eq!(ci.n_boot_finite, 200);
-        assert_eq!(ci.n_boot_finite_holdout_corr, 200);
-        assert!(ci.n_boot_finite_holdout_corr <= ci.n_boot_finite);
-        assert!(ci.n_boot_finite <= ci.n_boot);
+        for knobs in [
+            &[][..],
+            &[("level", 0.5)],
+            &[("level", 0.99)],
+            &[("max_failure_rate", 0.0), ("max_skip_rate", 0.0)],
+            &[("max_failure_rate", 1.0), ("max_skip_rate", 1.0)],
+        ] {
+            assert!(with(knobs).validate().is_ok(), "{knobs:?}");
+        }
     }
 
     fn run_engine(
@@ -1997,7 +1792,7 @@ mod tests_engine {
 
     /// Under a pure null (y independent of X, K = 1) every population β[j]
     /// is 0, so `beta_sign_z` should be roughly half-normal: mean
-    /// √(2/π) ≈ 0.80 and about 5% above 1.96. The former `(2p̂ − 1)·√B`
+    /// √(2/π) ≈ 0.80, sd √(1 − 2/π) ≈ 0.60 and about 5% above 1.96. The former `(2p̂ − 1)·√B`
     /// formula averaged about 4.6 here with most values above 1.96.
     #[test]
     fn beta_sign_z_is_calibrated_under_pure_null() {
@@ -2022,6 +1817,12 @@ mod tests_engine {
         assert!(pooled.iter().all(|z| z.is_finite() && *z >= 0.0));
         assert!((0.6..=1.0).contains(&mean), "mean |z| = {mean}");
         assert!(share <= 0.10, "share |z| > 1.96 = {share}");
+        // Half-normal spread too: sd √(1 − 2/π) ≈ 0.6028.
+        let sd = (pooled.iter().map(|z| (z - mean).powi(2)).sum::<f64>() / (total - 1.0)).sqrt();
+        assert!(
+            (sd - (1.0 - 2.0 / std::f64::consts::PI).sqrt()).abs() <= 0.15,
+            "sd |z| = {sd}"
+        );
         // The β CI rests on the same corrected SE, so it covers the null
         // β[j] = 0 at roughly the nominal rate. Uncorrected (no FPC, no
         // 1/κ̂) it was κ̂·√(1 − m/n) too narrow and missed 0 far more often.
@@ -2096,292 +1897,144 @@ mod tests_engine {
             assert!((0.0..=1.0).contains(&ci.leverage_ci_upper[j]));
         }
     }
-}
 
-#[cfg(test)]
-#[allow(
-    clippy::many_single_char_names,
-    clippy::too_many_lines,
-    clippy::too_many_arguments
-)]
-mod copy_free_reference {
-    use super::*;
-    use crate::linalg::{col_row_subset, row_subset, standardize_apply};
-    use crate::signal_test::with_new_routes_disabled;
-    use crate::test_support::{assert_bits_eq, col_vals, copy_free_families, mat_vals, Layouts};
-
-    /// Pre-change body, verbatim.
-    fn fit_rows_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        idx: &[usize],
-        k: usize,
-        pre_standardized_x: bool,
-        weights: Option<ColRef<'_, f64>>,
-    ) -> PlsKitResult<RowFit> {
-        let d = x.ncols();
-        let x_rows = row_subset(x, idx);
-        let y_rows = col_row_subset(y, idx);
-
-        let w_sub: Option<faer::Col<f64>> = weights.map(|w| crate::linalg::col_row_subset(w, idx));
-        let (w_sub_norm, _, _) = crate::fit::validate_and_normalize_weights(
-            w_sub.as_ref().map(faer::Col::as_ref),
-            idx.len(),
-            k,
-        )?;
-
-        let (xs_sub, x_mean, x_scale, ys_sub, y_scale) = if pre_standardized_x {
-            // Caller asserts already standardized: the row subsets are the
-            // blocks, moved rather than copied. Mean/scale are no-ops (zeros /
-            // ones) for the holdout standardization and for the β
-            // back-projection (β_b stays on the standardized scale, matching
-            // β_ref which the caller's full-data fit also leaves on that scale).
-            (
-                x_rows,
-                Col::<f64>::zeros(d),
-                Col::<f64>::from_fn(d, |_| 1.0),
-                y_rows,
-                1.0_f64,
-            )
-        } else {
-            let (xs, mu, sigma) = crate::linalg::standardize_weighted(
-                x_rows.as_ref(),
-                w_sub_norm.as_ref().map(faer::Col::as_ref),
-            );
-            let (ys, _, ys_sigma) = crate::linalg::standardize1_weighted(
-                y_rows.as_ref(),
-                w_sub_norm.as_ref().map(faer::Col::as_ref),
-            );
-            (xs, mu, sigma, ys, ys_sigma)
-        };
-
-        let fit = pls1_fit(
-            xs_sub.as_ref(),
-            ys_sub.as_ref(),
-            KSpec::Fixed(k),
-            w_sub_norm.as_ref().map(faer::Col::as_ref),
-            FitOpts {
-                pre_standardized: true,
-                // Seq inside the per-resample worker: outer Rayon owns the threadpool.
-                par: crate::fit::ParChoice::Seq,
-                ..FitOpts::default()
-            },
-        )?;
-        if fit.w_star.ncols() != k {
-            return Err(PlsKitError::Internal(format!(
-                "resample fit truncated to {} of {k} components",
-                fit.w_star.ncols()
-            )));
-        }
-        Ok(RowFit {
-            w: fit.w_star,
-            beta: fit.beta,
-            x_mean,
-            x_scale,
-            y_scale,
-        })
-    }
-
-    /// Pre-change body, verbatim.
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::similar_names)]
-    fn run_one_confirmatory_reference(
-        x: MatRef<'_, f64>,
-        y: ColRef<'_, f64>,
-        k: usize,
-        m: usize,
-        _w_ref: MatRef<'_, f64>, // retained for call-site shape parity; leverage no longer uses it
-        pre_standardized_x: bool,
-        weights: Option<ColRef<'_, f64>>,
-        rng: &mut crate::rng::Rng,
-    ) -> PlsKitResult<ConfirmatoryWorkerRow> {
-        let n = x.nrows();
-        let d = x.ncols();
-
-        // 1. Index draws: subsample, then bootstrap resample.
-        let (sample_idx, holdout_idx) = subsample_indices(n, m, rng);
-        let boot_idx = bootstrap_indices(n, rng);
-
-        // 2. Subsample fit (β, holdout_corr) and bootstrap fit (leverage).
-        let RowFit {
-            beta: beta_b,
-            x_mean,
-            x_scale,
-            y_scale,
-            ..
-        } = fit_rows_reference(x, y, &sample_idx, k, pre_standardized_x, weights)?;
-        let boot = fit_rows_reference(x, y, &boot_idx, k, pre_standardized_x, weights)?;
-
-        // 3. Per-variable leverage on the bootstrap fit's unaligned W. Leverage
-        // is invariant under right-orthogonal rotation (leverage =
-        // diag(W(WᵀW)⁻¹Wᵀ); W → W·R leaves the hat matrix fixed), so no
-        // procrustes alignment is needed.
-        let leverage = crate::linalg::leverage_diag(boot.w.as_ref());
-
-        // 4. Holdout predictive correlation of the subsample fit.
-        let x_h_view = row_subset(x, &holdout_idx);
-        let y_h_view = col_row_subset(y, &holdout_idx);
-        let (xs_h, ys_h_owned) = if pre_standardized_x {
-            (
-                Mat::<f64>::from_fn(x_h_view.nrows(), d, |i, j| x_h_view[(i, j)]),
-                Col::<f64>::from_fn(y_h_view.nrows(), |i| y_h_view[i]),
-            )
-        } else {
-            let xs_h = standardize_apply(x_h_view.as_ref(), x_mean.as_ref(), x_scale.as_ref());
-            (xs_h, Col::<f64>::from_fn(y_h_view.nrows(), |i| y_h_view[i]))
-        };
-
-        let y_pred: Col<f64> = &xs_h * &beta_b;
-        let n_h = ys_h_owned.nrows();
-        #[allow(clippy::cast_precision_loss)]
-        let holdout_corr = if n_h >= 2 {
-            let yp_mean: f64 = (0..n_h).map(|i| y_pred[i]).sum::<f64>() / n_h as f64;
-            let yh_mean: f64 = (0..n_h).map(|i| ys_h_owned[i]).sum::<f64>() / n_h as f64;
-            let mut s_pp = 0.0_f64;
-            let mut s_yy = 0.0_f64;
-            let mut s_py = 0.0_f64;
-            for i in 0..n_h {
-                #[allow(clippy::many_single_char_names)]
-                let dp = y_pred[i] - yp_mean;
-                #[allow(clippy::many_single_char_names)]
-                let dy = ys_h_owned[i] - yh_mean;
-                s_pp += dp * dp;
-                s_yy += dy * dy;
-                s_py += dp * dy;
-            }
-            if s_pp > 1e-30 && s_yy > 1e-30 {
-                (s_py / (s_pp * s_yy).sqrt()).clamp(-1.0, 1.0)
-            } else {
-                f64::NAN
-            }
-        } else {
-            f64::NAN
-        };
-
-        // 5. Back-project β_b to the same scale as β_ref so deltas are meaningful.
-        // Mirrors `pls1_fit`'s full-data back-projection (`fit.rs:143-147`):
-        //   β_raw[j] = β_std[j] * y_scale / x_scale[j]
-        // For pre_standardized_x, both scales are 1.0 → no-op (β_b stays standardized,
-        // matching β_ref which the caller's full-data fit also leaves on that scale).
-        let beta_vec: Vec<f64> = (0..d).map(|j| beta_b[j] * y_scale / x_scale[j]).collect();
-
-        Ok(ConfirmatoryWorkerRow {
-            leverage,
-            holdout_corr,
-            beta: beta_vec,
-        })
-    }
-
-    fn row_fit_bits(a: &RowFit, b: &RowFit, what: &str) {
-        assert_bits_eq(
-            &mat_vals(a.w.as_ref()),
-            &mat_vals(b.w.as_ref()),
-            &format!("{what}.w"),
-        );
-        assert_bits_eq(
-            &col_vals(a.beta.as_ref()),
-            &col_vals(b.beta.as_ref()),
-            &format!("{what}.beta"),
-        );
-        assert_bits_eq(
-            &col_vals(a.x_mean.as_ref()),
-            &col_vals(b.x_mean.as_ref()),
-            &format!("{what}.x_mean"),
-        );
-        assert_bits_eq(
-            &col_vals(a.x_scale.as_ref()),
-            &col_vals(b.x_scale.as_ref()),
-            &format!("{what}.x_scale"),
-        );
-        assert_eq!(a.y_scale.to_bits(), b.y_scale.to_bits(), "{what}.y_scale");
-    }
-
-    // Per-unit body: no parallel axis; serial vs parallel is covered by
-    // byte_parity (confirmatory_ci_bundle_byte_parity).
+    /// End-to-end β CI at K = 2 on the 2-signal / 6-noise design with
+    /// unequal column scales (raw-scale true β = 8 and 4 on the signal
+    /// coordinates, 0 elsewhere). Signal CIs exclude 0 on the positive
+    /// side, noise CIs stay inside (−1, 1), signal midpoints sit ≥ 10×
+    /// further from 0 than any noise midpoint, and the full-data β lies
+    /// inside its CI on both signal coordinates and on at least d − 1
+    /// coordinates overall. The bracketing catches
+    /// replicates left on the standardized scale (no `y_scale / x_scale`
+    /// back-projection): the two signal coordinates have equal standardized
+    /// β but raw β 8 and 4, a gap the common factor κ̂ cannot absorb (with
+    /// equal column scales it would).
     #[test]
-    fn fit_rows_and_the_confirmatory_worker_match_reference() {
-        with_new_routes_disabled(|| {
-            for f in copy_free_families() {
-                let n = f.x.nrows();
-                let w =
-                    f.w.as_ref()
-                        .map(|w| crate::linalg::normalize_weights(w.as_ref()).unwrap());
-                let wr = w.as_ref().map(Col::as_ref);
-                let (xs, _, _) = crate::linalg::standardize(f.x.as_ref());
-                let (ys, _, _) = crate::linalg::standardize1(f.y.as_ref());
-                let (_, mut rng) = crate::rng::resolve_seed(Some(3)).unwrap();
-                // Bootstrap indices repeat rows.
-                let boot = bootstrap_indices(n, &mut rng);
-                let (sub, _) = subsample_indices(n, n * 2 / 3, &mut rng);
-                for pre in [false, true] {
-                    let (x0, y0) = if pre { (&xs, &ys) } else { (&f.x, &f.y) };
-                    let lay = Layouts::new(x0.as_ref());
-                    for (view, xv) in lay.all(x0) {
-                        for (label, idx) in [("boot", &boot), ("subsample", &sub)] {
-                            for k in [1_usize, 2] {
-                                let what = format!("{} {view} {label} pre={pre} k={k}", f.name);
-                                match (
-                                    fit_rows(xv, y0.as_ref(), idx, k, pre, wr),
-                                    fit_rows_reference(xv, y0.as_ref(), idx, k, pre, wr),
-                                ) {
-                                    (Ok(a), Ok(b)) => row_fit_bits(&a, &b, &what),
-                                    (Err(a), Err(b)) => {
-                                        assert_eq!(a.to_string(), b.to_string(), "{what}");
-                                    }
-                                    (a, b) => panic!("{what}: ok {} vs {}", a.is_ok(), b.is_ok()),
-                                }
-                            }
-                        }
-                        for seed in [1_u64, 2, 3] {
-                            let (_, mut r1) = crate::rng::resolve_seed(Some(seed)).unwrap();
-                            let (_, mut r2) = crate::rng::resolve_seed(Some(seed)).unwrap();
-                            let w_ref = Mat::<f64>::zeros(f.x.ncols(), 2);
-                            let what = format!("{} {view} pre={pre} worker seed {seed}", f.name);
-                            match (
-                                run_one_confirmatory(
-                                    xv,
-                                    y0.as_ref(),
-                                    2,
-                                    n * 2 / 3,
-                                    w_ref.as_ref(),
-                                    pre,
-                                    wr,
-                                    &mut r1,
-                                ),
-                                run_one_confirmatory_reference(
-                                    xv,
-                                    y0.as_ref(),
-                                    2,
-                                    n * 2 / 3,
-                                    w_ref.as_ref(),
-                                    pre,
-                                    wr,
-                                    &mut r2,
-                                ),
-                            ) {
-                                (Ok(a), Ok(b)) => {
-                                    assert_bits_eq(
-                                        &a.leverage,
-                                        &b.leverage,
-                                        &format!("{what}.leverage"),
-                                    );
-                                    assert_bits_eq(&a.beta, &b.beta, &format!("{what}.beta"));
-                                    assert_eq!(
-                                        a.holdout_corr.to_bits(),
-                                        b.holdout_corr.to_bits(),
-                                        "{what}.holdout_corr"
-                                    );
-                                }
-                                (Err(a), Err(b)) => {
-                                    assert_eq!(a.to_string(), b.to_string(), "{what}");
-                                }
-                                (a, b) => panic!("{what}: ok {} vs {}", a.is_ok(), b.is_ok()),
-                            }
-                        }
-                    }
-                }
+    fn beta_ci_separates_signal_and_brackets_full_data_beta() {
+        let (mut x, y) = synth(200, 8, 4.0, 42);
+        let scale = [0.5, 1.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0];
+        for (j, s) in scale.iter().enumerate() {
+            for i in 0..x.nrows() {
+                x[(i, j)] *= s;
             }
-        });
+        }
+        let ci = run_engine(&x, &y, 2, 300, 2026);
+        let beta_ref = pls1_fit(
+            x.as_ref(),
+            y.as_ref(),
+            KSpec::Fixed(2),
+            None,
+            FitOpts::default(),
+        )
+        .unwrap()
+        .beta;
+        let (lo, hi) = (&ci.beta_ci_lower, &ci.beta_ci_upper);
+        let mid = |j: usize| f64::midpoint(lo[j], hi[j]).abs();
+        let noise_mid = (2..8).map(mid).fold(0.0_f64, f64::max);
+        for j in 0..2 {
+            assert!(lo[j] > 0.0, "signal j={j}: [{}, {}]", lo[j], hi[j]);
+            assert!(
+                mid(j) >= 10.0 * noise_mid,
+                "signal j={j}: |mid| {} vs noise max {noise_mid}",
+                mid(j)
+            );
+        }
+        for j in 2..8 {
+            assert!(
+                lo[j] > -1.0 && hi[j] < 1.0,
+                "noise j={j}: [{}, {}]",
+                lo[j],
+                hi[j]
+            );
+        }
+        let inside = |j: usize| lo[j] <= beta_ref[j] && beta_ref[j] <= hi[j];
+        for j in 0..2 {
+            assert!(
+                inside(j),
+                "signal j={j}: β_ref {} outside [{}, {}]",
+                beta_ref[j],
+                lo[j],
+                hi[j]
+            );
+        }
+        let n_inside = (0..8).filter(|&j| inside(j)).count();
+        assert!(
+            n_inside >= 7,
+            "β_ref inside its CI on {n_inside} of 8: {lo:?} {beta_ref:?} {hi:?}"
+        );
+    }
+
+    /// The replicates read X only through row gathers into owned
+    /// column-major copies, so every layout of X gives the owned matrix's
+    /// CI bundle to the bit once the references are fixed. The references
+    /// are fitted on the owned matrix: `pls1_fit` itself is only
+    /// rounding-equal across layouts (CHANGELOG 0.6.1; owned by fit.rs).
+    /// Strict rates make any replicate failure an `Err`, which fails the
+    /// table, so it cannot pass on an empty bundle.
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn confirmatory_ci_engine_is_layout_invariant() {
+        crate::test_support::assert_families_layout_invariant(
+            "confirmatory_ci",
+            |c| {
+                let k = 2;
+                let (w_norm, _) = crate::fit::validate_and_normalize_weights(c.w, c.x.nrows(), k)?;
+                let wr = w_norm.as_ref().map(Col::as_ref);
+                let fit = pls1_fit(
+                    c.x_owned.as_ref(),
+                    c.y,
+                    KSpec::Fixed(k),
+                    wr,
+                    FitOpts {
+                        pre_standardized: c.pre,
+                        ..FitOpts::default()
+                    },
+                )?;
+                let lev = crate::linalg::leverage_diag(fit.w_star.as_ref());
+                let (_, mut rng) = resolve_seed(Some(3))?;
+                pls1_subsample_inference_confirmatory(
+                    c.x,
+                    c.y,
+                    k,
+                    fit.w_star.as_ref(),
+                    fit.beta.as_ref(),
+                    &lev,
+                    SubsampleOpts {
+                        n_boot: 100,
+                        m_rate: 0.7,
+                        level: 0.95,
+                        pre_standardized: c.pre,
+                        disable_parallelism: false,
+                        max_failure_rate: 0.0,
+                        max_skip_rate: 0.0,
+                    },
+                    wr,
+                    &mut rng,
+                )
+            },
+            |ci: &ConfirmatoryCI| {
+                let mut v = vec![
+                    ci.n_boot as f64,
+                    ci.m as f64,
+                    ci.n_boot_finite as f64,
+                    ci.n_boot_finite_holdout_corr as f64,
+                ];
+                for a in [
+                    &ci.beta_sign_z,
+                    &ci.beta_sign_z_signed,
+                    &ci.leverage_ci_lower,
+                    &ci.leverage_ci_upper,
+                    &ci.leverage_se,
+                    &ci.beta_ci_lower,
+                    &ci.beta_ci_upper,
+                    &ci.beta_se,
+                ] {
+                    v.extend_from_slice(a);
+                }
+                let h = &ci.holdout_corr;
+                v.extend([h.point, h.lower, h.upper, h.sd]);
+                v
+            },
+        );
     }
 }

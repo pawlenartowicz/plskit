@@ -1,0 +1,3 @@
+# CondaPkg's private Python environment, created by the first `using PLSKit`
+.CondaPkg/
+Manifest.toml

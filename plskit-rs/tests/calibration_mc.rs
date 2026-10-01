@@ -2,7 +2,8 @@
 //!
 //! Covers: weighted H0 FPR for every confirmatory method (split_nb, split_exact,
 //! score, raw_perm, e) and the weighted sequential-deflation entry point
-//! (`pls1_find_k_sequence`). The unweighted e-method test is a tripwire for
+//! (`pls1_find_k_sequence`), plus unweighted H0 FPR for e and for
+//! split_exact's no-refit route. The unweighted e-method test is a tripwire for
 //! gross e-value inflation; the weighted tests exercise non-uniform observation
 //! weights throughout.
 //!
@@ -162,6 +163,24 @@ fn split_exact_weighted_h0_fpr_within_band() {
         "split_exact",
         true,
         1000,
+        None,
+    );
+}
+
+#[test]
+fn split_exact_unweighted_h0_fpr_within_band() {
+    // k = 1, dense, unweighted: split_exact's no-refit route.
+    assert_calibrated(
+        40,
+        4,
+        1,
+        || ConfirmatoryArgs::SplitExact {
+            n_perm: 60,
+            n_splits: 15,
+        },
+        "split_exact unweighted",
+        false,
+        3000,
         None,
     );
 }

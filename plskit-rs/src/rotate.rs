@@ -218,11 +218,6 @@ fn mat_is_finite(m: MatRef<'_, f64>) -> bool {
     true
 }
 
-#[cfg(test)]
-fn identity(k: usize) -> Mat<f64> {
-    Mat::<f64>::from_fn(k, k, |i, j| if i == j { 1.0 } else { 0.0 })
-}
-
 #[allow(clippy::many_single_char_names)]
 fn row_normalize(m: MatRef<'_, f64>) -> Mat<f64> {
     // Row-norm with floor 1e-12 (matches SSDLite `varimax_kaiser_sweep`,
@@ -310,37 +305,35 @@ mod tests {
     use faer::Mat;
 
     #[test]
-    fn varimax_angle_2d_zero_for_already_simple() {
-        // A target with one all-positive column and one all-zero
-        // column already has perfect simple structure — angle is 0.
-        let l = Mat::<f64>::from_fn(5, 2, |i, j| if j == 0 { (i + 1) as f64 } else { 0.0 });
-        let theta = varimax_angle_2d(l.as_ref(), 0, 1);
-        assert!(theta.abs() < 1e-12, "expected ~0, got {theta}");
-    }
-
-    #[test]
     #[allow(clippy::unnested_or_patterns)] // tabular layout is clearer here
     fn varimax_angle_2d_known_value() {
+        // A target with one all-positive column and one all-zero
+        // column already has perfect simple structure: angle is 0.
+        let simple = Mat::<f64>::from_fn(5, 2, |i, j| if j == 0 { (i + 1) as f64 } else { 0.0 });
         // Drift lock: reference value computed against SSDLite's
         // `varimax_angle_2d` on this exact input.
         // Input:
         //   L = [[ 1, 1], [ 1,-1], [-1, 1], [-1,-1], [ 2, 0]] / 2
         // The (2, 0) row breaks symmetry: big_b = 0, big_a = -0.2,
         // so theta = atan2(0, -0.2)/4 = π/4.
-        let l = Mat::<f64>::from_fn(5, 2, |i, j| match (i, j) {
+        // Reference Python output: theta ≈ π/4 ≈ 0.7853981633974483.
+        // Verified against SSDLite varimax_angle_2d on this exact input (2026-04-27).
+        let symmetric = Mat::<f64>::from_fn(5, 2, |i, j| match (i, j) {
             (0, 0) | (0, 1) | (1, 0) | (2, 1) => 0.5,
             (1, 1) | (2, 0) | (3, 0) | (3, 1) => -0.5,
             (4, 0) => 1.0,
             _ => 0.0,
         });
-        let theta = varimax_angle_2d(l.as_ref(), 0, 1);
-        // Reference Python output: theta ≈ π/4 ≈ 0.7853981633974483.
-        // Verified against SSDLite varimax_angle_2d on this exact input (2026-04-27).
-        let expected = std::f64::consts::PI / 4.0;
-        assert!(
-            (theta - expected).abs() < 1e-12,
-            "expected π/4, got {theta}"
-        );
+        for (name, l, expected) in [
+            ("simple", simple, 0.0),
+            ("symmetric", symmetric, std::f64::consts::PI / 4.0),
+        ] {
+            let theta = varimax_angle_2d(l.as_ref(), 0, 1);
+            assert!(
+                (theta - expected).abs() < 1e-12,
+                "{name}: expected {expected}, got {theta}"
+            );
+        }
     }
 
     fn random_w(rng_seed: u64, n: usize, k: usize) -> Mat<f64> {
@@ -459,7 +452,7 @@ mod tests {
         .unwrap();
         // R'R should be I.
         let rt_r = matmul(out.r.transpose(), out.r.as_ref());
-        let eye = identity(4);
+        let eye = Mat::<f64>::identity(4, 4);
         assert!(approx_eq_mat(rt_r.as_ref(), eye.as_ref(), 1e-10));
     }
 
@@ -476,7 +469,7 @@ mod tests {
         let w = random_w(6, 40, 3);
         let out1 = rotate(w.as_ref(), RotationMethod::Varimax(tight), None).unwrap();
         let out2 = rotate(out1.w_rot.as_ref(), RotationMethod::Varimax(tight), None).unwrap();
-        let eye = identity(3);
+        let eye = Mat::<f64>::identity(3, 3);
         assert!(approx_eq_mat(out2.r.as_ref(), eye.as_ref(), 1e-6));
     }
 

@@ -98,7 +98,7 @@ fn synth(rng: &mut ChaCha8Rng, n: usize, d: usize, snr: f64) -> (Mat<f64>, Col<f
 
 /// Compute oracle per-coordinate leverage by fitting `pls1_fit` directly on
 /// a large dataset and replicating the leverage formula from
-/// `signal_test.rs::compute_leverage_ref`:
+/// `linalg::leverage_diag`:
 ///   `leverage[j] = W_star[j,:] · (W_starᵀ W_star)⁻¹ · W_star[j,:]ᵀ`
 #[allow(clippy::similar_names, clippy::many_single_char_names)]
 fn oracle_leverage(x: faer::MatRef<f64>, y: faer::ColRef<f64>, k: usize) -> Vec<f64> {
