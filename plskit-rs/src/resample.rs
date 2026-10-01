@@ -258,7 +258,7 @@ mod tests {
         let serial = map_indexed(500, true, f);
         assert_eq!(serial, (0..500).map(f).collect::<Vec<_>>());
         assert_eq!(serial, map_indexed(500, false, f));
-        assert!(map_indexed(0, false, f).is_empty());
+        assert_eq!(map_indexed(0, false, f), Vec::<usize>::new());
     }
 
     #[test]
@@ -328,14 +328,14 @@ mod tests {
         let calls = AtomicUsize::new(0);
         let (_, mut p) = resolve_seed(Some(5)).unwrap();
         let (_, mut q) = resolve_seed(Some(5)).unwrap();
-        assert!(parallel_fill_rows_seeded(&mut p, 0, 4, false, |_, _, _| {
+        let zero_rows = parallel_fill_rows_seeded(&mut p, 0, 4, false, |_, _, _| {
             calls.fetch_add(1, Ordering::Relaxed);
-        })
-        .is_empty());
-        assert!(parallel_fill_rows_seeded(&mut p, 3, 0, false, |_, _, _| {
+        });
+        assert_eq!(zero_rows, Vec::<f64>::new());
+        let zero_cols = parallel_fill_rows_seeded(&mut p, 3, 0, false, |_, _, _| {
             calls.fetch_add(1, Ordering::Relaxed);
-        })
-        .is_empty());
+        });
+        assert_eq!(zero_cols, Vec::<f64>::new());
         assert_eq!(calls.load(Ordering::Relaxed), 0);
         let _ = child_seeds(&mut q, 3); // the seeds of the 3 × 0 call
         assert_eq!(p.next_u64(), q.next_u64());
