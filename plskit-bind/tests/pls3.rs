@@ -144,7 +144,7 @@ fn transform_round_trips_and_validates() {
     assert_eq!(e.code, "invalid_argument");
 }
 
-// Review Focus 1 again: R hands back a q = 1 model's Y moments as scalars.
+// R hands back a q = 1 model's Y moments as scalars.
 #[test]
 fn transform_widens_scalar_moments() {
     let (x, _) = data(60, 6, 1);

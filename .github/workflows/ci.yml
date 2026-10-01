@@ -6,17 +6,14 @@ on:
   pull_request:
 
 jobs:
-  rust-tests:
-    name: Rust tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  # Lint, docs drift and generated-code gates. None of them depend on the OS,
+  # so they run once; every other job waits for this one.
+  checks:
+    name: Checks (fmt, clippy, drift, generated code)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      # check-profile-sync.py needs tomllib (Python 3.11+); pin one version
-      # so the plain-python3 gates behave the same on every runner image.
+      # check-profile-sync.py needs tomllib (Python 3.11+).
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -30,42 +27,47 @@ jobs:
         run: cargo fmt --all --check
       - name: cargo clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: cargo test --doc (FAER_CONVENTIONS.md §5 doctests)
-        run: cargo test --workspace --release --doc
-      - name: cargo test (workspace)
-        run: cargo test --workspace --release
       - name: Verify testdata content hashes
         run: python3 scripts/check_corpus_hash.py
       - name: plskit-bind registry matches the Python signatures
-        shell: bash
         run: |
           cargo run -p plskit-bind --release --bin plskit-bind-dump > "$RUNNER_TEMP/plskit-registry.json"
           python3 scripts/check-bind-registry.py "$RUNNER_TEMP/plskit-registry.json"
       - name: R stubs match a fresh render of the registry
-        shell: bash
         run: python3 scripts/render-r-stubs.py --dump "$RUNNER_TEMP/plskit-registry.json" --check
       - name: R crate profile and [workspace] table in sync with the workspace
         run: python3 scripts/check-profile-sync.py
       - name: Julia stubs match the plskit-bind registry
-        shell: bash
         run: python3 scripts/render-jl-stubs.py --dump "$RUNNER_TEMP/plskit-registry.json" --check
 
-  # MSRV + beta tripwire — ubuntu-only, narrower test set than rust-tests.
-  # Catches MSRV drift (1.85 row) and upcoming-rustc regressions (beta row).
-  # Beta is informational; an upstream regression shouldn't gate merges.
-  rust-versions:
-    name: Rust ${{ matrix.rust }}
-    runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.rust == 'beta' }}
+  # The engine's numerics are what can differ by OS, so the full Rust suite
+  # (doctests included) runs on all three. The wrappers test only their API.
+  rust-tests:
+    name: Rust tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        rust: [beta, "1.85"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (workspace)
+        run: cargo test --workspace --release
+
+  rust-msrv:
+    name: Rust 1.85 (MSRV)
+    runs-on: ubuntu-latest
+    # rust-toolchain.toml pins stable and outranks `rustup default`, which is
+    # all the toolchain action sets; RUSTUP_TOOLCHAIN outranks the file.
+    env:
+      RUSTUP_TOOLCHAIN: "1.85"
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.rust }}
+          toolchain: "1.85"
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy (deny warnings)
@@ -73,24 +75,21 @@ jobs:
       - name: cargo test (workspace)
         run: cargo test --workspace --release
 
-  # plskit-py builds against Python's stable ABI (abi3-py310 in plskit-py/Cargo.toml),
-  # so one wheel works on 3.10+. We still smoke-test on each supported Python to
-  # catch interpreter-side regressions (numpy ↔ cpython behavior, alpha CPythons).
+  # plskit-py builds against Python's stable ABI (abi3-py311 in plskit-py/Cargo.toml),
+  # so one wheel works on 3.11+. The full suite runs on the oldest and newest
+  # supported Python on Linux; macOS and Windows only install and smoke-test.
   python-tests:
-    name: Python tests (${{ matrix.os }}, py${{ matrix.python }})
+    name: Python (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
-    needs: rust-tests
-    continue-on-error: ${{ matrix.python == '3.15' }}
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         include:
-          - os: ubuntu-latest
-            python: "3.15"
-          - os: macos-latest
-            python: "3.15"
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.15" }
+          - { os: macos-latest, python: "3.15" }
+          - { os: windows-latest, python: "3.15" }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -100,24 +99,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ matrix.python == '3.10' }}
+          save-if: ${{ matrix.python == '3.15' }}
       - name: Install Python deps
         run: pip install pytest numpy
       - name: Build & install plskit
         run: pip install . -v
-      - name: Run pytest
+      - name: Run pytest (Linux)
+        if: runner.os == 'Linux'
         run: |
           cd plskit-py
           pytest -v --tb=short
+      - name: Smoke test (macOS, Windows)
+        if: runner.os != 'Linux'
+        run: >-
+          python -c "import numpy as np, plskit;
+          rng = np.random.default_rng(1);
+          X = rng.standard_normal((40, 5)); y = rng.standard_normal(40);
+          assert plskit.pls1_fit(X, y, k=2).k_used == 2"
 
-  # R package (spec 8): R CMD check through r-lib/actions on three OSes, in
-  # dev mode (spec 4.6): a cargo config outside the package patches plskit
-  # and plskit-bind to this checkout. Until P4 there is no committed R
-  # Cargo.lock, so dev mode is the only way the package builds.
+  # R package: R CMD check on Linux; macOS and Windows only install and
+  # smoke-test. Builds in dev mode: a cargo config outside the package patches
+  # plskit and plskit-bind to this checkout. There is no committed R
+  # Cargo.lock until plskit-bind is on crates.io, so dev mode is the only way
+  # the package builds.
   r-package:
     name: R package (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: rust-tests
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
@@ -135,13 +143,13 @@ jobs:
         if: runner.os == 'Windows'
         run: rustup target add x86_64-pc-windows-gnu
       # Caches the Linux clippy build and the canary install; R CMD check
-      # itself compiles in a temporary copy of the package. Until P4 publishes
-      # plskit-bind, rust-cache's `cargo metadata` cannot resolve the pinned
+      # itself compiles in a temporary copy of the package. Until plskit-bind
+      # is on crates.io, rust-cache's `cargo metadata` cannot resolve the pinned
       # crates.io requirements and logs an error; the step still succeeds.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: plskit-r/src/rust
-      - name: Dev-mode cargo config (spec 4.6)
+      - name: Dev-mode cargo config
         shell: bash
         run: |
           root="$(pwd -W 2>/dev/null || pwd)"
@@ -172,6 +180,7 @@ jobs:
           git status --porcelain -- plskit-r/man plskit-r/NAMESPACE
           test -z "$(git status --porcelain -- plskit-r/man plskit-r/NAMESPACE)"
       - uses: r-lib/actions/check-r-package@v2
+        if: runner.os == 'Linux'
         with:
           working-directory: plskit-r
           args: 'c("--no-manual")'
@@ -181,6 +190,7 @@ jobs:
       # "checking compiled code" (the Rust std library references _abort).
       # Any other WARNING fails here.
       - name: No R CMD check WARNING other than compiled code
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           log=plskit-r/check/plskit.Rcheck/00check.log
@@ -189,8 +199,8 @@ jobs:
             echo "::error::unexpected WARNING in $log"
             exit 1
           fi
-      # Spec 7 cross-wrapper bit canary, R half: R against the corpus at
-      # atol 0 on the host class the fixtures come from. Non-blocking.
+      # Cross-wrapper bit canary, R half: R against the corpus at atol 0 on
+      # the platform that generated the fixtures. Non-blocking.
       - name: Bit canary, R vs the corpus at atol 0 (Linux, non-blocking)
         if: runner.os == 'Linux'
         continue-on-error: true
@@ -199,19 +209,28 @@ jobs:
         run: |
           R CMD INSTALL plskit-r
           Rscript -e 'testthat::test_file("plskit-r/tests/testthat/test-corpus.R", package = "plskit", load_package = "installed", reporter = "check")'
+      - name: Install and smoke test (macOS, Windows)
+        if: runner.os != 'Linux'
+        run: |
+          R CMD INSTALL plskit-r
+          Rscript -e 'library(plskit); set.seed(1); X <- matrix(rnorm(200), 40); y <- rnorm(40); stopifnot(pls1_fit(X, y, k = 2)$k_used == 2L)'
 
   # PLSKit.jl runs the Python package through PythonCall.jl, so this job
   # builds plskit-py into a virtualenv and points PythonCall at it, with
-  # CondaPkg switched off (spec 8).
+  # CondaPkg switched off. Pkg.test() runs on Linux; macOS and Windows only
+  # install and smoke-test.
   julia-tests:
-    name: Julia tests (${{ matrix.os }}, julia ${{ matrix.julia }})
+    name: Julia (${{ matrix.os }}, julia ${{ matrix.julia }})
     runs-on: ${{ matrix.os }}
-    needs: rust-tests
+    needs: checks
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        julia: ["lts", "1"]
+        include:
+          - { os: ubuntu-latest, julia: "lts" }
+          - { os: ubuntu-latest, julia: "1" }
+          - { os: macos-latest, julia: "1" }
+          - { os: windows-latest, julia: "1" }
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -229,7 +248,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.pypin.outputs.mode == 'source'
         with:
-          save-if: ${{ matrix.julia == 'lts' }}
+          save-if: ${{ matrix.julia == '1' }}
       - name: Install plskit-py into a virtualenv
         shell: bash
         env:
@@ -254,8 +273,16 @@ jobs:
         with:
           version: ${{ matrix.julia }}
       - uses: julia-actions/cache@v2
-      - name: Pkg.test()
+      - name: Pkg.test() (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         env:
           PLSKIT_REQUIRE_CORPUS: "1"
         run: julia --color=yes --project=plskit-jl -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+      - name: Smoke test (macOS, Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: >-
+          julia --color=yes --project=plskit-jl -e 'using Pkg; Pkg.instantiate();
+          using PLSKit; X = randn(40, 5); y = randn(40);
+          @assert pls1_fit(X, y; k=2).k_used == 2'

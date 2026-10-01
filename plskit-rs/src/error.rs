@@ -330,7 +330,6 @@ mod tests {
 
     #[test]
     fn procrustes_dimension_mismatch_converts_to_internal() {
-        // Regression for review-finding R4 (ticket #1, 2026-05-10):
         // procrustes returns DimensionMismatch when a NIPALS short-circuit
         // truncates `w_b`; the From impl must convert (so `?` works at the
         // call sites in subsample.rs / rotation_stability.rs).

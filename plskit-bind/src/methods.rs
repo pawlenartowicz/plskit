@@ -1,5 +1,5 @@
-//! Method strings and `args` records, ported from `plskit-py/src/lib.rs`
-//! with the same allowed keys, defaults and messages. Absent keys, and
+//! Method strings and `args` records, with the same allowed keys, defaults
+//! and messages as `plskit-py/src/lib.rs`. Absent keys, and
 //! keys whose value is null, take the engine's own defaults; no wrapper
 //! keeps a copy of them.
 
@@ -12,9 +12,10 @@ use crate::coerce;
 use crate::error::BindError;
 use crate::value::{Record, Value};
 
-/// Reject keys outside `allowed`, with plskit-py's message.
+/// Reject keys outside `allowed`, with plskit-py's message. `label` names the
+/// argument and its value, e.g. `test_method='raw_perm'`.
 pub(crate) fn validate_keys(
-    method: &str,
+    label: &str,
     args: Option<&Record<'_>>,
     allowed: &[&str],
 ) -> Result<(), BindError> {
@@ -22,7 +23,7 @@ pub(crate) fn validate_keys(
         for key in a.keys() {
             if !allowed.contains(&key) {
                 return Err(BindError::invalid_args(format!(
-                    "method='{method}' does not accept arg '{key}'; allowed: {allowed:?}"
+                    "{label} does not accept arg '{key}'; allowed: {allowed:?}"
                 )));
             }
         }
@@ -90,35 +91,35 @@ pub(crate) fn confirmatory_args(
     args: Option<&Record<'_>>,
 ) -> Result<ConfirmatoryArgs, BindError> {
     let m = parse_method(method)?;
-    let label = format!("method='{method}'");
+    let label = format!("test_method='{method}'");
     Ok(match (m, ConfirmatoryArgs::defaults_for(m)) {
         (ConfirmatoryMethod::RawPerm, ConfirmatoryArgs::RawPerm { n_perm, n_folds }) => {
-            validate_keys(method, args, &["n_perm", "n_folds"])?;
+            validate_keys(&label, args, &["n_perm", "n_folds"])?;
             ConfirmatoryArgs::RawPerm {
                 n_perm: arg_usize(args, &label, "n_perm", n_perm)?,
                 n_folds: arg_usize(args, &label, "n_folds", n_folds)?,
             }
         }
         (ConfirmatoryMethod::SplitNb, ConfirmatoryArgs::SplitNb { n_splits, force }) => {
-            validate_keys(method, args, &["n_splits", "force"])?;
+            validate_keys(&label, args, &["n_splits", "force"])?;
             ConfirmatoryArgs::SplitNb {
                 n_splits: arg_usize(args, &label, "n_splits", n_splits)?,
                 force: arg_bool(args, &label, "force", force)?,
             }
         }
         (ConfirmatoryMethod::SplitExact, ConfirmatoryArgs::SplitExact { n_perm, n_splits }) => {
-            validate_keys(method, args, &["n_perm", "n_splits"])?;
+            validate_keys(&label, args, &["n_perm", "n_splits"])?;
             ConfirmatoryArgs::SplitExact {
                 n_perm: arg_usize(args, &label, "n_perm", n_perm)?,
                 n_splits: arg_usize(args, &label, "n_splits", n_splits)?,
             }
         }
         (ConfirmatoryMethod::Score, _) => {
-            validate_keys(method, args, &[])?;
+            validate_keys(&label, args, &[])?;
             ConfirmatoryArgs::Score
         }
         (ConfirmatoryMethod::E, _) => {
-            validate_keys(method, args, &[])?;
+            validate_keys(&label, args, &[])?;
             ConfirmatoryArgs::E
         }
         (m, d) => {
@@ -136,7 +137,7 @@ pub(crate) fn pls3_confirmatory_args(
 ) -> Result<ConfirmatoryArgs, BindError> {
     if method != "split_exact" && method != "split_nb" {
         return Err(BindError::invalid_args(format!(
-            "method='{method}' is not available for pls3_confirmatory_test; \
+            "test_method='{method}' is not available for pls3_confirmatory_test; \
              allowed: [\"split_exact\", \"split_nb\"]"
         )));
     }
@@ -145,9 +146,9 @@ pub(crate) fn pls3_confirmatory_args(
 
 /// Varimax `args` / `rotation_args`.
 pub(crate) fn varimax_args(args: Option<&Record<'_>>) -> Result<VarimaxArgs, BindError> {
-    validate_keys("varimax", args, &["max_iter", "tol", "kaiser_normalize"])?;
-    let d = VarimaxArgs::default();
     let label = "method='varimax'";
+    validate_keys(label, args, &["max_iter", "tol", "kaiser_normalize"])?;
+    let d = VarimaxArgs::default();
     Ok(VarimaxArgs {
         max_iter: arg_usize(args, label, "max_iter", d.max_iter)?,
         tol: arg_f64(args, label, "tol", d.tol)?,
@@ -185,8 +186,8 @@ pub(crate) fn find_k_optimal_opts(
     let d = FindKOptimalOpts::default();
     let sel = selector(selector_name)?;
     let diag = diagnostic.map(parse_method).transpose()?;
-    validate_keys("optimal", args, &["n_folds", "n_perm", "n_splits", "force"])?;
     let label = "method='optimal'";
+    validate_keys(label, args, &["n_folds", "n_perm", "n_splits", "force"])?;
     let n_folds = arg_usize(args, label, "n_folds", d.n_folds)?;
     if matches!(sel, Selector::Bic) && arg(args, "n_folds").is_some() {
         return Err(BindError::invalid_args(
@@ -259,7 +260,7 @@ pub(crate) fn find_k_sequence_opts(
             )));
         }
     };
-    validate_keys("sequence", args, allowed)?;
+    validate_keys("method='sequence'", args, allowed)?;
     let label = format!("test_method='{test_method}'");
     Ok(FindKSequenceOpts {
         test_method: tm,
@@ -281,7 +282,7 @@ pub(crate) fn keep_optimal_opts(
     disable_parallelism: bool,
     verbose: bool,
 ) -> Result<FindKeepOptimalOpts, BindError> {
-    validate_keys("keep_optimal", args, &["n_folds"])?;
+    validate_keys("method='keep_optimal'", args, &["n_folds"])?;
     let d = FindKeepOptimalOpts::default();
     Ok(FindKeepOptimalOpts {
         n_folds: arg_usize(args, "method='keep_optimal'", "n_folds", d.n_folds)?,
@@ -336,7 +337,7 @@ mod tests {
         assert_eq!(e.code, "invalid_args");
         assert_eq!(
             e.message,
-            "method='raw_perm' does not accept arg 'n_splits'; allowed: [\"n_perm\", \"n_folds\"]"
+            "test_method='raw_perm' does not accept arg 'n_splits'; allowed: [\"n_perm\", \"n_folds\"]"
         );
     }
 

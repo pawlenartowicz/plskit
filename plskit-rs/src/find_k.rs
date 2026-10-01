@@ -176,8 +176,8 @@ pub fn pls1_find_k_optimal(
     find_k_optimal_impl(x, y, k_max, None, weights, opts)
 }
 
-/// Sparse counterpart of [`pls1_find_k_optimal`] (mode 3 of the `spls1`
-/// family): identical CV / selector machinery with the inner fitter swapped
+/// Sparse counterpart of [`pls1_find_k_optimal`] (`_docs/python/api.md`
+/// §2b.3): identical CV / selector machinery with the inner fitter swapped
 /// to the sparse fit at the caller's fixed `keep`. Same selectors, options,
 /// and output shape; `keep = n_features` reproduces the dense function
 /// bit-exactly.
@@ -185,9 +185,10 @@ pub fn pls1_find_k_optimal(
 /// The `Bic` selector reuses the dense complexity penalty `k · ln(n_eff)` —
 /// NOT a keep-aware sparse BIC: effective complexity scales with `keep` per
 /// component, so the dense penalty underpenalizes added components and
-/// biases the selected `k` upward under sparsity. Deliberate v1
+/// biases the selected `k` upward under sparsity. This is a deliberate
 /// simplification (not a consequence of `keep` being fixed); BIC values are
-/// not comparable across `keep`. A keep-aware penalty is deferred.
+/// not comparable across `keep`. See
+/// `_docs/concepts/sPLS1/keep-and-selection.md` for the BIC bias.
 ///
 /// # Errors
 /// Everything `pls1_find_k_optimal` returns, plus `InvalidArgument` for
@@ -508,8 +509,8 @@ pub fn pls1_find_k_sequence(
     find_k_sequence_impl(x, y, k_max, None, weights, opts)
 }
 
-/// Sparse counterpart of [`pls1_find_k_sequence`] (mode 4 of the `spls1`
-/// family): the same sequential closed test with the inner fitter swapped
+/// Sparse counterpart of [`pls1_find_k_sequence`] (`_docs/python/api.md`
+/// §2b.3): the same sequential closed test with the inner fitter swapped
 /// to the sparse fit at the caller's fixed `keep`. `keep` threads through
 /// BOTH per-step fit sites — the deflation fit and the per-component
 /// confirmatory test — so each step tests the sparse marginal component
@@ -621,8 +622,8 @@ fn find_k_sequence_impl(
 /// moments; val fold standardized with the train fold's parameters.
 /// Per-fold weights re-normalized to mean 1; an unnormalizable slice
 /// yields `None` → that fold runs unweighted (kept rather than an
-/// explicit uniform fill — the two paths are not provably bit-identical;
-/// see the original note at the `select_cv` call site).
+/// explicit uniform fill, which would run the weighted code path and is not
+/// provably bit-identical to the unweighted path).
 struct FoldData {
     xs_tr: Mat<f64>,
     ys_tr: Col<f64>,
@@ -1044,8 +1045,8 @@ fn first_component_exhausted(
 
 /// Logged geometric keep grid for `spls1_find_keep_optimal`: powers of two
 /// in `[1, n_features)` plus the dense endpoint `n_features`. Both endpoints
-/// are always included — the dense endpoint keeps the bit-parity mirror
-/// reachable. The 1-SE parsimony selector makes exact spacing non-critical.
+/// are always included — so `keep = n_features` (which reproduces
+/// the dense fit bit for bit) is always on the grid. The 1-SE parsimony selector makes exact spacing non-critical.
 fn keep_grid(n_features: usize) -> Vec<usize> {
     let mut grid = Vec::new();
     let mut v = 1usize;
@@ -1101,8 +1102,8 @@ pub struct FindKeepOptimalOutput {
     pub cv_scores: BTreeMap<usize, f64>,
     /// SE of CV R² per swept keep.
     pub cv_scores_se: BTreeMap<usize, f64>,
-    /// The keep grid actually swept (no-silent-caps rule). Empty when
-    /// `keep_star = 0`: nothing was swept.
+    /// The keep grid actually swept, reported so no cap is applied
+    /// silently. Empty when `keep_star = 0`: nothing was swept.
     pub keep_grid: Vec<usize>,
     /// RNG seed actually used.
     pub seed: u64,
@@ -1110,7 +1111,7 @@ pub struct FindKeepOptimalOutput {
     pub n_eff: f64,
 }
 
-/// Keep-count tuning at fixed `k` (mode 2 of the `spls1` family): sweep a
+/// Keep-count tuning at fixed `k` (`_docs/python/api.md` §2b.2): sweep a
 /// logged geometric keep grid over `[1, n_features]`, compute per-fold CV R²
 /// at each grid point, and return the sparsest keep whose mean CV R² is
 /// within 1 SE of the best. Sparsity is tuned inside the training split,
@@ -1264,9 +1265,9 @@ mod tests {
 
     /// A first-component truncation leaves no component to select, so every
     /// selector, dense and sparse, reports `k_star = 0` with an empty score
-    /// map. Before the fix BIC returned `k_star = 1` with an empty map and the
-    /// CV selectors `k_star = 1` with NaN (constant) or negative
-    /// (orthogonal) scores.
+    /// map. Reporting `k_star = 1` instead would pair it with an empty map
+    /// (BIC) or with NaN (constant `y`) or negative (orthogonal `y`) scores
+    /// (CV selectors).
     #[test]
     fn optimal_first_component_truncation_returns_k_star_zero() {
         let (x, ys) = degenerate_ys(60, 8, 5);
@@ -1548,10 +1549,9 @@ mod tests {
     /// The `split_nb` gate reads its effective-sample input off ONE formula
     /// at every entry point. These weights sit on the `n_eff` floor of 25:
     /// Kish `n_eff` of the raw weights is `24.999999999999996` (fires), of
-    /// their normalized copy `25.00000000000002` (does not). The sequence
-    /// used to recompute it from the normalized weights it is handed, so it
-    /// ran `split_nb` on a design `split_nb_gate` and
-    /// `pls1_confirmatory_test` both reroute.
+    /// their normalized copy `25.00000000000002` (does not). Recomputing it
+    /// from the normalized weights the sequence is handed would run `split_nb`
+    /// on a design `split_nb_gate` and `pls1_confirmatory_test` both reroute.
     #[test]
     fn split_nb_gate_agrees_across_entry_points_at_the_n_eff_floor() {
         let (x, y) = synth(26, 8, 1, 4.0, 3);
@@ -1584,7 +1584,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(conf.method, "split_exact");
+        assert_eq!(conf.test_method, "split_exact");
         assert_eq!(
             conf.stable_rank.unwrap().to_bits(),
             gate.stable_rank.to_bits()
@@ -2004,7 +2004,7 @@ mod tests {
         assert!(matches!(e, Err(PlsKitError::KExceedsMax { .. })));
     }
 
-    /// Layout invariance (D1): every `find_k` entry copies X column-major
+    /// Layout invariance: every `find_k` entry copies X column-major
     /// before it computes (CV folds through `prep_fold`, BIC and the gate
     /// through `standardize_weighted`, sequence steps through `standardize` /
     /// `col_major_or_copy`), so padded, row-major and reversed-column views

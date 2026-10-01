@@ -8,7 +8,7 @@ pls3_confirmatory_test(
   X,
   Y,
   k = 1L,
-  method,
+  test_method,
   args = NULL,
   pre_standardized_X = FALSE,
   pre_standardized_Y = FALSE,
@@ -18,7 +18,7 @@ pls3_confirmatory_test(
 )
 }
 \arguments{
-\item{X, Y, k, method, args, pre_standardized_X, pre_standardized_Y, seed, disable_parallelism, verbose}{See the canonical reference.}
+\item{X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, disable_parallelism, verbose}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("confirmatory_test_result", "plskit_result")}.

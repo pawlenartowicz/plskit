@@ -1,6 +1,6 @@
 //! Tests of the PLS1 kernel (`pls1_kernel`, `pls1_component_loop`, the X
-//! backend) against the explicit-deflation kernel it replaced, kept
-//! verbatim as `super::tests::nipals_pls1_reference`.
+//! backend) against an explicit-deflation reference kernel,
+//! `super::tests::nipals_pls1_reference`.
 #![allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
 #![allow(clippy::many_single_char_names, clippy::similar_names)]
 

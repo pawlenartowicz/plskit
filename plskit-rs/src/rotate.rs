@@ -2,12 +2,10 @@
 //! pairwise Kaiser sweeps; the `RotationMethod` enum is parameterized so
 //! promax / oblimin / geomin can land later without changing the surface.
 //!
-//! Algorithm reference: `SSD/SSDLite/ssdiff/backends/multipls.py:20-128`
-//! (Kaiser closed-form 2D angle + lexicographic pair sweeps). The Rust
-//! port reproduces SSDLite's numerical output for the SSDLite migration
-//! to be bit-exact.
+//! Algorithm reference: Kaiser (1958), "The varimax criterion for analytic
+//! rotation in factor analysis", Psychometrika 23(3):187-200 (closed-form
+//! 2D rotation angle, swept over column pairs in lexicographic order).
 //!
-// "SSDLite" is a tool name, not a Rust item — suppress backtick warning.
 #![allow(clippy::doc_markdown)]
 
 use faer::{Mat, MatRef};
@@ -24,15 +22,15 @@ pub enum RotationMethod {
     // Planned: Promax(PromaxArgs), Oblimin(ObliminArgs), Geomin(GeominArgs).
 }
 
-/// Resolved varimax parameters. Defaults match SSDLite's
-/// `varimax_kaiser_sweep` so migration is numerically faithful.
+/// Resolved varimax parameters. Defaults: `max_iter` 50, `tol` 1e-8,
+/// `kaiser_normalize` true.
 #[derive(Debug, Clone, Copy)]
 pub struct VarimaxArgs {
-    /// Maximum Kaiser sweeps. SSDLite default: 50.
+    /// Maximum Kaiser sweeps (default 50).
     pub max_iter: usize,
-    /// Convergence tolerance on the varimax criterion `V`. SSDLite default: 1e-8.
+    /// Convergence tolerance on the varimax criterion `V` (default 1e-8).
     pub tol: f64,
-    /// Row-normalize the simple-structure target before sweeping. SSDLite default: true.
+    /// Row-normalize the simple-structure target before sweeping (default true).
     pub kaiser_normalize: bool,
 }
 
@@ -116,8 +114,8 @@ pub fn rotate(
 // varimax_rotate always returns Ok today; the Result return is forward-
 // compatibility for future variants (promax, oblimin) that may error.
 #[allow(clippy::unnecessary_wraps)]
-// Single-letter math vars (w, l, k, r, c, s, p, q) are domain-correct —
-// see project memory rule. Clippy allow is localized here, not global.
+// Single-letter math vars (w, l, k, r, c, s, p, q) are domain-correct.
+// Clippy allow is localized here, not global.
 #[allow(clippy::many_single_char_names)]
 fn varimax_rotate(
     w: MatRef<'_, f64>,
@@ -169,23 +167,19 @@ fn varimax_rotate(
         }
         let v_new = sum_var_squared_columns(t_simp.as_ref());
         if v_new - v_prev < args.tol {
-            // Bit-exact match with SSDLite multipls.py:118-120: break
-            // BEFORE updating v_prev, so v_converged reports the V at
-            // the sweep that converged (the OLD value at break time).
-            // Reassigning v_prev = v_new here would shift v_converged
-            // by one sweep relative to the SSDLite reference.
+            // Break BEFORE updating v_prev, so v_converged reports the V
+            // from the sweep before the converging one (the old value at
+            // break time). Reassigning v_prev = v_new here would shift
+            // v_converged by one sweep.
             break;
         }
         v_prev = v_new;
     }
 
-    // Step 4: w_rot = w @ r. Note: when kaiser_normalize=true the SSDLite
-    // reference (multipls.py:120) computes L_rot = L @ R from the
-    // *original* L (not row-normalized) at the end — i.e. row magnitudes
-    // are restored. We do the analogous thing for W: w_rot = w @ r is
-    // computed from the original w, regardless of kaiser_normalize.
+    // Step 4: w_rot = w @ r, computed from the original (not row-normalized)
+    // w regardless of kaiser_normalize, so row magnitudes are preserved.
     // Par::Seq: rotate runs inside rotation_stability's rayon workers, so the
-    // D×K GEMM must not dispatch to the global pool. (The SSD parity test pins
+    // D×K GEMM must not dispatch to the global pool. (The rotate parity test pins
     // R and the sweep count, not w_rot — the kernel choice here is free.)
     let mut w_rot = Mat::<f64>::zeros(w.nrows(), r.ncols());
     faer::linalg::matmul::matmul(
@@ -220,8 +214,8 @@ fn mat_is_finite(m: MatRef<'_, f64>) -> bool {
 
 #[allow(clippy::many_single_char_names)]
 fn row_normalize(m: MatRef<'_, f64>) -> Mat<f64> {
-    // Row-norm with floor 1e-12 (matches SSDLite `varimax_kaiser_sweep`,
-    // multipls.py:91-93: zero rows are left at norm=1 to avoid div-by-zero).
+    // Row-norm with floor 1e-12: rows with norm below the floor are left
+    // at norm 1 to avoid division by zero.
     let n = m.nrows();
     let k = m.ncols();
     let mut norms = vec![0.0_f64; n];
@@ -252,7 +246,7 @@ fn sum_var_squared_columns(m: MatRef<'_, f64>) -> f64 {
             sum_sq += vv * vv;
         }
         let mean = sum / n_f;
-        // Population variance, matching numpy.var default (ddof=0) used in SSDLite.
+        // Population variance, matching numpy.var default (ddof=0).
         total += sum_sq / n_f - mean * mean;
     }
     total
@@ -272,7 +266,7 @@ fn rotate_columns_inplace(m: &mut Mat<f64>, p: usize, q: usize, c: f64, s: f64) 
 /// Closed-form Kaiser 2D varimax rotation angle for columns `p` and `q` of
 /// loadings matrix `l`. Maximizes `Σ_j Var(L_rot[:, j]²)` over rotations.
 ///
-/// Reference: SSDLite `varimax_angle_2d` (multipls.py:20-44).
+/// Reference: Kaiser (1958), closed-form varimax angle for one column pair.
 #[allow(clippy::many_single_char_names)]
 fn varimax_angle_2d(l: MatRef<'_, f64>, p: usize, q: usize) -> f64 {
     let n = l.nrows();
@@ -310,14 +304,12 @@ mod tests {
         // A target with one all-positive column and one all-zero
         // column already has perfect simple structure: angle is 0.
         let simple = Mat::<f64>::from_fn(5, 2, |i, j| if j == 0 { (i + 1) as f64 } else { 0.0 });
-        // Drift lock: reference value computed against SSDLite's
-        // `varimax_angle_2d` on this exact input.
+        // Drift lock: closed-form reference value on this exact input.
         // Input:
         //   L = [[ 1, 1], [ 1,-1], [-1, 1], [-1,-1], [ 2, 0]] / 2
         // The (2, 0) row breaks symmetry: big_b = 0, big_a = -0.2,
         // so theta = atan2(0, -0.2)/4 = π/4.
-        // Reference Python output: theta ≈ π/4 ≈ 0.7853981633974483.
-        // Verified against SSDLite varimax_angle_2d on this exact input (2026-04-27).
+        // Expected: theta ≈ π/4 ≈ 0.7853981633974483.
         let symmetric = Mat::<f64>::from_fn(5, 2, |i, j| match (i, j) {
             (0, 0) | (0, 1) | (1, 0) | (2, 1) => 0.5,
             (1, 1) | (2, 0) | (3, 0) | (3, 1) => -0.5,

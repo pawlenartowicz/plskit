@@ -1,13 +1,13 @@
 //! Rescaling a column of `X` or `y` / `Y` by a positive constant changes no
 //! scale-free output beyond rounding, however small or large the constant.
 //!
-//! Standardization used to classify a column as constant whenever its
-//! standard deviation was at most an absolute `1e-12`, so a column rescaled
-//! by `1e-13` was centered but not rescaled: `pls1_fit` then truncated to
-//! `k_used = 0` and the split-half statistics collapsed to `0` with `p = 1`.
-//! The classification is now relative to the column's own magnitude
-//! (`linalg::standardize_weighted`), so these outputs do not depend on the
-//! units the data are recorded in.
+//! Standardization classifies a column as constant relative to the column's
+//! own magnitude (`linalg::standardize_weighted`), not by an absolute
+//! threshold. An absolute `1e-12` cutoff would leave a column rescaled by
+//! `1e-13` centered but not rescaled, so `pls1_fit` would truncate to
+//! `k_used = 0` and the split-half statistics would collapse to `0` with
+//! `p = 1`. These outputs therefore do not depend on the units the data are
+//! recorded in.
 
 #![allow(clippy::many_single_char_names)]
 #![allow(clippy::cast_precision_loss)]
@@ -19,9 +19,9 @@ use plskit::{
     ConfirmatoryTestInput, ConfirmatoryTestOpts, Pls3ConfirmatoryTestOpts, Pls3FitOpts,
 };
 
-/// Factors spanning both sides of the old absolute `1e-12` floor. Every
-/// column below has standard deviation of order one, so `1e-13` puts it
-/// under the old floor and `1e-8` keeps it above.
+/// Factors spanning both sides of an absolute `1e-12` threshold (a naive
+/// constant-column test). Every column below has standard deviation of order
+/// one, so `1e-13` puts it under that threshold and `1e-8` keeps it above.
 const FACTORS: [f64; 4] = [1e-13, 1e-8, 1e8, 1e13];
 
 /// `SplitMix64` mapped to `[-1, 1)`: deterministic data without a dev-dependency.
@@ -254,8 +254,7 @@ fn pls3_fit_is_invariant_to_the_scale_of_x_and_y() {
 /// Columns that carry no information, next to `n` rows of real data: constant
 /// to rounding at several magnitudes (exact, and with relative jitter
 /// `1e-15`), or with a spread below the normal range. `1e6 + 0.1` and `0.1`
-/// are controls that already passed before the fix: their centering noise
-/// was small at scale 1.
+/// are controls: their centering noise is small at scale 1.
 fn columns_without_information(n: usize) -> Vec<(&'static str, Vec<f64>)> {
     let mut s = Stream(99);
     let jitter: Vec<f64> = (0..n).map(|_| s.next()).collect();
@@ -296,10 +295,10 @@ fn with_column(x: &Mat<f64>, c: &[f64]) -> Mat<f64> {
 /// leaves `pls1_fit` as it is without it, whatever its magnitude: the same
 /// `k_used`, the same coefficients on the other columns, and a zero
 /// coefficient of its own. With scale 1 at every magnitude, the centering
-/// noise of a constant near `1e300` truncated the fit to `k_used = 0` or
-/// overflowed it to NaN coefficients, and a constant near `1e20` moved the
-/// other coefficients by about 10%; a spread that underflowed gave scale
-/// `0` or a subnormal scale and NaN coefficients.
+/// noise of a constant near `1e300` would truncate the fit to `k_used = 0` or
+/// overflow it to NaN coefficients, and a constant near `1e20` would move the
+/// other coefficients by about 10%; a spread that underflowed would give
+/// scale `0` or a subnormal scale and NaN coefficients.
 #[test]
 fn pls1_fit_ignores_a_column_without_information_at_any_magnitude() {
     let n = 60;
@@ -347,8 +346,8 @@ fn pls1_fit_ignores_a_column_without_information_at_any_magnitude() {
 /// The same columns leave `pls3_fit` as it is without them: the same
 /// `k_used` and singular values, the same X saliences on the other
 /// columns and a zero salience on the new one, the same Y saliences.
-/// Before the fix a constant near `1e300`, its jittered twin and the
-/// single `5e-324` made the fit fail ("SVD of X'Y failed to converge").
+/// A constant near `1e300`, its jittered twin and the single
+/// `5e-324` can make a naive SVD of X'Y fail to converge.
 #[test]
 fn pls3_fit_ignores_a_column_without_information_at_any_magnitude() {
     // `pls3_fit` takes no weights yet.

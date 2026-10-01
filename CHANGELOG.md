@@ -4,6 +4,15 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+- Changed (breaking): `pls1_confirmatory_test` and `pls3_confirmatory_test`
+  take `test_method=` instead of `method=`, and their result reports
+  `result.test_method` instead of `result.method`, in Python, R and Julia.
+  The Rust `ConfirmatoryTestOutput.method` field is now `test_method`. This
+  matches the `test_method` argument of `pls1_find_k_sequence` and
+  `spls1_find_k_sequence`. There is no alias for the old name. Error
+  messages that name the argument say `test_method=` too. The testdata
+  corpus renames the `method` output entry and manifest kwargs key of the
+  confirmatory cases to `test_method`; numerical outputs are unchanged.
 - Added: the `plskit-bind` workspace crate, a language-neutral binding
   layer over the plskit engine. It exposes the whole Python surface
   through one `call(fn_name, Record)` entry point. The R wrapper calls the
@@ -32,7 +41,7 @@ All notable changes to this project will be documented here.
   on crates.io it builds only from a checkout, with `PLSKIT_CARGO_CONFIG`
   naming a cargo config that patches in the in-repo crates
   (`_docs/r/installation.md`). The package version moves from 0.0.1 to
-  0.6.2, the engine version. The placeholder `version()` export, which
+  0.7.0, the engine version. The placeholder `version()` export, which
   masked `base::version`, is removed.
 - Added (Julia): the Julia package `PLSKit.jl` (`plskit-jl/`) with the
   whole Python surface: it runs the Python `plskit` package through
@@ -44,7 +53,7 @@ All notable changes to this project will be documented here.
   function at the corpus tolerances; the numbers come from the Python
   wheel, which passes the whole corpus. The
   package and module are renamed from `plskit` to `PLSKit` (UUID kept),
-  version 0.6.2, pinning PyPI `plskit==0.6.2` through `CondaPkg.toml`.
+  version 0.7.0, pinning PyPI `plskit==0.7.0` through `CondaPkg.toml`.
   The placeholder `version()` export is removed.
   - The Julia package version, its `CondaPkg.toml` pin and
     `PLSKIT_PY_VERSION` are always equal and name the `plskit-py` release
@@ -135,7 +144,7 @@ All notable changes to this project will be documented here.
   fixtures (AS241 fix) and added `pls1_confirmatory_split_nb_ci_level80`,
   the first CI fixture off the default level, which pins the level-0.8
   critical value and fails a wrapper that drops `level`.
-  `producing_version` is 0.6.2 and the manifest tolerances record `rtol`.
+  `producing_version` is 0.7.0 and the manifest tolerances record `rtol`.
 - Docs: `length_mismatch` is listed as an `invalid_weights` reason; the
   `split_nb` docstrings state the actual auto-gate rule (at most 4 columns,
   `n_eff < 25`, or stable rank < 3);
@@ -326,7 +335,7 @@ All notable changes to this project will be documented here.
   corpus fixture changes.
 - Changed: PLS1 fits use Improved Kernel PLS (Dayal and MacGregor 1997)
   instead of explicit deflation. Same model; one-component fits are
-  bit-identical, multi-component fits may differ in the last bits (RULE 2).
+  bit-identical, multi-component fits may differ in the last bits.
 - Changed: `pls1_fit(k="optimal" | "sequence")` raises
   `optimal_no_component` / `sequence_no_rejection` from the engine, not
   the Python wrapper. Codes unchanged, wording slightly different.

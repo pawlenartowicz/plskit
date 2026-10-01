@@ -194,12 +194,12 @@ fn confirmatory_ci(ci: ConfirmatoryCI) -> Value<'static> {
     )
 }
 
-/// `ConfirmatoryTestResult`, fields in `results.md` order.
+/// `ConfirmatoryTestResult`, fields in `_docs/python/results.md` order.
 pub(crate) fn confirmatory_test(r: ConfirmatoryTestOutput) -> Record<'static> {
     Record::typed("ConfirmatoryTestResult")
         .field("pvalue", Value::F64(r.pvalue))
         .field("statistic", Value::F64(r.statistic))
-        .field("method", Value::text(&r.method))
+        .field("test_method", Value::text(&r.test_method))
         .field("k", count(r.k))
         .field("n_perm", opt(r.n_perm, count))
         .field("n_splits", opt(r.n_splits, count))

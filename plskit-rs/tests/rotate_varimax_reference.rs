@@ -1,7 +1,7 @@
-//! Bit-near parity test against the `SSDLite` Python reference. Locks in
-//! the contract that `plskit::rotate` produces the same R as
-//! `varimax_kaiser_sweep` (multipls.py) so the `SSDLite` migration can
-//! delete its in-tree implementation without numerical drift.
+//! Bit-near parity test against reference values stored in
+//! `varimax_reference_seed42.json`: the rotation matrix R and the sweep values
+//! from a Kaiser-normalized varimax (Kaiser 1958, Psychometrika 23(3):187-200)
+//! on seed 42. Locks in that `plskit::rotate` reproduces them.
 
 use faer::{Mat, MatRef};
 use plskit::{rotate, RotationMethod, VarimaxArgs};
@@ -30,9 +30,9 @@ fn approx_eq(a: MatRef<'_, f64>, b: MatRef<'_, f64>, tol: f64) -> bool {
 }
 
 #[test]
-fn rotate_matches_ssdlite_reference() {
-    let raw = fs::read_to_string("tests/ssd_reference_seed42.json")
-        .expect("tests/ssd_reference_seed42.json is missing");
+fn rotate_matches_varimax_reference() {
+    let raw = fs::read_to_string("tests/varimax_reference_seed42.json")
+        .expect("tests/varimax_reference_seed42.json is missing");
     let v: Value = serde_json::from_str(&raw).unwrap();
 
     let w = load_2d(&v["W"]);
@@ -50,11 +50,11 @@ fn rotate_matches_ssdlite_reference() {
     // Bit-near tolerance (array envelope: 1e-10).
     assert!(
         approx_eq(out.r.as_ref(), r_expected.as_ref(), 1e-10),
-        "R diverges from SSDLite reference"
+        "R diverges from the reference"
     );
     assert_eq!(out.sweeps, sweeps_expected, "sweep count differs");
     assert!(
         (out.v_converged - v["V_converged"].as_f64().unwrap()).abs() < 1e-12,
-        "V_converged differs from SSDLite"
+        "V_converged differs from the reference"
     );
 }

@@ -1,4 +1,4 @@
-# Input coercion (spec sections 4.2 and 4.3).
+# Input coercion (data frames, logicals, integers, arrays).
 
 d <- make_xy()
 
@@ -78,19 +78,19 @@ test_that("unsupported R values raise invalid_argument", {
   expect_identical(catch_plskit(pls1_fit(d$X, d$y, k = c(1, 2)))$code, "invalid_argument")
   expect_identical(catch_plskit(pls1_fit(d$X, d$y, pre_standardized = NA))$code, "invalid_argument")
   expect_identical(
-    catch_plskit(pls1_confirmatory_test(d$X, d$y, method = "split_exact", args = list(1, 2)))$code,
+    catch_plskit(pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", args = list(1, 2)))$code,
     "invalid_argument"
   )
   expect_identical(
-    catch_plskit(pls1_confirmatory_test(d$X, d$y, method = "split_exact", args = list(n_perm = 10, n_perm = 20)))$code,
+    catch_plskit(pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", args = list(n_perm = 10, n_perm = 20)))$code,
     "invalid_argument"
   )
 })
 
 test_that("an empty args list and NULL args entries mean the defaults", {
-  a <- pls1_confirmatory_test(d$X, d$y, method = "split_exact", args = list(), seed = 1)
-  b <- pls1_confirmatory_test(d$X, d$y, method = "split_exact", args = list(n_perm = NULL), seed = 1)
-  c <- pls1_confirmatory_test(d$X, d$y, method = "split_exact", seed = 1)
+  a <- pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", args = list(), seed = 1)
+  b <- pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", args = list(n_perm = NULL), seed = 1)
+  c <- pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", seed = 1)
   expect_identical(a, c)
   expect_identical(b, c)
 })
@@ -103,8 +103,8 @@ test_that("a missing required argument is R's own error", {
 test_that("bit64::integer64 seed converts exactly; elsewhere it is rejected", {
   skip_if_not_installed("bit64")
   s <- "4611686018427387904"
-  r64 <- pls1_confirmatory_test(d$X, d$y, method = "split_exact", seed = bit64::as.integer64(s))
-  rchr <- pls1_confirmatory_test(d$X, d$y, method = "split_exact", seed = s)
+  r64 <- pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", seed = bit64::as.integer64(s))
+  rchr <- pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", seed = s)
   expect_identical(r64, rchr)
   expect_identical(r64$seed, s)
 

@@ -6,8 +6,8 @@
 # high-level entry that reads the global: the solver methods on
 # `mat::generic::Mat` (so `Mat`, `MatRef` and `MatMut` alike), the
 # decomposition constructors, the `Solve` / `SolveLstsq` / `DenseSolveCore`
-# trait methods, and `determinant`. Test oracles that keep a pre-change body
-# verbatim `#[allow(clippy::disallowed_methods)]`. Operator `*` on faer
+# trait methods, and `determinant`. Test modules (oracles, synthetic designs)
+# opt out with `#[allow(clippy::disallowed_methods)]`. Operator `*` on faer
 # matrices reads the global too but cannot be listed here (it is a trait
 # impl); `tests/thread_count_parity.rs` and `tests/corpus.rs` catch it at run
 # time by disabling the global.

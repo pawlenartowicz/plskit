@@ -8,7 +8,7 @@ pls1_confirmatory_test(
   X,
   y,
   k = 1L,
-  method,
+  test_method,
   args = NULL,
   ci = FALSE,
   n_boot = NULL,
@@ -24,7 +24,7 @@ pls1_confirmatory_test(
 )
 }
 \arguments{
-\item{X, y, k, method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, disable_parallelism, verbose, weights, max_skip_rate}{See the canonical reference.}
+\item{X, y, k, test_method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, disable_parallelism, verbose, weights, max_skip_rate}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("confirmatory_test_result", "plskit_result")}.

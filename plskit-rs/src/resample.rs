@@ -144,7 +144,7 @@ pub(crate) fn parallel_for_each_seeded<T: Send>(
     }
 }
 
-/// `child_seeds(parent, n_rows)` first (unchanged seed consumption), then a
+/// `child_seeds(parent, n_rows)` first (the same parent consumption as `parallel_for_each_seeded`), then a
 /// row-major `n_rows × row_len` buffer allocated once and filled in place,
 /// row `i` by `f(i, &mut child_rng(seeds[i]), row)`, in parallel chunks or
 /// sequentially. Row `i` sees the same stream whichever worker runs it, so

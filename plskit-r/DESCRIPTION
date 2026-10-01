@@ -1,7 +1,7 @@
 Package: plskit
 Type: Package
 Title: PLS Regression with Modern Inference
-Version: 0.6.2
+Version: 0.7.0
 Authors@R: person("Paweł", "Lenartowicz", role = c("aut", "cre"),
                   email = "6quarg@gmail.com")
 Description: PLS regression with modern inference: canonical

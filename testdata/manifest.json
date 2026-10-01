@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "producing_version": "0.6.2",
+  "producing_version": "0.7.0",
   "cases": [
     {
       "name": "pls1_fit_small_n50_d10_k1",
@@ -390,12 +390,12 @@
           "n_perm": 200
         },
         "k": 2,
-        "method": "raw_perm",
-        "seed": 42
+        "seed": 42,
+        "test_method": "raw_perm"
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "5510511004e2dfbb1019043e0cfd7e8773373b0ff4d5bd2e399b36c137749efc"
+        "outputs_sha256": "fa655a7e55d03d9d8a6097ea148c92e4de6b179d9d1269c917cc5c185f2757c7"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -413,12 +413,12 @@
           "n_splits": 30
         },
         "k": 2,
-        "method": "split_nb",
-        "seed": 42
+        "seed": 42,
+        "test_method": "split_nb"
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "9b9168b0be7970f85e1efd46fb432369870a192c68a780fe9985b5f1d8eea27b"
+        "outputs_sha256": "4d7fc974ed78fa743d447ca2c898f2a3a8d0684976e9553989925ee10eb4315d"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -437,12 +437,12 @@
           "n_splits": 30
         },
         "k": 2,
-        "method": "split_exact",
-        "seed": 42
+        "seed": 42,
+        "test_method": "split_exact"
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "0b984ad2315cc2068f770207b2979a5e5d923c42dd22ed04692c62ad8903e57e"
+        "outputs_sha256": "ed16f4b323290c81359beda0ced3356c0ef39150362eaba0bfe64333ac6db39a"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -461,12 +461,12 @@
           "n_splits": 30
         },
         "k": 1,
-        "method": "split_exact",
-        "seed": 42
+        "seed": 42,
+        "test_method": "split_exact"
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "aed835eadf3556649a4ae117ac0866faec3a73ca22bb6b5cb4cc521cbbdbb1e9"
+        "outputs_sha256": "b856fce97ab61e827192a08ce4cefb374fe4b9fa528c078ab883f4e2a4a084cf"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -482,12 +482,12 @@
       "kwargs": {
         "args": {},
         "k": 2,
-        "method": "score",
-        "seed": 42
+        "seed": 42,
+        "test_method": "score"
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "14f6b387e9a8db8555a8b4aaba332a5d8fb86fae881f5a96bac3dd7d510c528b"
+        "outputs_sha256": "7273f3fb463abfcd65bd11f9d30355475af102632995e4d8c5ed39c2d826c3cb"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -503,12 +503,12 @@
       "kwargs": {
         "args": {},
         "k": 2,
-        "method": "e",
-        "seed": 42
+        "seed": 42,
+        "test_method": "e"
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "d56e57b5ab28153970eb287091f933bce717c70ad7dc2a9bdd59b7caa436c361"
+        "outputs_sha256": "5d8f42ab8b3bc8078ff33d6fbc8440927359ed294facca0376e986bdb6de8121"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -531,13 +531,13 @@
         "level": 0.95,
         "m_rate": 0.7,
         "max_failure_rate": 0.0,
-        "method": "split_nb",
         "n_boot": 300,
-        "seed": 42
+        "seed": 42,
+        "test_method": "split_nb"
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "d54ef95945642a0a3d4deb0b5876d534f1d602554e294d38094d3dadcd7364d3"
+        "outputs_sha256": "45d060bbc30508bfb05a167bac4ae71c8b7e0db5f62d7b5d76fa8f23f13dce13"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -560,13 +560,13 @@
         "level": 0.8,
         "m_rate": 0.7,
         "max_failure_rate": 0.0,
-        "method": "split_nb",
         "n_boot": 300,
-        "seed": 42
+        "seed": 42,
+        "test_method": "split_nb"
       },
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
-        "outputs_sha256": "066c1ca23803421e886b43924a13000ec124fcca2dd700835c3c521df7d0f054"
+        "outputs_sha256": "de9b8efb9d46cba12a4e472ab07e5a2c9f6ae6d084bd598808c4e59a728348ea"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -585,13 +585,13 @@
           "n_perm": 200
         },
         "k": 1,
-        "method": "raw_perm",
         "seed": 42,
+        "test_method": "raw_perm",
         "weights": "nonuniform"
       },
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
-        "outputs_sha256": "382ac68383a90b1f3d99125880e79dd45903daa565f9be527d4e34f5dff1c3ac"
+        "outputs_sha256": "34be0846b66354b0ce83777e39c0ffe4dd3f99e16e55e61fef349f99e3daae54"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -609,13 +609,13 @@
           "n_splits": 50
         },
         "k": 1,
-        "method": "split_nb",
         "seed": 42,
+        "test_method": "split_nb",
         "weights": "nonuniform"
       },
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
-        "outputs_sha256": "8d054c0eb195c4d5f1b2841ff2d27a240187a9038852f8d16d760bdd0dd1cca8"
+        "outputs_sha256": "22b89b6fda620d04a405e66a8a26bb451fd9371dab3b985996fc5488ae6119c3"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -634,13 +634,13 @@
           "n_splits": 50
         },
         "k": 1,
-        "method": "split_exact",
         "seed": 42,
+        "test_method": "split_exact",
         "weights": "nonuniform"
       },
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
-        "outputs_sha256": "04485838a5b5dd1f94f7fc7c95864fd24ad041cdcb7baf10460d33e3039f7954"
+        "outputs_sha256": "f886c40e42e31be68be81633c7b9098a19ee0871f469f130ac030339077d08a0"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -656,13 +656,13 @@
       "kwargs": {
         "args": {},
         "k": 1,
-        "method": "score",
         "seed": 42,
+        "test_method": "score",
         "weights": "nonuniform"
       },
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
-        "outputs_sha256": "71f1eac75c3be540b0167923367795b03e1e066d35ead9cffafa35ba14a4bd8d"
+        "outputs_sha256": "3e061758b99451614e79fccd56fd5766e6a031e8d506e9b97c6fad0187f3ea12"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -678,13 +678,13 @@
       "kwargs": {
         "args": {},
         "k": 1,
-        "method": "e",
         "seed": 42,
+        "test_method": "e",
         "weights": "nonuniform"
       },
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
-        "outputs_sha256": "9396801e52e71df3f7eb28cda098a7631a136cb762f36442defbe540cbd62230"
+        "outputs_sha256": "41b7b9f1d4bf24b268fc3e1d13c98daff87dedb975c9489095ce7670a7e44e2f"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -703,12 +703,12 @@
           "n_perm": 100
         },
         "k": 1,
-        "method": "raw_perm",
-        "seed": 42
+        "seed": 42,
+        "test_method": "raw_perm"
       },
       "hashes": {
         "inputs_sha256": "b2ea41452732cd5404968d89b03cb1473d32b9e50a901b769008138529252c2f",
-        "outputs_sha256": "e88991f9a46b3cce9c6170d9ca314cc40d8971b26520de10f997a9469b4f99fa"
+        "outputs_sha256": "b5d83255313dd672471e05755fcd593ac9e847c4b7591debc8b59e1d1659655f"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -727,12 +727,12 @@
           "n_perm": 200
         },
         "k": 2,
-        "method": "raw_perm",
-        "seed": 42
+        "seed": 42,
+        "test_method": "raw_perm"
       },
       "hashes": {
         "inputs_sha256": "c994d41ff7d13b342ab4ce2efd1246d502af50f66766baf48bed9795ccd1e864",
-        "outputs_sha256": "e403427491c4c25e91377aa6d7a5dbd6dd337b8630cdaa87ebb8591f41733017"
+        "outputs_sha256": "24ab1e6a818d82abb38765fdca55e35bcdddfe8437a4c723e4167874591dc5ec"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -751,12 +751,12 @@
           "n_splits": 20
         },
         "k": 2,
-        "method": "split_exact",
-        "seed": 42
+        "seed": 42,
+        "test_method": "split_exact"
       },
       "hashes": {
         "inputs_sha256": "c994d41ff7d13b342ab4ce2efd1246d502af50f66766baf48bed9795ccd1e864",
-        "outputs_sha256": "50c7464e1f8e3bf198651b74244805c600f3cded3b67c464a8b0b52c462d7954"
+        "outputs_sha256": "2e32b95f99f976d92e2fd030855f528fe458b6ba5b042022c5496dc7a86f33d1"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -775,12 +775,12 @@
           "n_perm": 1000
         },
         "k": 2,
-        "method": "raw_perm",
-        "seed": 42
+        "seed": 42,
+        "test_method": "raw_perm"
       },
       "hashes": {
         "inputs_sha256": "3d17cadba8f5a1d23a01de0bc528ef61561b48948a2dec8733ee6cecac8fbb26",
-        "outputs_sha256": "f5755d035f1290d509192f948416af6d549580161e76464e509a7f28ff90d178"
+        "outputs_sha256": "61cca8a7f37d990cb60e792026d052da6daeef8b748ebafe2b6e0f3b6ea9b117"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -796,13 +796,13 @@
       "kwargs": {
         "args": {},
         "k": 1,
-        "method": "score",
         "pre_standardized": true,
-        "seed": 42
+        "seed": 42,
+        "test_method": "score"
       },
       "hashes": {
         "inputs_sha256": "9626f02fa60d5b75e658b604b5308ba82235dbcbc7428ec0e769ad1bc0bcd52a",
-        "outputs_sha256": "6614837706e1520c99e43434a71bb90ca92c97177a19d2f1add3374a9d9ed2d0"
+        "outputs_sha256": "3f1192bdfdf4b138c19e93e2dcd5938cee77f5ff02e4f7b27ce4cf5c9f0682c1"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -821,13 +821,13 @@
           "n_splits": 50
         },
         "k": 2,
-        "method": "split_exact",
         "seed": 42,
+        "test_method": "split_exact",
         "weights": "nonuniform"
       },
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
-        "outputs_sha256": "d203616d7028d2534e038349b2711f5106c2a648d6298df5bbeb47e63859954f"
+        "outputs_sha256": "0416e6d7592781b7b81cbb9343fc1aa14eae6c41759a366512fa0260b117ea78"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -846,12 +846,12 @@
           "n_splits": 20
         },
         "k": 1,
-        "method": "split_exact",
-        "seed": 42
+        "seed": 42,
+        "test_method": "split_exact"
       },
       "hashes": {
         "inputs_sha256": "c994d41ff7d13b342ab4ce2efd1246d502af50f66766baf48bed9795ccd1e864",
-        "outputs_sha256": "04f14ef356f9668be717a1e09dfe19e400d07935477092ffa0a9cd12a8d82bb3"
+        "outputs_sha256": "a5d1c99dcff38bd4c3505910833cc801cf3aae84f044a645d080135d08e29d11"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -874,14 +874,14 @@
         "level": 0.95,
         "m_rate": 0.7,
         "max_failure_rate": 0.0,
-        "method": "split_nb",
         "n_boot": 300,
         "seed": 42,
+        "test_method": "split_nb",
         "weights": "nonuniform"
       },
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
-        "outputs_sha256": "f28dbadbbc9b4f51331f2233dd2e67e460f0a09f0a483ccd30adf834f823b0ff"
+        "outputs_sha256": "fa57f3a18448ca1919e1e29fad70342a0fb828f7eb7ca83e008fbb698edde6c1"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -904,15 +904,15 @@
         "level": 0.95,
         "m_rate": 0.7,
         "max_failure_rate": 0.0,
-        "method": "split_nb",
         "n_boot": 300,
         "pre_standardized": true,
         "seed": 42,
+        "test_method": "split_nb",
         "weights": "nonuniform"
       },
       "hashes": {
         "inputs_sha256": "f575aacb2cd08b2e40a751b65eff735abdcbd08d3c813d5cc66165170609438c",
-        "outputs_sha256": "fa329064157edb5da022ad714b8dca704b53b940efcaff8883607278a7d002b1"
+        "outputs_sha256": "4f53b38153d957dc3da2fed59667232671a42eadc51b9f2730585d1ba1e36993"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -928,14 +928,14 @@
       "kwargs": {
         "args": {},
         "k": 1,
-        "method": "score",
         "pre_standardized": true,
         "seed": 42,
+        "test_method": "score",
         "weights": "nonuniform"
       },
       "hashes": {
         "inputs_sha256": "c3bc018c2341a466942198148f20a67af91b11861c37a149c02443c5b510eeb0",
-        "outputs_sha256": "ba162a454c0943e68ec21c39a22f86b5867ee3811e19456c85da21fa8ec0a265"
+        "outputs_sha256": "663cd95b694af4e544bd288a4b1cab1ecda272de21aedf2f8aff11ab79f26146"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -1669,12 +1669,12 @@
           "n_splits": 30
         },
         "k": 1,
-        "method": "split_exact",
-        "seed": 42
+        "seed": 42,
+        "test_method": "split_exact"
       },
       "hashes": {
         "inputs_sha256": "9d3c09faa47ea1d282a5cd7699a1ac439023721bcab3f59e2e8ca4b254ccc3cc",
-        "outputs_sha256": "9ac597171cea6b59dcb4d1083502b3f56c477c9947e17e6b198dc82559e62753"
+        "outputs_sha256": "08df90d73b73bd90f192c066251ceddd20bdd9fc8a714a6292088c2772e80bda"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -1693,12 +1693,12 @@
           "n_splits": 30
         },
         "k": 1,
-        "method": "split_exact",
-        "seed": 42
+        "seed": 42,
+        "test_method": "split_exact"
       },
       "hashes": {
         "inputs_sha256": "f486451d2a37ceea7d84ed59def2c7a6357ad00912c532151a7bee9564207a4f",
-        "outputs_sha256": "14672b6d614e3884c63d0500e4dd318ed14358d971bb960fa30cf08a4d5f053d"
+        "outputs_sha256": "42127e7eb2e4220be301706cfbcde60f046fe0b3a13bb7f99950dc35c3bd220d"
       },
       "tolerance": {
         "atol_array": 1e-10,
@@ -1716,12 +1716,12 @@
           "n_splits": 30
         },
         "k": 1,
-        "method": "split_nb",
-        "seed": 42
+        "seed": 42,
+        "test_method": "split_nb"
       },
       "hashes": {
         "inputs_sha256": "9d3c09faa47ea1d282a5cd7699a1ac439023721bcab3f59e2e8ca4b254ccc3cc",
-        "outputs_sha256": "6113437e0f4f10294da320ea69f4a9586afd163184f1acf4096e8826adfcae05"
+        "outputs_sha256": "e1b4784b883e5e00ebeff81518f7525cf936cf9f1e5ffdc4ee1852be647e847b"
       },
       "tolerance": {
         "atol_array": 1e-10,

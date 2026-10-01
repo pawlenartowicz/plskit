@@ -1,9 +1,9 @@
 # The seed is a decimal string on results and accepts a string, an
-# integer or a whole double up to 2^53 (spec section 4.3).
+# integer or a whole double up to 2^53.
 
 d <- make_xy()
 test_fn <- function(seed) {
-  pls1_confirmatory_test(d$X, d$y, method = "split_exact",
+  pls1_confirmatory_test(d$X, d$y, test_method = "split_exact",
                          args = list(n_perm = 100, n_splits = 5), seed = seed)
 }
 

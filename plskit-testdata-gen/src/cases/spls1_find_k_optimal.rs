@@ -1,4 +1,4 @@
-//! `spls1_find_k_optimal` fixture cases (sparse PLS1, mode 3 — k sweep at fixed keep).
+//! `spls1_find_k_optimal` fixture cases (sparse PLS1: k sweep at fixed keep).
 
 use std::path::Path;
 

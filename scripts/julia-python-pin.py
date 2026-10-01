@@ -14,7 +14,7 @@ with the pin:
 - equal:  mode=source (build plskit-py from this checkout)
 - newer:  mode=pypi   (Python moved on; Julia still pins an older release,
                        so install that release from PyPI)
-- older:  error       (Julia would lead Python, which RULE 7 forbids)
+- older:  error       (a Julia release may not lead the Python release it wraps)
 
 With --release the mode is always pypi: a Julia release is tested only
 against the wheel users will get.

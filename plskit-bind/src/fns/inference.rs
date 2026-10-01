@@ -30,7 +30,7 @@ pub(crate) fn split_nb_gate(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> 
     ))
 }
 
-/// `pls1_confirmatory_test(X, y, k=1, *, method, args=None, ci=False,
+/// `pls1_confirmatory_test(X, y, k=1, *, test_method, args=None, ci=False,
 /// n_boot=None, m_rate=None, level=None, max_failure_rate=None,
 /// pre_standardized=False, seed=None, disable_parallelism=False,
 /// verbose=False, weights=None, max_skip_rate=None)`.
@@ -38,7 +38,7 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     let x = inp.mat("X")?;
     let y = inp.vec("y")?;
     let k = inp.usize("k")?;
-    let method = inp.string("method")?;
+    let test_method = inp.string("test_method")?;
     let args = inp.opt_record("args")?;
     let ci = inp.bool("ci")?;
     let n_boot = inp.opt_usize("n_boot")?;
@@ -62,7 +62,7 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     });
     let od = ConfirmatoryTestOpts::default();
     let opts = ConfirmatoryTestOpts {
-        args: methods::confirmatory_args(&method, args.as_ref())?,
+        args: methods::confirmatory_args(&test_method, args.as_ref())?,
         pre_standardized,
         seed,
         disable_parallelism,
@@ -81,8 +81,8 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
         opts,
     ))?;
     let warning = warn::rerouted(
-        Some(&method),
-        Some(&r.method),
+        Some(&test_method),
+        Some(&r.test_method),
         r.n_perm,
         r.stable_rank,
         Some(r.n_eff),
@@ -90,14 +90,14 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     Ok(with_warning(convert::confirmatory_test(r), warning))
 }
 
-/// `pls3_confirmatory_test(X, Y, k=1, *, method, args=None,
+/// `pls3_confirmatory_test(X, Y, k=1, *, test_method, args=None,
 /// pre_standardized_X=False, pre_standardized_Y=False, seed=None,
 /// disable_parallelism=False, verbose=False)`.
 pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = pls3_y(inp)?;
     let k = inp.usize("k")?;
-    let method = inp.string("method")?;
+    let test_method = inp.string("test_method")?;
     let args = inp.opt_record("args")?;
     let pre_standardized_x = inp.bool("pre_standardized_X")?;
     let pre_standardized_y = inp.bool("pre_standardized_Y")?;
@@ -106,7 +106,7 @@ pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     let verbose = inp.bool("verbose")?;
     inp.finish()?;
     let opts = Pls3ConfirmatoryTestOpts {
-        args: methods::pls3_confirmatory_args(&method, args.as_ref())?,
+        args: methods::pls3_confirmatory_args(&test_method, args.as_ref())?,
         pre_standardized_x,
         pre_standardized_y,
         seed,
@@ -121,8 +121,8 @@ pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
         opts,
     ))?;
     let warning = warn::rerouted(
-        Some(&method),
-        Some(&r.method),
+        Some(&test_method),
+        Some(&r.test_method),
         r.n_perm,
         r.stable_rank,
         Some(r.n_eff),

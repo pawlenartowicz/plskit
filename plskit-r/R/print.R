@@ -1,4 +1,4 @@
-# Compact display of plskit results (spec 4.4): one line per field, shapes
+# Compact display of plskit results: one line per field, shapes
 # instead of values for arrays, the type name for nested results.
 
 .plskit_type_name <- function(x) {

@@ -1,4 +1,4 @@
-//! R values to `plskit_bind::Value` (spec 4.2 and 4.4).
+//! R values to `plskit_bind::Value`.
 //!
 //! Conversion runs in two passes. `collect` walks the R object and keeps
 //! an owned `Robj` handle for every node; `convert` then borrows numeric
@@ -171,8 +171,8 @@ fn dims(x: &Robj) -> Option<Vec<usize>> {
 /// Integer keys when every name parses as one, and does so canonically:
 /// the name must equal the parsed key's own decimal form, so `"+1"` and
 /// `"01"` are not integer names (only `"1"` is `1`'s name). A name that
-/// fails this makes the whole vector not an int map (Decision 9: "all"
-/// integer). Two names that do both round-trip to the same key (a
+/// fails this makes the whole vector not an int map (every name must
+/// be an integer). Two names that do both round-trip to the same key (a
 /// literal duplicate name, e.g. `c("3", "3")`) raise `invalid_argument`
 /// instead of silently overwriting one with the other.
 fn int_names(x: &Robj, path: &str) -> Result<Option<Vec<i64>>, BindError> {

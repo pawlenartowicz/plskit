@@ -1,5 +1,5 @@
-# Every PlsKitError code maps to PlsKitError(code::Symbol, msg, details)
-# (spec §5.5). Codes the public API can raise are triggered for real;
+# Every PlsKitError code maps to PlsKitError(code::Symbol, msg, details).
+# Codes the public API can raise are triggered for real;
 # the rest (reserved or not reachable on demand) go through the same
 # translation from a Python PlsKitError built by hand.
 
@@ -45,7 +45,7 @@ end
         :k_exceeds_max => () -> pls1_fit(X, y; k=20),
         :non_finite_input => () -> pls1_fit(Xnan, y),
         :invalid_argument => () -> pls1_fit(X, y; k="optimal"),
-        :invalid_args => () -> pls1_confirmatory_test(X, y; method="raw_perm", args=(bogus=1,)),
+        :invalid_args => () -> pls1_confirmatory_test(X, y; test_method="raw_perm", args=(bogus=1,)),
         :invalid_input => () -> rotate(zeros(10, 0)),
         :shape_mismatch => () -> rotate(randn_np(1, 10, 3); L=randn_np(2, 40, 2)),
         :rotation_method_not_implemented => () -> rotate(fit; method="promax"),
@@ -75,7 +75,7 @@ end
 
 @testset "unknown method string" begin
     X, y = pls1_data()
-    e = plskit_error(() -> pls1_confirmatory_test(X, y; method="bogus"))
+    e = plskit_error(() -> pls1_confirmatory_test(X, y; test_method="bogus"))
     @test occursin("bogus", e.msg)
     @test e.code === :invalid_args
 end

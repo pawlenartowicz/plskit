@@ -1,4 +1,4 @@
-# Julia -> Python argument conversion (spec §5.3).
+# Julia -> Python argument conversion.
 
 @testset "_to_py" begin
     X, _ = pls1_data()
@@ -78,10 +78,10 @@ end
 
 @testset "arguments through the public API" begin
     X, y = pls1_data()
-    base = pls1_confirmatory_test(X, y; method="raw_perm", args=(n_perm=100,), seed=5)
-    # args as NamedTuple, Dict{String}, Dict{Symbol}; method as Symbol
+    base = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,), seed=5)
+    # args as NamedTuple, Dict{String}, Dict{Symbol}; test_method as Symbol
     for args in ((n_perm=100,), Dict("n_perm" => 100), Dict(:n_perm => 100))
-        r = pls1_confirmatory_test(X, y; method=:raw_perm, args=args, seed=5)
+        r = pls1_confirmatory_test(X, y; test_method=:raw_perm, args=args, seed=5)
         @test r.pvalue == base.pvalue && r.statistic == base.statistic
     end
     # nested args inside find_k_args, Symbol values inside args

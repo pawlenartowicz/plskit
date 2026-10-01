@@ -424,14 +424,14 @@ spls3_fit <- function(
 #' documented once, in the canonical reference: section
 #' "3.1 Confirmatory omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
 #'
-#' @param X,y,k,method,args,ci,n_boot,m_rate,level,max_failure_rate,pre_standardized,seed,disable_parallelism,verbose,weights,max_skip_rate See the canonical reference.
+#' @param X,y,k,test_method,args,ci,n_boot,m_rate,level,max_failure_rate,pre_standardized,seed,disable_parallelism,verbose,weights,max_skip_rate See the canonical reference.
 #' @return A list of class `c("confirmatory_test_result", "plskit_result")`.
 #' @export
 pls1_confirmatory_test <- function(
   X,
   y,
   k = 1L,
-  method,
+  test_method,
   args = NULL,
   ci = FALSE,
   n_boot = NULL,
@@ -449,7 +449,7 @@ pls1_confirmatory_test <- function(
     X = X,
     y = y,
     k = k,
-    method = method,
+    test_method = test_method,
     args = args,
     ci = ci,
     n_boot = n_boot,
@@ -525,14 +525,14 @@ pls1_perm_null <- function(
 #' documented once, in the canonical reference: section
 #' "3.4 Confirmatory PLS3 omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
 #'
-#' @param X,Y,k,method,args,pre_standardized_X,pre_standardized_Y,seed,disable_parallelism,verbose See the canonical reference.
+#' @param X,Y,k,test_method,args,pre_standardized_X,pre_standardized_Y,seed,disable_parallelism,verbose See the canonical reference.
 #' @return A list of class `c("confirmatory_test_result", "plskit_result")`.
 #' @export
 pls3_confirmatory_test <- function(
   X,
   Y,
   k = 1L,
-  method,
+  test_method,
   args = NULL,
   pre_standardized_X = FALSE,
   pre_standardized_Y = FALSE,
@@ -544,7 +544,7 @@ pls3_confirmatory_test <- function(
     X = X,
     Y = Y,
     k = k,
-    method = method,
+    test_method = test_method,
     args = args,
     pre_standardized_X = pre_standardized_X,
     pre_standardized_Y = pre_standardized_Y,

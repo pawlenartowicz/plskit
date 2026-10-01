@@ -769,10 +769,10 @@ fn pls1_confirmatory_test_cases_match_corpus() {
             "level",
             "m_rate",
             "max_failure_rate",
-            "method",
             "n_boot",
             "pre_standardized",
             "seed",
+            "test_method",
             "weights",
         ],
         args: &["force", "n_folds", "n_perm", "n_splits"],
@@ -781,7 +781,7 @@ fn pls1_confirmatory_test_cases_match_corpus() {
         let kw = &case["kwargs"];
         let (x, y) = (inputs.mat("X"), inputs.col("y"));
         let weights = inputs.weights(case);
-        let method = method_from_str(kw["method"].as_str().expect("method"));
+        let method = method_from_str(kw["test_method"].as_str().expect("test_method"));
         let ci = kw_bool(kw, "ci").then(|| {
             let d = CIOpts::default();
             CIOpts {
@@ -811,7 +811,7 @@ fn pls1_confirmatory_test_cases_match_corpus() {
 
         fx.scalar("pvalue", r.pvalue);
         fx.scalar("statistic", r.statistic);
-        fx.string("method", &r.method);
+        fx.string("test_method", &r.test_method);
         fx.int("k", r.k);
         fx.optional("n_perm", r.n_perm, |fx, v| fx.int("n_perm", v));
         fx.optional("n_splits", r.n_splits, |fx, v| fx.int("n_splits", v));
@@ -1204,12 +1204,12 @@ fn pls3_transform_cases_match_corpus() {
 #[test]
 fn pls3_confirmatory_test_cases_match_corpus() {
     let kwargs = Kwargs {
-        top: &["args", "disable_parallelism", "k", "method", "seed"],
+        top: &["args", "disable_parallelism", "k", "seed", "test_method"],
         args: &["force", "n_folds", "n_perm", "n_splits"],
     };
     for_each_case("pls3_confirmatory_test", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
-        let method = method_from_str(kw["method"].as_str().expect("method"));
+        let method = method_from_str(kw["test_method"].as_str().expect("test_method"));
         let r = plskit::pls3_confirmatory_test(
             inputs.mat("X").as_ref(),
             inputs.mat("Y").as_ref(),
@@ -1224,7 +1224,7 @@ fn pls3_confirmatory_test_cases_match_corpus() {
         .expect("pls3_confirmatory_test");
         fx.scalar("pvalue", r.pvalue);
         fx.scalar("statistic", r.statistic);
-        fx.string("method", &r.method);
+        fx.string("test_method", &r.test_method);
         fx.int("k", r.k);
         fx.optional("n_perm", r.n_perm, |fx, v| fx.int("n_perm", v));
         fx.optional("n_splits", r.n_splits, |fx, v| fx.int("n_splits", v));

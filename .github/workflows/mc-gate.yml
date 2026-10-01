@@ -1,7 +1,8 @@
 name: MC calibration gate
 
 # Runs the #[ignore]d Monte-Carlo calibration tests on a weekly schedule
-# and on demand. Kept out of ci.yml so the schedule trigger does not fire
+# and on demand, plus a beta-rustc tripwire for upcoming compiler
+# regressions. Kept out of ci.yml so the schedule trigger does not fire
 # the full per-push CI suite.
 #
 # What runs: `cargo test -p plskit --release -- --ignored --nocapture`.
@@ -33,3 +34,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run ignored MC calibration tests
         run: cargo test -p plskit --release -- --ignored --nocapture
+
+  # Informational: an upstream beta regression shows up here a release
+  # cycle early, without blocking merges.
+  rust-beta:
+    name: Rust beta
+    runs-on: ubuntu-latest
+    # Overrides rust-toolchain.toml, as in ci.yml's rust-msrv.
+    env:
+      RUSTUP_TOOLCHAIN: "beta"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@beta
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo test (workspace)
+        run: cargo test --workspace --release

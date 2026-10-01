@@ -373,8 +373,8 @@ def check_python(root: Path, docs_dir: Path) -> list[str]:
 
 
 def check_r(root: Path, docs_dir: Path) -> list[str]:
-    """R NAMESPACE exports vs the functions in _docs/python/api.md (RULE 1:
-    identical names; R has no API page of its own, spec section 9)."""
+    """R NAMESPACE exports vs the functions in _docs/python/api.md (names
+    must be identical; R has no API page of its own)."""
     namespace = root / "plskit-r" / "NAMESPACE"
     exported = set(RE_R_EXPORT.findall(namespace.read_text(encoding="utf-8")))
     return _report_function_drift(
@@ -385,8 +385,8 @@ def check_r(root: Path, docs_dir: Path) -> list[str]:
 def check_julia(root: Path, docs_dir: Path) -> list[str]:
     """Julia `export`s equal the Python surface: every public function and
     every result dataclass (as a `PlsKitResult` alias), plus the two
-    Julia-only names. The Julia wrapper has no API docs of its own (spec §9:
-    the Python reference is canonical), so it is checked against the Python
+    Julia-only names. The Julia wrapper has no API docs of its own (the
+    Python reference is canonical), so it is checked against the Python
     code side."""
     jl_src = root / "plskit-jl" / "src"
     py_src = root / "plskit-py" / "python" / "plskit"

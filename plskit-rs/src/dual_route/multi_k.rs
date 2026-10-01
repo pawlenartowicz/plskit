@@ -31,8 +31,8 @@ use crate::fit::{w_rel_floor, NIPALS_ABS_FLOOR};
 use crate::linalg::{scaled_moments, standardize1};
 use crate::signal_test::{cv_fold_contribution, pearson_scaled, CvFold, PreparedSplit, SplitIdx};
 
-/// Largest component count the n-space route serves. Set by the
-/// feasibility spike `scripts/gate_feasibility.py`: the largest `k ≤ 10`
+/// Largest component count the n-space route serves. Chosen with
+/// `scripts/gate_feasibility.py`: the largest `k ≤ 10`
 /// whose fallback rate on ordinary data stays at or under 1% at every
 /// block shape it runs (40 × 2000 to 1000 × 4000 and the wide corpus
 /// fixtures). Past it the first-order history term of
@@ -461,7 +461,7 @@ pub(crate) struct ComponentTrace {
 /// still protected. It compounds: `ρ_a` grows by several orders of
 /// magnitude per component on ordinary data, which is why [`K_DUAL_MAX`] is
 /// small. `scripts/gate_feasibility.py` transcribes this recursion and set
-/// `K_DUAL_MAX`; `history_bounds_reproduce_the_feasibility_spike` pins the
+/// `K_DUAL_MAX`; `history_bounds_match_gate_feasibility_script` pins the
 /// two to each other, and the validation sweep checks soundness, including
 /// an earlier component placed just past gate 1 (family `gate_edge`).
 ///

@@ -2,8 +2,8 @@
 //!
 //! A wrapper converts its native values into a [`Record`] of [`Value`]s,
 //! calls [`call`] with a public function name, and converts the
-//! [`Outcome`] (or [`BindError`]) back. Everything else a wrapper used to
-//! do lives here: method-string parsing, strict `args` validation, engine
+//! [`Outcome`] (or [`BindError`]) back. Everything else is shared here, so no
+//! wrapper reimplements it: method-string parsing, strict `args` validation, engine
 //! default resolution, result records, the `split_nb` reroute warning
 //! text, `rotate(model)` composition and the error-code mapping.
 

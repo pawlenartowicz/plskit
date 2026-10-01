@@ -2,7 +2,7 @@
 //! records. Each function returns the reason as a `String`; the caller
 //! picks the error code and prefixes the argument name.
 //!
-//! The rules are the spec's section 3.2: an integer parameter takes
+//! The rules: an integer parameter takes
 //! `I64`, `U64`, or an `F64` with no fractional part; a seed also takes a
 //! decimal string; a scalar widens to a 1-element vector where a vector
 //! is expected, because R has no scalar / length-1 distinction.

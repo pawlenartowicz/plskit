@@ -16,9 +16,9 @@
 //!   row duplication's. Inverting the formula recovers each SSR, and
 //!   SSR_weighted · (total / n) = SSR_dup is replication-invariant.
 //! - cross-entry-point consistency → weighted `pls1_perm_null(..).beta_ref`
-//!   equals weighted `pls1_fit(..).coef` (standardized scale). Pins the
-//!   convention unification (perm_null standardizes with weighted moments then
-//!   fits pre_standardized; pls1_fit standardizes internally — same coef).
+//!   equals weighted `pls1_fit(..).coef` (standardized scale). Pins that both
+//!   paths give the same coef (perm_null standardizes with weighted moments
+//!   then fits pre_standardized; pls1_fit standardizes internally).
 //!
 //! Methods deliberately NOT given a parity test here (split_nb/split_exact/score
 //! are FPR-calibrated in `calibration_mc.rs`; the CV selector gets a weighted
@@ -177,8 +177,7 @@ fn perm_null_beta_ref_matches_weighted_fit_coef() {
     // Cross-entry-point consistency (bullet 3): the standardized-scale reference
     // coefficient is the same object whether reached via pls1_perm_null
     // (standardize_weighted → fit pre_standardized) or via a direct weighted
-    // pls1_fit (standardizes internally). Permanent pin of the convention
-    // unification. NOT bit-exact (measured: ≤2 ulp): perm_null hands pls1_fit
+    // pls1_fit (standardizes internally). NOT bit-exact (measured: ≤2 ulp): perm_null hands pls1_fit
     // already-normalized weights, and the fit normalizes again — mean-1
     // normalization is idempotent only to rounding, so the √w′ row-scaling
     // factors differ in the last bit. 1e-15 absorbs exactly that.
@@ -224,7 +223,7 @@ fn perm_null_beta_ref_matches_weighted_fit_coef() {
 
 // ── Weighted end-to-end coverage for the resampling entry points ─────────────
 //
-// These complete the Accept-clause matrix for paths whose observed statistic is
+// These cover the paths whose observed statistic is
 // resampling-dependent (folds/splits/permutations drawn from the RNG) and so are
 // not replication-equivalent: parity is meaningless, FPR calibration covers what
 // is testable (calibration_mc.rs), and these pin that the weighted path runs
@@ -239,14 +238,14 @@ fn nonuniform_weights(n: usize) -> Col<f64> {
 
 #[test]
 fn find_k_sequence_weighted_deflation_not_inflated() {
-    // Regression pin for the weighted deflation in p_for_incremental: T·P′
-    // lives on the √w′-row-scaled problem, so deflating unscaled Xs by T·P′
-    // directly leaks (1−√w′ᵢ) of each removed component back into the step-h
-    // test. With strongly non-uniform weights (alternating 2.0/0.25) that leak
-    // made every deflated step "significant" and drove the weighted k_star to
-    // k_max=4 while the unweighted run on the same data stopped at 2. The
-    // corrected √W⁻¹-deflated residual must reach the same structural verdict
-    // as the unweighted run. (A duplication-parity oracle is impossible here —
+    // Pins the weighted deflation in p_for_incremental: T·P′ lives on the
+    // √w′-row-scaled problem, so deflating unscaled Xs by T·P′ directly would
+    // leak (1−√w′ᵢ) of each removed component back into the step-h test. With
+    // strongly non-uniform weights (alternating 2.0/0.25) that leak would make
+    // every deflated step "significant" and drive the weighted k_star to
+    // k_max=4 while the unweighted run on the same data stops at 2. The
+    // √W⁻¹-deflated residual must reach the same structural verdict as the
+    // unweighted run. (A duplication-parity oracle is impossible here —
     // the per-step splits are RNG-drawn over different row counts; see module
     // doc — so equality of k_star on a fixed seed is the strongest pin.)
     let (x, y) = synth(60, 5, 6.0, 11);

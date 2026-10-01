@@ -1,5 +1,5 @@
 //! Python-compatible renderings, so a message built here reads the same
-//! as the one `_api.py` builds today.
+//! as the one the Python wrapper builds.
 
 /// Python's `format(x, '.4g')`.
 pub(crate) fn g4(x: f64) -> String {

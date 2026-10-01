@@ -165,7 +165,7 @@ field semantics are identical to the Python counterpart; see
 |---|---|---|
 | `pvalue` | `f64` | always |
 | `statistic` | `f64` | always |
-| `method` | `String` | one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`; `"split_exact"` when a `"split_nb"` request was rerouted by the auto-gate |
+| `test_method` | `String` | one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`; `"split_exact"` when a `"split_nb"` request was rerouted by the auto-gate |
 | `k` | `usize` | the K tested (echoed from the input) |
 | `n_perm` | `Option<usize>` | `Some` for resampling-family methods, `None` for `score` / `e` |
 | `n_splits` | `Option<usize>` | `Some` for `split_*` methods, `None` for `raw_perm` / `score` / `e` |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Feasibility spike for the Gram-route decision gates. Not a CI gate.
+"""Feasibility check for the Gram-route decision gates. Not a CI gate.
 
 A numpy transcription of the n-space PLS1 kernel's gate recursion
 (`dual_route::multi_k::pls1_nspace_kernel` in plskit-rs): the
@@ -26,15 +26,14 @@ Usage (from plskit/):
     python3 scripts/gate_feasibility.py gram_p --ratio-min 1e-5 # after a RATIO_MIN raise
 
 For gram_p the exit code is 0 when K_GRAM_MAX >= 2 and every tall fixture's
-pin k is at most K_GRAM_MAX; 2 when K_GRAM_MAX < 2 (stop and report before
-writing any gram_p code); 3 when a tall fixture's pin k exceeds K_GRAM_MAX;
-1 when the
-reference design does not resolve.
+pin k is at most K_GRAM_MAX; 2 when K_GRAM_MAX < 2 (the gram_p route would not
+be worth enabling); 3 when a tall fixture's pin k exceeds K_GRAM_MAX;
+1 when the reference design does not resolve.
 
 Exit status: 0 when k = 2 is feasible on every fixture shape; 2 when it is
-not, or when an ordinary shape already drives K_DUAL_MAX below 2 (stop and
-report before writing any route code); 1 when the reference design does not
-resolve; argparse's 2 on usage errors.
+not, or when an ordinary shape already drives K_DUAL_MAX below 2
+(the n-space route would not be worth enabling); 1 when the reference
+design does not resolve; argparse's 2 on usage errors.
 
 The constants below mirror plskit-rs and change together with it;
 HISTORY_COEF in particular is `multi_k::HISTORY_COEF`.
@@ -202,7 +201,7 @@ def fallback_rates(n, p, seed):
 
 def reference_design():
     """The closed-form design that the Rust test
-    `history_bounds_reproduce_the_feasibility_spike` rebuilds."""
+    `history_bounds_match_gate_feasibility_script` rebuilds."""
     n, p = 24, 300
     i = np.arange(n, dtype=float)[:, None]
     j = np.arange(p, dtype=float)[None, :]
@@ -222,9 +221,9 @@ def print_reference():
         print(f"the reference design did not resolve at k = {REFERENCE_K}", file=sys.stderr)
         return 1
     print("/// Printed by `python3 scripts/gate_feasibility.py nspace --reference`.")
-    print(f"const SPIKE_G2: f64 = {g2!r};")
+    print(f"const SCRIPT_G2: f64 = {g2!r};")
     print("/// `(E_w(a), E_t(a), rho_a)` for `a = 1..=4`.")
-    print("const SPIKE_REFERENCE: [(f64, f64, f64); 4] = [")
+    print("const SCRIPT_REFERENCE: [(f64, f64, f64); 4] = [")
     for _, e_w, e_t, rho in trace:
         print(f"    ({e_w!r}, {e_t!r}, {rho!r}),")
     print("];")
@@ -232,7 +231,7 @@ def print_reference():
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Gram-route gate feasibility spike (not a CI gate).")
+    ap = argparse.ArgumentParser(description="Gram-route gate feasibility check (not a CI gate).")
     ap.add_argument("route", choices=["nspace", "gram_p"])
     ap.add_argument("--reference", action="store_true", help="print the Rust test constants")
     ap.add_argument("--ratio-min", type=float, default=GRAM_P_RATIO_MIN)
@@ -266,7 +265,7 @@ def main():
 # p-space Gram backend: a transcription of `gram_p::GramBackend`'s
 # decision-gate recursion inside `fit::pls1_component_loop`. Its history is
 # carried by the running bounds (`rot_prop`, `d_s`), not by HISTORY_COEF,
-# which belongs to an amended, coarser rule not implemented here.
+# which is the coarser n-space rule (`multi_k::HISTORY_COEF`).
 
 U = EPS / 2.0  # gram_p::U
 GRAM_P_RATIO_MIN = 1e-6  # gram_p::RATIO_MIN (change together)
@@ -456,7 +455,7 @@ def gram_p_first_failures(n, p, keep, weighted, seed, n_rep, k_cap, ratio_min):
 
 def gram_p_reference_design():
     """The closed-form design the Rust test
-    `gram_p::tests_kernel::bounds_reproduce_the_feasibility_spike` rebuilds."""
+    `gram_p::tests_kernel::bounds_match_gate_feasibility_script` rebuilds."""
     n, p = 400, 12
     i = np.arange(n, dtype=float)[:, None]
     j = np.arange(p, dtype=float)[None, :]
@@ -483,8 +482,8 @@ def gram_p_print_reference(ratio_min):
     print("/// Printed by `python3 scripts/gate_feasibility.py gram_p --reference`:")
     print("/// `(tt_a, δtt_a, δp_a)` for a = 1..=3 on the reference design, with the")
     print("/// ‖C‖₂ estimate.")
-    print(f"const SPIKE_C2_NORM: f64 = {float(c2n)!r};")
-    print("const SPIKE_REFERENCE: &[(f64, f64, f64)] = &[")
+    print(f"const SCRIPT_C2_NORM: f64 = {float(c2n)!r};")
+    print("const SCRIPT_REFERENCE: &[(f64, f64, f64)] = &[")
     for tt, d_tt, d_p in trace:
         print(f"    ({float(tt)!r}, {float(d_tt)!r}, {float(d_p)!r}),")
     print("];")

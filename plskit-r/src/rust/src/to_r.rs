@@ -1,9 +1,9 @@
-//! `plskit_bind` values to R (spec 4.4): a tagged record becomes a named
+//! `plskit_bind` values to R: a tagged record becomes a named
 //! list with class `c(<r_class>, "plskit_result")`, a seed (`U64`) a
 //! decimal string, an integer-keyed map a named double vector.
 
-// Integers beyond R's 32-bit range leave as doubles (spec 4.4); the
-// precision loss above 2^53 is the documented behaviour.
+// Integers beyond R's 32-bit range leave as doubles; the
+// precision loss above 2^53 is accepted.
 #![allow(clippy::cast_precision_loss)]
 
 use extendr_api::prelude::*;

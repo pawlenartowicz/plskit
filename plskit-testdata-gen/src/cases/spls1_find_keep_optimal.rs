@@ -1,4 +1,4 @@
-//! `spls1_find_keep_optimal` fixture case (mode 2 — keep sweep at fixed k).
+//! `spls1_find_keep_optimal` fixture case (keep sweep at fixed k).
 
 use std::path::Path;
 

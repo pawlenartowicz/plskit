@@ -12,19 +12,19 @@ lists what looks different from Julia.
 
   ```julia
   pls1_fit(X, y; k=3, seed=42)
-  spls1_fit(X, y, 3, 20)                                     # k and keep: positional
-  pls1_confirmatory_test(X, y; k=1, method="split_exact")    # method: required keyword
-  preprocess(; X=X, Y=y)                                     # every argument has a default
+  spls1_fit(X, y, 3, 20)                                       # k and keep: positional
+  pls1_confirmatory_test(X, y; k=1, test_method="split_exact") # test_method: required keyword
+  preprocess(; X=X, Y=y)                                       # every argument has a default
   pls3_transform(model; X_new=X2, which=:x_scores)
   ```
 
   Python's `pls3_transform(model, X_new)` is `pls3_transform(model; X_new=X_new)`
-  in Julia. Leaving out `method=` raises Julia's own `UndefKeywordError`.
+  in Julia. Leaving out `test_method=` raises Julia's own `UndefKeywordError`.
 - **`args`, `find_k_args`, `rotation_args`** take a `NamedTuple` or a
   `Dict` with `Symbol` or `String` keys, nested like Python's dicts:
   `find_k_args=(selector=:bic, args=(n_folds=5,))`.
-- **String options** (`method`, `selector`, `which`, ...) take a `String`
-  or a `Symbol`: `method=:split_exact`.
+- **String options** (`test_method`, `selector`, `which`, ...) take a `String`
+  or a `Symbol`: `test_method=:split_exact`.
 - `nothing` is Python's `None`.
 - **Arrays**: any `AbstractArray` of numbers. A dense `Array` reaches
   Python as a NumPy view; other arrays (`X'`, `view(...)`, `BitVector`)

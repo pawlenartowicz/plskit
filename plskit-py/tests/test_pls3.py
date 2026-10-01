@@ -116,10 +116,10 @@ def test_a_model_of_the_wrong_type_is_invalid_argument(call, message):
 def test_confirmatory_test_split_exact_marshals_its_fields():
     X, Y = _data(snr=3.0, seed=2)
     r = plskit.pls3_confirmatory_test(
-        X, Y, k=1, method="split_exact", args={"n_perm": 199, "n_splits": 10}, seed=42
+        X, Y, k=1, test_method="split_exact", args={"n_perm": 199, "n_splits": 10}, seed=42
     )
     assert isinstance(r, plskit.ConfirmatoryTestResult)
-    assert r.method == "split_exact"
+    assert r.test_method == "split_exact"
     assert r.k == 1
     assert r.n_perm == 199
     assert r.n_splits == 10
@@ -132,10 +132,10 @@ def test_confirmatory_test_split_exact_marshals_its_fields():
 def test_confirmatory_test_seed_none_is_recorded_and_replayable():
     X, Y = _data(snr=2.0, seed=3)
     a = plskit.pls3_confirmatory_test(
-        X, Y, k=1, method="split_exact", args={"n_perm": 49, "n_splits": 6}
+        X, Y, k=1, test_method="split_exact", args={"n_perm": 49, "n_splits": 6}
     )
     b = plskit.pls3_confirmatory_test(
-        X, Y, k=1, method="split_exact", args={"n_perm": 49, "n_splits": 6}, seed=a.seed
+        X, Y, k=1, test_method="split_exact", args={"n_perm": 49, "n_splits": 6}, seed=a.seed
     )
     assert a.pvalue == b.pvalue
 
@@ -144,7 +144,7 @@ def test_confirmatory_test_seed_none_is_recorded_and_replayable():
 def test_confirmatory_test_rejects_other_methods(method):
     X, Y = _data()
     with pytest.raises(plskit.PlsKitError) as ei:
-        plskit.pls3_confirmatory_test(X, Y, k=1, method=method, seed=1)
+        plskit.pls3_confirmatory_test(X, Y, k=1, test_method=method, seed=1)
     assert ei.value.code == "invalid_args"
 
 
@@ -152,7 +152,7 @@ def test_confirmatory_test_unknown_arg_key_is_rejected():
     X, Y = _data()
     with pytest.raises(plskit.PlsKitError) as ei:
         plskit.pls3_confirmatory_test(
-            X, Y, k=1, method="split_exact", args={"n_folds": 5}, seed=1
+            X, Y, k=1, test_method="split_exact", args={"n_folds": 5}, seed=1
         )
     assert ei.value.code == "invalid_args"
 
@@ -161,9 +161,9 @@ def test_split_nb_runs_and_reports_its_own_method():
     # p=6 and n=80 clear the gate's column, n_eff and stable-rank floors.
     X, Y = _data(snr=3.0, seed=2)
     r = plskit.pls3_confirmatory_test(
-        X, Y, k=1, method="split_nb", args={"n_splits": 10}, seed=42
+        X, Y, k=1, test_method="split_nb", args={"n_splits": 10}, seed=42
     )
-    assert r.method == "split_nb"
+    assert r.test_method == "split_nb"
     assert r.n_perm is None
     assert r.n_splits == 10
     assert r.stable_rank is not None
@@ -176,9 +176,9 @@ def test_split_nb_gate_reroutes_and_warns():
     X, Y = _data(n=80, p=3, q=3, snr=3.0, seed=2)
     with pytest.warns(UserWarning):
         r = plskit.pls3_confirmatory_test(
-            X, Y, k=1, method="split_nb", args={"n_splits": 6}, seed=42
+            X, Y, k=1, test_method="split_nb", args={"n_splits": 6}, seed=42
         )
-    assert r.method == "split_exact"
+    assert r.test_method == "split_exact"
     assert r.n_perm == 1000
     assert r.n_splits == 6
 
@@ -187,7 +187,7 @@ def test_split_nb_unknown_arg_key_is_rejected():
     X, Y = _data()
     with pytest.raises(plskit.PlsKitError) as ei:
         plskit.pls3_confirmatory_test(
-            X, Y, k=1, method="split_nb", args={"n_perm": 100}, seed=1
+            X, Y, k=1, test_method="split_nb", args={"n_perm": 100}, seed=1
         )
     assert ei.value.code == "invalid_args"
 
@@ -228,7 +228,7 @@ def test_orthogonal_Y_keeps_no_component_like_pls1(k):
         (lambda X, Y: plskit.pls3_fit(X, Y, k=-1), "k must be a non-negative whole number"),
         (lambda X, Y: plskit.pls3_fit(X, Y, pre_standardized_Y=1), "pre_standardized_Y must be a bool"),
         (lambda X, Y: plskit.spls3_fit(X, Y, 1, 2.5, 2), "keep_X must be a non-negative whole number"),
-        (lambda X, Y: plskit.pls3_confirmatory_test(X, Y, method="split_exact", seed=-1),
+        (lambda X, Y: plskit.pls3_confirmatory_test(X, Y, test_method="split_exact", seed=-1),
          "seed must be a whole number"),
         (lambda X, Y: plskit.pls3_transform(plskit.pls3_fit(X, Y), X, which=1),
          "which must be a string"),

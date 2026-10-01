@@ -2,8 +2,8 @@
 # pattern: pynew() at load time, pycopy! at runtime).
 
 # The Python plskit version this PLSKit.jl release runs. Equals the
-# `version` in Project.toml and the pin in CondaPkg.toml (spec §10).
-const PLSKIT_PY_VERSION = "0.6.2"
+# `version` in Project.toml and the pin in CondaPkg.toml.
+const PLSKIT_PY_VERSION = "0.7.0"
 
 const _plskit = PythonCall.pynew()
 const _np = PythonCall.pynew()

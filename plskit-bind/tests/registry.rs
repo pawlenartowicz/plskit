@@ -71,14 +71,14 @@ fn registry_json_parses_and_carries_the_signature_details() {
         .iter()
         .find(|f| f["name"] == "pls1_confirmatory_test")
         .unwrap();
-    let method = ct["params"]
+    let test_method = ct["params"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|p| p["name"] == "method")
+        .find(|p| p["name"] == "test_method")
         .unwrap();
-    assert_eq!(method["required"], true);
-    assert_eq!(method["keyword_only"], true);
+    assert_eq!(test_method["required"], true);
+    assert_eq!(test_method["keyword_only"], true);
     let k = ct["params"]
         .as_array()
         .unwrap()

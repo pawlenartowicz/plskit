@@ -160,11 +160,11 @@ pub(crate) const SIGMA_FLOOR: f64 = 1e-14;
 /// `σ₁` itself is therefore no reference. It is only a lower bound on the
 /// rounding scale and sits far below it when Y is nearly orthogonal to X
 /// (on standardized blocks `‖X̃‖_F·‖Ỹ‖_F = n·√(pq)`, while `σ₁` can be as
-/// small as the signal). A floor of `max(n, p, q)·eps·σ₁` kept the noise
+/// small as the signal). A floor of `max(n, p, q)·eps·σ₁` would keep the noise
 /// components of such designs: with Y built as `δ·XB` plus noise projected
 /// off the span of X, and a total-score column, the structurally zero `σ`
-/// sat up to 121× above it at `δ = 1e-4` and 7e5× at `δ = 1e-8`, and when Y
-/// is exactly orthogonal to X every requested component was kept.
+/// sits up to 121× above it at `δ = 1e-4` and 7e5× at `δ = 1e-8`, and when Y
+/// is exactly orthogonal to X every requested component would be kept.
 ///
 /// Measured on total-score, duplicated-column and `n − 1 < k` designs,
 /// crossed with strong, null, `δ` from 1e-2 to 1e-8 and exactly orthogonal
@@ -210,12 +210,9 @@ pub(crate) fn sigma_rel_floor(n: usize, p: usize, q: usize, x_fro: f64, y_fro: f
 ///
 /// It exists so the sparse path need not obtain those by running a whole
 /// dense fit and discarding its SVD, its sign pinning and both of its
-/// score matmuls. Splitting it out is bit-safe: `spls3_fit` used to
-/// re-derive the standardized blocks by feeding the dense fit's moments
-/// back through `linalg::standardize_apply`, whose element expression
-/// `(v - mean) / scale` is character-for-character the one
-/// `linalg::standardize` uses, evaluated in the same `(i, j)` order, so
-/// both routes produce the same bits.
+/// score matmuls. Both the dense and the sparse fit go through `prepare`,
+/// so they standardize with the same element expression `(v - mean) / scale`
+/// in the same `(i, j)` order and produce the same bits.
 struct Prepared {
     /// Standardized X; under `pre_standardized_x`, a column-major copy of
     /// the caller's X when `linalg::col_major_or_copy` makes one, else
@@ -774,7 +771,7 @@ pub(crate) fn validate_sparse(
 ///
 /// `keep_x` bounds the non-zeros per column of `U`, `keep_y` the non-zeros
 /// per column of `V`. Both are scalars broadcast to all `k` components
-/// (per-component budgets deferred, rule of three). The Y-side count is
+/// (per-component budgets are not supported). The Y-side count is
 /// the reason this exists: `keep_y < n_targets` forces each dimension onto
 /// a few outcomes, so the outcomes separate into hard groups instead of
 /// every dimension loading a little on everything.
@@ -956,7 +953,8 @@ fn sparse_components(
 /// `u_i σ_i v_i'`, and therefore `X'Y`, exactly where it was, and it negates
 /// both held-out score vectors at once, so the held-out LV correlation is
 /// unchanged and the confirmatory test needs no alignment step (see
-/// `_docs/concepts/PLS3/fit-and-transform.md` and `inference.md`).
+/// `_docs/concepts/PLS3/fit-and-transform.md` and
+/// `_docs/concepts/PLS3/inference.md`).
 fn pin_component_signs(u: &mut Mat<f64>, v: &mut Mat<f64>) {
     for a in 0..u.ncols() {
         let mut best = 0usize;
@@ -2074,9 +2072,9 @@ mod tests {
         })
     }
 
-    /// The previous relative floor, `max(n, p, q)·eps·σ_ref` with `σ_ref`
-    /// the first component's `σ`. Kept only so the tests below can show it
-    /// would have kept the noise component they drop.
+    /// A floor relative to the first component's `σ`,
+    /// `max(n, p, q)·eps·σ_ref` with `σ_ref` that `σ`: the naive alternative,
+    /// kept so the tests below show it would keep the noise component they drop.
     #[allow(clippy::cast_precision_loss)]
     fn sigma1_relative_floor(n: usize, p: usize, q: usize, sigma_ref: f64) -> f64 {
         (n.max(p).max(q) as f64) * f64::EPSILON * sigma_ref
@@ -2186,8 +2184,8 @@ mod tests {
     /// `X̃'Ỹ` is exactly `δ·B` up to column scaling, and `B` is rank 1 on
     /// a 3 × 2 support matching `(keep_x, keep_y)`. The first sparse
     /// component recovers it, and the deflated `A` is rounding noise. That
-    /// noise sits far above `max(n, p, q)·eps` times the first sparse `σ`,
-    /// the previous reference, and far under the floor from the blocks.
+    /// noise sits far above `max(n, p, q)·eps` times the first sparse `σ`
+    /// (the `σ₁`-relative alternative) and far under the floor from the blocks.
     /// Measured on aarch64-apple-darwin: the second `σ ≈ 6e-13`, 600× over
     /// the first-`σ` floor and 2e5× under this one.
     #[allow(clippy::cast_precision_loss)]

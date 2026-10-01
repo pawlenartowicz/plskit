@@ -42,17 +42,17 @@ component count from the data; see `pls1_find_k_optimal` and
 
 ## 2. Test for signal
 
-`method` has no default and must be passed. `args` takes a `NamedTuple`
+`test_method` has no default and must be passed. `args` takes a `NamedTuple`
 (or a `Dict`). The counts are kept small so the example runs in seconds.
 
 ```julia
-test = pls1_confirmatory_test(X, y; k=1, method="split_exact",
+test = pls1_confirmatory_test(X, y; k=1, test_method="split_exact",
                               args=(n_perm=199, n_splits=20), seed=1)
 
-test.pvalue      # permutation p-value
-test.statistic   # tanh of the mean Fisher-z held-out correlation
-test.method      # "split_exact"
-test.seed        # 0x0000000000000001
+test.pvalue        # permutation p-value
+test.statistic     # tanh of the mean Fisher-z held-out correlation
+test.test_method   # "split_exact"
+test.seed          # 0x0000000000000001
 ```
 
 Pass `seed=test.seed` to reproduce a run whose seed was drawn for you.

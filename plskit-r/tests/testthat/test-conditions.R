@@ -1,4 +1,4 @@
-# Errors and warnings as R conditions (spec section 4.5).
+# Errors and warnings as R conditions.
 
 codes <- plskit:::.plskit_registry()$error_codes
 d <- make_xy()
@@ -22,10 +22,10 @@ test_that("engine and bind errors arrive with their codes", {
   y <- d$y
   expect_identical(catch_plskit(pls1_fit(X, y, k = 2.5))$code, "invalid_argument")
   expect_identical(
-    catch_plskit(pls1_confirmatory_test(X, y, method = "split_exact", args = list(bogus = 1)))$code,
+    catch_plskit(pls1_confirmatory_test(X, y, test_method = "split_exact", args = list(bogus = 1)))$code,
     "invalid_args"
   )
-  expect_identical(catch_plskit(pls1_confirmatory_test(X, y, method = "split_perm"))$code, "invalid_args")
+  expect_identical(catch_plskit(pls1_confirmatory_test(X, y, test_method = "split_perm"))$code, "invalid_args")
   expect_identical(catch_plskit(pls1_fit(X, y[-1]))$code, "dimension_mismatch")
   X_na <- X
   X_na[1, 1] <- NA
@@ -90,20 +90,20 @@ test_that("a rerouted split_nb warns with class plskit_rerouted", {
   X3 <- d$X[, 1:3]
   w <- NULL
   res <- withCallingHandlers(
-    pls1_confirmatory_test(X3, d$y, method = "split_nb", seed = 3),
+    pls1_confirmatory_test(X3, d$y, test_method = "split_nb", seed = 3),
     plskit_rerouted = function(cond) {
       w <<- cond
       invokeRestart("muffleWarning")
     }
   )
-  expect_identical(res$method, "split_exact")
+  expect_identical(res$test_method, "split_exact")
   expect_identical(class(w), c("plskit_rerouted", "plskit_warning", "warning", "condition"))
   expect_identical(w$requested, "split_nb")
   expect_identical(w$actual, "split_exact")
   expect_identical(w$n_perm, 1000L)
   expect_match(conditionMessage(w), "^'split_nb' was rerouted to 'split_exact'")
   expect_silent(suppressWarnings(
-    pls1_confirmatory_test(X3, d$y, method = "split_nb", seed = 3),
+    pls1_confirmatory_test(X3, d$y, test_method = "split_nb", seed = 3),
     classes = "plskit_rerouted"
   ))
 })

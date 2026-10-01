@@ -39,7 +39,7 @@ pip install plskit
 ```
 
 Wheels are built for Linux, macOS, and Windows on recent Python
-versions (`>=3.10`). When a wheel is unavailable for your platform,
+versions (`>=3.11`). When a wheel is unavailable for your platform,
 pip falls back to building from the source distribution, which
 requires a working Rust toolchain.
 
@@ -60,7 +60,7 @@ y_hat = plskit.pls1_predict(model, X_new=X[:5])
 
 # Confirmatory test for any signal; k=1 with split_exact is recommended.
 sig = plskit.pls1_confirmatory_test(
-    X, y, k=1, method="split_exact", seed=42,
+    X, y, k=1, test_method="split_exact", seed=42,
 )
 print(sig.pvalue, sig.statistic)
 ```

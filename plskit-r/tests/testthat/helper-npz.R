@@ -1,4 +1,4 @@
-# Base-R reader for the testdata/ corpus (spec section 7): .npz files are
+# Base-R reader for the testdata/ corpus: .npz files are
 # zip archives of .npy v1.0 arrays, little-endian float64 ('<f8'), int64
 # ('<i8') or uint8 strings ('|u1'), C order. No test dependency.
 

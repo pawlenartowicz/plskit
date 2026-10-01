@@ -128,13 +128,13 @@ class RotationStabilityResult:
 class ConfirmatoryTestResult:
     pvalue: float
     statistic: float
-    method: str               # what actually ran: "raw_perm" | "split_nb" | "split_exact" | "score" | "e"
+    test_method: str          # what actually ran: "raw_perm" | "split_nb" | "split_exact" | "score" | "e"
     k: int                    # the K tested
     n_perm: int | None
     n_splits: int | None
     seed: int
     n_eff: float = float("nan")
-    # Populated (non-None) for method="split_nb" only, when the weights are
+    # Populated (non-None) for test_method="split_nb" only, when the weights are
     # absent or all equal and the test half has at least 4 rows. None for
     # every other method (including "split_exact", which has no z-scatter
     # interpretation to offer), and None for "split_nb" itself when the

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the plskit-bind registry against the Python signatures.
 
-RULE 1: every wrapper exposes the same functions with the same argument
+Every wrapper exposes the same functions with the same argument
 names. The plskit-bind registry drives R and Julia, so it must equal the
 Python surface: the same functions, and per function the same parameters
 in the same order, with the same keyword-only boundary and defaults.

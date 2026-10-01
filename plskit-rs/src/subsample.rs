@@ -210,7 +210,7 @@ use crate::fit::{pls1_fit, FitOpts, KSpec};
 use crate::linalg::{col_row_subset, row_subset};
 
 /// Per-resample outputs for the confirmatory CI branch. Per-variable arrays
-/// only — composite scalars have been removed.
+/// only.
 ///
 /// Each row carries its own `beta` vector; the reducer turns these into the
 /// per-coordinate β CIs and the per-coordinate subsampling z (`beta_sign_z`).
@@ -350,7 +350,7 @@ fn run_one_confirmatory(
     y: ColRef<'_, f64>,
     k: usize,
     m: usize,
-    _w_ref: MatRef<'_, f64>, // retained for call-site shape parity; leverage no longer uses it
+    _w_ref: MatRef<'_, f64>, // unused: kept so the call site matches the other workers' signature
     pre_standardized_x: bool,
     weights: Option<ColRef<'_, f64>>,
     rng: &mut crate::rng::Rng,
@@ -423,7 +423,7 @@ fn run_one_confirmatory(
     };
 
     // 5. Back-project β_b to the same scale as β_ref so deltas are meaningful.
-    // Mirrors `pls1_fit`'s full-data back-projection (`fit.rs:143-147`):
+    // Mirrors `pls1_fit`'s full-data back-projection in `pls1_fit`:
     //   β_raw[j] = β_std[j] * y_scale / x_scale[j]
     // For pre_standardized_x, both scales are 1.0 → no-op (β_b stays standardized,
     // matching β_ref which the caller's full-data fit also leaves on that scale).
@@ -444,10 +444,8 @@ mod tests_worker {
     use rand::RngExt;
     use rand::SeedableRng;
 
-    /// Regression for review-finding R4 (ticket #1, 2026-05-10): a
-    /// subsample whose NIPALS fit short-circuits with `k_used < k` must not
-    /// panic the Rayon worker (the pre-fix `.expect(...)` did). The
-    /// replicate fit runs `pls1_fit` with `pre_standardized = true`, whose
+    /// A subsample whose NIPALS fit short-circuits with `k_used < k` must
+    /// not panic the Rayon worker. The replicate fit runs `pls1_fit` with `pre_standardized = true`, whose
     /// `k_used < k` guard returns `InvalidInput` ("truncated"); the worker
     /// propagates it with `?` and the outer driver maps it to
     /// `WorkerOutcome::Failed`.
@@ -1161,8 +1159,8 @@ mod tests_beta_z_and_leverage_clamp {
     /// `√(m/(n − m))` times the `δ` quantile, `beta_se` is the SE the z
     /// divides by, `beta_sign_z_signed = β_ref / beta_se` exactly, and the
     /// folded `beta_sign_z` is its absolute value. None of it grows with
-    /// the number of replicates B: the former `(2p̂ − 1)·√B` formula
-    /// returns √B here (every replicate shares the sign of `β_ref`), 14.1
+    /// the number of replicates B: a `(2p̂ − 1)·√B` statistic
+    /// would return √B here (every replicate shares the sign of `β_ref`), 14.1
     /// and 44.7.
     #[test]
     fn beta_ci_is_shrinkage_corrected_and_fpc_scaled() {
@@ -1302,8 +1300,8 @@ mod tests_beta_z_and_leverage_clamp {
     /// subsampling rate (the replicates are size-`n` fits, so `n` and `m`
     /// do not enter), and centered on `h` whatever the replicate mean. A
     /// common offset of the replicates (the resampling bias of leverage)
-    /// and the skew of their distribution leave the interval unchanged; the
-    /// former reflected subsampling interval moved by both.
+    /// and the skew of their distribution leave the interval unchanged; a reflected subsampling interval would
+    /// move with both.
     #[test]
     fn leverage_ci_is_normal_bootstrap_interval_centered_on_h() {
         let b = 2000_usize;
@@ -1524,7 +1522,7 @@ pub(crate) struct SubsampleOpts {
     pub disable_parallelism: bool,
     /// Maximum tolerable combined per-resample failure rate
     /// (`n_holdout_corr_failed / n_boot`). Default `0.01`. Range `[0.0, 1.0]`.
-    /// `0.0` is strict; `1.0` is the legacy permissive behaviour.
+    /// `0.0` is strict; `1.0` never fails on resample failures.
     /// Distinct from `max_skip_rate`: covers numerical/fit failures, not weight-validation skips.
     pub max_failure_rate: f64,
     /// Threshold on the fraction of resamples skipped by weight validation.
@@ -1792,8 +1790,8 @@ mod tests_engine {
 
     /// Under a pure null (y independent of X, K = 1) every population β[j]
     /// is 0, so `beta_sign_z` should be roughly half-normal: mean
-    /// √(2/π) ≈ 0.80, sd √(1 − 2/π) ≈ 0.60 and about 5% above 1.96. The former `(2p̂ − 1)·√B`
-    /// formula averaged about 4.6 here with most values above 1.96.
+    /// √(2/π) ≈ 0.80, sd √(1 − 2/π) ≈ 0.60 and about 5% above 1.96. A `(2p̂ − 1)·√B`
+    /// statistic would average about 4.6 here, with most values above 1.96.
     #[test]
     fn beta_sign_z_is_calibrated_under_pure_null() {
         let (n, d, reps) = (200_usize, 8_usize, 60_u64);
@@ -1825,19 +1823,20 @@ mod tests_engine {
         );
         // The β CI rests on the same corrected SE, so it covers the null
         // β[j] = 0 at roughly the nominal rate. Uncorrected (no FPC, no
-        // 1/κ̂) it was κ̂·√(1 − m/n) too narrow and missed 0 far more often.
+        // 1/κ̂) it would be κ̂·√(1 − m/n) too narrow and
+        // miss 0 far more often.
         #[allow(clippy::cast_precision_loss)]
         let miss = excluded as f64 / total;
         assert!(miss <= 0.10, "share of β CIs excluding 0 = {miss}");
     }
 
     /// The leverage CI covers the expected leverage of a size-`n` fit in
-    /// the regime that exposed the reflected subsampling interval: `D = 20`,
+    /// the regime where a reflected subsampling interval fails: `D = 20`,
     /// `n = 100`, `K = 1`, where a fit on `m = 26` rows puts much less
     /// leverage on the signal variables than the full fit. The target
-    /// `E[ĥ_n]` is the mean full-data leverage over fresh datasets. The
-    /// former interval covered it about half the time here (0.51 over 1000
-    /// datasets); the bootstrap interval about 0.93.
+    /// `E[ĥ_n]` is the mean full-data leverage over fresh datasets. A
+    /// reflected subsampling interval covers it about half the time here
+    /// (0.51 over 1000 datasets); the bootstrap interval about 0.93.
     #[test]
     #[allow(clippy::cast_precision_loss, clippy::many_single_char_names)]
     fn leverage_ci_covers_expected_leverage_at_small_n_over_d() {

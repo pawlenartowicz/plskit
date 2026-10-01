@@ -342,7 +342,7 @@ standardized `X` is `< 3`. Since stable rank can never exceed the column
 count, `X` with 4 columns or fewer is rerouted outright, without
 consulting the computed rank. A `split_nb` request on a design that trips
 any of these reroutes to `split_exact` at `n_perm=1000`;
-`result.method` reports `"split_exact"` and Python raises a
+`result.test_method` reports `"split_exact"` and Python raises a
 `UserWarning`. Pass `args={'force': True}` to run `split_nb` anyway.
 Call `split_nb_gate` (§3.2) to ask the same question in advance.
 
@@ -353,7 +353,7 @@ rotation-invariant CIs.
 **arguments:** `X`, `y`, `k` (default `1`)
 **options:**
 
-- `method` (`"raw_perm"` | `"split_nb"` | `"split_exact"` |
+- `test_method` (`"raw_perm"` | `"split_nb"` | `"split_exact"` |
   `"score"` | `"e"`; keyword-only and required, with no default;
   `"split_exact"` is recommended)
 - `args` (dict of method-specific kwargs)
@@ -430,7 +430,7 @@ that apply to `beta_ci_*`.
 **function:** `split_nb_gate`
 **need:** find out whether the `split_nb` auto-gate (§3.1) flags your
 design, before spending a test run to discover it from
-`result.method`. Reports the engine's own decision — it evaluates the
+`result.test_method`. Reports the engine's own decision — it evaluates the
 one rule, it does not restate it.
 **arguments:** `X`
 **options:** `weights`.
@@ -451,7 +451,7 @@ value, not `None`); `return_perm_matrix`
 (bool, default `False`); `pre_standardized`; `seed`;
 `disable_parallelism`; `verbose`; `weights`.
 **returns:** `PermNullResult`. Pair with
-`pls1_confirmatory_test(method="split_exact")` as an omnibus gate before
+`pls1_confirmatory_test(test_method="split_exact")` as an omnibus gate before
 spending the `n_perm` permutation budget.
 
 ### 3.4 Confirmatory PLS3 omnibus test
@@ -461,7 +461,7 @@ spending the `n_perm` permutation budget.
 latent-variable correlation, calibrated by permutation or against a t
 reference.
 **arguments:** `X`, `Y`, `k` (must be `1`)
-**options:** `method` (`"split_exact"` | `"split_nb"`; keyword-only and
+**options:** `test_method` (`"split_exact"` | `"split_nb"`; keyword-only and
 required, with no default; `"split_exact"` is recommended); `args`
 (`"split_exact"`: `{"n_perm": int, "n_splits": int}`, defaults `1000` / `50`;
 `"split_nb"`: `{"n_splits": int, "force": bool}`, defaults `50` / `False`);
@@ -510,7 +510,7 @@ Blocked splits and blocked permutation are not implemented.
 
 **The `split_nb` auto-gate.** Identical to `pls1_confirmatory_test`'s and
 applied to X only: a flagged design runs `split_exact` instead
-(`result.method` says so, and Python warns), and `args={"force": True}`
+(`result.test_method` says so, and Python warns), and `args={"force": True}`
 overrides it. Y never enters the gate — `q` is small by construction in
 PLSC, so a stable-rank floor on Y would flag almost every design. The gate
 thresholds are the PLS1 ones and have not been re-derived for a two-block

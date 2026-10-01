@@ -105,7 +105,7 @@ def _confirmatory_test(w):
     X = rng.normal(size=(60, 5))
     y = X[:, 0] + 0.5 * rng.normal(size=60)
     return plskit.pls1_confirmatory_test(
-        X, y, k=2, method="raw_perm", args={"n_perm": 200}, weights=w, seed=42)
+        X, y, k=2, test_method="raw_perm", args={"n_perm": 200}, weights=w, seed=42)
 
 
 def _find_k_optimal(w):
@@ -169,7 +169,7 @@ def test_confirmatory_ci_skip_rate_guard_fires():
     X, y, w = _pathological()
     with pytest.raises(plskit.PlsKitResamplingDegenerate):
         plskit.pls1_confirmatory_test(
-            X, y, k=3, method="raw_perm", args={"n_perm": 200},
+            X, y, k=3, test_method="raw_perm", args={"n_perm": 200},
             ci=True, weights=w, n_boot=500, seed=0,
         )
 

@@ -352,21 +352,25 @@ pub(crate) fn renormalize_mean_one(w: ColRef<'_, f64>) -> Col<f64> {
 /// `w[0..n] · n / Σ w[0..n]`, in index order: the same mean-one
 /// renormalization as [`renormalize_mean_one`], but restricted to the
 /// first `n` entries of `w` and using `n` (not `w.nrows()`) as both the
-/// summation bound and the count. This is what the pre-refactor bodies of
-/// `standardize_weighted` and `standardize1_weighted` did: they summed
-/// and rebuilt only their own `n_rows` / `n` elements of `weights`, so a
-/// `weights` column longer than the rows being standardized (reachable
-/// from a Rust caller that passes a longer `weights` to the public
-/// `standardize_weighted`) keeps its old bits here even though
-/// [`renormalize_mean_one`] would read the rest of `w` and divide by a
-/// different count.
+/// summation bound and the count. `standardize_weighted` and
+/// `standardize1_weighted` sum and rebuild only their own `n_rows` / `n`
+/// elements of `weights`, so a `weights` column longer than the rows being
+/// standardized (reachable from a Rust caller that passes a longer
+/// `weights` to the public `standardize_weighted`) gives the same bits as
+/// one cut to `n` rows, whereas [`renormalize_mean_one`] would read the
+/// rest of `w` and divide by a different count.
 fn renormalize_mean_one_n(w: ColRef<'_, f64>, n: usize) -> Col<f64> {
     let s: f64 = (0..n).map(|i| w[i]).sum();
     let n_f = n as f64;
     Col::<f64>::from_fn(n, |i| w[i] * n_f / s)
 }
 
-/// `√w[i]` for every `i`: the Convention A row factor of a weighted fit.
+/// `√w[i]` for every `i`: the row factor of the √w row-scaling convention.
+///
+/// The √w row-scaling convention is how `pls1_fit` handles weights:
+/// standardize X and y with weighted moments (mean-one weights `w'`), then
+/// multiply row `i` of both by `√w'[i]` and run the unweighted algorithm on
+/// the result.
 pub(crate) fn sqrt_col(w: ColRef<'_, f64>) -> Col<f64> {
     Col::<f64>::from_fn(w.nrows(), |i| w[i].sqrt())
 }
@@ -376,9 +380,8 @@ pub(crate) fn sqrt_col(w: ColRef<'_, f64>) -> Col<f64> {
 /// column-major with a nonnegative column stride, and the caller then reads
 /// `x` itself.
 ///
-/// The `pre_standardized` paths used to copy X unconditionally. Borrowing
-/// is value-identical, and on a column-major, nonnegative-column-stride
-/// view it is also bit-identical downstream: the kernels that read the
+/// Borrowing is value-identical to copying, and on a column-major,
+/// nonnegative-column-stride view it is also bit-identical downstream: the kernels that read the
 /// caller's view directly (faer's `norm_l2` for the NIPALS floor, and the
 /// products of the score test) take the same path on such a view as on an
 /// owned copy, whatever its column stride or offset; the per-module
@@ -402,8 +405,8 @@ pub(crate) fn col_major_or_copy(x: MatRef<'_, f64>) -> Option<Mat<f64>> {
     }
 }
 
-/// Standardize a 1-D vector. Returns (z, mean, scale). Mirrors the
-/// reshape→standardize→ravel pattern used by the prototype.
+/// Standardize a 1-D vector. Returns (z, mean, scale): the same result as
+/// standardizing it as a one-column matrix.
 #[must_use]
 pub fn standardize1(y: ColRef<'_, f64>) -> (Col<f64>, f64, f64) {
     standardize1_weighted(y, None)
@@ -435,9 +438,9 @@ pub fn standardize1_weighted(
 /// its largest absolute value ([`pow2_scale`]), so the squares inside
 /// [`constant_to_rounding`] and the variance stay finite and normal at any
 /// magnitude. Summed on the raw column, `Σx²` is `inf` once `|x|` exceeds
-/// about `1e154` (and a varying column there was classified as constant,
-/// with scale `inf`), and is `0` once `|x|` is below about `1e-162` (a
-/// varying column there was classified as constant too).
+/// about `1e154` (and a varying column there would be classified as
+/// constant, with scale `inf`), and is `0` once `|x|` is below about
+/// `1e-162` (a varying column there would be classified as constant too).
 ///
 /// Dividing by a power of two is exact, and IEEE rounding commutes with it
 /// while no intermediate leaves the normal range, so on such a column every
@@ -462,11 +465,12 @@ fn mean_and_scale(n: usize, v: impl Fn(usize) -> f64, w: Option<ColRef<'_, f64>>
 /// Such a column is only centered, and its centered entries are rounding
 /// noise of size up to about `2n·ε·|mean|`. Dividing by `max(1, |mean|)`
 /// keeps them below about `2n·ε` at any magnitude: with scale 1 a constant
-/// near `1e300` standardized to entries near `1e285`, which dominated
-/// `‖Xs‖_F` (and the fit's truncation floor) or overflowed the fit to NaN.
+/// near `1e300` would standardize to entries near `1e285`, which would
+/// dominate `‖Xs‖_F` (and the fit's truncation floor) or overflow the fit
+/// to NaN.
 /// A constant of magnitude at most 1, the all-zero column included, keeps
 /// scale 1. A constant column's `|mean| / scale` is at most 1, so one of
-/// magnitude above `1e3` no longer pushes `pls1_fit` past
+/// magnitude above `1e3` does not push `pls1_fit` past
 /// `IMPLICIT_MAX_MEAN_RATIO` onto the materialized-copy route
 /// ([`FitX::max_mean_ratio`]).
 #[allow(clippy::cast_precision_loss)]
@@ -628,8 +632,8 @@ fn fro_term(m: &ScaledMoments, scale: f64) -> f64 {
 }
 
 /// `√(Σ rⱼ²)` over the [`fro_term`]s, each divided by the largest `|rⱼ|`
-/// before it is squared, so that no `r²` can overflow (a constant column
-/// of large entries reached `r` near `1e285` while its scale was 1).
+/// before it is squared, so that no `r²` can overflow (with scale 1, a
+/// constant column of large entries would give `r` near `1e285`).
 /// Non-finite when a term is.
 fn fro_from_terms(r: &[f64]) -> f64 {
     let big = r.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
@@ -1165,11 +1169,11 @@ impl ScaledMoments {
 /// held-out vector are judged constant by literally the same sums. The sums
 /// of squares neither overflow nor underflow at any magnitude of `v`:
 /// formed on `v` itself, `Σv²` is `inf` once `|v|` exceeds about `1e154`
-/// and `0` once it is below about `1e-162`, and `constant_to_rounding` then
-/// read every such vector as constant.
+/// and `0` once it is below about `1e-162`, and `constant_to_rounding` would
+/// then read every such vector as constant.
 ///
 /// Dividing by a power of two is exact, and rounding commutes with it while
-/// no intermediate leaves the normal range, so where the raw sums were in
+/// no intermediate leaves the normal range, so where the raw sums are in
 /// range these are the raw sums times `1/s` (`mean`) or `1/s²` (`ss`,
 /// `sq`), bit for bit: `constant_to_rounding` takes the same branch, and
 /// `signal_test::pearson_scaled` returns the bits
@@ -1299,8 +1303,8 @@ fn scaled_moments_block<const B: usize>(
 
 /// The value an `f64` `Iterator::sum` starts from (`-0.0` on current
 /// toolchains). [`scaled_moments_block`] starts its sums here so that
-/// each is the `.sum()` it replaces bit for bit, down to the sign of a sum
-/// whose every term is `-0.0`.
+/// each equals the corresponding `Iterator::sum` bit for bit, down to the
+/// sign of a sum whose every term is `-0.0`.
 fn sum_start() -> f64 {
     core::iter::empty::<f64>().sum()
 }
@@ -1350,13 +1354,13 @@ pub(crate) fn pow2_scale(max_abs: f64) -> (f64, f64) {
 /// forming the sums on the column divided by a power of two near its
 /// largest entry, and the split-half correlations do the same to each
 /// held-out vector: both go through [`scaled_moments`].
-/// An absolute threshold did switch: standardization used `sd ≤ 1e-12`, so
-/// a column of standard deviation `1e-13` was centered but not rescaled
-/// (and `pls1_fit` on it truncated to `k_used = 0`), while a constant
+/// An absolute threshold would switch: with `sd ≤ 1e-12`, a column of
+/// standard deviation `1e-13` would be centered but not rescaled (and
+/// `pls1_fit` on it would truncate to `k_used = 0`), while a constant
 /// column of magnitude `1e6`, whose centered entries are rounding noise of
-/// order `1e-10` to `1e-9`, was rescaled to unit variance. The split-half
-/// correlation's guard had the same flaw with `ss < 1e-15`. An all-zero
-/// vector (`ss = sq = 0`) is constant.
+/// order `1e-10` to `1e-9`, would be rescaled to unit variance. An
+/// absolute guard `ss < 1e-15` on a split-half correlation has the same
+/// flaw. An all-zero vector (`ss = sq = 0`) is constant.
 ///
 /// The price of a bound that holds for every constant vector is that it
 /// grows with `n`: a vector whose `sd/|mean|` is at most about `2n·ε` is
@@ -1392,7 +1396,9 @@ pub fn compute_n_eff(w: ColRef<'_, f64>) -> f64 {
 /// singular value squared. Equivalently `Σσᵢ² / σ₁²`. Does NOT standardize
 /// `a`; the caller standardizes first (intended use: `stable_rank(standardized X)`,
 /// where it equals the reciprocal of the first principal component's variance
-/// share — VE1 in Aquino et al., 2020).
+/// share — VE1 in Aquino, Fulcher, Parkes, Sabaroedin & Fornito, 2020,
+/// "Identifying and removing widespread signal deflections from fMRI data",
+/// NeuroImage 212:116614, doi:10.1016/j.neuroimage.2020.116614).
 /// Zero matrix (σ₁ = 0) returns 0.0.
 ///
 /// The SVD runs on the crate's fixed-degree Rayon split
@@ -1402,6 +1408,7 @@ pub fn compute_n_eff(w: ColRef<'_, f64>) -> f64 {
 /// # Panics
 /// Panics if faer's SVD fails to converge (only expected on pathological input).
 #[must_use]
+#[allow(clippy::doc_markdown)] // "NeuroImage"
 pub fn stable_rank(a: MatRef<'_, f64>) -> f64 {
     let s = singular_values(a, crate::fit::par_fixed()).expect("SVD failed to converge");
     let sigma1 = if s.nrows() == 0 { 0.0 } else { s[0] };
@@ -1642,16 +1649,16 @@ mod tests {
     /// up to rounding relative to one, whatever their magnitude: an all-zero
     /// column, a constant whose computed mean is off by rounding (`0.1`), a
     /// large constant whose centered entries are rounding noise of standard
-    /// deviation about `1e-9` (which the old absolute `sd ≤ 1e-12` floor
-    /// rescaled to unit variance), and a column varying by a few ulps.
+    /// deviation about `1e-9` (which an absolute `sd ≤ 1e-12` floor would
+    /// rescale to unit variance), and a column varying by a few ulps.
     /// With scale 1 at every magnitude, the centering noise of a constant
-    /// near `1e300` stayed near `1e285` (squares overflowing to NaN fits,
-    /// or a `‖Xs‖_F` that truncated `pls1_fit` to `k_used = 0`).
+    /// near `1e300` would stay near `1e285` (squares overflowing to NaN fits,
+    /// or a `‖Xs‖_F` that truncates `pls1_fit` to `k_used = 0`).
     #[test]
     fn constant_columns_to_rounding_standardize_to_zeros_at_any_magnitude() {
         let n = 50;
         let big = 1e6 + 0.1;
-        // The large constant's rounding noise is far above the old floor.
+        // The large constant's rounding noise is far above an absolute 1e-12 floor.
         let mean = (0..n).map(|_| big).sum::<f64>() / n as f64;
         let noise_sd = ((0..n).map(|_| (big - mean).powi(2)).sum::<f64>() / n as f64).sqrt();
         assert!(noise_sd > 1e-10, "noise sd = {noise_sd:e}");
@@ -1700,9 +1707,9 @@ mod tests {
     /// A column whose spread is below the normal range (so that `sd` would
     /// be `0` or subnormal) though its entries are not all equal is
     /// treated as constant: a normal scale, finite standardized entries.
-    /// It used to get scale `0` (a single `5e-324` among zeros) or a
-    /// subnormal scale (`1e-310` on half the rows), and `pls1_fit` returned
-    /// NaN coefficients without an error.
+    /// Without this rule it would get scale `0` (a single `5e-324` among
+    /// zeros) or a subnormal scale (`1e-310` on half the rows), and
+    /// `pls1_fit` would return NaN coefficients without an error.
     #[test]
     fn columns_whose_spread_underflows_are_only_centered() {
         let n = 40;
@@ -1773,9 +1780,9 @@ mod tests {
     /// A column far outside the range where its squares are finite and
     /// normal, with a small spread relative to its magnitude, is still
     /// rescaled, and standardizes to the same values as the same column
-    /// near 1. Summed on the raw values, `Σx²` is `inf` at `1e200` (the
-    /// column was classified as constant, the bug this pins) and `0` at
-    /// `1e-200` (likewise).
+    /// near 1. Summed on the raw values, `Σx²` is `inf` at `1e200` (raw sums
+    /// would classify the column as constant) and `0` at `1e-200`
+    /// (likewise).
     #[test]
     fn huge_and_tiny_columns_with_small_relative_spread_are_rescaled() {
         let base: Vec<f64> = (0..40).map(|i| f64::from(i * 7 % 11).sin()).collect();
@@ -1804,9 +1811,9 @@ mod tests {
         }
     }
 
-    /// Standardization before the power-of-two pre-scaling: the raw-column
-    /// formulas, kept here as the bit-level reference for the claim that
-    /// pre-scaling changes nothing where those formulas stay in range.
+    /// Raw-column standardization formulas (no power-of-two pre-scaling):
+    /// the bit-level reference for the claim that pre-scaling changes
+    /// nothing where those formulas stay in range.
     fn raw_mean_and_scale(v: &[f64], w: Option<&[f64]>) -> (f64, f64) {
         let n = v.len();
         let n_f = n as f64;
@@ -1839,8 +1846,8 @@ mod tests {
     /// Wherever the raw-column sums stay finite and normal, the pre-scaled
     /// standardizers reproduce the raw formulas bit for bit: mean, scale,
     /// every standardized entry, and the constant/non-constant decision.
-    /// This is what keeps the frozen corpus and `tests/byte_parity.rs`
-    /// unmoved by the pre-scaling.
+    /// So the frozen corpus and `tests/byte_parity.rs` are unaffected by
+    /// the pre-scaling.
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn prescaling_is_bit_identical_in_the_normal_range() {
@@ -1925,7 +1932,7 @@ mod tests {
             vec![vec![0, 1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]]
         );
         // numpy.array_split(arange(2), 3): more folds than indices leaves the
-        // last fold empty (the Python raw_perm guard relies on it).
+        // last fold empty.
         assert_eq!(fold_split(&[0, 1], 3), vec![vec![0], vec![1], vec![]]);
     }
 
@@ -2224,8 +2231,7 @@ mod row_standardize_tests {
 
     /// A `weights` column longer than the rows being standardized: only
     /// its first `n` entries count, renormalized over `n` rows
-    /// (`renormalize_mean_one_n`), as the pre-refactor bodies of
-    /// `standardize_weighted` and `standardize1_weighted` did. Reachable
+    /// (`renormalize_mean_one_n`). Reachable
     /// from a Rust caller that passes a longer `weights` to the public
     /// `standardize_weighted`; also through the row gather of
     /// `standardize_rows`.
@@ -2744,8 +2750,8 @@ mod fast_standardize_tests {
         }
     }
 
-    /// `standardize1_weighted` still reads the same moments as a column of
-    /// `standardize_weighted`, now that the two go through different loops.
+    /// `standardize1_weighted` reads the same moments as a column of
+    /// `standardize_weighted`, though the two go through different loops.
     #[test]
     fn standardize1_weighted_matches_each_column_of_standardize_weighted() {
         let (n, p) = (37, 19);

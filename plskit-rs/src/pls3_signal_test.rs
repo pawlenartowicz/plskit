@@ -271,7 +271,7 @@ pub fn pls3_confirmatory_test(
         ConfirmatoryArgs::SplitNb { n_splits, force } => (None, n_splits, force),
         other => {
             return Err(PlsKitError::InvalidArgument(format!(
-                "pls3_confirmatory_test supports method='split_exact' or 'split_nb' (got \
+                "pls3_confirmatory_test supports test_method='split_exact' or 'split_nb' (got \
                  '{}'): 'raw_perm' needs a CV statistic PLS3 does not have (there is no \
                  pls3_predict); 'score' is not implemented (its symmetric analog, an \
                  RV-type test on ‖X'Y‖_F², tests a different estimand); 'e' needs a \
@@ -314,7 +314,7 @@ pub fn pls3_confirmatory_test(
 
     // The J splits are drawn once and held fixed across all B permutation
     // replicates: redrawing per replicate would fold split-to-split scatter
-    // into the null (the bug `run_split_perm` was fixed for in 0.4.0).
+    // into the null.
     let splits = draw_splits(n, k, n_splits, opts.disable_parallelism, &mut rng)?;
 
     let (n_tr, n_te) = crate::resample::split_sizes(n, k);
@@ -332,7 +332,7 @@ pub fn pls3_confirmatory_test(
         return Ok(ConfirmatoryTestOutput {
             pvalue: p,
             statistic,
-            method: ConfirmatoryMethod::SplitNb.as_str().to_owned(),
+            test_method: ConfirmatoryMethod::SplitNb.as_str().to_owned(),
             k,
             n_perm: None,
             n_splits: Some(n_splits),
@@ -361,11 +361,8 @@ pub fn pls3_confirmatory_test(
     // This is drawn *above* the route branch and is the only draw either
     // route makes, so the parent's seed budget is exactly
     // `resolve_seed` → `draw_splits(n_splits)` → `child_seeds(n_perm)` on
-    // both arms. It is also literally what
-    // `parallel_for_each_seeded(&mut rng, n_perm, ..)` used to draw on the
-    // primal side (`child_seeds`, then one `child_rng` per iteration), so
-    // replicate `b` still gets the permutation of `seeds[b]` alone, whichever
-    // route runs and however Rayon schedules it.
+    // both arms. Replicate `b` gets the permutation of `seeds[b]` alone,
+    // whichever route runs and however Rayon schedules it.
     let seeds = crate::rng::child_seeds(&mut rng, n_perm);
     let perms: Vec<Vec<usize>> = seeds
         .iter()
@@ -406,7 +403,7 @@ pub fn pls3_confirmatory_test(
     Ok(ConfirmatoryTestOutput {
         pvalue: p,
         statistic: z_bar_obs.tanh(),
-        method: ConfirmatoryMethod::SplitExact.as_str().to_owned(),
+        test_method: ConfirmatoryMethod::SplitExact.as_str().to_owned(),
         k,
         n_perm: Some(n_perm),
         n_splits: Some(n_splits),
@@ -712,7 +709,7 @@ mod tests {
     fn strong_shared_factor_rejects() {
         let (x, y) = linked_blocks(80, 8, 4, 4.0, 3);
         let r = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, opts(199, 10, 42)).unwrap();
-        assert_eq!(r.method, "split_exact");
+        assert_eq!(r.test_method, "split_exact");
         assert_eq!(r.k, 1);
         assert_eq!(r.n_perm, Some(199));
         assert_eq!(r.n_splits, Some(10));
@@ -943,7 +940,7 @@ mod tests {
         // 4-column precheck, so this also fails if Y were ever gated.
         let (x, y) = linked_blocks(60, 6, 3, 2.0, 5);
         let r = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(10, false, 7)).unwrap();
-        assert_eq!(r.method, "split_nb");
+        assert_eq!(r.test_method, "split_nb");
         assert!(r.n_perm.is_none(), "split_nb runs no permutations");
         assert_eq!(r.n_splits, Some(10));
         assert!(r.pvalue > 0.0 && r.pvalue <= 1.0, "p = {}", r.pvalue);
@@ -962,8 +959,8 @@ mod tests {
         let (x, y) = linked_blocks(60, 6, 3, 2.0, 5);
         let nb = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(8, false, 42)).unwrap();
         let ex = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, opts(99, 8, 42)).unwrap();
-        assert_eq!(nb.method, "split_nb");
-        assert_eq!(ex.method, "split_exact");
+        assert_eq!(nb.test_method, "split_nb");
+        assert_eq!(ex.test_method, "split_exact");
         assert_eq!(nb.statistic.to_bits(), ex.statistic.to_bits());
     }
 
@@ -973,7 +970,7 @@ mod tests {
         // to split_exact at that method's own default n_perm.
         let (x, y) = linked_blocks(60, 3, 3, 2.0, 5);
         let r = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(4, false, 7)).unwrap();
-        assert_eq!(r.method, "split_exact");
+        assert_eq!(r.test_method, "split_exact");
         assert_eq!(r.n_perm, Some(1000));
         assert_eq!(r.n_splits, Some(4), "the requested n_splits carries over");
         assert!(r.stable_rank.is_some(), "the gate reports what it saw");
@@ -983,7 +980,7 @@ mod tests {
     fn split_nb_force_overrides_the_gate() {
         let (x, y) = linked_blocks(60, 3, 3, 2.0, 5);
         let r = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(4, true, 7)).unwrap();
-        assert_eq!(r.method, "split_nb");
+        assert_eq!(r.test_method, "split_nb");
         assert!(r.n_perm.is_none());
     }
 
@@ -1549,7 +1546,7 @@ mod tests {
         // from deciding what runs.
         let nb = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(n_splits, true, seed))
             .unwrap();
-        assert_eq!(nb.method, "split_nb");
+        assert_eq!(nb.test_method, "split_nb");
         let rel = (nb.statistic - r.statistic).abs() / r.statistic.abs().max(1e-300);
         assert!(
             rel < 1e-10,
@@ -1711,15 +1708,15 @@ mod tests {
     /// involved; `δ = 0` with the default `tol` is the exactly degenerate
     /// case, which stops on the second sweep.
     ///
-    /// What this measured, before the drift gate existed: no `1/δ`
-    /// amplification, but accumulation. The ungated routes' `|Δz|` grew
+    /// Without the drift gate there is no `1/δ` amplification, but there is
+    /// accumulation. The ungated routes' `|Δz|` grows
     /// linearly in the sweep count at about `2.5e-16` per sweep, the same
     /// for `δ = 1e-6` and `1e-9` (3e-14 at 100 sweeps, 2.8e-13 at 1e3,
     /// 2.8e-12 at 1e4, 2.8e-11 at 1e5; aarch64-apple-darwin), past the
     /// corpus `1e-12` beyond about 4000 sweeps. A near-degenerate
     /// restricted map damps a per-sweep discrepancy only at rate `δ`, so it
     /// builds up as about `ε·min(sweeps, 1/δ)`; `DRIFT_SWEEPS` in
-    /// `dual_route::pls3_split_zbars_columns` now bounds that by falling
+    /// `dual_route::pls3_split_zbars_columns` bounds that by falling
     /// back to the primal. Short runs (the gate is not evaluated) must
     /// agree to `1e-12`; long near-degenerate runs must fall back, which is
     /// checked to the bit.

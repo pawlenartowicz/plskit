@@ -1,6 +1,6 @@
 # R: differences from Python
 
-Names are identical across languages (RULE 1). What differs is how
+Names are identical across languages. What differs is how
 values are represented.
 
 ## Arguments
@@ -73,8 +73,8 @@ type name, then `"plskit_result"`.
 | `seed` | character string (below) |
 
 `print()` shows a compact summary (field names, shapes, nested type
-names). There are no `coef()` or `predict()` methods (RULE 5): call
-`pls1_predict(fit, X_new)`.
+names). There are no `coef()` or `predict()` methods (wrappers add no
+statistical methods of their own): call `pls1_predict(fit, X_new)`.
 
 Results can be passed back: `pls1_predict(fit, X_new)`, `rotate(fit)`,
 `pls3_transform(model, ...)`. `rotate` takes a fitted `pls1_result`

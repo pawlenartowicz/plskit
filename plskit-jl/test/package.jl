@@ -1,5 +1,5 @@
 # __init__ version check and the three version numbers that must agree
-# (spec §5.6, §10).
+# (Project.toml, CondaPkg.toml, the Python package's `__version__`).
 @test PLSKit._check_version(PLSKit.PLSKIT_PY_VERSION) === nothing
 @test_throws ErrorException PLSKit._check_version("0.0.0")
 @test string(pkgversion(PLSKit)) == PLSKit.PLSKIT_PY_VERSION

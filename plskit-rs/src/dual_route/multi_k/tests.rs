@@ -305,9 +305,9 @@ fn out_of_contract_shapes_are_unresolved() {
 }
 
 /// Printed by `python3 scripts/gate_feasibility.py nspace --reference`.
-const SPIKE_G2: f64 = 2303.608226002213;
+const SCRIPT_G2: f64 = 2303.608226002213;
 /// `(E_w(a), E_t(a), rho_a)` for `a = 1..=4`.
-const SPIKE_REFERENCE: [(f64, f64, f64); 4] = [
+const SCRIPT_REFERENCE: [(f64, f64, f64); 4] = [
     (
         5.563549621001585e-10,
         7.735252438578756e-06,
@@ -331,10 +331,10 @@ const SPIKE_REFERENCE: [(f64, f64, f64); 4] = [
 ];
 
 #[test]
-fn history_bounds_reproduce_the_feasibility_spike() {
+fn history_bounds_match_gate_feasibility_script() {
     // `reference_design` of scripts/gate_feasibility.py, rebuilt here; the
     // kernel's per-component bounds must equal the script's (up to BLAS and
-    // libm rounding), so the spike that set K_DUAL_MAX ran this recursion.
+    // libm rounding), so the script that set K_DUAL_MAX models this recursion.
     let (n, p) = (24_usize, 300_usize);
     let x = Mat::<f64>::from_fn(n, p, |i, j| {
         ((i as f64 + 1.0) * (j as f64 + 1.0) * 0.37).sin()
@@ -347,14 +347,14 @@ fn history_bounds_reproduce_the_feasibility_spike() {
     let block = gram.block();
     let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs();
     assert!(
-        close(block.g2, SPIKE_G2),
-        "‖G‖₂ bound {:e} vs {SPIKE_G2:e}",
+        close(block.g2, SCRIPT_G2),
+        "‖G‖₂ bound {:e} vs {SCRIPT_G2:e}",
         block.g2
     );
     let (out, trace) = pls1_nspace_kernel_traced(&block, z.as_ref(), 4);
     assert!(matches!(out, NspaceOutcome::Resolved { k_used: 4, .. }));
     assert_eq!(trace.len(), 4);
-    for (a, (t, &(e_w, e_t, rho))) in trace.iter().zip(SPIKE_REFERENCE.iter()).enumerate() {
+    for (a, (t, &(e_w, e_t, rho))) in trace.iter().zip(SCRIPT_REFERENCE.iter()).enumerate() {
         assert!(close(t.e_w, e_w), "a={}: E_w {:e} vs {e_w:e}", a + 1, t.e_w);
         assert!(close(t.e_t, e_t), "a={}: E_t {:e} vs {e_t:e}", a + 1, t.e_t);
         assert!(close(t.rho, rho), "a={}: rho {:e} vs {rho:e}", a + 1, t.rho);

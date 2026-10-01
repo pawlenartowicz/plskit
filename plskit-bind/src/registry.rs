@@ -367,7 +367,7 @@ static REGISTRY: &[FnSpec] = &[
             pos("X", K::Mat),
             pos("y", K::Vec),
             pos_d("k", K::Int, I(1)),
-            kw_req("method", K::Str),
+            kw_req("test_method", K::Str),
             kw("args", K::Args, N),
             kw("ci", K::Bool, B(false)),
             kw("n_boot", K::Int, N),
@@ -413,7 +413,7 @@ static REGISTRY: &[FnSpec] = &[
             pos("X", K::Mat),
             pos("Y", K::Mat),
             pos_d("k", K::Int, I(1)),
-            kw_req("method", K::Str),
+            kw_req("test_method", K::Str),
             kw("args", K::Args, N),
             kw("pre_standardized_X", K::Bool, B(false)),
             kw("pre_standardized_Y", K::Bool, B(false)),
@@ -624,7 +624,7 @@ mod tests {
         panic!("kaboom")
     }
 
-    // Review Focus 3: a panic under call() is an `internal` error.
+    // A panic under call() is an `internal` error.
     #[test]
     fn a_panic_becomes_an_internal_error() {
         let spec = FnSpec {

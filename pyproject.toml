@@ -1,5 +1,4 @@
-# This pyproject.toml lives at the workspace root (not next to plskit-py/Cargo.toml)
-# because cibuildwheel copies only `package_dir` into its manylinux container, and
+# This pyproject.toml lives at the workspace root (not next to plskit-py/Cargo.toml);
 # the Python wrapper depends on workspace inheritance from the root Cargo.toml.
 # `tool.maturin.manifest-path` points the build at the actual crate.
 # The R / Julia wrappers are unaffected — they have their own toolchains.
@@ -18,7 +17,7 @@ description = "PLS regression with modern inference (Python wrapper for plskit).
 readme = "plskit-py/README.md"
 license = { text = "GPL-3.0-or-later" }
 authors = [{ name = "Paweł Lenartowicz" }]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = ["numpy>=1.23"]
 classifiers = [
     "Programming Language :: Python :: 3",

@@ -148,12 +148,13 @@ impl ConfirmatoryArgs {
 /// effective observations than this is rerouted to `split_exact`.
 ///
 /// This and [`SPLIT_NB_GATE_MIN_STABLE_RANK`] are calibrated constants, not
-/// round numbers picked by taste: 5,000 null replicates per cell across iid
-/// Gaussian, decaying-spectrum, single-factor, NIR gasoline and GloVe-300
-/// designs. The NB correction is exact at ρ = ½ and loses its level when the
-/// sample is small or X's spectrum is concentrated on few directions; the
-/// pair of thresholds is the smallest rule separating the level-holding cells
-/// from the rest, and it deliberately errs toward flagging.
+/// round numbers picked by taste. The authors calibrated them on 5,000 null
+/// replicates per cell across iid Gaussian, decaying-spectrum,
+/// single-factor, NIR gasoline and GloVe-300 designs. The NB correction is
+/// exact at ρ = ½ and loses its level when the sample is small or X's
+/// spectrum is concentrated on few directions; the pair of thresholds is the
+/// smallest rule separating the level-holding cells from the rest, and it
+/// deliberately errs toward flagging.
 const SPLIT_NB_GATE_MIN_N_EFF: f64 = 25.0;
 
 /// Spectrum floor of the `split_nb` auto-gate, on `linalg::stable_rank` of the
@@ -390,7 +391,7 @@ pub struct ConfirmatoryTestOutput {
     /// `e`).
     pub statistic: f64,
     /// Method name as a lowercase string (e.g. `"raw_perm"`, `"split_nb"`, `"e"`).
-    pub method: String,
+    pub test_method: String,
     /// Resolved number of components actually tested.
     pub k: usize,
     /// Number of `raw_perm` / `split_exact` iterations used. `None` when the method has no permutation count.
@@ -429,7 +430,7 @@ pub struct ConfirmatoryTestOutput {
 /// - `PlsKitError::KExceedsMax` when k > `d`
 /// - `PlsKitError::InvalidArgument` when `k = 0` (every method, `score`
 ///   included although its statistic does not depend on k)
-/// - `PlsKitError::InvalidArgument` for `method = "raw_perm"` with
+/// - `PlsKitError::InvalidArgument` for `test_method = "raw_perm"` with
 ///   `n_folds < 2` or `n_folds >= n` (leave-one-out; the pooled CV R² is
 ///   undefined when every validation fold is a single row)
 /// - `PlsKitError::NonFiniteInput` when X, y, or weights contain NaN/inf
@@ -536,10 +537,11 @@ pub(crate) fn confirmatory_test_impl(
         }
         ConfirmatoryArgs::Score | ConfirmatoryArgs::E => {}
     }
-    // k = 0 is rejected here, before dispatch, for every method: left to the
-    // runners, `raw_perm` and `e` rejected it through `pls1_fit` while
-    // `split_exact` / `split_nb` returned a constant p and `score` (which
-    // never reads k) a real one. Same error `pls1_fit` raises.
+    // k = 0 is rejected here, before dispatch, for every method: if it were
+    // left to the runners, `raw_perm` and `e` would reject it through
+    // `pls1_fit` while `split_exact` / `split_nb` would return a constant p
+    // and `score` (which never reads k) a real one. Same error `pls1_fit`
+    // raises.
     if k_resolved == 0 {
         return Err(PlsKitError::InvalidArgument("k must be >= 1".into()));
     }
@@ -572,9 +574,9 @@ pub(crate) fn confirmatory_test_impl(
     // designs get rerouted to `split_exact`, which calibrates by permutation
     // and holds its level either way.
     //
-    // Resolution happens here, BEFORE dispatch, not inside it: `method`,
+    // Resolution happens here, BEFORE dispatch, not inside it: `test_method`,
     // `n_perm` and `n_splits` on the output are read off `args_resolved`, so
-    // rewriting the args is exactly what makes `result.method` say
+    // rewriting the args is exactly what makes `result.test_method` say
     // `"split_exact"` when the gate fired.
     //
     // Under `GateMode::Decided` the whole block is skipped: the caller settled
@@ -632,10 +634,11 @@ pub(crate) fn confirmatory_test_impl(
             // K ≥ 2 deflation breaks it (component 2's weights depend on
             // component 1's y-dependent scores), and sparse `keep` breaks it
             // even at K = 1 (the selected column set moves with every
-            // permutation). Weights do not break it: under Convention A the
-            // map just carries a `diag(√w_tr)` inside it and stays fixed and
-            // linear in y, so weighted K = 1 dense input takes the no-refit
-            // route too (see `split_perm_nr_zbars`, "Under weights").
+            // permutation). Weights do not break it: under the √w row-scaling
+            // convention (`linalg::sqrt_col`) the map just carries a
+            // `diag(√w_tr)` inside it and stays fixed and linear in y, so
+            // weighted K = 1 dense input takes the no-refit route too (see
+            // `split_perm_nr_zbars`, "Under weights").
             //
             // Route decided here, before any draw from `rng`: the no-refit
             // route consumes the parent rng through its own sequential draws
@@ -736,7 +739,7 @@ pub(crate) fn confirmatory_test_impl(
     Ok(ConfirmatoryTestOutput {
         pvalue: result.pvalue,
         statistic: result.statistic,
-        method: args_resolved.method().as_str().to_owned(),
+        test_method: args_resolved.method().as_str().to_owned(),
         k: k_resolved,
         n_perm: n_perm_out,
         n_splits: n_splits_out,
@@ -790,35 +793,36 @@ pub(crate) fn split_exact_no_refit_route(k: usize, keep: Option<usize>) -> bool 
 }
 
 thread_local! {
-    /// Set by `with_new_routes_disabled` (tests); read through `new_routes_disabled`.
-    static NEW_ROUTES_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set by `with_gram_routes_disabled` (tests); read through `gram_routes_disabled`.
+    static GRAM_ROUTES_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Whether the replicate-loop route selectors are restricted to the routes
-/// that predate the Gram routes for K >= 2: `ReplicateRoute::Special` and
-/// `ReplicateRoute::Primal`. Always `false` outside the test-only
-/// `with_new_routes_disabled`. Thread-local: a selector runs on the
+/// Whether the replicate-loop route selectors are restricted to
+/// `ReplicateRoute::Special` and `ReplicateRoute::Primal`, which takes the
+/// Gram routes `ReplicateRoute::Nspace` and `ReplicateRoute::GramP` out of
+/// the choice. Always `false` outside the test-only
+/// `with_gram_routes_disabled`. Thread-local: a selector runs on the
 /// calling thread before any parallel work, so a test's override reaches
 /// exactly the calls that test makes. The override never forces a route
-/// onto an input the route's rule rejects; it only takes the newer routes
-/// out of the choice.
-pub(crate) fn new_routes_disabled() -> bool {
-    NEW_ROUTES_DISABLED.with(std::cell::Cell::get)
+/// onto an input the route's rule rejects; it only removes `Nspace` and
+/// `GramP` from the choice.
+pub(crate) fn gram_routes_disabled() -> bool {
+    GRAM_ROUTES_DISABLED.with(std::cell::Cell::get)
 }
 
-/// Run `f` with [`new_routes_disabled`] true on this thread, restoring the
+/// Run `f` with [`gram_routes_disabled`] true on this thread, restoring the
 /// previous value afterwards, also when `f` panics, so nested and failing
 /// tests cannot leak the override. Route-invisibility tests and the layout
 /// table run primal-only arms inside it.
 #[cfg(test)]
-pub(crate) fn with_new_routes_disabled<T>(f: impl FnOnce() -> T) -> T {
+pub(crate) fn with_gram_routes_disabled<T>(f: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
-            NEW_ROUTES_DISABLED.with(|c| c.set(self.0));
+            GRAM_ROUTES_DISABLED.with(|c| c.set(self.0));
         }
     }
-    let _restore = Restore(NEW_ROUTES_DISABLED.with(|c| c.replace(true)));
+    let _restore = Restore(GRAM_ROUTES_DISABLED.with(|c| c.replace(true)));
     f()
 }
 
@@ -828,10 +832,10 @@ pub(crate) fn with_new_routes_disabled<T>(f: impl FnOnce() -> T) -> T {
 /// statistic, and the choice is not observable on the public surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplicateRoute {
-    /// The K = 1 Gram shortcuts that predate the drivers: `raw_perm`'s closed
-    /// form (`dual_route::pls1_cv_r2_columns`) and `split_exact`'s no-refit
-    /// route (`run_split_perm_nr`). The runner runs it itself; a driver
-    /// handed it computes the primal statistic.
+    /// The K = 1 Gram shortcuts that run outside the drivers: `raw_perm`'s
+    /// closed form (`dual_route::pls1_cv_r2_columns`) and `split_exact`'s
+    /// no-refit route (`run_split_perm_nr`). The runner runs it itself; a
+    /// driver handed it computes the primal statistic.
     Special,
     /// The primal (X-side) per-unit bodies.
     Primal,
@@ -849,10 +853,10 @@ pub(crate) enum ReplicateRoute {
 /// the input (`raw_perm_k1_gram_route` owns that rule). After the K = 1
 /// closed form, dense and unweighted `2 ≤ k ≤ K_DUAL_MAX` input the n-space
 /// rule admits (`dual_route::nspace_eligible_raw_perm`) takes `Nspace`,
-/// unless `new_routes_disabled()`. `GramP` when `gram_p::gram_p_eligible`
+/// unless `gram_routes_disabled()`. `GramP` when `gram_p::gram_p_eligible`
 /// admits the block (tried after `Nspace`: in the overlap band
 /// `n_tr < p < 1.54·n_tr` the n-space route is cheaper), unless
-/// `new_routes_disabled()`. Everything else is `Primal`.
+/// `gram_routes_disabled()`. Everything else is `Primal`.
 pub(crate) fn raw_perm_route(
     n: usize,
     n_folds: usize,
@@ -865,7 +869,7 @@ pub(crate) fn raw_perm_route(
     if raw_perm_k1_gram_route(n, n_folds, p, n_perm, k, keep.is_none(), weighted) {
         return ReplicateRoute::Special;
     }
-    if new_routes_disabled() {
+    if gram_routes_disabled() {
         return ReplicateRoute::Primal;
     }
     let dense_unweighted = keep.is_none() && !weighted;
@@ -884,10 +888,10 @@ pub(crate) fn raw_perm_route(
 /// holds; otherwise the refit route through [`split_zbars_columns`]. After
 /// the K = 1 no-refit route, dense and unweighted `2 ≤ k ≤ K_DUAL_MAX`
 /// input the n-space rule admits (`dual_route::nspace_eligible_split_exact`
-/// on `split_sizes(n, k).0`) takes `Nspace`, unless `new_routes_disabled()`.
+/// on `split_sizes(n, k).0`) takes `Nspace`, unless `gram_routes_disabled()`.
 /// `GramP` when `gram_p::gram_p_eligible` admits the block (tried after
 /// `Nspace`: in the overlap band `n_tr < p < 1.54·n_tr` the n-space route is
-/// cheaper), unless `new_routes_disabled()`. Everything else is `Primal`.
+/// cheaper), unless `gram_routes_disabled()`. Everything else is `Primal`.
 pub(crate) fn split_exact_refit_route(
     n: usize,
     p: usize,
@@ -899,7 +903,7 @@ pub(crate) fn split_exact_refit_route(
     if split_exact_no_refit_route(k, keep) {
         return ReplicateRoute::Special;
     }
-    if new_routes_disabled() {
+    if gram_routes_disabled() {
         return ReplicateRoute::Primal;
     }
     let (n_train, _) = crate::resample::split_sizes(n, k);
@@ -1097,7 +1101,8 @@ pub(crate) struct CvFold {
 /// # Errors
 /// `NonFiniteInput` when the standardized training block is not finite:
 /// the error every column's fit on this fold met first (`pls1_fit` checks X
-/// before y), so the driver returns what column 0 returned before.
+/// before y), so the driver returns the same error a per-column fit of
+/// column 0 would.
 pub(crate) fn prepare_cv_fold(
     x: MatRef<'_, f64>,
     folds: &[Vec<usize>],
@@ -1450,11 +1455,10 @@ where
 /// Split fraction is hardcoded 50/50: NB calibration assumes balanced halves
 /// and there is no scientific reason to vary it.
 ///
-/// Drawn through `parallel_for_each_seeded` rather than a plain sequential loop
-/// because that is exactly how `split_half_correlations` used to draw them from
-/// inside its per-split worker: same parent state in, same J child seeds, and
-/// `one_split` is still the first draw off each child. So lifting the draw out
-/// to this function leaves `split_nb` seed-for-seed identical.
+/// Drawn through `parallel_for_each_seeded` rather than a plain sequential loop:
+/// the parent state gives J child seeds, and `one_split` is the first draw off
+/// each child. This per-split seeded stream fixes `split_nb`'s splits, and so
+/// its results, at a given seed; a different draw order would move them.
 ///
 /// Also drawn by `pls3_signal_test::pls3_confirmatory_test`, which needs the
 /// same fixed-across-replicates split set on the PLS3 statistic.
@@ -1488,8 +1492,7 @@ pub(crate) fn draw_splits(
     ))
 }
 
-/// Compute the split-half Pearson r on each supplied split. Port of
-/// `_tests.py:161-186`.
+/// Compute the split-half Pearson r on each supplied split.
 ///
 /// Takes the splits rather than drawing them so a caller can hold one set of
 /// splits fixed across many outcome vectors — what `split_exact`'s permutation
@@ -1503,10 +1506,11 @@ pub(crate) fn draw_splits(
 ///
 /// `x`/`y` are the **raw** (un-√w-scaled) inputs; `w_norm` carries the
 /// mean-1-normalized weights when present. Each half is standardized with
-/// **weighted** moments and then √w' row-scaled (Convention A, matching
-/// `pls1_fit`). The reported statistic is the unweighted Pearson r on the
-/// resulting √w-scaled test-half scores and test-half y — *not* the weighted
-/// Pearson r on the original data, because the test-half centering subtracts
+/// **weighted** moments and then √w' row-scaled (the √w row-scaling
+/// convention of `pls1_fit`, see `linalg::sqrt_col`). The reported
+/// statistic is the unweighted Pearson r on the resulting √w-scaled
+/// test-half scores and test-half y — *not* the weighted Pearson r on the
+/// original data, because the test-half centering subtracts
 /// the plain mean of the √w-scaled values rather than the weighted mean. The
 /// identical transform is applied to observed and permuted data, and the
 /// per-half weights stay tied to their rows (never permuted), so permutation
@@ -1562,7 +1566,7 @@ pub(crate) struct PreparedSplit {
 /// (mirrors `signal_test::pooled_cv_r2_columns`'s per-fold renormalization),
 /// with no weights for an all-zero or all-equal half. Each half is standardized with the
 /// training half's weighted moments and then √w-scaled with its own
-/// half's weights as given (Convention A, matching `pls1_fit`), in one pass
+/// half's weights as given (the √w row-scaling convention of `pls1_fit`), in one pass
 /// per half (`linalg::standardize_rows`).
 #[allow(clippy::similar_names)]
 pub(crate) fn prepare_split(
@@ -1640,7 +1644,8 @@ pub(crate) fn split_column_r(
         return 0.0;
     };
     // Both the scores (through the √w_te-scaled X̃_te) and the test outcome
-    // carry √w_te, so the Pearson r is taken on √w-scaled data (Convention A).
+    // carry √w_te, so the Pearson r is taken on √w-scaled data (the √w
+    // row-scaling convention).
     let scores_te = crate::linalg::mat_vec(prep.xs_te.as_ref(), m.coef.as_ref(), faer::Par::Seq);
     let n_te = scores_te.nrows();
     let y_te = split_test_target(prep, sp, y_of);
@@ -1668,7 +1673,7 @@ pub(crate) fn split_train_target(
 }
 
 /// The held-out target `split_column_r` correlates with: the test half's
-/// raw y, `√w_te`-scaled when weighted (Convention A, see
+/// raw y, `√w_te`-scaled when weighted (the √w row-scaling convention, see
 /// `split_half_correlations`).
 pub(crate) fn split_test_target(
     prep: &PreparedSplit,
@@ -2019,7 +2024,8 @@ fn run_split_nb(
     let (n_train, n_test) = split_sizes(n, k);
 
     // Raw (X, y) and weights flow into split_half_correlations, which does the
-    // per-half weighted-standardize-then-√w (Convention A) internally.
+    // per-half weighted-standardize-then-√w (the √w row-scaling convention)
+    // internally.
     let splits = draw_splits(n, k, n_splits, opts.disable_parallelism, rng)?;
     let r_splits = split_half_correlations(
         x,
@@ -2045,7 +2051,9 @@ fn run_split_nb(
     })
 }
 
-/// NB t-test on Fisher-z transforms. Port of `_core.py:32-89`.
+/// NB t-test on Fisher-z transforms: the corrected resampled t-test of
+/// Nadeau & Bengio (2003), "Inference for the Generalization Error",
+/// Machine Learning 52:239–281.
 ///
 /// Shared with `pls3_signal_test::pls3_confirmatory_test`, whose `split_nb`
 /// runs the identical statistic on PLS3's held-out LV correlations — the two
@@ -2117,23 +2125,22 @@ fn run_split_perm(
 ) -> PlsKitResult<RunResult> {
     let n = x.nrows();
     // The J splits are drawn once and held fixed across all B permutation
-    // replicates. Redrawing them per replicate (what this function used to do)
-    // folds split-to-split scatter into the null, so the reference
-    // distribution stops isolating the y–X association the observed statistic
-    // measures. split_perm_nr_zbars has always worked this way; this is the
-    // route that had to move.
+    // replicates. Redrawing them per replicate would fold split-to-split
+    // scatter into the null, so the reference distribution would stop
+    // isolating the y–X association the observed statistic measures.
+    // split_perm_nr_zbars holds its splits fixed the same way.
     let splits = draw_splits(n, k, n_splits, opts.disable_parallelism, rng)?;
 
-    // One child seed per null column, drawn right after the splits: the
-    // sequence `parallel_for_each_seeded` drew when the nulls were computed
-    // replicate by replicate, so the permutations are unchanged at a given
-    // seed, on every route.
+    // One child seed per null column, drawn right after the splits, in
+    // `parallel_for_each_seeded`'s order, so every route sees the same
+    // permutations at a given seed.
     let seeds = crate::rng::child_seeds(rng, n_perm);
     let cols = crate::resample::Columns { y, seeds: &seeds };
 
-    // Raw (X, y, weights) flow into the per-split preparation (Convention A
-    // weighted-standardize-then-√w); permuted y rows, weights tied to row
-    // positions (w[i] always pairs with destination row i).
+    // Raw (X, y, weights) flow into the per-split preparation (the √w
+    // row-scaling convention: weighted-standardize-then-√w); permuted y
+    // rows, weights tied to row positions (w[i] always pairs with
+    // destination row i).
     let z = split_zbars_columns(
         route,
         x,
@@ -2220,7 +2227,7 @@ const NR_ABS_BAND: f64 = 100.0;
 /// which is why this method is K = 1 only.
 ///
 /// # Under weights
-/// The identity survives Convention A intact, but the map is not the same
+/// The identity survives the √w row-scaling convention intact, but the map is not the same
 /// map. `X̃_tr` is now `diag(√w_tr)·X_std,tr` with `X_std,tr` standardized on
 /// *weighted* train-half moments, and the train y that `pls1_fit` sees is
 /// `diag(√w_tr)·y_std,tr`. So the fixed map carries a second `diag(√w_tr)`
@@ -2304,7 +2311,7 @@ const NR_ABS_BAND: f64 = 100.0;
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::items_after_statements)]
 #[allow(clippy::similar_names)]
-#[allow(clippy::too_many_lines)] // per-half Convention A setup inflates the per-split closure
+#[allow(clippy::too_many_lines)] // per-half √w row-scaling setup inflates the per-split closure
 fn split_perm_nr_zbars(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -2321,7 +2328,7 @@ fn split_perm_nr_zbars(
     use crate::resample::{one_split, permute_indices, split_sizes};
 
     // Scope limits, checked here (this route's own runner), never in
-    // split_half_correlations: that function now backs only run_split_nb,
+    // split_half_correlations: that function backs only run_split_nb,
     // not run_split_perm, and knows nothing of this formula anyway. Guard,
     // not fallback: ineligible input errors rather than silently running
     // the run_split_perm route. Weights are *not* a scope limit: see
@@ -2361,7 +2368,7 @@ fn split_perm_nr_zbars(
     // pairs are drawn here; standardization is deferred to per_split_z below so
     // peak memory stays O(np) plus the (B+1)-column blocks. By contrast,
     // materializing xs_tr/xs_te for all J splits up front would be O(J·n·p)
-    // (≈2.1 GB at the embedding-scale n=13365, p=400, J=50 case).
+    // (≈2.1 GB at n=13365, p=400, J=50).
     // standardize_rows/standardize_apply_rows are pure functions of x[tr]/x[te] with no
     // RNG, so moving them into the (possibly parallel) per-split closure
     // changes nothing about determinism or the parallel-order guarantee.
@@ -2423,7 +2430,7 @@ fn split_perm_nr_zbars(
         // Per-half weights renormalized to mean 1 within the half, weighted
         // moments, then √w row-scaling — every step mirrored from
         // split_half_correlations (change together; that function owns the
-        // Convention A explanation), including `renormalized_slice_weights`
+        // explanation of the weighted setup), including `renormalized_slice_weights`
         // for an all-zero or all-equal half.
         let w_tr = renormalized_slice_weights(w_norm, &sp.tr);
         let w_te = renormalized_slice_weights(w_norm, &sp.te);
@@ -2454,7 +2461,7 @@ fn split_perm_nr_zbars(
         let y_te = row_subset(y_mat.as_ref(), &sp.te);
         let n_te = sp.te.len();
 
-        // Convention A row-scaling of the outcomes. X̃_tr and X̃_te already
+        // √w row-scaling of the outcomes. X̃_tr and X̃_te already
         // carry √w_tr and √w_te from `standardize_rows`. On the train side
         // the √w_tr on Y is the `diag(√w_tr)` that sits *inside* the linear
         // map (see "Under weights"). On the test side both the scores
@@ -2745,8 +2752,7 @@ fn gammainc_upper(a: f64, x: f64) -> f64 {
     }
     let log_pref = a * x.ln() - x - crate::linalg::lgamma(a);
     if x < a + 1.0 {
-        // Series expansion for the lower tail P(a, x); Q = 1 − P. Identical to
-        // the prior series branch — only the final complement differs.
+        // Series expansion for the lower tail P(a, x); returns Q = 1 − P.
         let mut term = 1.0 / a;
         let mut sum = term;
         for i in 1_i32..200 {
@@ -3004,7 +3010,7 @@ mod tests {
                 },
             )
             .unwrap();
-            assert_eq!(r.method, method);
+            assert_eq!(r.test_method, method);
             assert!(r.pvalue < bound, "{method}: p={}", r.pvalue);
         }
     }
@@ -3059,7 +3065,7 @@ mod tests {
             )
             .unwrap();
             let what = format!("{method} k={k} weighted={}", w.is_some());
-            assert_eq!(r.method, method, "{what}");
+            assert_eq!(r.test_method, method, "{what}");
             assert_eq!(r.rho_hat.is_some(), some, "{what}: {:?}", r.rho_hat);
             if let Some(rho) = r.rho_hat {
                 assert!((0.0..=1.0).contains(&rho), "{what}: {rho}");
@@ -3339,8 +3345,8 @@ mod tests {
         assert!(basis.len() <= 4, "test premise: X̃_tr has rank 3");
         // Eight columns, each with its own orthogonal training part. Which
         // sign rounding gives `z'Gz` is a coin flip per column; a negative
-        // one happened to produce the primal's zero prediction even before
-        // the fallback existed, a positive one an order-one prediction.
+        // one gives the primal's zero prediction by luck, a positive one an
+        // order-one prediction.
         let n_cols = 8;
         let y_val = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
         let mut y_mat = Mat::<f64>::from_fn(n, n_cols, |i, _| y_val[i]);
@@ -3391,12 +3397,10 @@ mod tests {
     // Route selection is by input shape, not by a caller knob. Each case is
     // pinned bit-for-bit against the route it must land on, so a future edit
     // to the predicate fails here rather than silently switching routes.
-    // `SplitPermNr` and `SplitPerm` are no longer selectable methods, so the
-    // comparator side calls `run_split_perm_nr` / `run_split_perm` directly instead of
-    // going through `pls1_confirmatory_test` with those (now-deleted) args
-    // variants. `run_route` reproduces exactly the preprocessing
-    // `pls1_confirmatory_test` performs ahead of dispatch — weight
-    // normalization and `resolve_seed` — so the comparator sees the same
+    // The routes are not caller-selectable, so the comparator side calls
+    // `run_split_perm_nr` / `run_split_perm` directly. `run_route`
+    // reproduces exactly the preprocessing `pls1_confirmatory_test` performs
+    // ahead of dispatch — weight normalization and `resolve_seed` — so the comparator sees the same
     // `(w_norm, rng)` state dispatch would hand the route. `SplitExact` args
     // never trip the `split_nb` auto-gate (the only other RNG consumer ahead
     // of dispatch), so no extra RNG draws sit between `resolve_seed` and the
@@ -3465,7 +3469,7 @@ mod tests {
         for weights in [None, Some(w.as_ref())] {
             let a = run_exact(1, weights, None);
             let b = run_route(1, weights, None, false);
-            assert_eq!(a.method, "split_exact");
+            assert_eq!(a.test_method, "split_exact");
             assert_eq!(
                 a.pvalue.to_bits(),
                 b.pvalue.to_bits(),
@@ -3482,7 +3486,7 @@ mod tests {
                 let e = run_exact(k, weights, keep);
                 let s = run_route(k, weights, keep, true);
                 let what = format!("weighted={} k={k} keep={keep:?}", weights.is_some());
-                assert_eq!(e.method, "split_exact");
+                assert_eq!(e.test_method, "split_exact");
                 assert_eq!(
                     e.pvalue.to_bits(),
                     s.pvalue.to_bits(),
@@ -3601,7 +3605,7 @@ mod tests {
                 let (tr, te) = one_split(n, n_train, &mut rng_a);
                 let x_tr = row_subset(x.as_ref(), &tr);
                 let x_te = row_subset(x.as_ref(), &te);
-                // Convention A, spelled out the long way (this is the
+                // The √w row-scaling convention, spelled out the long way (this is the
                 // reference — it deliberately does not call the production
                 // helper): renormalize each half's weights to mean 1,
                 // standardize with weighted moments, then √w row-scale.
@@ -3655,7 +3659,7 @@ mod tests {
                     standardize1(y_tr_col.as_ref())
                 };
                 // √w_tr on the standardized train y, matching the √w_tr
-                // already baked into sp.xs_tr (Convention A).
+                // already baked into sp.xs_tr (the √w row-scaling convention).
                 let ys_tr = match sp.w_tr.as_ref() {
                     Some(w) => Col::<f64>::from_fn(ys_tr.nrows(), |i| ys_tr[i] * w[i].sqrt()),
                     None => ys_tr,
@@ -3720,10 +3724,11 @@ mod tests {
     /// at p = 5 route B costs 30·30·55 = 49,500 > route A's 60·5·50 = 15,000,
     /// so route A is live; at p = 40 route B costs 30·30·90 = 81,000 < route
     /// A's 60·40·50 = 120,000, so route B is live (the branch production
-    /// uses on the near-singular grid, n ≤ 320, p = 400, B = 1000). The
+    /// takes at n ≤ 320, p = 400, B = 1000). The
     /// weighted rows license the weighted derivation: the batched map folds
     /// `diag(√w_tr)` into a fixed linear map, the reference refits honestly
-    /// under Convention A, and every one of the B+1 columns must agree.
+    /// under the √w row-scaling convention, and every one of the B+1 columns
+    /// must agree.
     #[test]
     fn split_perm_nr_route_matches_honest_refit() {
         for (p, expect_route_b, weighted) in [
@@ -3877,7 +3882,7 @@ mod tests {
     }
 
     /// Rank-3 `X` (n × p) and a `y` whose rows in `tr` are orthogonal, up to
-    /// rounding, to `span{√w_tr, X̃_tr}` (the Convention A training matrix the
+    /// rounding, to `span{√w_tr, X̃_tr}` (the √w-row-scaled training matrix the
     /// refit route builds for that half), so the refit route's
     /// training-half fit truncates to zero components. The other rows of `y`
     /// are random. `y` is then multiplied by `scale`.
@@ -3986,7 +3991,7 @@ mod tests {
     /// half (relative floor), so its `r` there is 0. The no-refit route's
     /// scores are a fixed linear map of the raw `y`, which on that half is
     /// rounding noise times `‖y‖`; a guard on their absolute size cannot tell
-    /// that apart from signal once `y` is large, and the route used to report
+    /// that apart from signal once `y` is large, and the route would report
     /// the correlation of that noise with the test-half `y`.
     #[test]
     fn split_exact_no_refit_route_matches_refit_when_a_train_half_y_is_orthogonal_to_x() {
@@ -4084,8 +4089,8 @@ mod tests {
         }
     }
 
-    /// The guarded correlation as it was formed before `scaled_moments`:
-    /// moments of the raw vectors. The reference for the bit-identity test.
+    /// Guarded correlation from moments of the raw (unscaled) vectors: the
+    /// reference for the bit-identity test.
     #[allow(clippy::similar_names)]
     fn raw_guarded_pearson(a: &[f64], b: &[f64]) -> f64 {
         let n = a.len();
@@ -4282,8 +4287,8 @@ mod tests {
     // generally different p. Splits are drawn once, so same seed ⇒ same
     // splits too — checked here via the identical statistic (tanh(z̄[0])),
     // which only matches if both the splits and the observed column agree.
-    // k=1, dense, unweighted ⇒ split_exact's no-refit route (SplitPermNr's
-    // former public identity) via the public API.
+    // k=1, dense, unweighted ⇒ split_exact's no-refit route via the public
+    // API.
     #[test]
     fn split_exact_no_refit_route_deterministic_under_same_seed() {
         let (x, y) = synth_with_signal(60, 5, 4.0, 5);
@@ -4364,7 +4369,7 @@ mod tests {
         // neither the rank clause nor the column precheck can be the reason.
         let (x, y) = synth_no_signal(20, 10, 5);
         let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
-        assert_eq!(r.method, "split_exact");
+        assert_eq!(r.test_method, "split_exact");
         let sr = r.stable_rank.expect("gate was evaluated");
         assert!(
             sr >= SPLIT_NB_GATE_MIN_STABLE_RANK,
@@ -4380,7 +4385,7 @@ mod tests {
     fn gate_reroutes_on_narrow_x_despite_adequate_rank() {
         let (x, y) = synth_no_signal(60, 4, 11);
         let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
-        assert_eq!(r.method, "split_exact");
+        assert_eq!(r.test_method, "split_exact");
         let sr = r.stable_rank.expect("gate was evaluated");
         assert!(
             sr >= SPLIT_NB_GATE_MIN_STABLE_RANK,
@@ -4392,7 +4397,7 @@ mod tests {
     fn gate_reroutes_when_stable_rank_below_floor() {
         let (x, y) = synth_one_factor(40, 5, 6);
         let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
-        assert_eq!(r.method, "split_exact");
+        assert_eq!(r.test_method, "split_exact");
         let sr = r.stable_rank.expect("gate was evaluated");
         assert!(sr < SPLIT_NB_GATE_MIN_STABLE_RANK, "stable_rank={sr}");
     }
@@ -4405,8 +4410,8 @@ mod tests {
         // columns put it near 7.
         let (x, y) = synth_no_signal(60, 10, 7);
         let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
-        assert_eq!(r.method, "split_nb");
-        // No rank assertion — `method == "split_nb"` at n = 60 already implies
+        assert_eq!(r.test_method, "split_nb");
+        // No rank assertion — `test_method == "split_nb"` at n = 60 already implies
         // the rank cleared the floor. What is worth pinning is that the
         // diagnostic is populated on the pass path too.
         assert!(r.stable_rank.is_some());
@@ -4425,7 +4430,7 @@ mod tests {
             ("narrow x", synth_no_signal(60, 4, 11)),
         ] {
             let r = gate_run(x.as_ref(), y.as_ref(), None, 20, true);
-            assert_eq!(r.method, "split_nb", "{name}");
+            assert_eq!(r.test_method, "split_nb", "{name}");
             let sr = r.stable_rank.expect(
                 "rank is computed even under force — it is how a caller sees what the gate saw",
             );
@@ -4444,13 +4449,13 @@ mod tests {
 
         let unweighted = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
         assert_eq!(
-            unweighted.method, "split_nb",
+            unweighted.test_method, "split_nb",
             "the same X at raw n = 40 must clear the gate, so the weighted \
              case below isolates n_eff"
         );
 
         let r = gate_run(x.as_ref(), y.as_ref(), Some(w.as_ref()), 20, false);
-        assert_eq!(r.method, "split_exact");
+        assert_eq!(r.test_method, "split_exact");
         let sr = r.stable_rank.expect("gate was evaluated");
         assert!(
             sr >= SPLIT_NB_GATE_MIN_STABLE_RANK,
@@ -4503,10 +4508,10 @@ mod tests {
         let w = Col::<f64>::from_fn(n, |i| if i < n / 2 { 0.05 } else { 1.95 });
 
         let unweighted = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
-        assert_eq!(unweighted.method, "split_nb");
+        assert_eq!(unweighted.test_method, "split_nb");
 
         let weighted = gate_run(x.as_ref(), y.as_ref(), Some(w.as_ref()), 20, false);
-        assert_eq!(weighted.method, "split_exact");
+        assert_eq!(weighted.test_method, "split_exact");
         assert!(
             weighted.n_eff >= SPLIT_NB_GATE_MIN_N_EFF,
             "{}",
@@ -4527,7 +4532,7 @@ mod tests {
     fn gate_result_counts_read_off_resolved_args() {
         let (x, y) = synth_one_factor(40, 5, 6);
         let r = gate_run(x.as_ref(), y.as_ref(), None, 12, false);
-        assert_eq!(r.method, "split_exact");
+        assert_eq!(r.test_method, "split_exact");
         // n_perm is split_exact's own default; n_splits is what the caller asked for.
         assert_eq!(r.n_perm, Some(1000));
         assert_eq!(r.n_splits, Some(12));
@@ -4555,7 +4560,7 @@ mod tests {
             let embedded = gate_run(x.as_ref(), y.as_ref(), w, 20, false);
             let q = split_nb_gate(x.as_ref(), w).unwrap();
             assert_eq!(q.fires, expect_fires);
-            assert_eq!(q.fires, embedded.method == "split_exact");
+            assert_eq!(q.fires, embedded.test_method == "split_exact");
             assert_eq!(q.stable_rank, embedded.stable_rank.unwrap());
             assert_eq!(q.n_eff, embedded.n_eff);
             if w.is_some() {
@@ -4672,19 +4677,19 @@ mod tests {
 
     #[test]
     fn the_route_override_restores_the_previous_value_even_on_panic() {
-        assert!(!new_routes_disabled());
-        with_new_routes_disabled(|| {
-            assert!(new_routes_disabled());
-            with_new_routes_disabled(|| assert!(new_routes_disabled()));
+        assert!(!gram_routes_disabled());
+        with_gram_routes_disabled(|| {
+            assert!(gram_routes_disabled());
+            with_gram_routes_disabled(|| assert!(gram_routes_disabled()));
             assert!(
-                new_routes_disabled(),
+                gram_routes_disabled(),
                 "the inner guard restores the outer value"
             );
         });
-        assert!(!new_routes_disabled());
-        let caught = std::panic::catch_unwind(|| with_new_routes_disabled(|| panic!("inside")));
+        assert!(!gram_routes_disabled());
+        let caught = std::panic::catch_unwind(|| with_gram_routes_disabled(|| panic!("inside")));
         assert!(caught.is_err());
-        assert!(!new_routes_disabled(), "restored on unwind");
+        assert!(!gram_routes_disabled(), "restored on unwind");
     }
 
     #[test]
@@ -4786,8 +4791,7 @@ mod tests {
     /// standardized owned copy (`score`, the `split_nb` gate) or
     /// `linalg::col_major_or_copy` (`score` with `pre_standardized`), so a
     /// padded submatrix, a row-major view and a negative-column-stride view
-    /// give the owned matrix's whole output to the bit (decisions D1;
-    /// replaces the retired copy-free reference tests). Run on the default
+    /// give the owned matrix's whole output to the bit. Run on the default
     /// route set and again primal-only. No CI: its reference fit is
     /// `pls1_fit` on the input view, layout-invariant only to rounding
     /// since 0.6.1.
@@ -4873,7 +4877,7 @@ mod tests {
             }
         };
         table();
-        with_new_routes_disabled(table);
+        with_gram_routes_disabled(table);
     }
 }
 
@@ -5235,7 +5239,7 @@ mod tests_gram_p {
                 .expect("raw_perm")
             };
             let g = call();
-            let p = with_new_routes_disabled(call);
+            let p = with_gram_routes_disabled(call);
             // No null lies within 1e-10 of the observed statistic at this
             // seed (the driver-level tests above check the near-tie rule),
             // so the p-values are equal.
@@ -5508,7 +5512,7 @@ mod tests_gram_p {
                 .expect("split_exact")
             };
             let g = call();
-            let p = with_new_routes_disabled(call);
+            let p = with_gram_routes_disabled(call);
             assert_eq!(g.pvalue.to_bits(), p.pvalue.to_bits(), "{label}: pvalue");
             assert!(
                 (g.statistic - p.statistic).abs() <= 1e-10,
@@ -5542,7 +5546,7 @@ mod tests_gram_p {
                 .expect("sequence")
         };
         let g = call();
-        let p = with_new_routes_disabled(call);
+        let p = with_gram_routes_disabled(call);
         assert_eq!(g.k_star, p.k_star, "k_star");
         assert_eq!(g.pvalues.nrows(), p.pvalues.nrows());
         for i in 0..g.pvalues.nrows() {

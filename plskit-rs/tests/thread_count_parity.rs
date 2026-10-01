@@ -19,8 +19,8 @@
 //! The pool comparison only has teeth where some product is past a
 //! pool-sensitive split: `ParChoice::Auto`'s `n·d·k >= 1e6` (`n·p·q` for
 //! PLS3), faer's `256²`-entry column-major GEMV split, or the parallel
-//! threshold of its EVD / SVD. Every case below marked "pool" was checked
-//! to differ across pool sizes before the fix (it fails without it). Cases
+//! threshold of its EVD / SVD. Every case below marked "pool" differs
+//! across pool sizes when a pool-sized `Par` is used. Cases
 //! marked "guard only" sit below those thresholds, so the pool comparison
 //! cannot fail there today; they are kept for the global-parallelism guard
 //! below, which fails on them the day a path they reach reads faer's
@@ -199,7 +199,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
             .unwrap()
         });
     }
-    // M5: the Python seam hands the kernel a row-major *view* of `X`
+    // The Python seam hands the kernel a row-major *view* of `X`
     // (`np_mat_view`, `MatRef::from_row_major_slice`) instead of a
     // column-major copy. The standardized X keeps a row-major input's
     // layout, so that view agrees with the column-major case above to
@@ -305,8 +305,8 @@ fn pls3_fits_auto_are_pool_size_invariant() {
     });
     // Pool: sparse PLS3 needs a parallel split inside the alternation's
     // `A v` products, i.e. `p·q >= 256²` for the p x q cross-covariance
-    // (20000·4 here); at 200x2000x6 `spls3_fit` is pool-invariant even
-    // before the fix.
+    // (20000·4 here); at 200x2000x6 `spls3_fit` stays below that
+    // split.
     let (xs, ys) = two_block(100, 20_000, 4, 32);
     c.check("spls3_fit 100x20000x4 k=2 keep=500,2", || {
         spls3_fit(
@@ -390,7 +390,7 @@ const CI: CIOpts = CIOpts {
 #[test]
 fn split_exact_primal_is_pool_size_invariant() {
     let mut c = Checker::default();
-    // Pool. The reproducer: 40x4000 dense, k = 3 (past the n-space route's
+    // Pool: 40x4000 dense, k = 3 (past the n-space route's
     // cap, so the primal refit and its held-out scoring GEMV).
     let (x, y) = synth(40, 4000, 1.0, 5);
     let split_exact = ConfirmatoryArgs::SplitExact {
@@ -537,7 +537,7 @@ fn perm_null_is_pool_size_invariant() {
     c.check("perm_null 40x4000 k=3", || {
         pls1_perm_null(x.as_ref(), y.as_ref(), 3, None, perm_opts(), Some(16)).unwrap()
     });
-    // Guard only (pool sensitivity not measured before a fix): the public
+    // Guard only (not shown to be pool-sensitive): the public
     // calls on the n-space and the p-space Gram routes (shapes pinned in
     // `fixture_route_pins::byte_parity_shapes_take_their_routes`). Their
     // block builds are pinned kernel-level by

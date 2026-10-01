@@ -1,4 +1,4 @@
-//! `spls1_find_k_sequence` fixture cases (sparse PLS1, mode 4: sequential test at fixed keep).
+//! `spls1_find_k_sequence` fixture cases (sparse PLS1: sequential test at fixed keep).
 
 use std::path::Path;
 

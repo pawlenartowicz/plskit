@@ -182,9 +182,8 @@ pub(crate) struct Family {
 impl Family {
     /// `(x, y)` as a layout test feeds them: raw, or for `pre = true`
     /// standardized without weights (`linalg::standardize` /
-    /// `standardize1`), the input every `pre_standardized` axis of the
-    /// retired copy-free oracles used. Standardizing with unweighted moments
-    /// keeps `pre_standardized` observable on the weighted families.
+    /// `standardize1`). Standardizing with unweighted moments keeps
+    /// `pre_standardized` observable on the weighted families.
     pub(crate) fn inputs(&self, pre: bool) -> (Mat<f64>, Col<f64>) {
         if pre {
             let (xs, _, _) = crate::linalg::standardize(self.x.as_ref());
@@ -232,7 +231,7 @@ pub(crate) fn copy_free_families() -> Vec<Family> {
 }
 
 // ---------------------------------------------------------------------------
-// Layout invariance (decisions D1). One core primitive, `for_each_layout`,
+// Layout invariance. One core primitive, `for_each_layout`,
 // and three thin assertions on top:
 // - `assert_layout_invariant`: one matrix, whole output bit-identical (Debug
 //   rendering);
@@ -308,14 +307,14 @@ pub(crate) fn assert_layout_invariant<T: Debug>(
 pub(crate) enum Agree {
     /// `to_bits` equality, any NaN matching any NaN (Rust leaves a NaN's
     /// sign and payload unspecified). The contract of the resampling and
-    /// inference engines, which copy X column-major (CHANGELOG 0.6.1).
+    /// inference engines, which copy X column-major, so their output is layout-independent.
     Bits,
     /// `u == v` or `|u - v| <= atol + 1e-14 · |v|` per entry (`v` the owned
     /// run's value), NaN matching NaN: the corpus rule (`tests/corpus.rs`,
     /// `rtol = 1e-14`) at the given `atol`. For the entries that form their
     /// products in X's own layout and so agree across layouts only to
-    /// rounding (`pls1_fit` / `spls1_fit` since CHANGELOG 0.6.1, and what
-    /// reads them: `pls1_predict`, `pls1_rotation_stability`). Lengths are
+    /// rounding (`pls1_fit` / `spls1_fit`, which form products in X's own
+    /// layout, and what reads them: `pls1_predict`, `pls1_rotation_stability`). Lengths are
     /// still exact, and an integer (a count, `k_used`) that differs by one
     /// fails any `atol` below 1.
     Corpus(f64),

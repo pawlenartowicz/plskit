@@ -1,4 +1,4 @@
-# ---- Julia -> Python arguments (spec §5.3) -------------------------------
+# ---- Julia -> Python arguments -------------------------------------------
 
 _to_py(x::PlsKitResult) = getfield(x, :py)      # round-trip: Python's own object
 _to_py(x::Py) = x
@@ -12,7 +12,7 @@ _to_py(x::AbstractFloat) = Py(Float64(x))
 # collected first. plskit-py applies its own layout and dtype rules.
 _to_py(x::Array) = _np.asarray(x)
 # `missing` becomes NaN, so the engine answers :non_finite_input as it
-# does for NaN (and as R's NA does, spec §4.2).
+# does for NaN (and as R's NA does).
 _to_py(x::Array{Union{Missing,T}}) where {T<:Real} =
     _np.asarray(map(v -> v === missing ? NaN : Float64(v), x))
 # An Array{Any} (a DataFrame column mix, say) that happens to hold `missing`

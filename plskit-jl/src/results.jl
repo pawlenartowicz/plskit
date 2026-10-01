@@ -24,12 +24,12 @@ Base.propertynames(r::PlsKitResult, private::Bool=false) = keys(getfield(r, :fie
 # ---- Python -> Julia, by the runtime type of the Python value ------------
 
 # `name` is the field the value sits in: an `int` in a field called
-# `seed` becomes a UInt64 (RULE 2 seeds span the full u64 range).
+# `seed` becomes a UInt64 (seeds span the full u64 range).
 function _to_julia(x::Py, name::Symbol=:_)
     if pyisinstance(x, _np.generic)
         # A NumPy scalar (np.bool_, np.int64, np.float64, ...): unwrap to
         # its native Python value first, as `_array` already does for 0-D
-        # arrays, then dispatch on that (fix round 1, F1).
+        # arrays, then dispatch on that.
         return _to_julia(x.item(), name)
     elseif pyis(x, pybuiltins.None)
         return nothing
@@ -54,8 +54,8 @@ function _to_julia(x::Py, name::Symbol=:_)
 end
 
 # A Python `int` to Julia; the target width depends on the field (`seed`
-# spans the full u64 range, RULE 2). Overflow errors name the field
-# (fix round 1, F4), matching the ndarray dtype/dimension errors below.
+# spans the full u64 range). Overflow errors name the field,
+# matching the ndarray dtype/dimension errors below.
 function _to_int(x::Py, name::Symbol)
     if name === :seed
         try
@@ -80,7 +80,7 @@ function _array(x::Py, name::Symbol)
     T = kind == "f" ? Float64 : kind == "b" ? Bool : kind in ("i", "u") ? Int :
         error("PLSKit: unsupported ndarray dtype $(x.dtype) in field `$(name)`")
     # uint64 values above typemax(Int) would silently wrap when cast to
-    # int64 below; raise instead (fix round 1, F2). Smaller unsigned
+    # int64 below; raise instead. Smaller unsigned
     # widths (uint8/16/32) always fit, so the comparison is cheap and safe.
     if kind == "u" && pytruth(_np.any(x > _np.uint64(typemax(Int))))
         error("PLSKit: an unsigned integer array in field `$(name)` has a value " *
@@ -90,7 +90,7 @@ function _array(x::Py, name::Symbol)
     # A single Julia-owned copy, laid out F-order (Julia's own column-major
     # order) so `pyconvert` does not need to transpose it; `copy=true`
     # forces a fresh array even when `x` is already F-ordered, so the
-    # result never aliases NumPy's memory (fix round 1, F5, F7).
+    # result never aliases NumPy's memory.
     c = x.astype(dtype, order="F", copy=true)
     ndim == 1 && return pyconvert(Vector{T}, c)
     ndim == 2 && return pyconvert(Matrix{T}, c)
@@ -110,9 +110,8 @@ function _mapping(x::Py)
     return Dict{Int,Float64}(pyconvert(Int, k) => pyconvert(Float64, x[k]) for k in ks)
 end
 
-# list[int] (keep_grid) -> Vector{Int}; list[bool] -> Vector{Bool} (fix
-# round 1, F3, checked before the int case since bool is an int subtype in
-# Python); a list of results (variance_ratio_per_axis) -> Vector{PlsKitResult}.
+# list[int] (keep_grid) -> Vector{Int}; list[bool] -> Vector{Bool} (checked
+# before the int case since bool is an int subtype in Python); a list of results (variance_ratio_per_axis) -> Vector{PlsKitResult}.
 # An empty list is a Vector{Int}: only keep_grid can be empty.
 function _list(x::Py)
     items = collect(x)
@@ -133,13 +132,13 @@ function _result(x::Py)
     return PlsKitResult{T}(NamedTuple{Tuple(names)}(vals), x)
 end
 
-# ---- display (RULE 5: plumbing only, no methods) ------------------------
+# ---- display (plumbing only: no statistical methods) --------------------
 
 # `io` is the caller's IOContext (`:compact`, `:limit`, ...); arrays and
 # dicts always get their short `summary` regardless, but anything else
 # (strings, numbers, NamedTuples, nested results in the generic fallback)
 # is shown through that context, so a caller asking for compact or limited
-# output gets it (fix round 1, F6).
+# output gets it.
 _brief(io::IO, v::AbstractArray) = summary(v)
 _brief(io::IO, v::AbstractDict) = summary(v)
 _brief(io::IO, v::PlsKitResult{T}) where {T} = string(T)

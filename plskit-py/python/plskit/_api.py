@@ -767,7 +767,7 @@ def pls3_confirmatory_test(
     Y: np.ndarray,
     k: int = 1,
     *,
-    method: Literal["split_exact", "split_nb"],
+    test_method: Literal["split_exact", "split_nb"],
     args: dict | None = None,
     pre_standardized_X: bool = False,
     pre_standardized_Y: bool = False,
@@ -795,8 +795,8 @@ def pls3_confirmatory_test(
         Must be 1. Above LV1 the training-half component ordering need not
         survive to the test half, and whether the statistic should then be
         per-component or subspace-level is not settled.
-    method : {'split_exact', 'split_nb'}
-        ``'split_exact'`` is recommended (``method`` has no default): the p-value comes from
+    test_method : {'split_exact', 'split_nb'}
+        ``'split_exact'`` is recommended (``test_method`` has no default): the p-value comes from
         a permutation reference built by shuffling the rows of Y against X,
         with the splits held fixed across all permutations, so it is exact
         whenever the rows are exchangeable under the null. Neither method is
@@ -820,7 +820,7 @@ def pls3_confirmatory_test(
 
         ``'split_nb'`` requests are auto-gated on X exactly as in
         ``pls1_confirmatory_test``: a flagged design runs ``'split_exact'``
-        instead (``result.method`` says so, and Python warns). Pass
+        instead (``result.test_method`` says so, and Python warns). Pass
         ``args={'force': True}`` to run ``'split_nb'`` anyway. Y never
         enters the gate — q is small by construction in PLSC, so a
         stable-rank floor on Y would flag almost every design. The gate
@@ -856,7 +856,7 @@ def pls3_confirmatory_test(
         it is what the auto-gate saw. ``n_perm`` is ``None`` for
         ``'split_nb'``, which runs no permutations.
     """
-    method = _string(method, "method")
+    test_method = _string(test_method, "test_method")
     args = _args_dict(args, "args")
     pre_standardized_X = _flag(pre_standardized_X, "pre_standardized_X")
     pre_standardized_Y = _flag(pre_standardized_Y, "pre_standardized_Y")
@@ -866,7 +866,7 @@ def pls3_confirmatory_test(
     Y = _ensure_2d_Y(Y)
     raw = _plskit.pls3_confirmatory_test_raw(
         X, Y, _whole(1 if k is None else k, "k"),
-        method=method, args=args,
+        test_method=test_method, args=args,
         pre_standardized_X=pre_standardized_X,
         pre_standardized_Y=pre_standardized_Y,
         seed=_seed(seed),
@@ -876,7 +876,7 @@ def pls3_confirmatory_test(
     raw.pop("ci", None)
     result = ConfirmatoryTestResult(ci=None, **raw)
     _warn_if_rerouted(
-        method, result.method,
+        test_method, result.test_method,
         n_perm=result.n_perm,
         stable_rank=result.stable_rank,
         n_eff=result.n_eff,
@@ -888,7 +888,7 @@ def pls3_confirmatory_test(
 def pls1_confirmatory_test(
     X: np.ndarray, y: np.ndarray, k: int = 1,
     *,
-    method: Literal["raw_perm", "split_nb", "split_exact", "score", "e"],
+    test_method: Literal["raw_perm", "split_nb", "split_exact", "score", "e"],
     args: dict | None = None,
     ci: bool = False,
     n_boot: int | None = None,
@@ -912,11 +912,11 @@ def pls1_confirmatory_test(
         Response vector.
     k : int, default 1
         Number of components to test.
-    method : str
+    test_method : str
         Test method: ``'raw_perm'``, ``'split_nb'``, ``'split_exact'``,
         ``'score'``, or ``'e'``.
 
-        ``'split_exact'`` is recommended (``method`` has no default): a split-half test
+        ``'split_exact'`` is recommended (``test_method`` has no default): a split-half test
         (statistic ``tanh(z̄)``, the mean Fisher-z of held-out correlations)
         calibrated by permutation, so it holds its level on any design.
         ``'split_nb'`` uses the same statistic with an asymptotic correction
@@ -926,7 +926,7 @@ def pls1_confirmatory_test(
         fewer, whose effective sample size ``n_eff`` is below 25, or whose
         standardized X (weighted, when ``weights`` is given) has a stable
         rank below 3. A flagged ``'split_nb'`` request runs ``'split_exact'``
-        (``n_perm=1000``) instead (``result.method`` says so, and Python
+        (``n_perm=1000``) instead (``result.test_method`` says so, and Python
         warns). A design that passes the gate is not thereby shown to be in
         the regime above. Pass ``args={'force': True}`` to run
         ``'split_nb'`` anyway; ``split_nb_gate`` reports the decision
@@ -969,7 +969,7 @@ def pls1_confirmatory_test(
     seed : int | None
         RNG seed.
     """
-    method = _string(method, "method")
+    test_method = _string(test_method, "test_method")
     args = _args_dict(args, "args")
     ci = _flag(ci, "ci")
     pre_standardized = _flag(pre_standardized, "pre_standardized")
@@ -981,7 +981,7 @@ def pls1_confirmatory_test(
         weights = _ensure_array(weights, "weights", 1)
     raw = _plskit.pls1_confirmatory_test_raw(
         X, y, _whole(1 if k is None else k, "k"),
-        method=method, args=args,
+        test_method=test_method, args=args,
         ci=ci,
         n_boot=_whole_or_none(n_boot, "n_boot"),
         m_rate=_number_or_none(m_rate, "m_rate"),
@@ -998,7 +998,7 @@ def pls1_confirmatory_test(
     ci_obj = _confirmatory_ci_from_dict(ci_dict) if ci_dict is not None else None
     result = ConfirmatoryTestResult(ci=ci_obj, **raw)
     _warn_if_rerouted(
-        method, result.method,
+        test_method, result.test_method,
         n_perm=result.n_perm,
         stable_rank=result.stable_rank,
         n_eff=result.n_eff,
@@ -1181,13 +1181,13 @@ def pls1_find_k_sequence(
     test_method : str, default 'split_nb'
         Per-step test method: ``'raw_perm'``, ``'split_nb'``,
         ``'split_exact'``, or ``'e'``. ``'split_exact'`` is the recommended
-        default (permutation-calibrated, holds its level on any design);
-        ``'split_nb'`` is the cheaper asymptotic alternative, meant for n
-        large relative to p with a flat X spectrum. Its auto-gate flags only
-        X with 4 columns or fewer, ``n_eff`` below 25, or a stable rank of
-        the standardized X below 3 (see ``pls1_confirmatory_test``), and is
-        evaluated once for the whole sequence: a flagged ``'split_nb'``
-        request runs ``'split_exact'`` for every step and
+        method (permutation-calibrated, holds its level on any design);
+        ``'split_nb'``, the default, is the cheaper asymptotic alternative,
+        meant for n large relative to p with a flat X spectrum. Its auto-gate
+        flags only X with 4 columns or fewer, ``n_eff`` below 25, or a stable
+        rank of the standardized X below 3 (see ``pls1_confirmatory_test``),
+        and is evaluated once for the whole sequence: a flagged
+        ``'split_nb'`` request runs ``'split_exact'`` for every step and
         ``result.test_method`` says so.
     alpha : float | None, default None
         Significance threshold for rejection. ``None`` uses the engine
@@ -1651,7 +1651,7 @@ def pls1_perm_null(
 ) -> PermNullResult:
     """Permutation-null engine for PLS1 β. Signed per-voxel z + optional perm matrix.
 
-    Pair with `pls1_confirmatory_test(method="split_exact")` as an omnibus gate
+    Pair with `pls1_confirmatory_test(test_method="split_exact")` as an omnibus gate
     before spending the `n_perm` permutation budget at fMRI scale.
 
     Parameters

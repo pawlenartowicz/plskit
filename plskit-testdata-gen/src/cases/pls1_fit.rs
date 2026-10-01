@@ -73,7 +73,7 @@ fn fit_fixed_k(root: &Path, c: &FitFixedKCase<'_>) -> Result<Case> {
 
 /// Case: small (n=50, d=10), `k_signal=2`, fixed k=1, seed=42.
 ///
-/// Legacy field set: `coef`, `beta`, `intercept`, `k_used`.
+/// Output fields: `coef`, `beta`, `intercept`, `k_used`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_fit` fails.
@@ -95,7 +95,7 @@ pub fn small_n50_d10_k1(root: &Path) -> Result<Case> {
 
 /// Case: small (n=50, d=10), `k_signal=2`, fixed k=3, seed=42.
 ///
-/// Legacy field set: `coef`, `beta`, `intercept`, `k_used`.
+/// Output fields: `coef`, `beta`, `intercept`, `k_used`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_fit` fails.
@@ -117,7 +117,7 @@ pub fn small_n50_d10_k3(root: &Path) -> Result<Case> {
 
 /// Case: wide (n=30, d=100), `k_signal=2`, fixed k=1, seed=42.
 ///
-/// Legacy field set: `coef`, `beta`, `intercept`, `k_used`.
+/// Output fields: `coef`, `beta`, `intercept`, `k_used`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_fit` fails.
@@ -139,7 +139,7 @@ pub fn wide_n30_d100_k1(root: &Path) -> Result<Case> {
 
 /// Case: wide (n=30, d=100), `k_signal=2`, fixed k=3, seed=42.
 ///
-/// Legacy field set: `coef`, `beta`, `intercept`, `k_used`.
+/// Output fields: `coef`, `beta`, `intercept`, `k_used`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_fit` fails.
@@ -165,7 +165,7 @@ pub fn wide_n30_d100_k3(root: &Path) -> Result<Case> {
 /// (no rejection — unexpected given the current seed+parameters).
 /// Otherwise fits PLS1 at `k_star` and writes both input and output `.npz` fixtures.
 ///
-/// Legacy field set: `coef`, `beta`, `intercept`, `k_used`.
+/// Output fields: `coef`, `beta`, `intercept`, `k_used`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written, either plskit call fails,
@@ -242,7 +242,7 @@ pub fn small_n50_d10_sequence(root: &Path) -> Result<Case> {
 /// Case: skinny (n=200, d=5), `k_signal=2`, fixed k=1, seed=42.
 ///
 /// Tests behavior when n >> d (skinny regime).
-/// Legacy field set: `coef`, `beta`, `intercept`, `k_used`.
+/// Output fields: `coef`, `beta`, `intercept`, `k_used`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_fit` fails.
@@ -266,7 +266,7 @@ pub fn skinny_n200_d5_k1(root: &Path) -> Result<Case> {
 ///
 /// Weights: `2.0` for observations 0..25, `1.0` for 25..50.
 /// Exercises the weighted preprocessing + NIPALS path.
-/// Legacy field set: `coef`, `beta`, `intercept`, `k_used`.
+/// Output fields: `coef`, `beta`, `intercept`, `k_used`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_fit` fails.

@@ -48,7 +48,7 @@ def test_raw_perm_rejects_leave_one_out_n_folds():
     X, y = _data(n=12)
     with pytest.raises(plskit.PlsKitError) as exc_info:
         plskit.pls1_confirmatory_test(
-            X, y, k=1, method="raw_perm", args={"n_folds": 12}, seed=7,
+            X, y, k=1, test_method="raw_perm", args={"n_folds": 12}, seed=7,
         )
     assert exc_info.value.code == "invalid_argument"
 
@@ -56,12 +56,12 @@ def test_raw_perm_rejects_leave_one_out_n_folds():
 def test_confirmatory_at_param_no_longer_accepted():
     X, y = _data()
     with pytest.raises(TypeError):
-        plskit.pls1_confirmatory_test(X, y, k=1, method="split_nb", at="fitted_k")
+        plskit.pls1_confirmatory_test(X, y, k=1, test_method="split_nb", at="fitted_k")
 
 
 def test_confirmatory_score_n_perm_field_is_none():
     X, y = _data()
-    r = plskit.pls1_confirmatory_test(X, y, k=1, method="score", seed=7)
+    r = plskit.pls1_confirmatory_test(X, y, k=1, test_method="score", seed=7)
     assert r.n_perm is None
     assert r.n_splits is None
 
@@ -73,7 +73,7 @@ def test_removed_method_names_raise(removed):
     X, y = _data()
     unknown = f"unknown method: {removed}"
     for call in (
-        lambda: plskit.pls1_confirmatory_test(X, y, k=1, method=removed),  # type: ignore[arg-type]
+        lambda: plskit.pls1_confirmatory_test(X, y, k=1, test_method=removed),  # type: ignore[arg-type]
         lambda: plskit.pls1_find_k_sequence(X, y, k_max=3, test_method=removed, seed=7),  # type: ignore[arg-type]
         lambda: plskit.pls1_find_k_optimal(X, y, k_max=3, diagnostic=removed, seed=7),  # type: ignore[arg-type]
     ):
@@ -88,7 +88,7 @@ def test_optional_fields_are_filled_only_by_unweighted_split_nb():
     # marshals both as None (never a recomputed stable rank).
     X, y = _data()
     nb = plskit.pls1_confirmatory_test(
-        X, y, k=1, method="split_nb", args=_SMALL_ARGS_BY_METHOD["split_nb"], seed=7,
+        X, y, k=1, test_method="split_nb", args=_SMALL_ARGS_BY_METHOD["split_nb"], seed=7,
     )
     assert isinstance(nb, plskit.ConfirmatoryTestResult)
     assert isinstance(nb.rho_hat, float)
@@ -98,14 +98,14 @@ def test_optional_fields_are_filled_only_by_unweighted_split_nb():
 
     w = np.where(np.arange(X.shape[0]) % 2 == 0, 1.5, 0.5)
     weighted = plskit.pls1_confirmatory_test(
-        X, y, k=1, method="split_nb", args=_SMALL_ARGS_BY_METHOD["split_nb"],
+        X, y, k=1, test_method="split_nb", args=_SMALL_ARGS_BY_METHOD["split_nb"],
         weights=w, seed=7,
     )
     assert weighted.rho_hat is None
 
     for method in ("raw_perm", "split_exact", "score", "e"):
         r = plskit.pls1_confirmatory_test(
-            X, y, k=1, method=method, args=_SMALL_ARGS_BY_METHOD[method], seed=7,
+            X, y, k=1, test_method=method, args=_SMALL_ARGS_BY_METHOD[method], seed=7,
         )
         assert r.rho_hat is None, method
         assert r.stable_rank is None, method
@@ -118,9 +118,9 @@ def test_gate_reroutes_split_nb_and_warns():
     X, y = _flagged_data()
     with pytest.warns(UserWarning, match="rerouted") as rec:
         r = plskit.pls1_confirmatory_test(
-            X, y, k=1, method="split_nb", args={"n_splits": 20}, seed=7,
+            X, y, k=1, test_method="split_nb", args={"n_splits": 20}, seed=7,
         )
-    assert r.method == "split_exact"
+    assert r.test_method == "split_exact"
     assert isinstance(r.stable_rank, float)
     msg = str(rec[0].message)
     assert "n_perm=1000" in msg
@@ -132,9 +132,9 @@ def test_force_suppresses_the_reroute_and_the_warning():
     X, y = _flagged_data()
     with _no_warning():
         r = plskit.pls1_confirmatory_test(
-            X, y, k=1, method="split_nb", args={"n_splits": 20, "force": True}, seed=7,
+            X, y, k=1, test_method="split_nb", args={"n_splits": 20, "force": True}, seed=7,
         )
-    assert r.method == "split_nb"
+    assert r.test_method == "split_nb"
     # The gate still ran and still reports what it saw under force.
     assert isinstance(r.stable_rank, float)
 
@@ -143,16 +143,16 @@ def test_gate_does_not_fire_on_a_healthy_design():
     X, y = _data()
     with _no_warning():
         r = plskit.pls1_confirmatory_test(
-            X, y, k=1, method="split_nb", args={"n_splits": 20}, seed=7,
+            X, y, k=1, test_method="split_nb", args={"n_splits": 20}, seed=7,
         )
-    assert r.method == "split_nb"
+    assert r.test_method == "split_nb"
 
 
 def test_force_is_a_split_nb_only_arg():
     X, y = _data()
     with pytest.raises(plskit.PlsKitError, match="does not accept arg 'force'") as ei:
         plskit.pls1_confirmatory_test(
-            X, y, k=1, method="split_exact", args={"n_perm": 100, "force": True}, seed=7,
+            X, y, k=1, test_method="split_exact", args={"n_perm": 100, "force": True}, seed=7,
         )
     assert ei.value.code == "invalid_args"
 
@@ -161,14 +161,15 @@ def test_force_must_be_a_bool():
     X, y = _data()
     with pytest.raises(plskit.PlsKitError, match="must be a bool") as ei:
         plskit.pls1_confirmatory_test(
-            X, y, k=1, method="split_nb", args={"n_splits": 20, "force": 1.5}, seed=7,
+            X, y, k=1, test_method="split_nb", args={"n_splits": 20, "force": 1.5}, seed=7,
         )
     assert ei.value.code == "invalid_args"
 
 
 def test_gate_reroutes_the_optimal_diagnostic_and_warns():
-    # find_k_optimal's diagnostic runs through the same hoisted gate, and it
-    # takes the same `force` override, so the warning advises one.
+    # find_k_optimal's diagnostic runs through the same split_nb auto-gate as
+    # pls1_confirmatory_test, and it takes the same `force` override, so the
+    # warning advises one.
     X, y = _flagged_data()
     with pytest.warns(UserWarning, match="rerouted") as rec:
         r = plskit.pls1_find_k_optimal(
@@ -226,8 +227,7 @@ def test_sequence_results_carry_the_gate_rank():
         )
     assert seq.test_method == "split_exact"
     assert isinstance(seq.stable_rank, float)
-    # The whole point of plumbing it through: the warning can now name both
-    # numbers the rule read, with no hedge about which result type has what.
+    # The warning names both numbers the gate read (stable_rank and n_eff).
     msg = str(rec[0].message)
     assert f"{seq.stable_rank:.4g}" in msg
     assert f"{seq.n_eff:.4g}" in msg
@@ -262,9 +262,9 @@ def test_split_nb_gate_answers_what_the_test_functions_decide():
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             r = plskit.pls1_confirmatory_test(
-                X, y, k=1, method="split_nb", args={"n_splits": 20}, seed=7,
+                X, y, k=1, test_method="split_nb", args={"n_splits": 20}, seed=7,
             )
-        assert q.fires == (r.method == "split_exact")
+        assert q.fires == (r.test_method == "split_exact")
         # Same rule on the same standardized X — the numbers must match too.
         assert q.stable_rank == r.stable_rank
         assert q.n_eff == r.n_eff
@@ -297,7 +297,8 @@ def test_split_nb_gate_validates_its_input():
 # TypeError / OverflowError: `invalid_args` inside the `args` dict,
 # `invalid_argument` for a top-level argument (plskit-bind's split, so R and
 # Julia raise the same codes). Each case fails before any engine work runs.
-# Sibling rows for other entry points sit beside their own keepers.
+# Equivalent rows for other entry points live in their own test files
+# (test_pls1_fit.py, test_rotate.py, test_spls1.py, test_spls3.py, ...).
 
 _X, _Y = _data()
 
@@ -305,36 +306,36 @@ _X, _Y = _data()
 @pytest.mark.parametrize(
     "kwargs, code, message",
     [
-        ({"method": "raw_perm", "args": {"n_perm": -5}}, "invalid_args",
-         r"args\['n_perm'\] for method='raw_perm' must be a non-negative whole number, got -5"),
-        ({"method": "split_exact", "args": {"n_splits": 2.5}}, "invalid_args",
+        ({"test_method": "raw_perm", "args": {"n_perm": -5}}, "invalid_args",
+         r"args\['n_perm'\] for test_method='raw_perm' must be a non-negative whole number, got -5"),
+        ({"test_method": "split_exact", "args": {"n_splits": 2.5}}, "invalid_args",
          "must be a non-negative whole number, got 2.5"),
-        ({"method": "raw_perm", "args": {"n_folds": True}}, "invalid_args",
+        ({"test_method": "raw_perm", "args": {"n_folds": True}}, "invalid_args",
          "must be a non-negative whole number, got True"),
-        ({"method": "raw_perm", "args": {"n_perm": "7"}}, "invalid_args",
+        ({"test_method": "raw_perm", "args": {"n_perm": "7"}}, "invalid_args",
          'got the string "7"'),
-        ({"method": "split_exact", "ci": True, "n_boot": -5}, "invalid_argument",
+        ({"test_method": "split_exact", "ci": True, "n_boot": -5}, "invalid_argument",
          "n_boot must be a non-negative whole number"),
-        ({"method": "split_exact", "k": -1}, "invalid_argument",
+        ({"test_method": "split_exact", "k": -1}, "invalid_argument",
          "k must be a non-negative whole number"),
-        ({"method": "split_exact", "ci": True, "level": "x"}, "invalid_argument",
+        ({"test_method": "split_exact", "ci": True, "level": "x"}, "invalid_argument",
          'level must be a number, got the string "x"'),
-        ({"method": "split_exact", "ci": True, "level": 10**400}, "invalid_argument",
+        ({"test_method": "split_exact", "ci": True, "level": 10**400}, "invalid_argument",
          "level must be a number"),
-        ({"method": "score", "seed": -1}, "invalid_argument",
+        ({"test_method": "score", "seed": -1}, "invalid_argument",
          "seed must be a whole number"),
-        ({"method": "score", "seed": 2**64}, "invalid_argument",
+        ({"test_method": "score", "seed": 2**64}, "invalid_argument",
          "seed must be a whole number"),
-        ({"method": "score", "ci": "yes"}, "invalid_argument",
+        ({"test_method": "score", "ci": "yes"}, "invalid_argument",
          'ci must be a bool, got the string "yes"'),
-        ({"method": "score", "pre_standardized": 1}, "invalid_argument",
+        ({"test_method": "score", "pre_standardized": 1}, "invalid_argument",
          "pre_standardized must be a bool, got 1"),
-        ({"method": "score", "disable_parallelism": 1}, "invalid_argument",
+        ({"test_method": "score", "disable_parallelism": 1}, "invalid_argument",
          "disable_parallelism must be a bool"),
-        ({"method": "score", "verbose": "no"}, "invalid_argument",
+        ({"test_method": "score", "verbose": "no"}, "invalid_argument",
          "verbose must be a bool"),
-        ({"method": 1}, "invalid_argument", "method must be a string, got 1"),
-        ({"method": "raw_perm", "args": [1]}, "invalid_argument",
+        ({"test_method": 1}, "invalid_argument", "test_method must be a string, got 1"),
+        ({"test_method": "raw_perm", "args": [1]}, "invalid_argument",
          r"args must be a dict of named values, got \[1\]"),
     ],
     ids=[
@@ -356,16 +357,16 @@ def test_args_none_and_whole_float_counts_are_accepted():
     is a count (plskit-bind's rules); both reach the engine as resolved
     values."""
     r = plskit.pls1_confirmatory_test(
-        _X, _Y, 1, method="split_nb", args={"n_splits": 20.0, "force": None}, seed=7,
+        _X, _Y, 1, test_method="split_nb", args={"n_splits": 20.0, "force": None}, seed=7,
     )
     assert r.n_splits == 20
     d = plskit.pls1_confirmatory_test(
-        _X, _Y, 1, method="split_nb", args={"n_splits": None}, seed=7,
+        _X, _Y, 1, test_method="split_nb", args={"n_splits": None}, seed=7,
     )
     assert d.n_splits == 50
 
 
 @pytest.mark.parametrize("seed", [2**64 - 1, np.uint64(2**64 - 1), 0, 7.0])
 def test_the_full_seed_range_is_accepted_and_echoed(seed):
-    r = plskit.pls1_confirmatory_test(_X, _Y, 1, method="score", seed=seed)
+    r = plskit.pls1_confirmatory_test(_X, _Y, 1, test_method="score", seed=seed)
     assert r.seed == int(seed) and type(r.seed) is int

@@ -1,7 +1,7 @@
 //! Declared shape of every result type: field names in `to_record()`
 //! order (which is `_docs/python/results.md` order), a type code per
-//! field, and nullability. The registry dump publishes this table; P3
-//! generates the Julia result structs from it.
+//! field, and nullability. The registry dump publishes this table;
+//! `scripts/render-jl-stubs.py` generates the Julia result structs from it.
 
 use crate::value::{Record, Value};
 
@@ -158,7 +158,7 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
         fields: &[
             req("pvalue", "f64"),
             req("statistic", "f64"),
-            req("method", "str"),
+            req("test_method", "str"),
             req("k", "i64"),
             opt("n_perm", "i64"),
             opt("n_splits", "i64"),

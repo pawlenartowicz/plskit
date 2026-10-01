@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare two plskit corpus trees: Gate M of the corpus OR rule.
+"""Compare two plskit corpus trees for numerical similarity.
 
 Usage:
     python3 scripts/diff_corpus.py REFERENCE CANDIDATE [--quiet]

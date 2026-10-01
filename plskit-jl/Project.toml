@@ -1,7 +1,7 @@
 name = "PLSKit"
 uuid = "b88181ae-ea14-454d-86f5-551fa9bf344b"
 authors = ["Paweł Lenartowicz <6quarg@gmail.com>"]
-version = "0.6.2"
+version = "0.7.0"
 
 [deps]
 PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"

@@ -1,8 +1,8 @@
-# One testdata/ fixture per function family, at the RULE 3 tolerances
+# One testdata/ fixture per function family, at the tolerances
 # (scalars 1e-12, arrays 1e-10, plus rtol 1e-14 for finite expected values;
 # integers and strings exact). The numbers
 # come from the Python wheel, which passes the whole corpus in
-# plskit-py/tests/test_corpus.py, so this checks conversion (spec §7).
+# plskit-py/tests/test_corpus.py, so this checks conversion.
 #
 # Key resolution follows plskit-bind/tests/corpus.rs: a fixture key maps
 # onto the result by name, exact, then ASCII case-insensitive (`y_std` is

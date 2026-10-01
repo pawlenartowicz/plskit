@@ -170,7 +170,7 @@ fn predict_round_trips_the_record() {
     }
 }
 
-// Review Focus 1: R hands back a k = 1 model's Q as a length-1 vector,
+// R hands back a k = 1 model's Q as a length-1 vector,
 // which the seam turns into a scalar.
 #[test]
 fn predict_widens_a_scalar_q() {
@@ -194,7 +194,7 @@ fn predict_widens_a_scalar_q() {
     assert!(same(&before.result, &after.result));
 }
 
-// Review Focus 4: a y with no first component gives the zero model.
+// A y with no first component gives the zero model.
 #[test]
 fn a_zero_component_model_round_trips() {
     let (x, _) = data(40, 5, 3);
@@ -339,7 +339,7 @@ fn engine_errors_keep_their_code_and_details() {
     assert!(matches!(e.details.get("reason"), Some(Value::Str(s)) if s == "negative"));
 }
 
-// Review Minor 6: the R and Julia seams pass Borrowed views
+// The R and Julia seams pass Borrowed views
 // (MatF64::from_col_major / VecF64::Borrowed), not Owned; both must take
 // the same path through call() to a bit-identical result.
 #[test]

@@ -30,7 +30,7 @@ fn split_exact_records_its_seed_and_reproduces_from_it() {
     let a = ok(
         "pls1_confirmatory_test",
         confirm(vec![
-            ("method", Value::text("split_exact")),
+            ("test_method", Value::text("split_exact")),
             ("args", exact_args()),
         ]),
     );
@@ -43,7 +43,7 @@ fn split_exact_records_its_seed_and_reproduces_from_it() {
     let b = ok(
         "pls1_confirmatory_test",
         confirm(vec![
-            ("method", Value::text("split_exact")),
+            ("test_method", Value::text("split_exact")),
             ("args", exact_args()),
             ("seed", Value::U64(seed)),
         ]),
@@ -52,7 +52,7 @@ fn split_exact_records_its_seed_and_reproduces_from_it() {
     let c = ok(
         "pls1_confirmatory_test",
         confirm(vec![
-            ("method", Value::text("split_exact")),
+            ("test_method", Value::text("split_exact")),
             ("args", exact_args()),
             ("seed", Value::text(&seed.to_string())),
         ]),
@@ -60,13 +60,13 @@ fn split_exact_records_its_seed_and_reproduces_from_it() {
     assert!(same(&a.result, &c.result));
 }
 
-// Review Focus 2: seeds above 2^63 travel as decimal strings (R's form).
+// Seeds above 2^63 travel as decimal strings (R's form).
 #[test]
 fn a_seed_above_2_63_is_recorded_exactly() {
     let o = ok(
         "pls1_confirmatory_test",
         confirm(vec![
-            ("method", Value::text("split_exact")),
+            ("test_method", Value::text("split_exact")),
             ("args", exact_args()),
             ("seed", Value::text("18446744073709551615")),
         ]),
@@ -78,7 +78,7 @@ fn a_seed_above_2_63_is_recorded_exactly() {
 fn bad_methods_and_args_are_invalid_args() {
     let e = err(
         "pls1_confirmatory_test",
-        confirm(vec![("method", Value::text("split_perm"))]),
+        confirm(vec![("test_method", Value::text("split_perm"))]),
     );
     assert_eq!(
         (e.code, e.message.as_str()),
@@ -87,7 +87,7 @@ fn bad_methods_and_args_are_invalid_args() {
     let e = err(
         "pls1_confirmatory_test",
         confirm(vec![
-            ("method", Value::text("raw_perm")),
+            ("test_method", Value::text("raw_perm")),
             ("args", args(vec![("n_splits", Value::I64(3))])),
         ]),
     );
@@ -95,14 +95,14 @@ fn bad_methods_and_args_are_invalid_args() {
     let e = err(
         "pls1_confirmatory_test",
         confirm(vec![
-            ("method", Value::text("split_exact")),
+            ("test_method", Value::text("split_exact")),
             ("args", args(vec![("n_perm", Value::F64(2.5))])),
         ]),
     );
     assert_eq!(e.code, "invalid_args");
     let e = err(
         "pls1_confirmatory_test",
-        confirm(vec![("method", Value::I64(1))]),
+        confirm(vec![("test_method", Value::I64(1))]),
     );
     assert_eq!(e.code, "invalid_argument");
 }
@@ -112,7 +112,7 @@ fn ci_knobs_are_inert_without_ci_and_fill_the_bundle_with_it() {
     let off = ok(
         "pls1_confirmatory_test",
         confirm(vec![
-            ("method", Value::text("split_nb")),
+            ("test_method", Value::text("split_nb")),
             ("n_boot", Value::I64(50)),
             ("seed", Value::U64(1)),
         ]),
@@ -121,7 +121,7 @@ fn ci_knobs_are_inert_without_ci_and_fill_the_bundle_with_it() {
     let on = ok(
         "pls1_confirmatory_test",
         confirm(vec![
-            ("method", Value::text("split_nb")),
+            ("test_method", Value::text("split_nb")),
             ("ci", Value::Bool(true)),
             ("n_boot", Value::I64(100)),
             ("seed", Value::U64(1)),
@@ -143,12 +143,12 @@ fn a_rerouted_split_nb_warns_with_the_python_sentence() {
         vec![
             ("X", x.clone()),
             ("y", y.clone()),
-            ("method", Value::text("split_nb")),
+            ("test_method", Value::text("split_nb")),
             ("seed", Value::U64(3)),
         ],
     );
     let r = record(&o);
-    assert_eq!(s(r, "method"), "split_exact");
+    assert_eq!(s(r, "test_method"), "split_exact");
     assert_eq!(o.warnings.len(), 1);
     let w = &o.warnings[0];
     assert_eq!(s(w, "kind"), "rerouted");
@@ -176,12 +176,12 @@ fn a_rerouted_split_nb_warns_with_the_python_sentence() {
         vec![
             ("X", x),
             ("y", y),
-            ("method", Value::text("split_nb")),
+            ("test_method", Value::text("split_nb")),
             ("args", args(vec![("force", Value::Bool(true))])),
             ("seed", Value::U64(3)),
         ],
     );
-    assert_eq!(s(record(&forced), "method"), "split_nb");
+    assert_eq!(s(record(&forced), "test_method"), "split_nb");
     assert!(forced.warnings.is_empty());
 }
 
@@ -194,7 +194,7 @@ fn pls3_confirmatory_test_runs_two_methods_and_never_a_ci() {
         vec![
             ("X", x.clone()),
             ("Y", y.clone()),
-            ("method", Value::text("split_exact")),
+            ("test_method", Value::text("split_exact")),
             ("args", exact_args()),
         ],
     );
@@ -206,14 +206,18 @@ fn pls3_confirmatory_test_runs_two_methods_and_never_a_ci() {
         vec![
             ("X", x.clone()),
             ("Y", y),
-            ("method", Value::text("raw_perm")),
+            ("test_method", Value::text("raw_perm")),
         ],
     );
     assert_eq!(e.code, "invalid_args");
     let y1 = Value::Vec(VecF64::Owned(vec![0.0; 60]));
     let e = err(
         "pls3_confirmatory_test",
-        vec![("X", x), ("Y", y1), ("method", Value::text("split_exact"))],
+        vec![
+            ("X", x),
+            ("Y", y1),
+            ("test_method", Value::text("split_exact")),
+        ],
     );
     assert_eq!(e.code, "invalid_argument");
     assert!(e.message.contains("PLS1 problem"), "{}", e.message);

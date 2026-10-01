@@ -635,11 +635,9 @@ pub fn pls1_fit(
 /// selection step (rotation, scores, loadings, the update of `X'y`,
 /// `coef = W(P'W)⁻¹Q`, raw-scale β, intercept) is the same code as
 /// `pls1_fit`; `keep = n_features` reduces bit-exactly to the dense fit.
-///
-/// `keep` is a scalar broadcast to all `k` components (per-component budget
-/// deferred — rule of three). Selection on `w` does not guarantee a nested
-/// selection path across components; acceptable for v1 (tune, don't
-/// interpret the path).
+/// `keep` is one scalar for all `k` components. Selection on `w` does not
+/// guarantee a nested selection path across components; tune `keep`, do not
+/// interpret the path.
 ///
 /// # Errors
 /// Everything `pls1_fit` returns, plus `InvalidArgument` for `keep == 0`
@@ -811,8 +809,7 @@ pub(crate) fn hard_select_keep(w: &mut Col<f64>, keep: usize) {
     let d = w.nrows();
     // `keep >= d` selects everything, so there is no complement to zero.
     // Guarded rather than left to `select_nth_unstable_by`, which panics
-    // on `keep == d` where the old `&idx[keep..]` yielded an empty slice:
-    // this function is total and stays total.
+    // on `keep == d`: this function is total and stays total.
     if keep >= d {
         return;
     }
@@ -880,7 +877,8 @@ pub(crate) const NIPALS_ABS_FLOOR: f64 = 1e-14;
 /// orthogonality, and `w_norm` can climb back up over the following
 /// components, so the floor must fire at the first noise component rather
 /// than wait for a monotone decline. Measured at `n = 2000`, `d = 40` (rank
-/// 39) with the explicit-deflation kernel this crate used up to 0.5.0:
+/// 39) with the explicit-deflation oracle kernel (`fit::kernel_tests`,
+/// `nipals_pls1_reference`):
 /// `w_norm` fell from 339 to about `1.4e-13` by the 18th component, regrew
 /// to 40, and all 40 components were kept. With the current kernel and the
 /// floor disabled, `w_norm` falls to about `4.6e-13` by component 19,
@@ -920,7 +918,7 @@ pub(crate) const NIPALS_ABS_FLOOR: f64 = 1e-14;
 /// to the fitted values of the unfloored fit. For the first component in
 /// particular (880 designs over the same families, `n` from 5 to 1e5,
 /// weighted and not; measured on the
-/// explicit-deflation kernel, whose first component is the same float
+/// explicit-deflation oracle kernel, whose first component is the same float
 /// sequence as the current kernel's, so the numbers carry over), a `y`
 /// orthogonal to the standardized `X` up to rounding sat at most at `0.33×`
 /// the floor, a true effect of `1e-9` of `‖y‖` added to it at least `14×`
@@ -1302,7 +1300,7 @@ impl ComponentBackend for ImplicitXBackend<'_> {
 /// The PLS1 kernel: the NIPALS PLS1 model, computed by Improved Kernel PLS
 /// (Dayal and MacGregor 1997, Algorithm 1) through [`pls1_component_loop`]
 /// with the X backend. Same inputs and outputs (`T`, `P`, `W`, `Q`) as the
-/// explicit-deflation kernel it replaced.
+/// explicit-deflation oracle kernel in `fit::kernel_tests`.
 ///
 /// # Derivation
 /// NIPALS deflates `X_{a+1} = X_a − t_a p_a'` and `y_{a+1} = y_a − q_a t_a`
@@ -1417,7 +1415,7 @@ mod tests {
     use crate::test_support::{orthonormal_basis, project_off};
     use approx::assert_relative_eq;
 
-    /// The explicit-deflation PLS1 kernel that `pls1_kernel` replaced, kept
+    /// The explicit-deflation PLS1 kernel (textbook NIPALS deflation), kept
     /// verbatim as the oracle for the IKPLS kernel (`pls1_kernel`). Do not
     /// edit: every equivalence test in `fit::kernel_tests` measures against
     /// this exact float sequence.
@@ -1998,8 +1996,8 @@ mod boundary_tests {
     /// Layouts of X agree to rounding, not bit for bit: `pls1_fit` forms its
     /// products from X in X's own layout (CHANGELOG 0.6.1), so each layout
     /// sums in its own order. `Agree::Corpus(1e-10)` is the corpus array
-    /// tolerance, `1e-10 + 1e-14 · |value|`, which the Python docs promise
-    /// across layouts.
+    /// tolerance, `1e-10 + 1e-14 · |value|`, which `_docs/python/api.md`
+    /// (Conventions) promises across layouts.
     const FIT_LAYOUT_TOL: f64 = 1e-10;
 
     /// Every numeric output of a fit, flattened; `k_used` as an `f64` fails
@@ -2174,7 +2172,7 @@ mod boundary_tests {
     /// A `y` orthogonal to an offset X, below `IMPLICIT_MAX_MEAN_RATIO`: two
     /// offset columns (largest `|mean_j| / scale_j` about 270), and a centered
     /// column beside the offset column `a + 999.3` (ratio 999.3; a constant
-    /// column no longer counts, its ratio is at most 1). The implicit products
+    /// column's ratio is at most 1, so it does not count). The implicit products
     /// would put the first `‖X'y‖` above the floor and keep one component;
     /// the copy puts it below, and the fit decides on the copy: `k_used = 0`.
     #[test]
@@ -2419,10 +2417,9 @@ mod boundary_tests {
                 nf,
                 None,
             ),
-            // Review finding H1/N5 (ticket #3): with `pre_standardized = true`
-            // and inputs so far below unit scale that ‖X'y‖ < 1e-14, the
-            // kernel stops at the first component. A top-level call
-            // (`check_n_eff = true`) reports the truncation instead of
+            // With `pre_standardized = true` and inputs so far below unit
+            // scale that ‖X'y‖ < 1e-14, the kernel stops at the first
+            // component. A top-level call (`check_n_eff = true`) reports the truncation instead of
             // returning a k_used = 0 model.
             (
                 "strict truncation",

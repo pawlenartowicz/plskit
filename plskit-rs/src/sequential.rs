@@ -211,7 +211,7 @@ pub(crate) fn run_incremental_sequence(
     //
     // Rewriting `opts.args` is also what makes the reported method honest —
     // `IncrementalSequenceOutput.method` is read off the resolved args below,
-    // exactly as `result.method` is read off `args_resolved` in
+    // exactly as `result.test_method` is read off `args_resolved` in
     // `pls1_confirmatory_test`.
     let mut stable_rank_out = None;
     if let SequentialArgs::SplitNb { n_splits, force } = opts.args {
@@ -271,9 +271,10 @@ fn p_for_confirmatory_at_k(
     use crate::signal_test::{
         confirmatory_test_impl, ConfirmatoryTestInput, ConfirmatoryTestOpts, GateMode,
     };
-    // Burn one RNG advance so the per-step seed stream stays bit-stable
-    // across `pls1_find_k_sequence` revisions. DO NOT remove without regen
-    // of testdata/ — see byte_parity tests for the sentinel.
+    // One RNG draw is discarded per step: it is part of the fixed seed
+    // stream that the testdata/ fixtures and `tests/byte_parity.rs` pin. The
+    // test seed below is the next draw. Removing it changes every p-value;
+    // regenerate testdata/ if you do.
     let _: u64 = {
         use rand::Rng;
         rng.next_u64()
@@ -290,8 +291,8 @@ fn p_for_confirmatory_at_k(
             disable_parallelism: opts.disable_parallelism,
             verbose: opts.verbose,
             ci: None,
-            // `IncrementalSequenceOpts` does not expose `max_skip_rate` yet, and
-            // `ci: None` makes this field dead until it does.
+            // `IncrementalSequenceOpts` has no `max_skip_rate`; with
+            // `ci: None` this field is unread.
             max_skip_rate: 0.01,
             keep: opts.keep,
         },
@@ -370,7 +371,7 @@ fn p_for_incremental(
         // Deflate the UNscaled standardized data: Xs_d = Xs − √W⁻¹·T·P′ (same
         // for y). prev.weights holds the exact normalized weights the fit
         // row-scaled with (None when absent or uniform; that branch must stay
-        // bit-identical to the historical unweighted path). A zero weight
+        // bit-identical to the unweighted fit, as the corpus fixtures pin). A zero weight
         // zeroes the score row (t = √w·xs·w_vec), so its deflation
         // contribution is 0, not 0·∞.
         Some(match prev.weights.as_ref() {
@@ -525,7 +526,7 @@ mod tests {
             GateMode::Decided,
         )
         .unwrap();
-        assert_eq!(r.method, "split_nb");
+        assert_eq!(r.test_method, "split_nb");
         assert!(r.stable_rank.is_none(), "step evaluated the gate");
     }
 
@@ -557,7 +558,7 @@ mod tests {
         assert!((0..3).all(|i| !r.pvalues[i].is_nan()));
     }
 
-    /// Layout invariance (D1): every step reads X through `standardize` /
+    /// Layout invariance: every step reads X through `standardize` /
     /// `col_major_or_copy`, so padded, row-major and reversed-column views
     /// give bit-identical p-values to the owned matrix, for all four
     /// sequential methods, dense and `keep = 3`, over the copy-free families

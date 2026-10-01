@@ -15,7 +15,7 @@ use crate::resample::Columns;
 use crate::rng::{child_seeds, resolve_seed};
 use crate::signal_test::{
     draw_splits, fold_block, fold_unit, pls1_confirmatory_test, prepare_cv_fold, prepare_split,
-    raw_perm_route, split_block, split_exact_refit_route, split_unit, with_new_routes_disabled,
+    raw_perm_route, split_block, split_exact_refit_route, split_unit, with_gram_routes_disabled,
     ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput,
     ReplicateRoute, SplitIdx,
 };
@@ -107,7 +107,7 @@ fn assert_public_raw_perm_invisible(
         before + n_folds,
         "k={k}: the n-space route must run"
     );
-    let primal = with_new_routes_disabled(|| raw_perm(x, y, k, n_folds, seed));
+    let primal = with_gram_routes_disabled(|| raw_perm(x, y, k, n_folds, seed));
     assert!(
         (gram.statistic - primal.statistic).abs() <= 1e-10,
         "k={k}: {:e} vs {:e}",
@@ -188,7 +188,7 @@ fn raw_perm_keeps_its_other_routes() {
         ReplicateRoute::Primal
     );
     assert_eq!(
-        with_new_routes_disabled(|| raw_perm_route(40, 5, 2000, 50, 2, None, false)),
+        with_gram_routes_disabled(|| raw_perm_route(40, 5, 2000, 50, 2, None, false)),
         ReplicateRoute::Primal
     );
     let (x, y) = wide(40, 2000, 0.3, 24);
@@ -356,7 +356,7 @@ fn split_exact_is_route_invisible_on_the_public_surface() {
             before + 10,
             "k={k}: one block per split"
         );
-        let primal = with_new_routes_disabled(|| split_exact(&x, &y, k, seed));
+        let primal = with_gram_routes_disabled(|| split_exact(&x, &y, k, seed));
         assert!(
             (gram.statistic - primal.statistic).abs() <= 1e-10,
             "k={k}: {:e} vs {:e}",
@@ -390,7 +390,7 @@ fn split_exact_keeps_its_other_routes() {
         ReplicateRoute::Primal
     );
     assert_eq!(
-        with_new_routes_disabled(|| split_exact_refit_route(40, 2000, 50, 2, None, false)),
+        with_gram_routes_disabled(|| split_exact_refit_route(40, 2000, 50, 2, None, false)),
         ReplicateRoute::Primal
     );
 }

@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn sentence_matches_the_python_warning() {
-        // Rendered by the f-string in `_warn_if_rerouted` (_api.py), 2026-09-29.
+        // Rendered by the f-string in `_warn_if_rerouted` (_api.py).
         let w = rerouted(
             Some("split_nb"),
             Some("split_exact"),

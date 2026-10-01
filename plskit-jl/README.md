@@ -9,7 +9,7 @@ wheel's.
 ```julia
 using PLSKit
 fit  = pls1_fit(X, y; k=3)
-test = pls1_confirmatory_test(X, y; k=1, method="split_exact", seed=42)
+test = pls1_confirmatory_test(X, y; k=1, test_method="split_exact", seed=42)
 ŷ    = pls1_predict(fit, X_new)
 ```
 
@@ -49,5 +49,5 @@ plskit is a Partial Least Squares (PLS) library built around three ideas:
 
 ## Status
 
-Version 0.6.2, running Python `plskit` 0.6.2. Not yet in the General
+Version 0.7.0, running Python `plskit` 0.7.0. Not yet in the General
 registry.

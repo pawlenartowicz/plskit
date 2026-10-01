@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Render the PLSKit.jl stubs, docstrings and result-type aliases.
 
-Reads the plskit-bind registry dump (spec §2.2) and writes
+Reads the plskit-bind registry dump and writes
 `plskit-jl/src/generated.jl`: one stub per registry function, one
 `const <Type> = PlsKitResult{:<Type>}` alias per result type, the
-results.md field order the result conversion uses, and the export list.
+_docs/python/results.md field order the result conversion uses, and
+the export list.
 
-Julia call rule (spec §5.2): a parameter that is required and not
+Julia call rule: a parameter that is required and not
 keyword-only in Python is a Julia positional argument; every other
 parameter is a Julia keyword, required when Python requires it
-(`method` in the confirmatory tests).
+(`test_method` in the confirmatory tests).
 
 Usage (from the workspace root):
     python3 scripts/render-jl-stubs.py                  # run the dump, rewrite
@@ -17,7 +18,7 @@ Usage (from the workspace root):
     python3 scripts/render-jl-stubs.py --dump reg.json [--check]
 
 `--check` also fails when the dumped result fields (names and order)
-differ from `_docs/python/results.md` (spec §8). Plain python3, no deps.
+differ from `_docs/python/results.md`. Plain python3, no deps.
 """
 
 import argparse

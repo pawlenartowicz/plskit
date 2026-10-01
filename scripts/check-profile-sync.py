@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep the R crate's build in step with the workspace (spec sections 2.3, 8).
+"""Keep the R crate's build in step with the workspace.
 
 plskit-r/src/rust/ is outside the cargo workspace, so it repeats the
 workspace [profile.release] block and resolves its own Cargo.lock. This
@@ -12,11 +12,11 @@ check fails when:
    the workspace Cargo.lock;
 3. the R crate's pinned `plskit` / `plskit-bind` requirements
    (`= X.Y.Z` in plskit-r/src/rust/Cargo.toml) do not equal
-   plskit-r/DESCRIPTION's `Version:` (Decision 4: both are pinned to
-   the R package version until P4).
+   plskit-r/DESCRIPTION's `Version:` (both are pinned to the R
+   package version).
 
-The committed R lock file starts in P4 (spec 2.3); until then check 2
-is skipped unless --r-lock names a lock file, e.g. the dev-mode one at
+No R lock file is committed, so check 2 is skipped unless
+--r-lock names a lock file, e.g. the dev-mode one at
 plskit-r/src/rust/target/dev-crate/Cargo.lock. Plain python3 (3.11+,
 for tomllib), no dependencies.
 """
@@ -54,7 +54,7 @@ def check_profile(root: Path) -> list[str]:
 
 def check_version(root: Path) -> list[str]:
     """The R crate's pinned plskit / plskit-bind requirements equal
-    DESCRIPTION's Version (Decision 4)."""
+    DESCRIPTION's Version."""
     r = load_toml(root / R_MANIFEST)
     deps = r.get("dependencies", {})
     description_text = (root / R_DESCRIPTION).read_text(encoding="utf-8")
@@ -134,7 +134,7 @@ def main() -> int:
     elif args.r_lock is not None:
         issues.append(f"{r_lock}: not found")
     else:
-        print(f"{R_LOCK} is not committed yet (spec 2.3: from P4); lock check skipped")
+        print(f"{R_LOCK} is not committed; lock check skipped")
 
     for line in issues:
         print(f"  {line}")

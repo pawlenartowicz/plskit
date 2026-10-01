@@ -13,13 +13,13 @@ fit                      # compact summary: field names and shapes
 yhat <- pls1_predict(fit, X[1:5, ])
 
 # Confirmatory test; method-specific options go in `args`
-test <- pls1_confirmatory_test(X, y, k = 1, method = "split_exact",
+test <- pls1_confirmatory_test(X, y, k = 1, test_method = "split_exact",
                                args = list(n_perm = 1000, n_splits = 50))
 test$pvalue
 test$seed                # the drawn seed, as a decimal string
 
 # Reproduce the run exactly
-again <- pls1_confirmatory_test(X, y, k = 1, method = "split_exact",
+again <- pls1_confirmatory_test(X, y, k = 1, test_method = "split_exact",
                                 args = list(n_perm = 1000, n_splits = 50),
                                 seed = test$seed)
 identical(again, test)   # TRUE

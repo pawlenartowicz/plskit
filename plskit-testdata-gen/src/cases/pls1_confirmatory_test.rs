@@ -167,7 +167,7 @@ fn run_confirmatory_on(
         let mut w = NpzWriter::create(&abs_outputs)?;
         w.add_f64("pvalue", &scalar_f64(r.pvalue))?;
         w.add_f64("statistic", &scalar_f64(r.statistic))?;
-        w.add_string("method", &r.method)?;
+        w.add_string("test_method", &r.test_method)?;
         w.add_i64("k", &scalar_i64(i64::try_from(r.k)?))?;
         if let Some(np) = r.n_perm {
             w.add_i64("n_perm", &scalar_i64(i64::try_from(np)?))?;
@@ -199,7 +199,7 @@ fn run_confirmatory_on(
     })
 }
 
-/// Case: `pls1_confirmatory_test` with `method=raw_perm`, `n_perm=200`, `n_folds=5`, `seed=42`.
+/// Case: `pls1_confirmatory_test` with `test_method=raw_perm`, `n_perm=200`, `n_folds=5`, `seed=42`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
@@ -216,7 +216,7 @@ pub fn raw_perm(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
-                "method": "raw_perm",
+                "test_method": "raw_perm",
                 "args": {"n_perm": 200, "n_folds": 5},
                 "seed": 42
             }),
@@ -231,7 +231,7 @@ pub fn raw_perm(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls1_confirmatory_test` with `method=split_nb`, `n_splits=30`, `seed=42`.
+/// Case: `pls1_confirmatory_test` with `test_method=split_nb`, `n_splits=30`, `seed=42`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
@@ -248,7 +248,7 @@ pub fn split_nb(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
-                "method": "split_nb",
+                "test_method": "split_nb",
                 "args": {"n_splits": 30},
                 "seed": 42
             }),
@@ -263,7 +263,7 @@ pub fn split_nb(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls1_confirmatory_test` with `method=split_exact`, `n_perm=200`, `n_splits=30`,
+/// Case: `pls1_confirmatory_test` with `test_method=split_exact`, `n_perm=200`, `n_splits=30`,
 /// `seed=42`. `k=2` sends this through `split_exact`'s honest-refit route.
 ///
 /// # Errors
@@ -281,7 +281,7 @@ pub fn split_exact(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
-                "method": "split_exact",
+                "test_method": "split_exact",
                 "args": {"n_perm": 200, "n_splits": 30},
                 "seed": 42
             }),
@@ -296,7 +296,7 @@ pub fn split_exact(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls1_confirmatory_test` with `method=split_exact`, `n_perm=200`, `n_splits=30`,
+/// Case: `pls1_confirmatory_test` with `test_method=split_exact`, `n_perm=200`, `n_splits=30`,
 /// `seed=42`, `k=1`. Unweighted dense K = 1: exercises `split_exact`'s no-refit route
 /// (the [`split_exact`] case above covers the refit route via K = 2;
 /// [`weighted_split_exact`] covers the no-refit route under weights).
@@ -316,7 +316,7 @@ pub fn split_exact_k1(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
-                "method": "split_exact",
+                "test_method": "split_exact",
                 "args": {"n_perm": 200, "n_splits": 30},
                 "seed": 42
             }),
@@ -331,7 +331,7 @@ pub fn split_exact_k1(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls1_confirmatory_test` with `method=score`, `seed=42`.
+/// Case: `pls1_confirmatory_test` with `test_method=score`, `seed=42`.
 ///
 /// Closed-form score test — no permutation or split count.
 ///
@@ -347,7 +347,7 @@ pub fn score(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
-                "method": "score",
+                "test_method": "score",
                 "args": {},
                 "seed": 42
             }),
@@ -362,7 +362,7 @@ pub fn score(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls1_confirmatory_test` with `method=e`, `seed=42`.
+/// Case: `pls1_confirmatory_test` with `test_method=e`, `seed=42`.
 ///
 /// Universal-inference split-LR e-value — no permutation or split count.
 ///
@@ -378,7 +378,7 @@ pub fn e(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
-                "method": "e",
+                "test_method": "e",
                 "args": {},
                 "seed": 42
             }),
@@ -393,7 +393,7 @@ pub fn e(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls1_confirmatory_test` with `method=split_nb` + CI bundle (`n_boot=300`), `seed=42`.
+/// Case: `pls1_confirmatory_test` with `test_method=split_nb` + CI bundle (`n_boot=300`), `seed=42`.
 ///
 /// Exercises the `ci = Some(CIOpts { ... })` path. Parallelism is disabled
 /// (`disable_parallelism: true`) for fully deterministic output across runs.
@@ -455,7 +455,7 @@ fn split_nb_ci_case(name: &'static str, level: f64) -> ConfirmatoryCase {
         disable_parallelism: true,
         kwargs: serde_json::json!({
             "k": 2,
-            "method": "split_nb",
+            "test_method": "split_nb",
             "args": {"n_splits": 30},
             "ci": true,
             "n_boot": 300,
@@ -475,7 +475,7 @@ fn split_nb_ci_case(name: &'static str, level: f64) -> ConfirmatoryCase {
     }
 }
 
-/// Case: `pls1_confirmatory_test` with `method=raw_perm` on a wide design
+/// Case: `pls1_confirmatory_test` with `test_method=raw_perm` on a wide design
 /// (n=30, p=100), `k=1`, `n_perm=100`, `n_folds=5`.
 ///
 /// The corpus's only fixture that reaches the Gram route in
@@ -503,7 +503,7 @@ pub fn raw_perm_wide(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
-                "method": "raw_perm",
+                "test_method": "raw_perm",
                 "args": {"n_perm": 100, "n_folds": 5},
                 "seed": 42
             }),
@@ -518,7 +518,7 @@ pub fn raw_perm_wide(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls1_confirmatory_test` with `method=raw_perm` on a wide design
+/// Case: `pls1_confirmatory_test` with `test_method=raw_perm` on a wide design
 /// (n=60, p=3000), `k=2`, `n_perm=200`, `n_folds=5`.
 ///
 /// The primal `raw_perm` route at p ≫ n: `k = 2` keeps it off the K = 1 Gram
@@ -541,7 +541,7 @@ pub fn raw_perm_wide_k2(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
-                "method": "raw_perm",
+                "test_method": "raw_perm",
                 "args": {"n_perm": 200, "n_folds": 5},
                 "seed": 42
             }),
@@ -556,7 +556,7 @@ pub fn raw_perm_wide_k2(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls1_confirmatory_test` with `method=split_exact` on the wide
+/// Case: `pls1_confirmatory_test` with `test_method=split_exact` on the wide
 /// design of [`raw_perm_wide_k2`], `k=2`, `n_perm=200`, `n_splits=20`.
 ///
 /// `k = 2` takes the refit route (the no-refit route is K = 1 only), dense
@@ -577,7 +577,7 @@ pub fn split_exact_wide_k2(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
-                "method": "split_exact",
+                "test_method": "split_exact",
                 "args": {"n_perm": 200, "n_splits": 20},
                 "seed": 42
             }),
@@ -597,7 +597,7 @@ fn weighted_confirmatory_weights() -> ndarray::Array1<f64> {
     ndarray::Array1::from_shape_fn(SYNTH_N, |i| if i < 40 { 2.0_f64 } else { 1.0_f64 })
 }
 
-/// Case: weighted `pls1_confirmatory_test` with `method=raw_perm`, `n_perm=200`, `n_folds=5`.
+/// Case: weighted `pls1_confirmatory_test` with `test_method=raw_perm`, `n_perm=200`, `n_folds=5`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
@@ -614,7 +614,7 @@ pub fn weighted_raw_perm(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
-                "method": "raw_perm",
+                "test_method": "raw_perm",
                 "args": {"n_perm": 200, "n_folds": 5},
                 "seed": 42,
                 "weights": "nonuniform"
@@ -630,7 +630,7 @@ pub fn weighted_raw_perm(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: weighted `pls1_confirmatory_test` with `method=split_nb`, `n_splits=50`.
+/// Case: weighted `pls1_confirmatory_test` with `test_method=split_nb`, `n_splits=50`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
@@ -647,7 +647,7 @@ pub fn weighted_split_nb(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
-                "method": "split_nb",
+                "test_method": "split_nb",
                 "args": {"n_splits": 50},
                 "seed": 42,
                 "weights": "nonuniform"
@@ -663,7 +663,7 @@ pub fn weighted_split_nb(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: weighted `pls1_confirmatory_test` with `method=split_exact`, `n_perm=200`,
+/// Case: weighted `pls1_confirmatory_test` with `test_method=split_exact`, `n_perm=200`,
 /// `n_splits=50`. `k=1` dense under weights: exercises `split_exact`'s weighted
 /// no-refit route.
 ///
@@ -682,7 +682,7 @@ pub fn weighted_split_exact(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
-                "method": "split_exact",
+                "test_method": "split_exact",
                 "args": {"n_perm": 200, "n_splits": 50},
                 "seed": 42,
                 "weights": "nonuniform"
@@ -698,7 +698,7 @@ pub fn weighted_split_exact(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: weighted `pls1_confirmatory_test` with `method=score`.
+/// Case: weighted `pls1_confirmatory_test` with `test_method=score`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
@@ -712,7 +712,7 @@ pub fn weighted_score(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
-                "method": "score",
+                "test_method": "score",
                 "args": {},
                 "seed": 42,
                 "weights": "nonuniform"
@@ -728,7 +728,7 @@ pub fn weighted_score(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: weighted `pls1_confirmatory_test` with `method=e`.
+/// Case: weighted `pls1_confirmatory_test` with `test_method=e`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
@@ -742,7 +742,7 @@ pub fn weighted_e(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
-                "method": "e",
+                "test_method": "e",
                 "args": {},
                 "seed": 42,
                 "weights": "nonuniform"
@@ -758,11 +758,11 @@ pub fn weighted_e(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls1_confirmatory_test` with `method=raw_perm` on a tall design
+/// Case: `pls1_confirmatory_test` with `test_method=raw_perm` on a tall design
 /// (n=2000, p=50), `k=2`, `n_perm=1000`, `n_folds=5`, `seed=42`.
 ///
-/// Generated by the explicit-deflation engine before any p-space Gram route
-/// exists. The largest training fold has `n_tr = n − n/n_folds = 1600` rows
+/// Generated by the explicit-deflation (primal) kernel, so it is an
+/// independent reference for the p-space Gram route. The largest training fold has `n_tr = n − n/n_folds = 1600` rows
 /// and `B = n_perm + 1 = 1001` columns, so the X backend's work per block is
 /// `B·(2k + 1)·n_tr·p = 4.004e8`, 4× the Gram backend's starting work floor,
 /// and the n-space Gram route cannot claim it (`n_tr > p`).
@@ -783,7 +783,7 @@ pub fn raw_perm_tall_k2(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
-                "method": "raw_perm",
+                "test_method": "raw_perm",
                 "args": {"n_perm": 1000, "n_folds": 5},
                 "seed": 42
             }),
@@ -805,7 +805,7 @@ pub fn raw_perm_tall_k2(root: &Path) -> Result<Case> {
 /// whatever the nulls are, which pins nothing about them.
 const RAW_PERM_TALL_SNR: f64 = 0.05;
 
-/// Case: `method=score`, `k=1`, `pre_standardized=true` on the wide
+/// Case: `test_method=score`, `k=1`, `pre_standardized=true` on the wide
 /// (n=30, p=100) design of [`raw_perm_wide`], stored in its own inputs file
 /// with every column of X centered and scaled to unit Euclidean norm and y
 /// centered and scaled to unit (population) variance.
@@ -829,7 +829,7 @@ pub fn score_wide_pre_standardized(root: &Path) -> Result<Case> {
         disable_parallelism: false,
         kwargs: serde_json::json!({
             "k": 1,
-            "method": "score",
+            "test_method": "score",
             "args": {},
             "pre_standardized": true,
             "seed": 42
@@ -880,7 +880,7 @@ pub fn weighted_score_wide_pre_standardized(root: &Path) -> Result<Case> {
     let case = |name: &'static str, pre_standardized: bool, weighted: bool| {
         let mut kwargs = serde_json::json!({
             "k": 1,
-            "method": "score",
+            "test_method": "score",
             "args": {},
             "pre_standardized": pre_standardized,
             "seed": 42
@@ -930,7 +930,7 @@ pub fn weighted_score_wide_pre_standardized(root: &Path) -> Result<Case> {
     })
 }
 
-/// Case: weighted `method=split_exact`, `k=2`, `n_perm=200`, `n_splits=50`.
+/// Case: weighted `test_method=split_exact`, `k=2`, `n_perm=200`, `n_splits=50`.
 /// `k=2` takes the honest-refit route: the only fixture of that route under
 /// weights.
 ///
@@ -949,7 +949,7 @@ pub fn weighted_split_exact_k2(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
-                "method": "split_exact",
+                "test_method": "split_exact",
                 "args": {"n_perm": 200, "n_splits": 50},
                 "seed": 42,
                 "weights": "nonuniform"
@@ -965,7 +965,7 @@ pub fn weighted_split_exact_k2(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `method=split_exact`, `k=1`, `n_perm=200`, `n_splits=20` on the wide
+/// Case: `test_method=split_exact`, `k=1`, `n_perm=200`, `n_splits=20` on the wide
 /// (n=60, p=3000) inputs of [`raw_perm_wide_k2`]. Dense `K = 1` takes the
 /// no-refit route, and at this shape its association product runs in the
 /// order `30·30·(3000 + 201) < 60·3000·201` selects; [`split_exact_k1`] pins
@@ -986,7 +986,7 @@ pub fn split_exact_wide_k1(root: &Path) -> Result<Case> {
             disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
-                "method": "split_exact",
+                "test_method": "split_exact",
                 "args": {"n_perm": 200, "n_splits": 20},
                 "seed": 42
             }),
@@ -1013,7 +1013,7 @@ fn weighted_split_nb_ci_case(
 ) -> ConfirmatoryCase {
     let mut kwargs = serde_json::json!({
         "k": 2,
-        "method": "split_nb",
+        "test_method": "split_nb",
         "args": {"n_splits": 30},
         "ci": true,
         "n_boot": 300,

@@ -1,6 +1,5 @@
 //! `rotate`: array and model overloads. The model overload composes
-//! `T·R`, `P·R`, `Rᵀ·Q` here in faer (Python composes them in numpy
-//! today; P5 moves Python onto this path).
+//! `T·R`, `P·R`, `Rᵀ·Q` here in faer.
 
 use faer::linalg::matmul::matmul;
 use faer::{Accum, Mat, MatRef, Par};
@@ -57,7 +56,7 @@ fn rotate_array(
     })
 }
 
-/// A hand-edited `PLS1Result` (Decision 6 allows untagged records) can
+/// A hand-edited `PLS1Result` (untagged records are accepted) can
 /// carry `T`, `P` or `Q` that no longer agree with `W`'s column count.
 /// Composing them would panic inside faer's `matmul`, so check shapes
 /// here and raise `invalid_argument` instead.

@@ -219,7 +219,7 @@ struct Pls3SplitExactCase<'a> {
 ///
 /// # Panics
 /// Panics if the result omits `n_perm` / `n_splits` — unreachable for
-/// `method=split_exact`, which always reports both.
+/// `test_method=split_exact`, which always reports both.
 #[allow(clippy::many_single_char_names)]
 fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
     let function = "pls3_confirmatory_test";
@@ -253,7 +253,7 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
         let mut w = NpzWriter::create(&paths.abs_outputs)?;
         w.add_f64("pvalue", &scalar_f64(r.pvalue))?;
         w.add_f64("statistic", &scalar_f64(r.statistic))?;
-        w.add_string("method", &r.method)?;
+        w.add_string("test_method", &r.test_method)?;
         w.add_i64("k", &scalar_i64(i64::try_from(r.k)?))?;
         w.add_i64(
             "n_perm",
@@ -281,7 +281,7 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
         outputs: paths.rel_outputs,
         kwargs: serde_json::json!({
             "k": 1,
-            "method": "split_exact",
+            "test_method": "split_exact",
             "args": {"n_perm": c.n_perm, "n_splits": c.n_splits},
             "seed": CASE_SEED
         }),
@@ -293,7 +293,7 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
     })
 }
 
-/// Case: `pls3_confirmatory_test` with `method=split_exact`, `n_perm=200`,
+/// Case: `pls3_confirmatory_test` with `test_method=split_exact`, `n_perm=200`,
 /// `n_splits=30`, `seed=42`.
 ///
 /// # Errors
@@ -312,7 +312,7 @@ pub fn confirmatory_split_exact(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls3_confirmatory_test` with `method=split_exact` on a wide design
+/// Case: `pls3_confirmatory_test` with `test_method=split_exact` on a wide design
 /// (n=30, p=100, q=3), `n_perm=100`, `n_splits=30`, `seed=42`.
 ///
 /// The corpus's only `pls3_confirmatory_test` fixture that reaches the Gram
@@ -340,9 +340,9 @@ pub fn confirmatory_split_exact_wide(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `pls3_confirmatory_test` with `method=split_nb`, `n_splits=30`,
+/// Case: `pls3_confirmatory_test` with `test_method=split_nb`, `n_splits=30`,
 /// `seed=42`. Same design as `confirmatory_split_exact`, which clears the
-/// auto-gate on X, so the run is not rerouted and the pinned `method` is
+/// auto-gate on X, so the run is not rerouted and the pinned `test_method` is
 /// `split_nb`.
 ///
 /// # Errors
@@ -383,7 +383,7 @@ pub fn confirmatory_split_nb(root: &Path) -> Result<Case> {
         let mut w = NpzWriter::create(&paths.abs_outputs)?;
         w.add_f64("pvalue", &scalar_f64(r.pvalue))?;
         w.add_f64("statistic", &scalar_f64(r.statistic))?;
-        w.add_string("method", &r.method)?;
+        w.add_string("test_method", &r.test_method)?;
         w.add_i64("k", &scalar_i64(i64::try_from(r.k)?))?;
         // No `n_perm` key: split_nb runs no permutations. `stable_rank` is
         // what the gate saw, mirroring `cases/pls1_confirmatory_test.rs`.
@@ -408,7 +408,7 @@ pub fn confirmatory_split_nb(root: &Path) -> Result<Case> {
         outputs: paths.rel_outputs,
         kwargs: serde_json::json!({
             "k": 1,
-            "method": "split_nb",
+            "test_method": "split_nb",
             "args": {"n_splits": 30},
             "seed": CASE_SEED
         }),

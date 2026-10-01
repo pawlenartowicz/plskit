@@ -153,7 +153,7 @@ matching `pre_standardized_X` / `pre_standardized_Y`.
 
 ## Choosing the method in Rust
 
-The wrappers make `method` a required keyword with no default. In Rust the
+The wrappers make `test_method` a required keyword with no default. In Rust the
 method is the `ConfirmatoryArgs` variant in `opts.args`, and the options
 structs implement `Default`: both `ConfirmatoryTestOpts::default()` and
 `Pls3ConfirmatoryTestOpts::default()` fill `args` with `split_exact`

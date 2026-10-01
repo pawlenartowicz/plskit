@@ -29,7 +29,7 @@ Point PythonCall at a Python that has `plskit` installed, before
 
 ```bash
 export JULIA_CONDAPKG_BACKEND=Null
-export JULIA_PYTHONCALL_EXE=/path/to/venv/bin/python   # has plskit==0.6.2
+export JULIA_PYTHONCALL_EXE=/path/to/venv/bin/python   # has plskit==0.7.0
 ```
 
 `using PLSKit` compares that Python's `plskit.__version__` with the version
@@ -40,7 +40,7 @@ make the version number a false claim.
 
 ```julia
 using PLSKit
-PLSKit.PLSKIT_PY_VERSION                   # "0.6.2"
+PLSKit.PLSKIT_PY_VERSION                   # "0.7.0"
 pls1_fit(randn(30, 4), randn(30)).k_used   # 1
 ```
 

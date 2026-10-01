@@ -1,8 +1,8 @@
-# RULE 1 parity against the Python package PLSKit actually runs: the same
+# Parity against the Python package PLSKit actually runs: the same
 # public functions and result types, and per function the same argument
 # names. Julia positionals are Python's required, not keyword-only
 # parameters, in order; every other parameter is a Julia keyword, in
-# Python's order (spec §5.2). Base.method_argnames / Base.kwarg_decl are
+# Python's order. Base.method_argnames / Base.kwarg_decl are
 # unexported internals: if a Julia upgrade breaks them, this test fails,
 # not the package.
 
@@ -36,7 +36,7 @@ end
 @testset "argument names: $(name)" for name in py_functions
     params = collect(inspect.signature(pygetattr(pk, name)).parameters.values())
     kinds = [pyconvert(String, p.kind.name) for p in params]
-    # §5.2: _api.py has no positional-only parameters, so Julia may pass
+    # _api.py has no positional-only parameters, so Julia may pass
     # every argument by name.
     @test !("POSITIONAL_ONLY" in kinds)
     required = [pyis(p.default, inspect.Parameter.empty) for p in params]

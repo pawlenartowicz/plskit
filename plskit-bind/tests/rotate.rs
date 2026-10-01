@@ -84,7 +84,7 @@ fn a_rotated_model_cannot_be_rotated_again() {
     assert_eq!(e.code, "already_rotated");
 }
 
-// Review Focus 5: every field the rotation does not touch survives it.
+// Every field the rotation does not touch survives it.
 #[test]
 fn rotation_carries_selection_result_and_keep_through() {
     let (x, y) = data(80, 6, 1);
@@ -133,7 +133,7 @@ fn rotate_errors() {
     assert_eq!(e.code, "invalid_argument");
 }
 
-// Review Important #1: a hand-edited model whose T/P/Q no longer agree
+// A hand-edited model whose T/P/Q no longer agree
 // with W's shape must raise invalid_argument, not panic inside faer.
 #[test]
 fn rotate_rejects_a_model_with_mismatched_shapes() {
@@ -216,7 +216,7 @@ fn rotate_rejects_a_model_with_mismatched_shapes() {
     assert!(e.message.contains("'T'"));
 }
 
-// Review Minor 1: an untagged model record missing a nullable field and
+// An untagged model record missing a nullable field and
 // carrying an extra field must still yield output that matches the
 // PLS1Result shape exactly (Python's dataclasses.replace semantics).
 #[test]

@@ -1,4 +1,4 @@
-# Registry parity (spec section 7): the package exports exactly the
+# Registry parity: the package exports exactly the
 # registry's functions, and every generated stub carries the registry's
 # argument names, order and defaults.
 

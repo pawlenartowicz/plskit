@@ -122,8 +122,7 @@ fn x_view<'a>(
 
 /// `Y`, `Y_new`, `W` or `L` for an engine entry: a Fortran-contiguous,
 /// aligned array is read in place, column-major; any other layout is
-/// copied column-major by `np_mat_to_faer`, as every one of them was
-/// before. Only column-major data is read in place because that is the
+/// copied column-major by `np_mat_to_faer`. Only column-major data is read in place because that is the
 /// copy's own layout, so a view and a copy give the same bits in every
 /// entry; a row-major view of a C-ordered `Y` does not (a
 /// `pre_standardized_Y` PLS3 fit moves in the last bits). The seam test
@@ -353,14 +352,15 @@ fn invalid_argument_err(msg: &str) -> PyErr {
     coded_err("invalid_argument", msg)
 }
 
-fn validate_keys(method: &str, args: &Bound<'_, PyDict>, allowed: &[&str]) -> PyResult<()> {
+/// `label` names the argument and its value, e.g. `test_method='raw_perm'`.
+fn validate_keys(label: &str, args: &Bound<'_, PyDict>, allowed: &[&str]) -> PyResult<()> {
     for (k, _) in args.iter() {
         let ks: String = k
             .extract()
             .map_err(|_| invalid_args_err(&format!("args keys must be strings, got {k}")))?;
         if !allowed.iter().any(|a| *a == ks) {
             return Err(invalid_args_err(&format!(
-                "method='{method}' does not accept arg '{ks}'; allowed: {allowed:?}"
+                "{label} does not accept arg '{ks}'; allowed: {allowed:?}"
             )));
         }
     }
@@ -493,12 +493,12 @@ fn parse_confirmatory_args(
     args: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<ConfirmatoryArgs> {
     let m = parse_confirmatory_method(method)?;
-    let label = format!("method='{method}'");
+    let label = format!("test_method='{method}'");
     // Absent keys fall back to the engine's own defaults.
     Ok(match ConfirmatoryArgs::defaults_for(m) {
         ConfirmatoryArgs::RawPerm { n_perm, n_folds } => {
             if let Some(a) = args {
-                validate_keys(method, a, &["n_perm", "n_folds"])?;
+                validate_keys(&label, a, &["n_perm", "n_folds"])?;
             }
             ConfirmatoryArgs::RawPerm {
                 n_perm: arg_usize(args, &label, "n_perm", n_perm)?,
@@ -507,7 +507,7 @@ fn parse_confirmatory_args(
         }
         ConfirmatoryArgs::SplitNb { n_splits, force } => {
             if let Some(a) = args {
-                validate_keys(method, a, &["n_splits", "force"])?;
+                validate_keys(&label, a, &["n_splits", "force"])?;
             }
             ConfirmatoryArgs::SplitNb {
                 n_splits: arg_usize(args, &label, "n_splits", n_splits)?,
@@ -516,7 +516,7 @@ fn parse_confirmatory_args(
         }
         ConfirmatoryArgs::SplitExact { n_perm, n_splits } => {
             if let Some(a) = args {
-                validate_keys(method, a, &["n_perm", "n_splits"])?;
+                validate_keys(&label, a, &["n_perm", "n_splits"])?;
             }
             ConfirmatoryArgs::SplitExact {
                 n_perm: arg_usize(args, &label, "n_perm", n_perm)?,
@@ -525,7 +525,7 @@ fn parse_confirmatory_args(
         }
         other @ (ConfirmatoryArgs::Score | ConfirmatoryArgs::E) => {
             if let Some(a) = args {
-                validate_keys(method, a, &[])?;
+                validate_keys(&label, a, &[])?;
             }
             other
         }
@@ -543,11 +543,11 @@ fn parse_optimal_selector(s: &str) -> PyResult<Selector> {
 
 /// Varimax `args` (`rotate`) / `rotation_args` (`pls1_rotation_stability`).
 fn parse_varimax_args(args: Option<&Bound<'_, PyDict>>) -> PyResult<VarimaxArgs> {
+    let label = "method='varimax'";
     if let Some(a) = args {
-        validate_keys("varimax", a, &["max_iter", "tol", "kaiser_normalize"])?;
+        validate_keys(label, a, &["max_iter", "tol", "kaiser_normalize"])?;
     }
     let d = VarimaxArgs::default();
-    let label = "method='varimax'";
     Ok(VarimaxArgs {
         max_iter: arg_usize(args, label, "max_iter", d.max_iter)?,
         tol: arg_f64(args, label, "tol", d.tol)?,
@@ -841,7 +841,7 @@ fn parse_pls3_confirmatory_args(
     // PLS1 counterparts, so they go through the same parser.
     if method != "split_exact" && method != "split_nb" {
         return Err(invalid_args_err(&format!(
-            "method='{method}' is not available for pls3_confirmatory_test; \
+            "test_method='{method}' is not available for pls3_confirmatory_test; \
              allowed: [\"split_exact\", \"split_nb\"]"
         )));
     }
@@ -956,7 +956,7 @@ fn pls3_transform<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y, k, *, method, args=None,
+#[pyo3(signature = (x, y, k, *, test_method, args=None,
                     pre_standardized_X=false, pre_standardized_Y=false,
                     seed=None, disable_parallelism=false, verbose=false))]
 #[allow(clippy::too_many_arguments)]
@@ -969,7 +969,7 @@ fn pls3_confirmatory_test_raw<'py>(
     x: PyReadonlyArray2<'_, f64>,
     y: PyReadonlyArray2<'_, f64>,
     k: usize,
-    method: &str,
+    test_method: &str,
     args: Option<Bound<'_, PyDict>>,
     pre_standardized_X: bool,
     pre_standardized_Y: bool,
@@ -978,15 +978,15 @@ fn pls3_confirmatory_test_raw<'py>(
     verbose: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let opts = Pls3ConfirmatoryTestOpts {
-        args: parse_pls3_confirmatory_args(method, args.as_ref())?,
+        args: parse_pls3_confirmatory_args(test_method, args.as_ref())?,
         pre_standardized_x: pre_standardized_X,
         pre_standardized_y: pre_standardized_Y,
         seed,
         disable_parallelism,
         verbose,
         // Sparse selection (`keep_x` / `keep_y`) is not exposed on the Python
-        // surface yet; the core defaults keep this call the dense one it has
-        // always been, along with the `max_iter` / `tol` the core picks.
+        // surface yet; the core defaults make this the dense test, with the
+        // core's `max_iter` / `tol`.
         ..Pls3ConfirmatoryTestOpts::default()
     };
     let x = aligned(x)?;
@@ -1004,7 +1004,7 @@ fn pls3_confirmatory_test_raw<'py>(
     let d = PyDict::new(py);
     d.set_item("pvalue", r.pvalue)?;
     d.set_item("statistic", r.statistic)?;
-    d.set_item("method", r.method.clone())?;
+    d.set_item("test_method", r.test_method.clone())?;
     d.set_item("k", r.k)?;
     d.set_item("n_perm", r.n_perm)?;
     d.set_item("n_splits", r.n_splits)?;
@@ -1038,7 +1038,6 @@ fn rotate<'py>(
     let lc = &mut l_copy;
     let lf_ref = l.as_ref().map(move |a| col_major_view(a, lc)).transpose()?;
     let out: RotateOutput = map_res(core_rotate(wf, rot_method, lf_ref))?;
-    // PyO3 0.26: `PyDict::new` (was `new_bound` in 0.22).
     let d = PyDict::new(py);
     d.set_item("w_rot", faer_mat_to_np(py, out.w_rot))?;
     d.set_item("r", faer_mat_to_np(py, out.r))?;
@@ -1053,7 +1052,7 @@ fn rotate<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y, k, *, method, args=None,
+#[pyo3(signature = (x, y, k, *, test_method, args=None,
                     ci=false, n_boot=None, m_rate=None, level=None,
                     max_failure_rate=None,
                     pre_standardized=false, seed=None,
@@ -1068,7 +1067,7 @@ fn pls1_confirmatory_test_raw<'py>(
     x: PyReadonlyArray2<'_, f64>,
     y: PyReadonlyArray1<'_, f64>,
     k: usize,
-    method: &str,
+    test_method: &str,
     args: Option<Bound<'_, PyDict>>,
     ci: bool,
     n_boot: Option<usize>,
@@ -1096,7 +1095,7 @@ fn pls1_confirmatory_test_raw<'py>(
     };
     let opts_defaults = ConfirmatoryTestOpts::default();
     let opts = ConfirmatoryTestOpts {
-        args: parse_confirmatory_args(method, args.as_ref())?,
+        args: parse_confirmatory_args(test_method, args.as_ref())?,
         pre_standardized,
         seed,
         disable_parallelism,
@@ -1124,7 +1123,7 @@ fn pls1_confirmatory_test_raw<'py>(
     let d = PyDict::new(py);
     d.set_item("pvalue", r.pvalue)?;
     d.set_item("statistic", r.statistic)?;
-    d.set_item("method", r.method.clone())?;
+    d.set_item("test_method", r.test_method.clone())?;
     d.set_item("k", r.k)?;
     d.set_item("n_perm", r.n_perm)?;
     d.set_item("n_splits", r.n_splits)?;
@@ -1264,11 +1263,11 @@ fn run_find_k_optimal<'py>(
         None => None,
     };
     let allowed: &[&str] = &["n_folds", "n_perm", "n_splits", "force"];
+    let label = "method='optimal'";
     if let Some(a) = args.as_ref() {
-        validate_keys("optimal", a, allowed)?;
+        validate_keys(label, a, allowed)?;
     }
     let args = args.as_ref();
-    let label = "method='optimal'";
     let n_folds = arg_usize(args, label, "n_folds", defaults.n_folds)?;
     // Reject n_folds with bic.
     if matches!(sel, Selector::Bic) && arg(args, "n_folds").is_some() {
@@ -1517,7 +1516,7 @@ fn run_find_k_sequence<'py>(
         }
     };
     if let Some(a) = args.as_ref() {
-        validate_keys("sequence", a, allowed)?;
+        validate_keys("method='sequence'", a, allowed)?;
     }
     let args = args.as_ref();
     let label = format!("test_method='{test_method}'");
@@ -1858,7 +1857,7 @@ fn spls1_find_keep_optimal<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let allowed: &[&str] = &["n_folds"];
     if let Some(a) = args.as_ref() {
-        validate_keys("keep_optimal", a, allowed)?;
+        validate_keys("method='keep_optimal'", a, allowed)?;
     }
     let n_folds = arg_usize(
         args.as_ref(),

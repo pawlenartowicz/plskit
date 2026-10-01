@@ -1,6 +1,6 @@
 # The one path from R into Rust. Every generated stub in stubs.R calls
-# .plskit_call(); the conversion rules are spec section 4.2 (inputs) and
-# 4.5 (conditions).
+# .plskit_call(); inputs are prepared in R and converted in Rust, and
+# engine errors and warnings come back as R conditions.
 
 .plskit_env <- new.env(parent = emptyenv())
 
@@ -59,11 +59,11 @@
 
 # R-side input preparation, applied recursively: a data.frame of numeric
 # (or logical) columns becomes a matrix, an integer or logical matrix
-# becomes double (RULE 3; logical vectors are promoted at the top level in
+# becomes double (the engine takes float64 input; logical vectors are promoted at the top level in
 # .plskit_call, where the registry kind is known), strings and names are
 # re-encoded as UTF-8 and checked. Everything else is read by the Rust
-# seam. `is_seed` is TRUE only for the top-level `seed` argument (Ctx:
-# bit64::integer64 there means an exact-but-huge seed, see
+# seam. `is_seed` is TRUE only for the top-level `seed` argument (there,
+# bit64::integer64 means an exact-but-huge seed, see
 # .plskit_check_integer64).
 .plskit_prep <- function(x, call, is_seed = FALSE) {
   x <- .plskit_check_integer64(x, is_seed, call)

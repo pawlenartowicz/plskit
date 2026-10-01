@@ -2,9 +2,6 @@
 //! asks "does varimax rotation make axes more replicable than they would have
 //! been on the unrotated NIPALS basis?" Output is a paired
 //! rotated-vs-unrotated variance ratio with paired-bootstrap CIs.
-//!
-//! Supersedes the centered-scaled `agreement` reduction (the original
-//! `point ≡ 0` reduction was mathematically ill-posed).
 
 #![allow(clippy::doc_markdown)]
 
@@ -953,8 +950,8 @@ mod tests {
     /// The worker reads X only through row gathers of owned column-major
     /// copies, so every layout of X gives the owned matrix's per-axis
     /// residuals to the bit once the references are fixed. The references
-    /// are fitted on the owned matrix: `pls1_fit` itself is only
-    /// rounding-equal across layouts (CHANGELOG 0.6.1; owned by fit.rs).
+    /// are fitted on the owned matrix: `pls1_fit` itself is equal
+    /// across layouts only to rounding.
     #[test]
     fn rotation_stability_worker_is_layout_invariant() {
         crate::test_support::assert_families_layout_invariant(

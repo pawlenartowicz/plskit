@@ -8,8 +8,8 @@
 # `{field}_{point|lower|upper|sd}` (`{field}_k{i}_{part}` for list items)
 # encode CIScalars.
 
-# PLSKIT_CORPUS_EXACT=1 turns the comparison into the spec 7 bit canary
-# (atol 0): values are compared with `==`, so -0 equals 0 and NaN payload
+# PLSKIT_CORPUS_EXACT=1 compares with atol 0 (an exact-equality
+# canary): values are compared with `==`, so -0 equals 0 and NaN payload
 # bits are not compared. This is not a bit-identity check, and it is only
 # meaningful on Linux x86_64, the host the fixtures come from.
 EXACT <- env_flag("PLSKIT_CORPUS_EXACT")

@@ -1,4 +1,4 @@
-# Results passed back into the package (spec section 4.4).
+# Results passed back into the package.
 
 d <- make_xy()
 
@@ -85,32 +85,32 @@ test_that("every result's fields follow the registry order", {
     if (is.list(x)) for (v in x) check(v)
   }
   check(pls1_fit(d$X, d$y, k = "optimal", k_max = 3, seed = 1))
-  check(pls1_confirmatory_test(d$X, d$y, method = "split_exact", ci = TRUE, n_boot = 100, seed = 1))
+  check(pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", ci = TRUE, n_boot = 100, seed = 1))
   check(pls1_rotation_stability(d$X, d$y, 2, n_boot = 100, seed = 1))
 })
 
-# Fix round 1 (task-3-fix1.md).
+# Input coercion and malformed passed-back records.
 
-test_that("F2: a logical data vector is promoted to double, like numpy's bool cast", {
+test_that("a logical data vector is promoted to double, like numpy's bool cast", {
   y_logical <- d$y > 0
   fit_logical <- pls1_fit(d$X, y_logical, k = 2)
   fit_numeric <- pls1_fit(d$X, as.numeric(y_logical), k = 2)
   expect_identical(fit_logical, fit_numeric)
 })
 
-test_that("F2: a scalar logical flag is never promoted (it stays a flag, not data)", {
-  fit_true <- pls1_confirmatory_test(d$X, d$y, method = "split_exact", ci = TRUE, n_boot = 100, seed = 1)
-  fit_false <- pls1_confirmatory_test(d$X, d$y, method = "split_exact", ci = FALSE, n_boot = 100, seed = 1)
+test_that("a scalar logical flag is never promoted (it stays a flag, not data)", {
+  fit_true <- pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", ci = TRUE, n_boot = 100, seed = 1)
+  fit_false <- pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", ci = FALSE, n_boot = 100, seed = 1)
   expect_false(isTRUE(all.equal(fit_true, fit_false)))
 })
 
-test_that("F3: a 1-D array is a plain vector, not rejected", {
+test_that("a 1-D array is a plain vector, not rejected", {
   fit_vec <- pls1_fit(d$X, d$y, k = 2)
   fit_arr <- pls1_fit(d$X, array(d$y), k = 2)
   expect_identical(fit_vec, fit_arr)
 })
 
-test_that("F4: literal duplicate int-map names raise invalid_argument", {
+test_that("literal duplicate int-map names raise invalid_argument", {
   fit <- pls1_fit(d$X, d$y, k = "optimal", k_max = 4, seed = 7)
   broken <- fit
   names(broken$selection_result$cv_scores) <- c("1", "1", "3", "4")
@@ -119,7 +119,7 @@ test_that("F4: literal duplicate int-map names raise invalid_argument", {
   expect_match(err$message, "cv_scores", fixed = TRUE)
 })
 
-test_that("F4: a non-canonical int-map name ('01') is not silently accepted as a key", {
+test_that("a non-canonical int-map name ('01') is not silently accepted as a key", {
   fit <- pls1_fit(d$X, d$y, k = "optimal", k_max = 4, seed = 7)
   broken <- fit
   names(broken$selection_result$cv_scores) <- c("1", "01", "3", "4")
@@ -133,20 +133,20 @@ test_that("F4: a non-canonical int-map name ('01') is not silently accepted as a
   )
 })
 
-test_that("F6: a duplicate key in a passed-back model names the field", {
+test_that("a duplicate key in a passed-back model names the field", {
   err <- catch_plskit(pls1_predict(list(a = 1, a = 2), d$X))
   expect_identical(err$code, "invalid_argument")
   expect_match(err$message, "duplicate key 'a'", fixed = TRUE)
 })
 
-test_that("F7: a byte string that is not valid UTF-8 raises invalid_argument", {
+test_that("a byte string that is not valid UTF-8 raises invalid_argument", {
   bad <- "\xff"
   Encoding(bad) <- "bytes"
   err <- catch_plskit(rotate(pls1_fit(d$X, d$y, k = 1), method = bad))
   expect_identical(err$code, "invalid_argument")
 })
 
-# Final review E4: smoke tests for functions no other test calls.
+# Smoke tests for functions no other test calls.
 
 test_that("plssvd_fit, plssvd_transform and split_nb_gate work", {
   Y <- cbind(d$y, d$y + stats::rnorm(60))
@@ -163,7 +163,7 @@ test_that("plssvd_fit, plssvd_transform and split_nb_gate work", {
   expect_type(gate$n_eff, "double")
 })
 
-test_that("F7: a byte-string name that is not valid UTF-8 raises invalid_argument", {
+test_that("a byte-string name that is not valid UTF-8 raises invalid_argument", {
   bad <- "\xff"
   Encoding(bad) <- "bytes"
   bad_named <- list(seed = 1L)

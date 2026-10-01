@@ -1,6 +1,6 @@
 # Inference
 
-`pls3_confirmatory_test(X, Y, k=1, *, method=...)` asks one question: **is
+`pls3_confirmatory_test(X, Y, k=1, *, test_method=...)` asks one question: **is
 there a real X↔Y association on the first latent variable, or could the
 fitted pattern be noise?** It returns the same `ConfirmatoryTestResult`
 as `pls1_confirmatory_test`.
@@ -32,7 +32,7 @@ intervals on the saliences, which is one reason the family offers none
 
 ## Two methods
 
-`method` is keyword-only and required; there is no default.
+`test_method` is keyword-only and required; there is no default.
 
 | | `split_exact` (recommended) | `split_nb` |
 |---|---|---|
@@ -76,7 +76,7 @@ design when any of these holds:
 - X has 4 columns or fewer.
 
 A flagged design runs `split_exact` instead, with `n_perm = 1000` and your
-`n_splits`. `result.method` then reports `"split_exact"`, and Python emits
+`n_splits`. `result.test_method` then reports `"split_exact"`, and Python emits
 a `UserWarning`. `args={"force": True}` skips the reroute and runs `split_nb`
 anyway. `result.stable_rank` is filled whenever `split_nb` was requested,
 since it is what the gate saw.

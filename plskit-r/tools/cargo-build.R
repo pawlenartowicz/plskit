@@ -14,6 +14,10 @@
 # lock file is checked to confirm both crates came from the patch. The
 # committed rust/Cargo.toml is never edited. Without PLSKIT_CARGO_CONFIG
 # the build uses the committed rust/Cargo.lock with --locked.
+#
+# Release mode: the release tarball (r-universe branch, CRAN) carries every
+# crate in rust/vendor.tar.xz, written by the vX.Y.Z-r release job. When
+# that file is present the build unpacks it and runs offline against it.
 
 args <- commandArgs(trailingOnly = TRUE)
 target <- sub("^--target=", "", grep("^--target=", args, value = TRUE))
@@ -62,7 +66,7 @@ if (nzchar(config)) {
   writeLines(toml, file.path(dev_dir, "Cargo.toml"))
   manifest <- file.path(dev_dir, "Cargo.toml")
   # Start from the workspace lock file, so the dev build compiles the
-  # dependency versions the workspace CI tests (spec 2.3); cargo keeps
+  # dependency versions the workspace CI tests; cargo keeps
   # them and adds only extendr. Refreshed whenever the workspace lock is
   # newer than the dev one.
   cfg <- readLines(config)
@@ -93,6 +97,24 @@ if (nzchar(config)) {
     )
   }
   flags <- c(flags, "--locked")
+  vendor_tar <- file.path(crate_dir, "vendor.tar.xz")
+  if (file.exists(vendor_tar)) {
+    if (utils::untar(vendor_tar, exdir = crate_dir) != 0L) fail("could not unpack ", vendor_tar)
+    # A config file rather than inline --config 'key="value"' strings:
+    # system2 passes arguments through the shell unquoted, which would
+    # strip the TOML quotes. The absolute directory avoids cargo's rules
+    # for resolving relative paths in a --config file.
+    vendor_cfg <- file.path(target_dir, "vendor-config.toml")
+    dir.create(target_dir, recursive = TRUE, showWarnings = FALSE)
+    writeLines(c(
+      "[source.crates-io]",
+      'replace-with = "vendored-sources"',
+      "[source.vendored-sources]",
+      sprintf('directory = "%s"', file.path(crate_dir, "vendor"))
+    ), vendor_cfg)
+    flags <- c(flags, "--offline", "--config", vendor_cfg)
+    message("plskit: offline build against the crates in ", vendor_tar)
+  }
 }
 flags <- c(flags, "--manifest-path", manifest)
 if (clippy) flags <- c(flags, "--", "-D", "warnings")

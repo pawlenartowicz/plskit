@@ -11,7 +11,7 @@ members = [
 # Single source of truth for the workspace version. Every crate uses
 # `version.workspace = true`; DESCRIPTION / Project.toml / testdata pick
 # up the same number, and CI enforces lock-step on `v*` tags.
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/pawlenartowicz/plskit"
@@ -23,7 +23,7 @@ rust-version = "1.85"
 # version. The exact pin must equal [workspace.package].version: on a
 # version bump without it, every build fails to resolve, so the two
 # cannot drift silently (a caret requirement would keep matching).
-plskit = { path = "plskit-rs", version = "=0.6.2" }
+plskit = { path = "plskit-rs", version = "=0.7.0" }
 plskit-bind = { path = "plskit-bind" }
 procrustes = "0.1.0"
 faer = "0.24"                   # caret within 0.24.x; faer minor bump = plskit major bump

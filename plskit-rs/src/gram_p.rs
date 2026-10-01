@@ -40,20 +40,20 @@ const U: f64 = f64::EPSILON * 0.5;
 /// the cap, and one block is alive at a time.
 pub(crate) const GRAM_P_MAX: usize = 4000;
 
-/// Largest component count the route accepts. The calibration sweep
+/// Largest component count the route accepts. At `k = 4` ordinary families
+/// fall back above 1% (`n_much_larger_than_p`, `5000 × 8`: both replicates
+/// fall back at component 4), so the cap is 3.
+/// `python3 scripts/gate_feasibility.py gram_p` covers that `n ≫ p` shape
+/// alongside the tall corpus fixture blocks, the memprobe shape
+/// `10 000 × 500` and an ordinary `500 × 20` block, and prints the same
+/// value: the largest `k ≤ 20` whose fallback rate on ordinary data is at
+/// most 1% at every one of those shapes, for every `k` up to it. The
+/// calibration sweep
 /// (`gram_p::tests_sweep::gram_backend_matches_x_backend_across_design_families`)
-/// lowered it from 4 to 3 after ordinary families fell back above 1% at
-/// `k = 4` (`n_much_larger_than_p`, `5000 × 8`: both replicates fell back
-/// at component 4). The feasibility spike
-/// (`python3 scripts/gate_feasibility.py gram_p`) now includes that
-/// `n ≫ p` shape alongside the tall corpus fixture blocks, the memprobe
-/// shape `10 000 × 500` and an ordinary `500 × 20` block, and prints the
-/// same value: the largest `k ≤ 20` whose fallback rate on ordinary data
-/// is at most 1% at every spike shape, for every `k` up to it, so 3.
-/// The calibration sweep may only lower it further.
+/// may only lower it further.
 /// Calibration range: at `k = 3` the decision gates fall back on most
-/// replicates once `n/p` is above about 2000 (measured with the spike's
-/// recursion: `20 000 × 8` at 7%, `100 000 × 8` at 100%), which costs a
+/// replicates once `n/p` is above about 2000 (measured with the recursion
+/// in `scripts/gate_feasibility.py`: `20 000 × 8` at 7%, `100 000 × 8` at 100%), which costs a
 /// wasted attempt before the Primal arm but never a wrong answer; `k = 2`
 /// never fell back on any shape tried.
 pub(crate) const K_GRAM_MAX: usize = 3;
@@ -86,9 +86,8 @@ pub(crate) const GRAM_P_MIN_WORK: f64 = 1e8;
 /// grows and no single-`p` measurement covers the family. `3000` sits under
 /// every measured break-even with a comfortable margin (fallback at most
 /// 20% at `n_tr/p = 3000` across the three `p`, an over 4x net win even in
-/// the worst cell) while clearing the documented `n_tr/p = 2500` case
-/// (`20000×8` at `k = 3`, 7.9x faster with a 1.5% fallback rate) that
-/// motivated `K_GRAM_MAX`; the calibration sweep may only lower it further.
+/// the worst cell) while still admitting `n_tr/p = 2500`
+/// (`20000×8` at `k = 3`: 7.9x faster with a 1.5% fallback rate); the calibration sweep may only lower it further.
 pub(crate) const GRAM_P_TALL_RATIO_MAX_K3: f64 = 3000.0;
 
 /// Cost of building `C = Xs'Xs` per multiply-add, in units of one
@@ -188,8 +187,8 @@ pub(crate) fn gram_p_cost_rule(n_tr: f64, p: f64, n_replicates: f64, k: f64) -> 
 /// The selectors' `GramP` test: [`use_gram_p_route`] on the block shape,
 /// and arguments the Gram-p arms accept (`1 ≤ k ≤ p`; with `keep`,
 /// `1 ≤ keep ≤ p`). Anything else stays on the Primal route, whose per-unit
-/// input checks report it exactly as before, so no argument error ever
-/// depends on the route.
+/// input checks report it, so no argument error ever depends on
+/// the route.
 pub(crate) fn gram_p_eligible(
     n_tr: usize,
     p: usize,
@@ -315,7 +314,7 @@ impl<'a> GramPBlock<'a> {
 /// eigenvalue test. It is a guard, not a bound: the calibration sweep
 /// (`tests_sweep`) calibrates it, raising it only, so that every design
 /// family whose replicates resolve meets the tolerance with a 10× margin.
-/// Starting value 1e-6. Shared with `scripts/gate_feasibility.py`
+/// Shared with `scripts/gate_feasibility.py`
 /// (`GRAM_P_RATIO_MIN`): change both together.
 pub(crate) const RATIO_MIN: f64 = 1e-6;
 
@@ -383,7 +382,7 @@ pub(crate) struct GramFit {
     #[cfg(test)]
     pub(crate) max_rel: f64,
     /// `(tt_a, δtt_a, δp_a)` per component: a diagnostic, reproduced by
-    /// the feasibility spike (`tests_kernel::bounds_reproduce_the_feasibility_spike`).
+    /// `scripts/gate_feasibility.py` (`tests_kernel::bounds_match_gate_feasibility_script`).
     /// Test-only: production replicates neither fill nor allocate it.
     #[cfg(test)]
     pub(crate) bounds: Vec<(f64, f64, f64)>,
@@ -451,7 +450,7 @@ impl GramPBlock<'_> {
     /// per-entry bound the keep gap uses. With a shared support (the gap
     /// gate), selection is a coordinate projection and does not enlarge
     /// `δs_a`. `scripts/gate_feasibility.py` (`gram_p_gates`) transcribes
-    /// this recursion; `tests_kernel::bounds_reproduce_the_feasibility_spike`
+    /// this recursion; `tests_kernel::bounds_match_gate_feasibility_script`
     /// holds the two together.
     ///
     /// # Gates (decisions only)
@@ -879,9 +878,11 @@ mod tests_route_rule {
         // k = 2 at the same shapes is untouched by the ratio cap.
         assert!(use_gram_p_route(n_at_cap, p, b, 2));
         assert!(use_gram_p_route(n_at_cap + p, p, b, 2));
-        // The documented win this cap must keep: n_tr / p = 2500 at k = 3.
+        // A measured win this cap must keep: n_tr / p = 2500 at k = 3
+        // (20 000 × 8: 7.9x faster, 1.5% fallback).
         assert!(use_gram_p_route(20_000, 8, 1000, 3));
-        // The documented loss this cap must refuse: n_tr / p = 12500.
+        // A measured loss this cap must refuse: n_tr / p = 12500
+        // (100 000 × 8: fallback about 100%).
         assert!(!use_gram_p_route(100_000, 8, 300, 3));
     }
 
@@ -1202,8 +1203,8 @@ mod tests_kernel {
     fn the_ratio_gate_refuses_a_nearly_collinear_direction() {
         // Two columns 1e-3 apart: C's small eigenvalue is about 2.5e-7 of
         // tr C, under RATIO_MIN, while the tt band still decides at a = 2
-        // (δtt/tt about 2e-2 against the band's 1/8). The gram_p feasibility
-        // spike's transcription gave Ratio at a = 2 on every draw of this design.
+        // (δtt/tt about 2e-2 against the band's 1/8). The transcription in
+        // `scripts/gate_feasibility.py` gives Ratio at a = 2 on every draw of this design.
         let x1 = unif(1000, 1, 13);
         let e = unif_col(1000, 14);
         let x = Mat::<f64>::from_fn(1000, 2, |i, j| {
@@ -1288,18 +1289,18 @@ mod tests_kernel {
     }
 
     #[test]
-    // The reference values are pasted as the spike prints them; the design
+    // The reference values are pasted as `scripts/gate_feasibility.py` prints them; the design
     // names follow the formulas (n, p, x, y, i, j).
     #[allow(clippy::unreadable_literal, clippy::many_single_char_names)]
-    fn bounds_reproduce_the_feasibility_spike() {
+    fn bounds_match_gate_feasibility_script() {
         // Printed by `python3 scripts/gate_feasibility.py gram_p --reference`:
         // `(tt_a, δtt_a, δp_a)` for a = 1..=3 on the
-        // closed-form design below, with the ‖C‖₂ estimate. The spike
+        // closed-form design below, with the ‖C‖₂ estimate. The script
         // transcribes this backend's recursion, so the two agree to
         // rounding; a mismatch means one transcription left the formulas of
         // `fit_replicate_diag`'s doc comment.
-        const SPIKE_C2_NORM: f64 = 1719.5640898689182;
-        const SPIKE_REFERENCE: &[(f64, f64, f64)] = &[
+        const SCRIPT_C2_NORM: f64 = 1719.5640898689182;
+        const SCRIPT_REFERENCE: &[(f64, f64, f64)] = &[
             (
                 599.6834622091338,
                 2.2808421817899206e-10,
@@ -1327,21 +1328,21 @@ mod tests_kernel {
         let rel = |a: f64, b: f64| (a - b).abs() / b.abs();
         let block = GramPBlock::new(xs.as_ref(), Par::Seq);
         assert!(
-            rel(block.c2_norm, SPIKE_C2_NORM) <= 1e-12,
-            "c2_norm {:e} vs spike {SPIKE_C2_NORM:e}",
+            rel(block.c2_norm, SCRIPT_C2_NORM) <= 1e-12,
+            "c2_norm {:e} vs script {SCRIPT_C2_NORM:e}",
             block.c2_norm
         );
         let g = block
             .fit_replicate_diag(ys.as_ref(), 3, None)
             .expect("the reference design resolves at k = 3");
-        assert_eq!(g.bounds.len(), SPIKE_REFERENCE.len());
+        assert_eq!(g.bounds.len(), SCRIPT_REFERENCE.len());
         for (a, (&(tt, d_tt, d_p), &(s_tt, s_dtt, s_dp))) in
-            g.bounds.iter().zip(SPIKE_REFERENCE).enumerate()
+            g.bounds.iter().zip(SCRIPT_REFERENCE).enumerate()
         {
             for (what, got, want) in [("tt", tt, s_tt), ("d_tt", d_tt, s_dtt), ("d_p", d_p, s_dp)] {
                 assert!(
                     rel(got, want) <= 1e-12,
-                    "component {}: {what} {got:e} vs spike {want:e}",
+                    "component {}: {what} {got:e} vs script {want:e}",
                     a + 1
                 );
             }
@@ -1808,7 +1809,7 @@ mod tests_site_route {
     };
     use crate::perm_null::perm_null_route;
     use crate::signal_test::{
-        raw_perm_route, split_exact_refit_route, with_new_routes_disabled, ReplicateRoute,
+        raw_perm_route, split_exact_refit_route, with_gram_routes_disabled, ReplicateRoute,
     };
 
     #[test]
@@ -1884,7 +1885,7 @@ mod tests_site_route {
     #[test]
     fn invalid_arguments_never_take_the_gram_p_route() {
         // k = 0, k > p, keep = 0 and keep > p reach the Primal units, whose
-        // input checks report them exactly as before.
+        // input checks report them, independent of the route.
         assert_eq!(
             raw_perm_route(2000, 5, 50, 1000, 0, None, false),
             ReplicateRoute::Primal
@@ -1913,17 +1914,17 @@ mod tests_site_route {
     }
 
     #[test]
-    fn new_routes_disabled_restricts_to_the_special_and_primal_routes() {
+    fn gram_routes_disabled_restricts_to_the_special_and_primal_routes() {
         let tall = || perm_null_route(2000, 50, 1000, 3, false);
         assert_eq!(tall(), ReplicateRoute::GramP);
-        assert_eq!(with_new_routes_disabled(tall), ReplicateRoute::Primal);
+        assert_eq!(with_gram_routes_disabled(tall), ReplicateRoute::Primal);
         assert_eq!(
-            with_new_routes_disabled(|| raw_perm_route(2000, 5, 50, 1000, 2, Some(10), false)),
+            with_gram_routes_disabled(|| raw_perm_route(2000, 5, 50, 1000, 2, Some(10), false)),
             ReplicateRoute::Primal
         );
         // Special is not a new route and survives the guard.
         assert_eq!(
-            with_new_routes_disabled(|| raw_perm_route(60, 5, 3000, 200, 1, None, false)),
+            with_gram_routes_disabled(|| raw_perm_route(60, 5, 3000, 200, 1, None, false)),
             ReplicateRoute::Special
         );
         // The guard restores the previous state on exit.

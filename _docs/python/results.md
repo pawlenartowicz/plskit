@@ -163,7 +163,7 @@ input gives `k_star = 0` from `spls1_find_k_optimal`.
 |---|---|---|
 | `pvalue` | `float` | always |
 | `statistic` | `float` | always |
-| `method` | `str` | one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`; `"split_exact"` when a `"split_nb"` request was rerouted by the auto-gate |
+| `test_method` | `str` | one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`; `"split_exact"` when a `"split_nb"` request was rerouted by the auto-gate |
 | `k` | `int` | the K tested (echoed from the input) |
 | `n_perm` | `int \| None` | not None for resampling-family methods, None for `score` / `e` |
 | `n_splits` | `int \| None` | not None for `split_*` methods, None for `raw_perm` / `score` / `e` |

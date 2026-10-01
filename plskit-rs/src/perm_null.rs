@@ -366,10 +366,10 @@ fn signed_z(beta_ref: &[f64], sd: &[f64]) -> Vec<f64> {
 /// `pls1_perm_null`'s selector, called once per call on the calling thread
 /// before any parallel work. `Nspace` for dense, unweighted input the
 /// n-space rule admits (`dual_route::nspace_eligible_perm_null`), unless
-/// `new_routes_disabled()`. `GramP` when `gram_p::gram_p_eligible` admits
+/// `gram_routes_disabled()`. `GramP` when `gram_p::gram_p_eligible` admits
 /// the block (tried after `Nspace`: in the overlap band
 /// `n_tr < p < 1.54·n_tr` the n-space route is cheaper), unless
-/// `new_routes_disabled()`; its replicate count is `n_perm`, since the
+/// `gram_routes_disabled()`; its replicate count is `n_perm`, since the
 /// observed fit stays on the Primal route. `Primal` otherwise.
 pub(crate) fn perm_null_route(
     n: usize,
@@ -378,7 +378,7 @@ pub(crate) fn perm_null_route(
     k: usize,
     weighted: bool,
 ) -> ReplicateRoute {
-    if crate::signal_test::new_routes_disabled() {
+    if crate::signal_test::gram_routes_disabled() {
         return ReplicateRoute::Primal;
     }
     if crate::dual_route::nspace_eligible_perm_null(n, p, n_perm, k, !weighted) {
@@ -836,7 +836,7 @@ mod tests_nspace {
     use super::*;
     use crate::dual_route::{nspace_blocks_built, nspace_eligible_perm_null, K_DUAL_MAX};
     use crate::linalg::{standardize, standardize1};
-    use crate::signal_test::{with_new_routes_disabled, ReplicateRoute};
+    use crate::signal_test::{with_gram_routes_disabled, ReplicateRoute};
     use faer::{Col, Mat};
     use rand::RngExt;
     use rand::SeedableRng;
@@ -941,7 +941,7 @@ mod tests_nspace {
             "past K_DUAL_MAX"
         );
         assert_eq!(
-            with_new_routes_disabled(|| perm_null_route(40, 2000, 100, 2, false)),
+            with_gram_routes_disabled(|| perm_null_route(40, 2000, 100, 2, false)),
             ReplicateRoute::Primal,
             "override"
         );
@@ -958,7 +958,7 @@ mod tests_nspace {
             "the n-space route must run"
         );
         let before = nspace_blocks_built();
-        let _ = with_new_routes_disabled(|| run(&x, &y, 2, opts(true)));
+        let _ = with_gram_routes_disabled(|| run(&x, &y, 2, opts(true)));
         assert_eq!(nspace_blocks_built(), before, "override: primal only");
         let w = Col::<f64>::from_fn(40, |i| 0.5 + (i % 3) as f64 * 0.5);
         let before = nspace_blocks_built();
@@ -983,7 +983,7 @@ mod tests_nspace {
         for k in 1..=K_DUAL_MAX {
             let (x, y) = wide(40, 2000, 0.5, 20 + k as u64);
             let gram = run(&x, &y, k, opts(true));
-            let primal = with_new_routes_disabled(|| run(&x, &y, k, opts(true)));
+            let primal = with_gram_routes_disabled(|| run(&x, &y, k, opts(true)));
             assert_rows_close(&gram, &primal, &format!("k={k}"));
             assert_summaries_close(&gram, &primal, &format!("k={k}"));
             assert_eq!(
@@ -1017,7 +1017,7 @@ mod tests_nspace {
         for s in [1e-4, 1e-6, 1e-8, 1e-10, 1e-12] {
             let xt = Mat::<f64>::from_fn(40, 2000, |i, j| xs[(i, j)] * s);
             let gram = run(&xt, &ys, 2, o);
-            let primal = with_new_routes_disabled(|| run(&xt, &ys, 2, o));
+            let primal = with_gram_routes_disabled(|| run(&xt, &ys, 2, o));
             assert_rows_close(&gram, &primal, &format!("scale {s:e}"));
         }
         // At these two scales no replicate clears the gates, so the whole
@@ -1025,7 +1025,7 @@ mod tests_nspace {
         for s in [1e-8, 1e-12] {
             let xt = Mat::<f64>::from_fn(40, 2000, |i, j| xs[(i, j)] * s);
             let gram = run(&xt, &ys, 2, o);
-            let primal = with_new_routes_disabled(|| run(&xt, &ys, 2, o));
+            let primal = with_gram_routes_disabled(|| run(&xt, &ys, 2, o));
             assert_matrix_bits_eq(&gram, &primal, &format!("scale {s:e}"));
         }
     }
@@ -1044,7 +1044,7 @@ mod tests_nspace {
         for m in [1e-160, 1e-120, 1e120, 1e160] {
             let yt = Col::<f64>::from_fn(40, |i| ys[i] * m);
             let gram = run(&xs, &yt, 2, o);
-            let primal = with_new_routes_disabled(|| run(&xs, &yt, 2, o));
+            let primal = with_gram_routes_disabled(|| run(&xs, &yt, 2, o));
             assert_rows_close(&gram, &primal, &format!("|y| ~ {m:e}"));
         }
         // At these two magnitudes `‖z‖²` underflows or overflows for every
@@ -1052,7 +1052,7 @@ mod tests_nspace {
         for m in [1e-160, 1e160] {
             let yt = Col::<f64>::from_fn(40, |i| ys[i] * m);
             let gram = run(&xs, &yt, 2, o);
-            let primal = with_new_routes_disabled(|| run(&xs, &yt, 2, o));
+            let primal = with_gram_routes_disabled(|| run(&xs, &yt, 2, o));
             assert_matrix_bits_eq(&gram, &primal, &format!("|y| ~ {m:e}"));
         }
     }
@@ -1062,7 +1062,7 @@ mod tests_nspace {
 mod tests_gram_p {
     use super::*;
     use crate::gram_p::test_designs::{conditioned, linear_y, unif};
-    use crate::signal_test::{with_new_routes_disabled, ReplicateRoute};
+    use crate::signal_test::{with_gram_routes_disabled, ReplicateRoute};
     use faer::{Col, Mat, Par};
 
     fn weights(n: usize) -> Col<f64> {
@@ -1110,7 +1110,7 @@ mod tests_gram_p {
     #[test]
     fn gram_p_arm_falls_back_to_the_primal_arm_to_the_bit() {
         // κ = 1e9 at k = p = 20: every permutation fails a gate (Tt by
-        // component 4 in the gram_p feasibility spike's transcription), so every GramP row is the
+        // component 4 on this design), so every GramP row is the
         // Primal arm's row, bit for bit. The route rule never sends k = 20
         // here; the arm itself accepts any k.
         let xs = conditioned(2000, 20, 1e9, 5);
@@ -1186,7 +1186,7 @@ mod tests_gram_p {
                 .expect("perm_null")
             };
             let g = call();
-            let xr = with_new_routes_disabled(call);
+            let xr = with_gram_routes_disabled(call);
             // The observed fit stays on the Primal route on both runs.
             assert!(g
                 .beta_ref
@@ -1256,7 +1256,7 @@ mod tests_gram_p {
                     .expect("perm_null")
             };
             let g = call();
-            let xr = with_new_routes_disabled(call);
+            let xr = with_gram_routes_disabled(call);
             assert_rows_close(
                 &g.beta_perm_matrix.expect("matrix"),
                 &xr.beta_perm_matrix.expect("matrix"),

@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     println!(
         "{}: statistic = {:.3}, p = {:.4}",
-        test.method, test.statistic, test.pvalue
+        test.test_method, test.statistic, test.pvalue
     );
 
     // 3. Fit PLS3 (PLSSVD) on two blocks: X and a 3-column Y block.
@@ -102,7 +102,7 @@ signal at a fixed `k`. The method is the `ConfirmatoryArgs` variant;
 (see [Choosing the method in Rust](api.md#choosing-the-method-in-rust)).
 `split_exact` at `k = 1` is the recommended method. A fixed `seed` makes
 the result reproducible, and the same seed gives byte-identical output at
-any thread count. `test.method` reports the method that actually ran.
+any thread count. `test.test_method` reports the method that actually ran.
 
 **3. PLS3.** `pls3_fit(x, y, k, weights, opts)` takes two matrices: neither
 block is the outcome, and the model describes which pattern of `X` covaries

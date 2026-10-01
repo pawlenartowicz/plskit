@@ -21,7 +21,7 @@ const _RESULT_FIELDS = Dict{Symbol,Vector{Symbol}}(
     :FindKOptimalResult => [:k_star, :selector, :cv_scores, :cv_scores_se, :bic_scores, :pvalues, :diagnostic, :seed, :n_eff, :stable_rank],
     :FindKSequenceResult => [:k_star, :pvalues, :test_method, :alpha, :seed, :n_eff, :stable_rank],
     :FindKeepOptimalResult => [:keep_star, :k, :cv_scores, :cv_scores_se, :keep_grid, :seed, :n_eff],
-    :ConfirmatoryTestResult => [:pvalue, :statistic, :method, :k, :n_perm, :n_splits, :seed, :n_eff, :rho_hat, :stable_rank, :ci],
+    :ConfirmatoryTestResult => [:pvalue, :statistic, :test_method, :k, :n_perm, :n_splits, :seed, :n_eff, :rho_hat, :stable_rank, :ci],
     :SplitNbGateResult => [:fires, :stable_rank, :n_eff],
     :PermNullResult => [:n_perm, :k, :seed, :beta_ref, :beta_perm_mean, :beta_perm_sd, :beta_perm_z, :beta_perm_matrix, :n_eff],
     :CIScalar => [:point, :lower, :upper, :sd],
@@ -98,7 +98,7 @@ const FindKeepOptimalResult = PlsKitResult{:FindKeepOptimalResult}
     ConfirmatoryTestResult
 
 `PlsKitResult{:ConfirmatoryTestResult}`, the Julia form of Python's `plskit.ConfirmatoryTestResult`.
-Fields: `pvalue`, `statistic`, `method`, `k`, `n_perm`, `n_splits`, `seed`, `n_eff`, `rho_hat`, `stable_rank`, `ci`.
+Fields: `pvalue`, `statistic`, `test_method`, `k`, `n_perm`, `n_splits`, `seed`, `n_eff`, `rho_hat`, `stable_rank`, `ci`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
 const ConfirmatoryTestResult = PlsKitResult{:ConfirmatoryTestResult}
@@ -321,14 +321,14 @@ function spls3_fit(X, Y, k, keep_X, keep_Y; pre_standardized_X=false, pre_standa
 end
 
 """
-    pls1_confirmatory_test(X, y; k=1, method, args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing, max_skip_rate=nothing) -> ConfirmatoryTestResult
+    pls1_confirmatory_test(X, y; k=1, test_method, args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing, max_skip_rate=nothing) -> ConfirmatoryTestResult
 
 Call Python's `plskit.pls1_confirmatory_test` with the same arguments and defaults.
 Reference: [`pls1_confirmatory_test` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
-function pls1_confirmatory_test(X, y; k=1, method, args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing, max_skip_rate=nothing)
-    _call(:pls1_confirmatory_test; X, y, k, method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, disable_parallelism, verbose, weights, max_skip_rate)
+function pls1_confirmatory_test(X, y; k=1, test_method, args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing, max_skip_rate=nothing)
+    _call(:pls1_confirmatory_test; X, y, k, test_method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, disable_parallelism, verbose, weights, max_skip_rate)
 end
 
 """
@@ -354,14 +354,14 @@ function pls1_perm_null(X, y, k; n_perm=nothing, return_perm_matrix=false, pre_s
 end
 
 """
-    pls3_confirmatory_test(X, Y; k=1, method, args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, disable_parallelism=false, verbose=false) -> ConfirmatoryTestResult
+    pls3_confirmatory_test(X, Y; k=1, test_method, args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, disable_parallelism=false, verbose=false) -> ConfirmatoryTestResult
 
 Call Python's `plskit.pls3_confirmatory_test` with the same arguments and defaults.
 Reference: [`pls3_confirmatory_test` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
-function pls3_confirmatory_test(X, Y; k=1, method, args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, disable_parallelism=false, verbose=false)
-    _call(:pls3_confirmatory_test; X, Y, k, method, args, pre_standardized_X, pre_standardized_Y, seed, disable_parallelism, verbose)
+function pls3_confirmatory_test(X, Y; k=1, test_method, args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, disable_parallelism=false, verbose=false)
+    _call(:pls3_confirmatory_test; X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, disable_parallelism, verbose)
 end
 
 """

@@ -170,7 +170,7 @@ effect on `ŷ`. This is a property of the fit, not something
 
 After fitting at a chosen `k`, the natural next question is: **is this
 model statistically supported, or could the apparent fit be noise?**
-`pls1_confirmatory_test` provides five methods; `method` is a required
+`pls1_confirmatory_test` provides five methods; `test_method` is a required
 keyword argument with no default. The honest split rule applies (see
 [Find K](find-k.md)): if `k` was chosen on the same data, the inference
 is exploratory, not confirmatory.

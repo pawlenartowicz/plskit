@@ -1,12 +1,11 @@
-# Python -> Julia conversion by runtime type (spec §5.4).
+# Python -> Julia conversion by runtime type.
 
-# A probe type for F6: its `show` method reads the IOContext it is called
-# with, so a test can assert that `_brief` actually forwards `io` rather
-# than dropping it (as `repr(v)` did before the fix).
-struct _F6Probe
+# A probe type whose `show` method reads the IOContext it is called with,
+# so a test can assert that `_brief` forwards `io` rather than dropping it.
+struct _IOContextProbe
     v::Int
 end
-Base.show(io::IO, p::_F6Probe) = print(io, get(io, :probe, "no"))
+Base.show(io::IO, p::_IOContextProbe) = print(io, get(io, :probe, "no"))
 
 @testset "ndarrays keep orientation, dtype and ndim" begin
     m = PLSKit._to_julia(np.arange(6.0).reshape(2, 3))
@@ -49,9 +48,9 @@ end
     @test pytruth(np.array_equal(np.asarray(fit.W), pyfit.W))
     @test fit.k_used === 2 && fit.weights === nothing
     @test getfield(fit, :py) === pyfit
-    # results.md order, shared by plskit-bind and the Python dataclass
+    # field order of `ConfirmatoryTestResult` in _docs/python/results.md, shared by plskit-bind and the Python dataclass
     ct = PLSKit._to_julia(pk.pls1_confirmatory_test(np.asarray(X), np.asarray(y);
-                                                    method="score", seed=1))
+                                                    test_method="score", seed=1))
     @test collect(propertynames(ct))[8:10] == [:n_eff, :rho_hat, :stable_rank]
 end
 
@@ -72,17 +71,17 @@ end
     @test occursin("seed         0x000000000000002a", sprint(show, MIME"text/plain"(), seq))
 end
 
-# Fix round 1 (task review): NumPy scalars, unsigned overflow, bool lists,
+# Edge cases of the conversion: NumPy scalars, unsigned overflow, bool lists,
 # overflow error messages, F-order copies without aliasing, IOContext.
 
-@testset "F1 NumPy scalars unwrap through .item() before the type ladder" begin
+@testset "NumPy scalars unwrap through .item() before the type ladder" begin
     @test PLSKit._to_julia(np.array([true])[0]) === true
     @test PLSKit._to_julia(np.int64(7), :seed) === UInt64(7)
     @test PLSKit._to_julia(np.float64(2.5)) isa Float64
     @test PLSKit._to_julia(np.float64(2.5)) === 2.5
 end
 
-@testset "F2 an out-of-range unsigned array raises, naming the field" begin
+@testset "an out-of-range unsigned array raises, naming the field" begin
     big = np.array([typemax(UInt64)], dtype="uint64")
     err = try
         PLSKit._to_julia(big, :big_uints)
@@ -94,13 +93,13 @@ end
     @test occursin("big_uints", err.msg)
 end
 
-@testset "F3 a Python list of bools becomes Vector{Bool}" begin
+@testset "a Python list of bools becomes Vector{Bool}" begin
     v = PLSKit._to_julia(pylist([true, false, true]))
     @test v isa Vector{Bool}
     @test v == [true, false, true]
 end
 
-@testset "F4 a non-seed int overflow names the field" begin
+@testset "a non-seed int overflow names the field" begin
     huge = pyeval("2**63", Main)
     err = try
         PLSKit._to_julia(huge, :count)
@@ -112,7 +111,7 @@ end
     @test occursin("count", err.msg)
 end
 
-@testset "F7 array conversion does not alias NumPy's memory" begin
+@testset "array conversion does not alias NumPy's memory" begin
     a = np.arange(6.0).reshape(2, 3)
     m = PLSKit._to_julia(a)
     a[0, 0] = 99.0
@@ -141,9 +140,9 @@ end
     @test getfield(fit, :fields) isa NamedTuple
 end
 
-@testset "F6 _brief forwards the caller's IOContext to the generic fallback" begin
+@testset "_brief forwards the caller's IOContext to the generic fallback" begin
     io = IOBuffer()
     ioctx = IOContext(io, :probe => "yes")
-    @test PLSKit._brief(ioctx, _F6Probe(1)) == "yes"
-    @test PLSKit._brief(devnull, _F6Probe(1)) == "no"
+    @test PLSKit._brief(ioctx, _IOContextProbe(1)) == "yes"
+    @test PLSKit._brief(devnull, _IOContextProbe(1)) == "no"
 end

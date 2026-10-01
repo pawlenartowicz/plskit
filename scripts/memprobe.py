@@ -29,7 +29,7 @@ import sys
 import time
 from pathlib import Path
 
-# (call, n, p, B): the reference shapes first, then additional shapes added over time.
+# (call, n, p, B) for --table.
 TABLE = [
     ("perm", 100, 20000, 1000),
     ("rotstab", 100, 100000, 200),
@@ -68,21 +68,21 @@ def calls(plskit, X, y, Y, w, b: int, dp: bool, k: int = 2, n_folds: int | None 
             X, y, k=k, n_boot=b, seed=1, disable_parallelism=dp
         ),
         "ci": lambda: plskit.pls1_confirmatory_test(
-            X, y, k=k, method="split_exact", ci=True, n_boot=b, seed=1, disable_parallelism=dp
+            X, y, k=k, test_method="split_exact", ci=True, n_boot=b, seed=1, disable_parallelism=dp
         ),
         "split_exact": lambda: plskit.pls1_confirmatory_test(
-            X, y, k=k, method="split_exact", args={"n_perm": b}, seed=1, disable_parallelism=dp
+            X, y, k=k, test_method="split_exact", args={"n_perm": b}, seed=1, disable_parallelism=dp
         ),
         "raw_perm": lambda: plskit.pls1_confirmatory_test(
-            X, y, k=k, method="raw_perm", args=rp_args, seed=1, disable_parallelism=dp
+            X, y, k=k, test_method="raw_perm", args=rp_args, seed=1, disable_parallelism=dp
         ),
         "raw_perm_w": lambda: plskit.pls1_confirmatory_test(
-            X, y, k=k, method="raw_perm", args=rp_args, seed=1, disable_parallelism=dp,
+            X, y, k=k, test_method="raw_perm", args=rp_args, seed=1, disable_parallelism=dp,
             weights=w,
         ),
         "findk": lambda: plskit.pls1_find_k_optimal(X, y, k_max=4, seed=1, disable_parallelism=dp),
         "pls3": lambda: plskit.pls3_confirmatory_test(
-            X, Y, k=1, method="split_exact", seed=1, disable_parallelism=dp
+            X, Y, k=1, test_method="split_exact", seed=1, disable_parallelism=dp
         ),
     }
 

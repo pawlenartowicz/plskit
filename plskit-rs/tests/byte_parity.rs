@@ -371,8 +371,8 @@ fn find_k_optimal_byte_parity() {
 
 #[test]
 fn confirmatory_split_nb_byte_parity() {
-    // split_nb path: parallel_for_each_seeded over n_splits is now
-    // gated by disable_parallelism; this test pins the equivalence.
+    // split_nb path: parallel_for_each_seeded runs over n_splits, gated
+    // by disable_parallelism; this test pins the equivalence.
     let (x, y) = synth(60, 5, 3.0, 1);
     let opts = |dp: bool| ConfirmatoryTestOpts {
         args: ConfirmatoryArgs::SplitNb {
@@ -409,9 +409,9 @@ fn confirmatory_split_nb_byte_parity() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn rotation_stability_byte_parity() {
-    // Serial vs parallel bootstrap stream must be bit-identical after the
-    // paired-bootstrap re-derivation (boot_seed drawn post-subsample from
-    // the same parent RNG state in both paths).
+    // Serial vs parallel bootstrap stream must be bit-identical: boot_seed is
+    // drawn after the subsample seeds from the same parent RNG state in both
+    // paths.
     let (x, y) = synth(80, 6, 3.0, 1);
     let opts = |dp: bool| RotationStabilityOpts {
         n_boot: 200,
@@ -672,7 +672,7 @@ fn spls3_fit_is_byte_identical_serial_vs_parallel() {
 
     // Pin k_used to its expected value first: a fit that silently returned
     // zero components must not pass this test with every loop below
-    // skipped (a vacuous-pass defect seen before in this suite).
+    // skipped.
     assert_eq!(seq.k_used, 3, "seq.k_used");
     assert_eq!(seq.k_used, par.k_used, "k_used");
     assert_eq!(seq.n_iter, par.n_iter, "n_iter");

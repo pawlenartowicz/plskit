@@ -108,7 +108,7 @@ def _public_cases():
         "pls1_find_k_optimal": lambda mk: plskit.pls1_find_k_optimal(
             mk(X), mk(y), 3, seed=5, weights=mk(w)),
         "pls1_confirmatory_test": lambda mk: plskit.pls1_confirmatory_test(
-            mk(X), mk(y), k=1, method="split_exact", seed=6, weights=mk(w)),
+            mk(X), mk(y), k=1, test_method="split_exact", seed=6, weights=mk(w)),
     }
 
 
@@ -213,7 +213,7 @@ def _block_cases():
         "pls3_fit_pre": (Ys, lambda Yv: plskit.pls3_fit(Xs, Yv, k=1, **pre)),
         "spls3_fit_pre": (Ys, lambda Yv: plskit.spls3_fit(Xs, Yv, 1, 20, 10, **pre)),
         "pls3_confirmatory_test": (Y, lambda Yv: plskit.pls3_confirmatory_test(
-            X, Yv, k=1, method="split_exact", args={"n_perm": 99}, seed=7)),
+            X, Yv, k=1, test_method="split_exact", args={"n_perm": 99}, seed=7)),
         "pls3_transform": (Ys, lambda Yv: plskit.pls3_transform(m3, Y_new=Yv, which="y_scores")),
         "preprocess": (Y, lambda Yv: plskit.preprocess(X, Yv)),
         "rotate_W": (W, lambda Wv: plskit.rotate(Wv, method="varimax")),
@@ -226,8 +226,7 @@ def _block_cases():
 @pytest.mark.parametrize("name", list(_block_cases()))
 def test_block_inputs_give_the_same_bits_in_every_layout(name):
     """`Y`, `Y_new`, `W` and `L` in any layout give the bits of the
-    column-major copy the extension makes of a strided one (the path every
-    layout of these inputs took before F order was read in place)."""
+    column-major copy the extension makes of a strided one."""
     value, call = _block_cases()[name]
     layouts = _block_layouts(value)
     ref = _bits(call(layouts.pop("strided")))

@@ -12,7 +12,7 @@ Demonstrates the recommended pipeline (`_docs/python/api.md` §3.1):
      of D=8 columns (everything else is noise).
   2. Fit PLS1 at K=1 (the recommended omnibus K; y depends on X through
      a single direction here, so there is no reason to fix K higher).
-  3. Run `pls1_confirmatory_test(k=1, method="split_exact", ci=True)` to
+  3. Run `pls1_confirmatory_test(k=1, test_method="split_exact", ci=True)` to
      get both the omnibus p-value AND the rotation-invariant CI bundle.
      `split_exact` is the recommended method: a split-half test
      calibrated by permutation, so it holds its level on any design.
@@ -61,7 +61,7 @@ def main() -> None:
     # 2. Confirmatory test + CI
     r = plskit.pls1_confirmatory_test(
         X, y, k=1,
-        method="split_exact",
+        test_method="split_exact",
         args={"n_perm": 500, "n_splits": 50},
         ci=True,
         n_boot=500,

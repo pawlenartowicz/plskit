@@ -1,7 +1,6 @@
 """End-to-end example: PLS1 fit + every omnibus method + bootstrap CI bundle.
 
-Run from the public monorepo root (`plskit/`) after building the Python
-wrapper:
+Run from the repository root after building the Python wrapper:
 
     maturin develop --release
     python examples/omnibus_and_ci.py
@@ -123,7 +122,7 @@ def main() -> None:
     for method, args in _OMNIBUS_ARGS.items():
         omni[method] = plskit.pls1_confirmatory_test(
             X, y, k=1,
-            method=method, args=args or None,
+            test_method=method, args=args or None,
             seed=2026,
         )
     for method, r in omni.items():
@@ -144,7 +143,7 @@ def main() -> None:
     # 3. Recommended test + bootstrap CI bundle ------------------------------
     r = plskit.pls1_confirmatory_test(
         X, y, k=1,
-        method="split_exact",
+        test_method="split_exact",
         args={"n_perm": 500, "n_splits": 50},
         ci=True,
         n_boot=500,

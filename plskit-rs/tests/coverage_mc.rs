@@ -347,9 +347,9 @@ fn coverage_mc_two_sided_grid() {
                     // signal coordinates (≈0.39 vs 0.5 at d=20, n=100,
                     // snr=1). The CI is centered on ĥ with the SD of
                     // n-out-of-n bootstrap refits and no bias correction, so
-                    // it targets that estimand. The subsampling interval it
-                    // replaced (reflected around ĥ at the rate √(m/(n − m)))
-                    // covered it only 0.40 to 0.65 at d=20: a fit on m rows
+                    // it targets that estimand. A subsampling interval
+                    // reflected around ĥ at the rate √(m/(n − m)) would
+                    // cover it only 0.40 to 0.65 at d=20: a fit on m rows
                     // puts less leverage on the signal coordinates than the
                     // full fit, and the reflection turned that gap into an
                     // offset. Noise coordinates and k > SIGNAL_RANK are

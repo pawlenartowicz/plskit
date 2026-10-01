@@ -3,8 +3,9 @@ name: Release
 # Tag scheme:
 #   vX.Y.Z       → cargo publish plskit and plskit-bind; workspace version must equal X.Y.Z.
 #   vX.Y.Z-py    → PyPI publish (Python);   plskit-py version must equal X.Y.Z.
-#   vX.Y.Z-r     → R tarball;               plskit-r DESCRIPTION:Version must equal X.Y.Z.
-#                  CRAN submit is manual via the CRAN web form (no API).
+#   vX.Y.Z-r     → R tarball + r-universe branch; plskit-r DESCRIPTION:Version must equal X.Y.Z.
+#                  The crates are vendored from crates.io, so the vX.Y.Z release must
+#                  be published first. CRAN submit is manual via the CRAN web form (no API).
 #   vX.Y.Z-jl    → Julia register hint;     plskit-jl Project.toml version must equal X.Y.Z.
 #                  The tests run against PyPI plskit==X.Y.Z only (the pinned wheel),
 #                  so the vX.Y.Z-py release must be published first.
@@ -105,8 +106,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
-        with: { python-version: "3.10" }
-      - uses: dtolnay/rust-toolchain@stable
+        with: { python-version: "3.11" }
       - name: Verify tag-version = plskit-py version
         shell: bash
         run: |
@@ -119,16 +119,13 @@ jobs:
             echo "::error::tag $TAG_VER != plskit-py $PY"
             exit 1
           fi
-      - run: pip install cibuildwheel==2.21.3
-      - name: Build wheels
-        env:
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
-          # Skip musllinux (Alpine) and 32-bit targets (i686 Linux, win32):
-          # rustup has no i386 target, and plskit is 64-bit only.
-          CIBW_SKIP: "*-musllinux_* *_i686 *-win32"
-          CIBW_BEFORE_BUILD: "pip install maturin"
-          CIBW_BUILD_VERBOSITY: 1
-        run: python -m cibuildwheel --output-dir wheelhouse
+      # abi3: one wheel per platform serves every Python from 3.11 up. On
+      # Linux the build runs in a manylinux container.
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          args: --release --out wheelhouse
+          manylinux: auto
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}
@@ -140,11 +137,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with: { python-version: "3.10" }
-      - uses: dtolnay/rust-toolchain@stable
-      - run: pip install maturin
-      - run: maturin sdist --out sdist
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out sdist
       - uses: actions/upload-artifact@v7
         with:
           name: sdist
@@ -159,8 +156,6 @@ jobs:
       id-token: write   # PyPI Trusted Publishing (OIDC)
       contents: write   # softprops/action-gh-release creates the GH Release
     steps:
-      - uses: actions/setup-python@v6
-        with: { python-version: "3.10" }
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -193,22 +188,50 @@ jobs:
             echo "::error::tag $TAG_VER != plskit-r $R"
             exit 1
           fi
-      - run: |
-          R CMD build plskit-r
-          mkdir -p r-tarball
-          mv plskit_*.tar.gz r-tarball/
       # The build users get (r-universe, CRAN): no dev patch, so cargo uses
       # the committed rust/Cargo.lock with --locked against the published
       # plskit / plskit-bind. Fails if the lock is missing or stale, or if
       # the vX.Y.Z crates are not on crates.io yet.
       - name: Lock file matches the workspace versions
         run: python3 scripts/check-profile-sync.py
-      - name: Install the tarball against crates.io
-        run: R CMD INSTALL r-tarball/plskit_*.tar.gz
+      # A copy of plskit-r with every crate packed into src/rust/vendor.tar.xz,
+      # so the package builds offline (tools/cargo-build.R unpacks it). This
+      # tree is the release tarball and the r-universe branch below.
+      - name: Stage the vendored package
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/plskit"
+          cp -r plskit-r "$STAGE"
+          cd "$STAGE/src/rust"
+          cargo vendor --locked vendor > /dev/null
+          tar -cJf vendor.tar.xz vendor
+          rm -rf vendor
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+      - run: |
+          R CMD build "$STAGE"
+          mkdir -p r-tarball
+          mv plskit_*.tar.gz r-tarball/
+      - name: Install the tarball offline
+        run: CARGO_NET_OFFLINE=true R CMD INSTALL r-tarball/plskit_*.tar.gz
       - uses: softprops/action-gh-release@v2
         with:
           files: r-tarball/*.tar.gz
-      - run: echo "::notice::R tarball attached to release. CRAN submit is manual via the CRAN web form."
+      # r-universe builds from a git ref, so the staged tree goes to the root
+      # of a generated `r-universe` branch (no shared history with main). The
+      # registry entry in pawlenartowicz/pawlenartowicz.r-universe.dev points
+      # at that branch, so r-universe rebuilds on each vX.Y.Z-r release only.
+      - name: Force-push the staged tree as the r-universe branch
+        working-directory: ${{ env.STAGE }}
+        run: |
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "r-universe: plskit ${GITHUB_REF_NAME#v}"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:r-universe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: echo "::notice::R tarball attached to release and r-universe branch pushed. CRAN submit is manual via the CRAN web form."
 
   # ─── vX.Y.Z-jl (Julia) ──────────────────────────────────────────────
   publish-jl:

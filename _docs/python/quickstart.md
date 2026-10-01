@@ -46,7 +46,7 @@ component count from the data; see `pls1_find_k_optimal` and
 ## 2. Test for signal
 
 `pls1_confirmatory_test` asks whether there is any predictive signal at a
-pre-specified `k`. `method` has no default and must be passed;
+pre-specified `k`. `test_method` has no default and must be passed;
 `"split_exact"` is the recommended method. The permutation and split
 counts here are kept small so the example runs in seconds; the defaults
 are `n_perm=1000`, `n_splits=50`.
@@ -54,14 +54,14 @@ are `n_perm=1000`, `n_splits=50`.
 ```python
 test = plskit.pls1_confirmatory_test(
     X, y, k=1,
-    method="split_exact",
+    test_method="split_exact",
     args={"n_perm": 199, "n_splits": 20},
     seed=1,
 )
 
-test.pvalue      # permutation p-value
-test.statistic   # tanh of the mean Fisher-z held-out correlation
-test.method      # "split_exact"
+test.pvalue        # permutation p-value
+test.statistic     # tanh of the mean Fisher-z held-out correlation
+test.test_method   # "split_exact"
 ```
 
 A fixed `seed` makes the result reproducible, also across thread counts.
@@ -90,7 +90,7 @@ scores.x_scores.shape    # (200, 2)
 
 PLS3 has no `predict`: it is symmetric, so there is nothing to predict.
 `pls3_confirmatory_test` tests the first latent variable (`k=1` only) with
-the same `method="split_exact"` / `"split_nb"` choice as PLS1.
+the same `test_method="split_exact"` / `"split_nb"` choice as PLS1.
 
 ## Next
 

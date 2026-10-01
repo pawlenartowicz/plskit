@@ -11,11 +11,11 @@
 //! ```
 //!
 //! Build those once per fold or split and every replicate afterwards costs
-//! nothing in `p`. This is not new in the crate: `split_exact`'s no-refit
-//! route (`signal_test::split_perm_nr_zbars`) already computes
+//! nothing in `p`. `split_exact`'s no-refit route
+//! (`signal_test::split_perm_nr_zbars`) uses the same idea: it computes
 //! `X̃_te·X̃_tr'·y_tr` as a fixed linear map and batches all `B+1` columns
-//! through it. That route is left exactly as it is; this module generalizes
-//! the idea to loops whose argument the batched map does not cover.
+//! through it. This module covers loops whose argument that batched map does
+//! not cover.
 //!
 //! **The primal route stays primary.** The dual route is a conditional
 //! optimization for one corner of the input space (`p` large, `n` small).

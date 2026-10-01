@@ -18,5 +18,5 @@ names, defaults and fields are identical.
 ## Version
 
 `PLSKit.jl` carries the version of the Python `plskit` it runs
-(`PLSKit.PLSKIT_PY_VERSION`, currently 0.6.2). A Julia release follows the
+(`PLSKit.PLSKIT_PY_VERSION`, currently 0.7.0). A Julia release follows the
 matching Python release and never leads it.

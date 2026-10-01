@@ -1,6 +1,5 @@
-# A result passed back as an argument hands Python its own object
-# (spec §5.4); seeds reproduce runs exactly, including seeds above 2^63
-# (RULE 2, spec §5.3).
+# A result passed back as an argument hands Python its own object;
+# seeds reproduce runs exactly, including seeds above 2^63.
 
 @testset "pls1_predict and rotate take the result back" begin
     X, y = pls1_data()
@@ -51,21 +50,21 @@ end
 
 @testset "seed: drawn, passed back, reproduced" begin
     X, y = pls1_data()
-    a = pls1_confirmatory_test(X, y; method="raw_perm", args=(n_perm=100,))
+    a = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,))
     @test a.seed isa UInt64
-    b = pls1_confirmatory_test(X, y; method="raw_perm", args=(n_perm=100,), seed=a.seed)
+    b = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,), seed=a.seed)
     @test b.seed === a.seed
     @test b.pvalue == a.pvalue && b.statistic == a.statistic
 end
 
 @testset "seed above 2^63: $(s)" for s in (typemax(UInt64), UInt64(2)^63 + 5)
     X, y = pls1_data()
-    a = pls1_confirmatory_test(X, y; method="raw_perm", args=(n_perm=100,), seed=s)
+    a = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,), seed=s)
     @test a.seed === s
-    b = pls1_confirmatory_test(X, y; method="raw_perm", args=(n_perm=100,), seed=a.seed)
+    b = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,), seed=a.seed)
     @test b.pvalue == a.pvalue && b.statistic == a.statistic
     # the same seed from Python gives the same run
-    p = pk.pls1_confirmatory_test(np.asarray(X), np.asarray(y); method="raw_perm",
+    p = pk.pls1_confirmatory_test(np.asarray(X), np.asarray(y); test_method="raw_perm",
                                   args=pydict(Dict("n_perm" => 100)), seed=s)
     @test pyconvert(Float64, p.pvalue) == a.pvalue
     @test pyconvert(UInt64, p.seed) === s
