@@ -1289,9 +1289,14 @@ mod tests_kernel {
     }
 
     #[test]
-    // The reference values are pasted as `scripts/gate_feasibility.py` prints them; the design
-    // names follow the formulas (n, p, x, y, i, j).
-    #[allow(clippy::unreadable_literal, clippy::many_single_char_names)]
+    // The reference values are pasted as `scripts/gate_feasibility.py` prints them (clippy 1.85
+    // misreads their zero-padded exponents as excessive precision); the design names follow
+    // the formulas (n, p, x, y, i, j).
+    #[allow(
+        clippy::unreadable_literal,
+        clippy::excessive_precision,
+        clippy::many_single_char_names
+    )]
     fn bounds_match_gate_feasibility_script() {
         // Printed by `python3 scripts/gate_feasibility.py gram_p --reference`:
         // `(tt_a, δtt_a, δp_a)` for a = 1..=3 on the

@@ -211,6 +211,8 @@ jobs:
           Rscript -e 'testthat::test_file("plskit-r/tests/testthat/test-corpus.R", package = "plskit", load_package = "installed", reporter = "check")'
       - name: Install and smoke test (macOS, Windows)
         if: runner.os != 'Linux'
+        # pwsh, the Windows default, aliases `R` to Invoke-History.
+        shell: bash
         run: |
           R CMD INSTALL plskit-r
           Rscript -e 'library(plskit); set.seed(1); X <- matrix(rnorm(200), 40); y <- rnorm(40); stopifnot(pls1_fit(X, y, k = 2)$k_used == 2L)'

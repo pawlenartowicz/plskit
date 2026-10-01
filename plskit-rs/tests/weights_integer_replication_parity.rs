@@ -12,7 +12,7 @@ fn integer_weights_match_row_duplication() {
     let p = 3;
     let x = Mat::<f64>::from_fn(n, p, |i, j| ((i + j) as f64).sin());
     let y = Col::<f64>::from_fn(n, |i| (i as f64) * 0.5);
-    let w_int = vec![
+    let w_int = [
         1u32, 2, 1, 3, 1, 2, 1, 1, 2, 1, 1, 3, 1, 2, 1, 1, 2, 1, 1, 1,
     ];
 

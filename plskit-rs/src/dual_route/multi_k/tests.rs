@@ -307,6 +307,9 @@ fn out_of_contract_shapes_are_unresolved() {
 /// Printed by `python3 scripts/gate_feasibility.py nspace --reference`.
 const SCRIPT_G2: f64 = 2303.608226002213;
 /// `(E_w(a), E_t(a), rho_a)` for `a = 1..=4`.
+// Clippy 1.85 flags zero-padded exponents (`e-06`) as excessive precision
+// even though the digits round-trip; the values stay as the script prints them.
+#[allow(clippy::excessive_precision)]
 const SCRIPT_REFERENCE: [(f64, f64, f64); 4] = [
     (
         5.563549621001585e-10,

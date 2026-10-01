@@ -1451,6 +1451,7 @@ pub fn fold_split(shuffled: &[usize], n_folds: usize) -> Vec<Vec<usize>> {
 #[allow(clippy::doc_markdown)]
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::shadow_unrelated)]
+#[allow(clippy::similar_names)]
 fn betainc(a: f64, b: f64, x: f64) -> f64 {
     if x <= 0.0 {
         return 0.0;

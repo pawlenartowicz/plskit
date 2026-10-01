@@ -88,9 +88,10 @@ fn transform_round_trips_and_validates() {
     check_record(r).unwrap();
     // In-sample transform reproduces the fit's own scores.
     let fit_scores = floats(field(
-        match &model {
-            Value::Record(m) => m,
-            _ => panic!(),
+        if let Value::Record(m) = &model {
+            m
+        } else {
+            panic!()
         },
         "x_scores",
     ));

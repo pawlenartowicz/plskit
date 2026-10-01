@@ -250,6 +250,7 @@ fn ciscalar_to_dict(py: Python<'_>, ci: plskit::CIScalar) -> Bound<'_, PyDict> {
     d
 }
 
+#[allow(clippy::similar_names)]
 fn confirmatory_ci_to_dict(py: Python<'_>, ci: plskit::ConfirmatoryCI) -> Bound<'_, PyDict> {
     let d = PyDict::new(py);
     d.set_item("n_boot", ci.n_boot).unwrap();

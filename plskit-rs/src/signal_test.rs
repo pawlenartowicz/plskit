@@ -5281,7 +5281,7 @@ mod tests_gram_p {
     ];
 
     #[test]
-    #[allow(clippy::many_single_char_names)]
+    #[allow(clippy::many_single_char_names, clippy::similar_names)]
     fn split_exact_gram_units_match_primal_units() {
         // Dense, weighted, sparse and weighted sparse: the dense and
         // weighted refit cells have no corpus fixture, so this test and the
@@ -5375,6 +5375,7 @@ mod tests_gram_p {
     }
 
     #[test]
+    #[allow(clippy::similar_names)]
     fn split_exact_gram_zero_model_gives_r_zero() {
         // A y orthogonal to every training half's columns is not
         // constructible across random splits; a constant y is: both arms
