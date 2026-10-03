@@ -9,10 +9,11 @@ name: MC calibration gate
 # `--ignored` runs ONLY the #[ignore]d tests of every test target of the
 # package, and picks up future ones without editing this file. Today that is
 # the Monte-Carlo calibration gate (tests/coverage_mc.rs's CI-coverage grid)
-# plus three gram_p tools, the diagnostic sweep (tall_shapes_n_over_p_sweep),
-# the work-floor benchmark (gram_p_work_floor_benchmark) and the route
-# boundary benchmark (gram_p_route_boundary_benchmark, about 25 s), which
-# print measurements and assert nothing a running test does not. `--nocapture`
+# plus three gram_p tools: the tall-shape sweep (tall_shapes_n_over_p_sweep),
+# which asserts its fallback-rate bounds, and the work-floor benchmark
+# (gram_p_work_floor_benchmark) and the route boundary benchmark
+# (gram_p_route_boundary_benchmark, about 25 s), which print measurements
+# and assert nothing a running test does not. `--nocapture`
 # surfaces the per-cell numbers in the log even on a passing run.
 #
 # Runtime is substantial (36-cell grid × 200 datasets × 300 boots).

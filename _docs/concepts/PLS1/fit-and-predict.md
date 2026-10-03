@@ -170,15 +170,16 @@ effect on `ŷ`. This is a property of the fit, not something
 
 After fitting at a chosen `k`, the natural next question is: **is this
 model statistically supported, or could the apparent fit be noise?**
-`pls1_confirmatory_test` provides five methods; `test_method` is a required
-keyword argument with no default. The honest split rule applies (see
+`pls1_confirmatory_test` provides five methods; `test_method` is a keyword
+argument that defaults to `"auto"` (see
+[`test_method="auto"`](inference.md#test_methodauto)). The honest split rule applies (see
 [Find K](find-k.md)): if `k` was chosen on the same data, the inference
 is exploratory, not confirmatory.
 
 | Method | When to use | Cost |
 |---|---|---|
 | `split_exact` | **Recommended, especially at k = 1.** Split-half test on Fisher-z of held-out correlation, calibrated by permutation, so it holds its level on any design. At K = 1 the engine uses a no-refit route: the fitted direction is a fixed linear map of `y`, so every permutation reuses it, which keeps this route cheap; K ≥ 2 falls back to a per-permutation refit. | `O(n_splits)` GEMM pairs of width `n_perm` at K = 1; `O(n_splits × n_perm)` fits at K ≥ 2 |
-| `split_nb` | Same statistic as `split_exact`, calibrated by a Fisher-z t approximation instead of permutation: cheaper, but only appropriate for `n` large relative to `p` with a flat X spectrum. A design with `n_eff < 25`, 4 columns or fewer, or a stable rank `< 3` is auto-gated: the request reroutes to `split_exact` (at `n_perm=1000`) unless you pass `args={"force": True}`. | `O(n_splits)` fits |
+| `split_nb` | Same statistic as `split_exact`, calibrated by a Fisher-z t approximation instead of permutation: cheaper, but only appropriate for `n` large relative to `p` with a flat X spectrum. A design with `n_eff < 25`, 4 columns or fewer, or a stable rank `< 3` is auto-gated: an explicit `split_nb` request reroutes to `split_exact` (at `n_perm=1000`) unless you pass `args={"force": True}`. | `O(n_splits)` fits |
 | `score` | Fast pre-fit screening test on `‖X′ y‖²`. **Detects signal in `span(X)`; does not validate the PLS fit at your chosen `k`.** Faster and more powerful than the split tests when its assumptions hold, but sensitive to heavy tails / outliers in `y`. Use as a cheap omnibus check, not as a fit-validation test. | One matvec + one eigendecomp |
 | `e` | Universal-inference e-value. Run only when you specifically need an **e-value**: for anytime-valid sequential testing, optional-stopping inference, or composition with other e-processes. Substantially less powerful than `split_exact` for the omnibus K-fixed test. | One PLS fit |
 | `raw_perm` | **Legacy. Do not use for new analyses.** Implemented for compatibility with the chemometrics permutation-Q² convention; included so users porting workflows from older tools can reproduce historical numbers. Power and calibration are uniformly worse than `split_exact`. | `O(n_perm)` fits |

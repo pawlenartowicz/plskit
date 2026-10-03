@@ -79,7 +79,7 @@ pls1_predict <- function(
 #' documented once, in the canonical reference: section
 #' "2.3 K-selection" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
 #'
-#' @param X,y,k_max,selector,diagnostic,args,pre_standardized,seed,disable_parallelism,verbose,weights See the canonical reference.
+#' @param X,y,k_max,selector,diagnostic,args,pre_standardized,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("find_k_optimal_result", "plskit_result")`.
 #' @export
 pls1_find_k_optimal <- function(
@@ -91,7 +91,6 @@ pls1_find_k_optimal <- function(
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL
 ) {
@@ -104,7 +103,6 @@ pls1_find_k_optimal <- function(
     args = args,
     pre_standardized = pre_standardized,
     seed = seed,
-    disable_parallelism = disable_parallelism,
     verbose = verbose,
     weights = weights
   ))
@@ -116,19 +114,18 @@ pls1_find_k_optimal <- function(
 #' documented once, in the canonical reference: section
 #' "2.3 K-selection" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
 #'
-#' @param X,y,k_max,test_method,alpha,args,pre_standardized,seed,disable_parallelism,verbose,weights See the canonical reference.
+#' @param X,y,k_max,test_method,alpha,args,pre_standardized,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("find_k_sequence_result", "plskit_result")`.
 #' @export
 pls1_find_k_sequence <- function(
   X,
   y,
   k_max,
-  test_method = "split_nb",
+  test_method = "auto",
   alpha = NULL,
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL
 ) {
@@ -141,7 +138,6 @@ pls1_find_k_sequence <- function(
     args = args,
     pre_standardized = pre_standardized,
     seed = seed,
-    disable_parallelism = disable_parallelism,
     verbose = verbose,
     weights = weights
   ))
@@ -180,7 +176,7 @@ spls1_fit <- function(
 #' documented once, in the canonical reference: section
 #' "2b.2 Keep-count tuning" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
 #'
-#' @param X,y,k,args,seed,disable_parallelism,verbose,weights See the canonical reference.
+#' @param X,y,k,args,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("find_keep_optimal_result", "plskit_result")`.
 #' @export
 spls1_find_keep_optimal <- function(
@@ -189,7 +185,6 @@ spls1_find_keep_optimal <- function(
   k,
   args = NULL,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL
 ) {
@@ -199,7 +194,6 @@ spls1_find_keep_optimal <- function(
     k = k,
     args = args,
     seed = seed,
-    disable_parallelism = disable_parallelism,
     verbose = verbose,
     weights = weights
   ))
@@ -211,7 +205,7 @@ spls1_find_keep_optimal <- function(
 #' documented once, in the canonical reference: section
 #' "2b.3 K-selection at fixed keep" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
 #'
-#' @param X,y,k_max,keep,selector,diagnostic,args,pre_standardized,seed,disable_parallelism,verbose,weights See the canonical reference.
+#' @param X,y,k_max,keep,selector,diagnostic,args,pre_standardized,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("find_k_optimal_result", "plskit_result")`.
 #' @export
 spls1_find_k_optimal <- function(
@@ -224,7 +218,6 @@ spls1_find_k_optimal <- function(
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL
 ) {
@@ -238,7 +231,6 @@ spls1_find_k_optimal <- function(
     args = args,
     pre_standardized = pre_standardized,
     seed = seed,
-    disable_parallelism = disable_parallelism,
     verbose = verbose,
     weights = weights
   ))
@@ -250,7 +242,7 @@ spls1_find_k_optimal <- function(
 #' documented once, in the canonical reference: section
 #' "2b.3 K-selection at fixed keep" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
 #'
-#' @param X,y,k_max,keep,test_method,alpha,args,pre_standardized,seed,disable_parallelism,verbose,weights See the canonical reference.
+#' @param X,y,k_max,keep,test_method,alpha,args,pre_standardized,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("find_k_sequence_result", "plskit_result")`.
 #' @export
 spls1_find_k_sequence <- function(
@@ -258,12 +250,11 @@ spls1_find_k_sequence <- function(
   y,
   k_max,
   keep,
-  test_method = "split_nb",
+  test_method = "auto",
   alpha = NULL,
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL
 ) {
@@ -277,7 +268,6 @@ spls1_find_k_sequence <- function(
     args = args,
     pre_standardized = pre_standardized,
     seed = seed,
-    disable_parallelism = disable_parallelism,
     verbose = verbose,
     weights = weights
   ))
@@ -424,14 +414,14 @@ spls3_fit <- function(
 #' documented once, in the canonical reference: section
 #' "3.1 Confirmatory omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
 #'
-#' @param X,y,k,test_method,args,ci,n_boot,m_rate,level,max_failure_rate,pre_standardized,seed,disable_parallelism,verbose,weights,max_skip_rate See the canonical reference.
+#' @param X,y,k,test_method,args,ci,n_boot,m_rate,level,max_failure_rate,pre_standardized,seed,verbose,weights,max_skip_rate See the canonical reference.
 #' @return A list of class `c("confirmatory_test_result", "plskit_result")`.
 #' @export
 pls1_confirmatory_test <- function(
   X,
   y,
   k = 1L,
-  test_method,
+  test_method = "auto",
   args = NULL,
   ci = FALSE,
   n_boot = NULL,
@@ -440,7 +430,6 @@ pls1_confirmatory_test <- function(
   max_failure_rate = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL,
   max_skip_rate = NULL
@@ -458,7 +447,6 @@ pls1_confirmatory_test <- function(
     max_failure_rate = max_failure_rate,
     pre_standardized = pre_standardized,
     seed = seed,
-    disable_parallelism = disable_parallelism,
     verbose = verbose,
     weights = weights,
     max_skip_rate = max_skip_rate
@@ -490,7 +478,7 @@ split_nb_gate <- function(
 #' documented once, in the canonical reference: section
 #' "3.3 Permutation-null engine" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
 #'
-#' @param X,y,k,n_perm,return_perm_matrix,pre_standardized,seed,disable_parallelism,verbose,weights See the canonical reference.
+#' @param X,y,k,n_perm,return_perm_matrix,pre_standardized,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("perm_null_result", "plskit_result")`.
 #' @export
 pls1_perm_null <- function(
@@ -501,7 +489,6 @@ pls1_perm_null <- function(
   return_perm_matrix = FALSE,
   pre_standardized = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL
 ) {
@@ -513,7 +500,6 @@ pls1_perm_null <- function(
     return_perm_matrix = return_perm_matrix,
     pre_standardized = pre_standardized,
     seed = seed,
-    disable_parallelism = disable_parallelism,
     verbose = verbose,
     weights = weights
   ))
@@ -525,19 +511,18 @@ pls1_perm_null <- function(
 #' documented once, in the canonical reference: section
 #' "3.4 Confirmatory PLS3 omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
 #'
-#' @param X,Y,k,test_method,args,pre_standardized_X,pre_standardized_Y,seed,disable_parallelism,verbose See the canonical reference.
+#' @param X,Y,k,test_method,args,pre_standardized_X,pre_standardized_Y,seed,verbose See the canonical reference.
 #' @return A list of class `c("confirmatory_test_result", "plskit_result")`.
 #' @export
 pls3_confirmatory_test <- function(
   X,
   Y,
   k = 1L,
-  test_method,
+  test_method = "auto",
   args = NULL,
   pre_standardized_X = FALSE,
   pre_standardized_Y = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE
 ) {
   .plskit_call("pls3_confirmatory_test", list(
@@ -549,7 +534,6 @@ pls3_confirmatory_test <- function(
     pre_standardized_X = pre_standardized_X,
     pre_standardized_Y = pre_standardized_Y,
     seed = seed,
-    disable_parallelism = disable_parallelism,
     verbose = verbose
   ))
 }
@@ -583,7 +567,7 @@ rotate <- function(
 #' documented once, in the canonical reference: section
 #' "4.2 Rotation-stability diagnostic" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
 #'
-#' @param X,y,k,rotation_method,rotation_args,L,n_boot,m_rate,level,pre_standardized,seed,disable_parallelism,verbose,weights,max_skip_rate See the canonical reference.
+#' @param X,y,k,rotation_method,rotation_args,L,n_boot,m_rate,level,pre_standardized,seed,verbose,weights,max_skip_rate See the canonical reference.
 #' @return A list of class `c("rotation_stability_result", "plskit_result")`.
 #' @export
 pls1_rotation_stability <- function(
@@ -598,7 +582,6 @@ pls1_rotation_stability <- function(
   level = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL,
   max_skip_rate = NULL
@@ -615,7 +598,6 @@ pls1_rotation_stability <- function(
     level = level,
     pre_standardized = pre_standardized,
     seed = seed,
-    disable_parallelism = disable_parallelism,
     verbose = verbose,
     weights = weights,
     max_skip_rate = max_skip_rate

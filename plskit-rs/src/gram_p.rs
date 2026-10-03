@@ -161,7 +161,7 @@ const GRAM_P_PRODUCT_COST: f64 = 1.3;
 /// afford to run, the products stay inside f64's range with room to spare,
 /// and a rounding could only pick the slower of two routes that agree.
 #[allow(clippy::many_single_char_names)]
-pub(crate) fn use_gram_p_route(n_tr: usize, p: usize, n_replicates: usize, k: usize) -> bool {
+fn use_gram_p_route(n_tr: usize, p: usize, n_replicates: usize, k: usize) -> bool {
     if n_tr == 0 || p == 0 || n_replicates == 0 || k == 0 {
         return false;
     }
@@ -179,7 +179,7 @@ pub(crate) fn use_gram_p_route(n_tr: usize, p: usize, n_replicates: usize, k: us
 
 /// The cost rule of [`use_gram_p_route`] alone:
 /// `p·(GRAM_P_BUILD_COST·n_tr + GRAM_P_PRODUCT_COST·B·k) < 2·B·k·n_tr`.
-pub(crate) fn gram_p_cost_rule(n_tr: f64, p: f64, n_replicates: f64, k: f64) -> bool {
+fn gram_p_cost_rule(n_tr: f64, p: f64, n_replicates: f64, k: f64) -> bool {
     let bk = n_replicates * k;
     p * (GRAM_P_BUILD_COST * n_tr + GRAM_P_PRODUCT_COST * bk) < 2.0 * bk * n_tr
 }
@@ -277,7 +277,7 @@ pub(crate) struct GramPBlock<'a> {
 
 impl<'a> GramPBlock<'a> {
     /// Build `C` for the block `xs` with `par` (the driver passes
-    /// `resample::block_par(disable_parallelism)`), and its `‖C‖₂`
+    /// `fit::par_fixed()`), and its `‖C‖₂`
     /// estimate (sequential). `tests_block::c_build_is_thread_count_invariant_at_the_route_shapes`
     /// pins that every `par` gives the same bits.
     pub(crate) fn new(xs: MatRef<'a, f64>, par: Par) -> Self {
@@ -370,17 +370,13 @@ pub(crate) struct GramFit {
     /// Components kept; equal to the X backend's.
     pub(crate) k_used: usize,
     /// Weight vectors `W`; the tests read the first column, which is the X
-    /// backend's bits. Test-only, like the other diagnostics below.
+    /// backend's bits. Test-only, like `bounds` below.
     #[cfg(test)]
     pub(crate) w: Mat<f64>,
     /// First-order estimate of `‖coef − coef*‖₂`, either backend against
     /// the exact reference (see `fit_replicate_diag`); read by the
     /// `split_exact` score gate through [`score_discrepancy_bound`].
     pub(crate) coef_err: f64,
-    /// Largest per-component `max(δtt/tt, δp/‖p‖)`: a diagnostic for the
-    /// sweep report, never a gate. Test-only.
-    #[cfg(test)]
-    pub(crate) max_rel: f64,
     /// `(tt_a, δtt_a, δp_a)` per component: a diagnostic, reproduced by
     /// `scripts/gate_feasibility.py` (`tests_kernel::bounds_match_gate_feasibility_script`).
     /// Test-only: production replicates neither fill nor allocate it.
@@ -541,8 +537,6 @@ impl GramPBlock<'_> {
                     w: w_mat,
                     coef_err,
                     #[cfg(test)]
-                    max_rel: backend.max_rel,
-                    #[cfg(test)]
                     bounds: std::mem::take(&mut backend.bounds),
                 })
             }
@@ -626,9 +620,6 @@ struct GramBackend<'b> {
     coef_prop: f64,
     /// `Σ_a ‖r_a‖·|q_a|`.
     coef_scale: f64,
-    /// `GramFit::max_rel` (test-only).
-    #[cfg(test)]
-    max_rel: f64,
     /// `(tt_a, δtt_a, δp_a)` per component that reached `gate_tt`
     /// (test-only, `GramFit::bounds`).
     #[cfg(test)]
@@ -663,8 +654,6 @@ impl<'b> GramBackend<'b> {
             rot_prop: 0.0,
             coef_prop: 0.0,
             coef_scale: 0.0,
-            #[cfg(test)]
-            max_rel: 0.0,
             #[cfg(test)]
             bounds: Vec::new(),
             fail: None,
@@ -748,13 +737,7 @@ impl ComponentBackend for GramBackend<'_> {
         self.d_tt = d_tt;
         self.d_p = d_p;
         #[cfg(test)]
-        {
-            self.bounds.push((tt, d_tt, d_p));
-            let rel = (d_tt / tt).max(d_p / p_norm);
-            if rel > self.max_rel {
-                self.max_rel = rel;
-            }
-        }
+        self.bounds.push((tt, d_tt, d_p));
         let decided = tt >= RESOLVE_BAND * 2.0 * d_tt && tt >= ABS_BAND * NIPALS_ABS_FLOOR;
         let conditioned = tt >= RATIO_MIN * fro2 * r_norm * r_norm;
         if decided && conditioned {
@@ -838,7 +821,7 @@ mod tests_route_rule {
     }
 
     #[test]
-    fn work_floor_keeps_the_existing_corpus_shapes_on_the_x_backend() {
+    fn work_floor_refuses_a_shape_the_cost_rule_admits() {
         // perm_null n = 80, d = 6, n_perm = 200, k = 2: the cost rule alone
         // admits it, the work floor does not.
         let (n, p, b, k) = (80usize, 6usize, 200usize, 2usize);
@@ -847,13 +830,6 @@ mod tests_route_rule {
             "premise: the cost rule admits the corpus shape"
         );
         assert!(!use_gram_p_route(n, p, b, k));
-        // raw_perm (n_tr = 64, B = 201) and split_exact (n_train = 40,
-        // B = 201) at the same n, d, k.
-        assert!(!use_gram_p_route(64, 6, 201, 2));
-        assert!(!use_gram_p_route(40, 6, 201, 2));
-        // The wide route fixtures (n = 60, p = 3000) have p ≥ 2·n_tr.
-        assert!(!use_gram_p_route(60, 3000, 200, 1));
-        assert!(!use_gram_p_route(48, 3000, 201, 2));
     }
 
     #[test]
@@ -897,123 +873,11 @@ mod tests_route_rule {
     }
 }
 
-/// Design generators shared by the Gram-p tests here, in `perm_null.rs`
-/// and in `signal_test.rs`.
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
-pub(crate) mod test_designs {
-    use faer::{Col, Mat};
-    use rand::{RngExt, SeedableRng};
-
-    /// `n × d` uniform on `[-1, 1)`.
-    pub(crate) fn unif(n: usize, d: usize, seed: u64) -> Mat<f64> {
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-        Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0))
-    }
-
-    /// Length-`n` uniform on `[-1, 1)`.
-    pub(crate) fn unif_col(n: usize, seed: u64) -> Col<f64> {
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-        Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0))
-    }
-
-    /// `y = X b + noise·e`, `b_j = 1/(j + 1)`, `e` uniform.
-    pub(crate) fn linear_y(x: &Mat<f64>, noise: f64, seed: u64) -> Col<f64> {
-        let e = unif_col(x.nrows(), seed);
-        Col::<f64>::from_fn(x.nrows(), |i| {
-            (0..x.ncols())
-                .map(|j| x[(i, j)] / (j as f64 + 1.0))
-                .sum::<f64>()
-                + noise * e[i]
-        })
-    }
-
-    /// The arrays a fixed-X loop hands its kernel: X and y standardized
-    /// (weighted moments under `normalize_weights(w)` when weighted), both
-    /// then scaled by `fit_row_scale` of those weights.
-    pub(crate) fn prepared(
-        x: &Mat<f64>,
-        y: &Col<f64>,
-        w: Option<&Col<f64>>,
-    ) -> (Mat<f64>, Col<f64>) {
-        use crate::linalg::{
-            normalize_weights, standardize, standardize1, standardize1_weighted,
-            standardize_weighted,
-        };
-        match w {
-            None => {
-                let (xs, _, _) = standardize(x.as_ref());
-                let (ys, _, _) = standardize1(y.as_ref());
-                (xs, ys)
-            }
-            Some(w) => {
-                let wn = normalize_weights(w.as_ref()).expect("some weight is nonzero");
-                let (xs, _, _) = standardize_weighted(x.as_ref(), Some(wn.as_ref()));
-                let (ys, _, _) = standardize1_weighted(y.as_ref(), Some(wn.as_ref()));
-                let sqw = crate::fit::fit_row_scale(wn.as_ref());
-                (
-                    crate::fit::scale_rows(xs.as_ref(), sqw.as_ref()),
-                    crate::fit::scale_col(ys.as_ref(), sqw.as_ref()),
-                )
-            }
-        }
-    }
-
-    /// `√n · U diag(σ) V'` with `σ_j = κ^(−j/(p−1))`: condition number
-    /// exactly `kappa` up to rounding. Columns are not centered; the kernel
-    /// comparison does not need them to be.
-    #[allow(clippy::many_single_char_names)]
-    pub(crate) fn conditioned(n: usize, p: usize, kappa: f64, seed: u64) -> Mat<f64> {
-        let a = unif(n, p, seed);
-        let b = unif(p, p, seed + 1);
-        let ua = a.thin_svd().expect("svd");
-        let vb = b.thin_svd().expect("svd");
-        let (u, v) = (ua.U(), vb.U());
-        let sig = |j: usize| {
-            if p == 1 {
-                1.0
-            } else {
-                kappa.powf(-(j as f64) / (p as f64 - 1.0))
-            }
-        };
-        let scale = (n as f64).sqrt();
-        Mat::<f64>::from_fn(n, p, |i, j| {
-            (0..p).map(|l| u[(i, l)] * sig(l) * v[(j, l)]).sum::<f64>() * scale
-        })
-    }
-
-    /// A `y` orthogonal to `1` and to every column of `xs` (Gram-Schmidt,
-    /// each projection applied twice): `X'y` is rounding noise.
-    pub(crate) fn orthogonal_y(xs: &Mat<f64>, seed: u64) -> Col<f64> {
-        let n = xs.nrows();
-        let basis = crate::test_support::orthonormal_basis(
-            Col::<f64>::from_fn(n, |_| 1.0).as_ref(),
-            xs.as_ref(),
-            0.0,
-        );
-        let e = unif_col(n, seed);
-        let mut y = Col::<f64>::from_fn(n, |i| 5.0 + e[i]);
-        crate::test_support::project_off(&basis, &mut y);
-        y
-    }
-
-    /// `y = Σ_{l<m} (l + 1)·u_l` over the leading left singular vectors of
-    /// `xs`: exactly `m` components are real.
-    pub(crate) fn span_y(xs: &Mat<f64>, m: usize) -> Col<f64> {
-        let svd = xs.thin_svd().expect("svd");
-        let u = svd.U();
-        Col::<f64>::from_fn(xs.nrows(), |i| {
-            (0..m).map(|l| (1.0 + l as f64) * u[(i, l)]).sum::<f64>()
-        })
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
 mod tests_block {
-    use super::test_designs::{linear_y, prepared, unif};
     use super::*;
-    use crate::resample::block_par;
+    use crate::test_support::{linear_y, prepared, unif};
 
     fn lambda_max(c: &Mat<f64>) -> f64 {
         let ev = c.self_adjoint_eigenvalues(faer::Side::Lower).expect("evd");
@@ -1022,14 +886,13 @@ mod tests_block {
 
     #[test]
     fn c_build_is_thread_count_invariant_at_the_route_shapes() {
-        // byte_parity compares Par::Seq (disable_parallelism) with
-        // `block_par(false)`, the fixed-degree Rayon split, so the block must
-        // come out with the same bits serial and in pools of two and seven
-        // threads. Shapes: the fixture blocks (perm_null, raw_perm fold,
+        // The block built with `Par::Seq` is compared with the block built
+        // with `fit::par_fixed()`, the fixed-degree Rayon split, so the block
+        // must come out with the same bits serial and in pools of two and
+        // seven threads. Shapes: the fixture blocks (perm_null, raw_perm fold,
         // split_exact half), the memprobe shape, a block large enough for
         // faer's parallel GEMM, and d = 1, once short and once long enough
         // (n ≥ 256² entries) for faer to split the reduction dimension.
-        assert_eq!(block_par(true), Par::Seq);
         for (n, p) in [
             (2000usize, 50usize),
             (1600, 50),
@@ -1041,13 +904,13 @@ mod tests_block {
         ] {
             let x = unif(n, p, 31);
             let (xs, _) = prepared(&x, &linear_y(&x, 1.0, 32), None);
-            let seq = GramPBlock::new(xs.as_ref(), block_par(true));
+            let seq = GramPBlock::new(xs.as_ref(), Par::Seq);
             for threads in [2usize, 7] {
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
                     .build()
                     .expect("pool");
-                let par = pool.install(|| GramPBlock::new(xs.as_ref(), block_par(false)));
+                let par = pool.install(|| GramPBlock::new(xs.as_ref(), crate::fit::par_fixed()));
                 for j in 0..p {
                     for i in 0..p {
                         assert_eq!(
@@ -1096,7 +959,7 @@ mod tests_block {
         ));
         designs.push((
             "kappa_1e6",
-            super::test_designs::conditioned(400, 20, 1e6, 42),
+            crate::test_support::conditioned(400, 20, 1e6, 42),
         ));
         for (label, xs) in &designs {
             let block = GramPBlock::new(xs.as_ref(), Par::Seq);
@@ -1125,9 +988,9 @@ mod tests_block {
 
 #[cfg(test)]
 mod tests_kernel {
-    use super::test_designs::{linear_y, prepared, unif, unif_col};
     use super::*;
     use crate::fit::{pls1_fit_prepared_fro, ParChoice};
+    use crate::test_support::{linear_y, prepared, unif, unif_col};
     use faer::{Col, Mat};
 
     /// `max_j |a_j − b_j| ≤ 1e-10·max(1, ‖b‖∞)`, `b` the X backend's.
@@ -1357,12 +1220,21 @@ mod tests_kernel {
 
 #[cfg(test)]
 mod tests_sweep {
-    use super::test_designs::{
-        conditioned, linear_y, orthogonal_y, prepared, span_y, unif, unif_col,
-    };
     use super::*;
     use crate::fit::{pls1_fit_prepared_fro, ParChoice};
+    use crate::test_support::{conditioned, linear_y, orthogonal_y, prepared, unif, unif_col};
     use std::collections::BTreeMap;
+
+    /// `y = Σ_{l<m} (l + 1)·u_l` over the leading left singular vectors of
+    /// `xs`: exactly `m` components are real.
+    #[allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
+    fn span_y(xs: &Mat<f64>, m: usize) -> Col<f64> {
+        let svd = xs.thin_svd().expect("svd");
+        let u = svd.U();
+        Col::<f64>::from_fn(xs.nrows(), |i| {
+            (0..m).map(|l| (1.0 + l as f64) * u[(i, l)]).sum::<f64>()
+        })
+    }
 
     #[derive(Default)]
     struct Tally {
@@ -1373,8 +1245,6 @@ mod tests_sweep {
         /// Largest `max_j |coef_gram − coef_x| / max(1, ‖coef_x‖∞)` over
         /// resolved replicates (the tolerance is 1e-10).
         max_err: f64,
-        /// Largest per-component `max(δtt/tt, δp/‖p‖)`, a diagnostic.
-        max_rel: f64,
     }
 
     impl Tally {
@@ -1419,7 +1289,6 @@ mod tests_sweep {
                     / scale;
                 t.resolved += 1;
                 t.max_err = t.max_err.max(err);
-                t.max_rel = t.max_rel.max(g.max_rel);
             }
             Err(f) => {
                 *t.fails.entry(format!("{f:?}")).or_default() += 1;
@@ -1446,15 +1315,14 @@ mod tests_sweep {
 
     fn report(title: &str, tallies: &BTreeMap<&'static str, Tally>) {
         eprintln!("== {title} (RATIO_MIN = {RATIO_MIN:e}, K_GRAM_MAX = {K_GRAM_MAX})");
-        eprintln!("family\ttotal\tresolved\tfallback\tmax_err\tmax_rel\tby_gate\tby_k");
+        eprintln!("family\ttotal\tresolved\tfallback\tmax_err\tby_gate\tby_k");
         for (name, t) in tallies {
             eprintln!(
-                "{name}\t{}\t{}\t{:.4}\t{:.3e}\t{:.3e}\t{:?}\t{:?}",
+                "{name}\t{}\t{}\t{:.4}\t{:.3e}\t{:?}\t{:?}",
                 t.total,
                 t.resolved,
                 t.fallback_rate(),
                 t.max_err,
-                t.max_rel,
                 t.fails,
                 t.fails_by_k
             );
@@ -1721,9 +1589,9 @@ mod tests_sweep {
     }
 
     #[test]
-    #[ignore = "diagnostic: sweeps n/p at k = 3 (and k = 2) to find the gate that fails on very \
-                tall designs. Run with `cargo test -p plskit --release \
-                tall_shapes_n_over_p_sweep -- --ignored --nocapture`."]
+    #[ignore = "slow calibration sweep: n/p at k = 3 (and k = 2) on very tall designs. Run with \
+                `cargo test -p plskit --release tall_shapes_n_over_p_sweep -- --ignored \
+                --nocapture`."]
     fn tall_shapes_n_over_p_sweep() {
         // n/p ratios from 1000 to 20000, p in {4, 8, 16}, k = 3 and k = 2
         // (control). One block, 300 permuted replicates of a real signal
@@ -1731,8 +1599,9 @@ mod tests_sweep {
         let ratios = [
             1000usize, 2000, 2500, 3000, 3500, 4000, 5000, 6000, 7000, 8000, 12500, 16000, 20000,
         ];
+        let ps = [4usize, 8, 16];
         let mut tallies: BTreeMap<&'static str, Tally> = BTreeMap::new();
-        for &p in &[4usize, 8, 16] {
+        for &p in &ps {
             for &ratio in &ratios {
                 let n = ratio * p;
                 let x = unif(n, p, 500 + p as u64);
@@ -1752,6 +1621,30 @@ mod tests_sweep {
             }
         }
         report("n/p sweep at k = 3 and k = 2", &tallies);
+        // The two measurements the route rule rests on: `k = 2` never falls
+        // back (`K_GRAM_MAX`'s calibration range), and `k = 3` falls back on
+        // at most 20% of the replicates up to `GRAM_P_TALL_RATIO_MAX_K3`.
+        for &p in &ps {
+            for &ratio in &ratios {
+                let cell = |k: usize| &tallies[format!("p{p}_ratio{ratio}_k{k}").as_str()];
+                let k2 = cell(2);
+                assert_eq!(
+                    k2.resolved, k2.total,
+                    "p={p}, n/p={ratio}, k=2: fell back ({:?})",
+                    k2.fails
+                );
+                if ratio as f64 <= GRAM_P_TALL_RATIO_MAX_K3 {
+                    let k3 = cell(3);
+                    assert!(
+                        k3.fallback_rate() <= 0.20,
+                        "p={p}, n/p={ratio}, k=3: fallback rate {} ({:?}): lower \
+                         GRAM_P_TALL_RATIO_MAX_K3",
+                        k3.fallback_rate(),
+                        k3.fails
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1939,9 +1832,9 @@ mod tests_site_route {
 
 #[cfg(test)]
 mod bench_work_floor {
-    use super::test_designs::{linear_y, prepared, unif};
     use super::*;
     use crate::fit::{pls1_fit_prepared_fro, ParChoice};
+    use crate::test_support::{linear_y, prepared, unif};
     use std::hint::black_box;
     use std::time::Instant;
 

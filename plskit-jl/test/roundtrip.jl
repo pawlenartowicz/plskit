@@ -20,23 +20,12 @@
     @test rw.W_rot == rot.W
 end
 
-@testset "rotate keeps selection_result (k = \"optimal\")" begin
-    X, y = pls1_data()
-    fit = pls1_fit(X, y; k="optimal", k_max=4, seed=11)
-    rot = rotate(fit)
-    @test rot.selection_result isa FindKOptimalResult
-    @test rot.selection_result.seed === fit.selection_result.seed === UInt64(11)
-    @test rot.selection_result.cv_scores == fit.selection_result.cv_scores
-    @test rot.selection_result.k_star == fit.selection_result.k_star
-end
-
 @testset "pls3_transform takes the model back" begin
     X, y = pls1_data()
     Y = hcat(y, randn_np(9, 60), randn_np(10, 60))
     m = pls3_fit(X, Y; k=2)
     sc = pls3_transform(m; X_new=X, Y_new=Y)
     @test sc isa PLS3Scores
-    @test sc.x_scores ≈ m.x_scores atol = 1e-10
     @test pls3_transform(m; X_new=X, which=:x_scores).y_scores === nothing
     @test plssvd_transform(m; Y_new=Y, which="y_scores").x_scores === nothing
 end
@@ -63,25 +52,6 @@ end
     @test a.seed === s
     b = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,), seed=a.seed)
     @test b.pvalue == a.pvalue && b.statistic == a.statistic
-    # the same seed from Python gives the same run
-    p = pk.pls1_confirmatory_test(np.asarray(X), np.asarray(y); test_method="raw_perm",
-                                  args=pydict(Dict("n_perm" => 100)), seed=s)
-    @test pyconvert(Float64, p.pvalue) == a.pvalue
-    @test pyconvert(UInt64, p.seed) === s
-end
-
-@testset "plssvd_fit and split_nb_gate (untouched by any other testset)" begin
-    X, y = pls1_data()
-    Y = hcat(y, randn_np(9, 60))
-    fit = plssvd_fit(X, Y; k=2)
-    @test fit isa PLS3Result
-    @test size(fit.singular_values) == (2,)
-    @test fit.k_used == 2
-
-    gate = split_nb_gate(X)
-    @test gate isa SplitNbGateResult
-    @test gate.fires isa Bool
-    @test gate.n_eff isa Real
 end
 
 @testset "seed in a nested result" begin

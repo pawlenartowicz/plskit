@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use faer::{Col, ColRef, Mat, MatRef};
 
 use crate::error::PlsKitResult;
+use crate::perm_null::PermNullOutput;
 
 /// Remove from `v` its component in the span of the orthonormal `basis`,
 /// with one reorthogonalization pass (each projection applied twice).
@@ -55,6 +56,11 @@ pub(crate) fn assert_bits_eq(a: &[f64], b: &[f64], what: &str) {
     }
 }
 
+/// The bit patterns of `v`, for `assert_eq!` / `assert_ne!` on whole slices.
+pub(crate) fn bits(v: &[f64]) -> Vec<u64> {
+    v.iter().map(|x| x.to_bits()).collect()
+}
+
 /// Column-major entries of `m`, for [`assert_bits_eq`].
 pub(crate) fn mat_vals(m: MatRef<'_, f64>) -> Vec<f64> {
     let mut v = Vec::with_capacity(m.nrows() * m.ncols());
@@ -71,6 +77,62 @@ pub(crate) fn col_vals(c: ColRef<'_, f64>) -> Vec<f64> {
     (0..c.nrows()).map(|i| c[i]).collect()
 }
 
+/// Same shape and `to_bits` equality of every entry, naming the first
+/// `(row, column)` that differs.
+pub(crate) fn assert_mat_bits_eq(a: MatRef<'_, f64>, b: MatRef<'_, f64>, what: &str) {
+    assert_eq!(
+        (a.nrows(), a.ncols()),
+        (b.nrows(), b.ncols()),
+        "{what}: shape"
+    );
+    for j in 0..a.ncols() {
+        for i in 0..a.nrows() {
+            let (x, y) = (a[(i, j)], b[(i, j)]);
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "{what}[({i}, {j})]: {x:e} vs {y:e}"
+            );
+        }
+    }
+}
+
+/// On `d`-wide rows: NaN in the same places, and every row within
+/// `1e-10·max(1, ‖reference row‖∞)`.
+pub(crate) fn assert_rows_close(a: &[f64], b: &[f64], d: usize, what: &str) {
+    assert_eq!(a.len(), b.len(), "{what}: length");
+    for (r, (ra, rb)) in a.chunks(d).zip(b.chunks(d)).enumerate() {
+        let scale = rb
+            .iter()
+            .filter(|v| v.is_finite())
+            .fold(1.0_f64, |m, v| m.max(v.abs()));
+        for (j, (x, y)) in ra.iter().zip(rb).enumerate() {
+            assert!(
+                (x.is_nan() && y.is_nan()) || (x - y).abs() <= 1e-10 * scale,
+                "{what}: row {r}, column {j}: {x} vs {y}"
+            );
+        }
+    }
+}
+
+/// The reduced outputs of two `pls1_perm_null` runs: same lengths, NaN in
+/// the same places, `1e-10` absolute.
+pub(crate) fn assert_summaries_close(a: &PermNullOutput, b: &PermNullOutput, what: &str) {
+    for (name, va, vb) in [
+        ("beta_perm_mean", &a.beta_perm_mean, &b.beta_perm_mean),
+        ("beta_perm_sd", &a.beta_perm_sd, &b.beta_perm_sd),
+        ("beta_perm_z", &a.beta_perm_z, &b.beta_perm_z),
+    ] {
+        assert_eq!(va.len(), vb.len(), "{what}: {name} length");
+        for (j, (x, y)) in va.iter().zip(vb.iter()).enumerate() {
+            assert!(
+                x.is_nan() == y.is_nan() && (x.is_nan() || (x - y).abs() <= 1e-10),
+                "{what}: {name}[{j}]: {x:e} vs {y:e}"
+            );
+        }
+    }
+}
+
 /// `(x, y)` with `x` uniform on `[-1, 1)` and `y = 2·x₀ − x₁ + noise`
 /// (`d >= 2`).
 pub(crate) fn signal_data(n: usize, d: usize, seed: u64) -> (Mat<f64>, Col<f64>) {
@@ -83,6 +145,111 @@ pub(crate) fn signal_data(n: usize, d: usize, seed: u64) -> (Mat<f64>, Col<f64>)
     (x, y)
 }
 
+/// `(x, y)` with `x` uniform on `[-1, 1)` and
+/// `y = snr·Σ_{j < k_signal} x_j + noise`, noise uniform on `[-1, 1)`.
+/// `k_signal = 0` gives `y` independent of `X`.
+pub(crate) fn synth(
+    n: usize,
+    d: usize,
+    k_signal: usize,
+    snr: f64,
+    seed: u64,
+) -> (Mat<f64>, Col<f64>) {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    let x = Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0));
+    let beta = Col::<f64>::from_fn(d, |j| if j < k_signal { 1.0 } else { 0.0 });
+    let y_signal: Col<f64> = x.as_ref() * beta.as_ref();
+    let y = Col::<f64>::from_fn(n, |i| y_signal[i] * snr + rng.random_range(-1.0..1.0));
+    (x, y)
+}
+
+/// `n × d` uniform on `[-1, 1)`.
+pub(crate) fn unif(n: usize, d: usize, seed: u64) -> Mat<f64> {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0))
+}
+
+/// Length-`n` uniform on `[-1, 1)`.
+pub(crate) fn unif_col(n: usize, seed: u64) -> Col<f64> {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0))
+}
+
+/// `y = X b + noise·e`, `b_j = 1/(j + 1)`, `e` uniform.
+pub(crate) fn linear_y(x: &Mat<f64>, noise: f64, seed: u64) -> Col<f64> {
+    let e = unif_col(x.nrows(), seed);
+    Col::<f64>::from_fn(x.nrows(), |i| {
+        (0..x.ncols())
+            .map(|j| x[(i, j)] / (j as f64 + 1.0))
+            .sum::<f64>()
+            + noise * e[i]
+    })
+}
+
+/// The arrays a fixed-X loop hands its kernel: X and y standardized
+/// (weighted moments under `normalize_weights(w)` when weighted), both
+/// then scaled by `fit_row_scale` of those weights.
+pub(crate) fn prepared(x: &Mat<f64>, y: &Col<f64>, w: Option<&Col<f64>>) -> (Mat<f64>, Col<f64>) {
+    use crate::linalg::{
+        normalize_weights, standardize, standardize1, standardize1_weighted, standardize_weighted,
+    };
+    match w {
+        None => {
+            let (xs, _, _) = standardize(x.as_ref());
+            let (ys, _, _) = standardize1(y.as_ref());
+            (xs, ys)
+        }
+        Some(w) => {
+            let wn = normalize_weights(w.as_ref()).expect("some weight is nonzero");
+            let (xs, _, _) = standardize_weighted(x.as_ref(), Some(wn.as_ref()));
+            let (ys, _, _) = standardize1_weighted(y.as_ref(), Some(wn.as_ref()));
+            let sqw = crate::fit::fit_row_scale(wn.as_ref());
+            (
+                crate::fit::scale_rows(xs.as_ref(), sqw.as_ref()),
+                crate::fit::scale_col(ys.as_ref(), sqw.as_ref()),
+            )
+        }
+    }
+}
+
+/// `√n · U diag(σ) V'` with `σ_j = κ^(−j/(p−1))`: condition number
+/// exactly `kappa` up to rounding. Columns are not centered; the kernel
+/// comparison does not need them to be.
+#[allow(clippy::many_single_char_names)]
+#[allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
+pub(crate) fn conditioned(n: usize, p: usize, kappa: f64, seed: u64) -> Mat<f64> {
+    let a = unif(n, p, seed);
+    let b = unif(p, p, seed + 1);
+    let ua = a.thin_svd().expect("svd");
+    let vb = b.thin_svd().expect("svd");
+    let (u, v) = (ua.U(), vb.U());
+    let sig = |j: usize| {
+        if p == 1 {
+            1.0
+        } else {
+            kappa.powf(-(j as f64) / (p as f64 - 1.0))
+        }
+    };
+    let scale = (n as f64).sqrt();
+    Mat::<f64>::from_fn(n, p, |i, j| {
+        (0..p).map(|l| u[(i, l)] * sig(l) * v[(j, l)]).sum::<f64>() * scale
+    })
+}
+
+/// A `y` orthogonal to `1` and to every column of `xs` (Gram-Schmidt,
+/// each projection applied twice): `X'y` is rounding noise.
+pub(crate) fn orthogonal_y(xs: &Mat<f64>, seed: u64) -> Col<f64> {
+    let n = xs.nrows();
+    let basis = orthonormal_basis(Col::<f64>::from_fn(n, |_| 1.0).as_ref(), xs.as_ref(), 0.0);
+    let e = unif_col(n, seed);
+    let mut y = Col::<f64>::from_fn(n, |i| 5.0 + e[i]);
+    project_off(&basis, &mut y);
+    y
+}
+
 /// Uneven observation weights with a mean other than one and a zero on
 /// every eleventh row.
 pub(crate) fn test_weights(n: usize) -> Col<f64> {
@@ -91,6 +258,17 @@ pub(crate) fn test_weights(n: usize) -> Col<f64> {
             0.0
         } else {
             0.25 + (i % 7) as f64 * 0.5
+        }
+    })
+}
+
+/// Uneven observation weights, zero on every ninth row from row 0.
+pub(crate) fn gram_p_weights(n: usize) -> Col<f64> {
+    Col::<f64>::from_fn(n, |i| {
+        if i % 9 == 0 {
+            0.0
+        } else {
+            0.5 + (i % 5) as f64 * 0.3
         }
     })
 }

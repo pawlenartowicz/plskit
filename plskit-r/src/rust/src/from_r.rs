@@ -35,7 +35,8 @@ impl Node {
 enum Ctx {
     /// A data or option argument: names are ignored.
     Data,
-    /// An `args`-kind argument: a list is a record, even an empty one.
+    /// An `args`-kind argument, or a list nested in one (`find_k_args$args`):
+    /// a list is a record, even an empty one.
     Args,
     /// Inside a passed-back result: a numeric vector whose names are all
     /// integers is an integer-keyed map.
@@ -113,11 +114,6 @@ fn list<'a>(robj: &Robj, items: &'a [Node], ctx: Ctx, path: &str) -> Result<Valu
     } else {
         None
     };
-    let child_ctx = if ctx == Ctx::Model {
-        Ctx::Model
-    } else {
-        Ctx::Data
-    };
     let names: Option<Vec<&str>> = robj.names().map(Iterator::collect);
     match names {
         Some(names) => {
@@ -127,7 +123,7 @@ fn list<'a>(robj: &Robj, items: &'a [Node], ctx: Ctx, path: &str) -> Result<Valu
                     return Err(bad(path, "every element of the list must be named"));
                 }
                 let child = format!("{path}${name}");
-                rec.push(name, convert(item, child_ctx, &child)?)
+                rec.push(name, convert(item, ctx, &child)?)
                     .map_err(|e| bad(&child, &e.message))?;
             }
             Ok(Value::Record(rec))
@@ -139,7 +135,7 @@ fn list<'a>(robj: &Robj, items: &'a [Node], ctx: Ctx, path: &str) -> Result<Valu
         None => items
             .iter()
             .enumerate()
-            .map(|(i, item)| convert(item, child_ctx, &format!("{path}[[{}]]", i + 1)))
+            .map(|(i, item)| convert(item, ctx, &format!("{path}[[{}]]", i + 1)))
             .collect::<Result<Vec<_>, _>>()
             .map(Value::List),
     }

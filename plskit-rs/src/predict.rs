@@ -56,6 +56,7 @@ pub fn pls1_predict(model: &Pls1Model, x_new: MatRef<'_, f64>) -> PlsKitResult<C
 mod tests {
     use super::*;
     use crate::fit::{pls1_fit, FitOpts, KSpec};
+    use approx::assert_relative_eq;
     use faer::Mat;
 
     fn linear_data(n: usize, d: usize, k_true: usize, seed: u64) -> (Mat<f64>, Col<f64>) {
@@ -72,7 +73,14 @@ mod tests {
 
     #[test]
     fn predict_recovers_in_sample_y() {
+        // Offset X and an offset, scaled y, so a dropped intercept, `coef`
+        // read for `beta`, or a re-standardized X each move the prediction.
+        // The expected value is built from the scores, `mean(y) + sd(y)·(T q)`
+        // (population sd), which reads neither `beta` nor `intercept`.
         let (x, y) = linear_data(80, 6, 3, 7);
+        let n = y.nrows();
+        let x = Mat::<f64>::from_fn(n, 6, |i, j| x[(i, j)] + 3.0);
+        let y = Col::<f64>::from_fn(n, |i| 2.0 * y[i] + 10.0);
         let m = pls1_fit(
             x.as_ref(),
             y.as_ref(),
@@ -82,11 +90,15 @@ mod tests {
         )
         .unwrap();
         let y_hat = pls1_predict(&m, x.as_ref()).unwrap();
-        let mean_y: f64 = (0..y.nrows()).map(|i| y[i]).sum::<f64>() / y.nrows() as f64;
-        let ss_tot: f64 = (0..y.nrows()).map(|i| (y[i] - mean_y).powi(2)).sum();
-        let ss_res: f64 = (0..y.nrows()).map(|i| (y[i] - y_hat[i]).powi(2)).sum();
-        let r2 = 1.0 - ss_res / ss_tot;
-        assert!(r2 > 0.9, "R² = {r2}");
+        let mean_y: f64 = (0..n).map(|i| y[i]).sum::<f64>() / n as f64;
+        let sd_y = ((0..n).map(|i| (y[i] - mean_y).powi(2)).sum::<f64>() / n as f64).sqrt();
+        assert_eq!(m.k_used, 3);
+        for i in 0..n {
+            let tq: f64 = (0..m.k_used)
+                .map(|a| m.t_scores[(i, a)] * m.q_loadings[a])
+                .sum();
+            assert_relative_eq!(y_hat[i], mean_y + sd_y * tq, max_relative = 1e-10);
+        }
     }
 
     #[test]

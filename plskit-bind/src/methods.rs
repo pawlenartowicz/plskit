@@ -73,19 +73,22 @@ pub(crate) fn arg_bool(
     })
 }
 
-/// A confirmatory method name.
+/// A confirmatory method name. Mirrors `parse_confirmatory_method` in
+/// `plskit-py/src/lib.rs` — change together.
 pub(crate) fn parse_method(s: &str) -> Result<ConfirmatoryMethod, BindError> {
     match s {
         "raw_perm" => Ok(ConfirmatoryMethod::RawPerm),
         "split_nb" => Ok(ConfirmatoryMethod::SplitNb),
         "split_exact" => Ok(ConfirmatoryMethod::SplitExact),
+        "auto" => Ok(ConfirmatoryMethod::Auto),
         "score" => Ok(ConfirmatoryMethod::Score),
         "e" => Ok(ConfirmatoryMethod::E),
         _ => Err(BindError::invalid_args(format!("unknown method: {s}"))),
     }
 }
 
-/// `method` + `args` for `pls1_confirmatory_test`.
+/// `method` + `args` for `pls1_confirmatory_test`. Mirrors
+/// `parse_confirmatory_args` in `plskit-py/src/lib.rs` — change together.
 pub(crate) fn confirmatory_args(
     method: &str,
     args: Option<&Record<'_>>,
@@ -114,6 +117,13 @@ pub(crate) fn confirmatory_args(
                 n_splits: arg_usize(args, &label, "n_splits", n_splits)?,
             }
         }
+        (ConfirmatoryMethod::Auto, ConfirmatoryArgs::Auto { n_perm, n_splits }) => {
+            validate_keys(&label, args, &["n_perm", "n_splits"])?;
+            ConfirmatoryArgs::Auto {
+                n_perm: arg_usize(args, &label, "n_perm", n_perm)?,
+                n_splits: arg_usize(args, &label, "n_splits", n_splits)?,
+            }
+        }
         (ConfirmatoryMethod::Score, _) => {
             validate_keys(&label, args, &[])?;
             ConfirmatoryArgs::Score
@@ -130,15 +140,17 @@ pub(crate) fn confirmatory_args(
     })
 }
 
-/// `method` + `args` for `pls3_confirmatory_test`: two of the five methods.
+/// `method` + `args` for `pls3_confirmatory_test`: three of the six methods.
+/// Mirrors `parse_pls3_confirmatory_args` in `plskit-py/src/lib.rs` — change
+/// together.
 pub(crate) fn pls3_confirmatory_args(
     method: &str,
     args: Option<&Record<'_>>,
 ) -> Result<ConfirmatoryArgs, BindError> {
-    if method != "split_exact" && method != "split_nb" {
+    if method != "split_exact" && method != "split_nb" && method != "auto" {
         return Err(BindError::invalid_args(format!(
             "test_method='{method}' is not available for pls3_confirmatory_test; \
-             allowed: [\"split_exact\", \"split_nb\"]"
+             allowed: [\"split_exact\", \"split_nb\", \"auto\"]"
         )));
     }
     confirmatory_args(method, args)
@@ -161,7 +173,6 @@ pub(crate) fn varimax_args(args: Option<&Record<'_>>) -> Result<VarimaxArgs, Bin
 pub(crate) struct Common {
     pub(crate) pre_standardized: bool,
     pub(crate) seed: Option<u64>,
-    pub(crate) disable_parallelism: bool,
     pub(crate) verbose: bool,
 }
 
@@ -233,12 +244,13 @@ pub(crate) fn find_k_optimal_opts(
         force: arg_bool(args, "diagnostic='split_nb'", "force", d.force)?,
         pre_standardized: c.pre_standardized,
         seed: c.seed,
-        disable_parallelism: c.disable_parallelism,
         verbose: c.verbose,
     })
 }
 
 /// `test_method` / `alpha` / `args` for the `*_find_k_sequence` family.
+/// The `allowed` match mirrors `run_find_k_sequence` in `plskit-py/src/lib.rs`
+/// — change together.
 pub(crate) fn find_k_sequence_opts(
     test_method: &str,
     alpha: Option<f64>,
@@ -250,7 +262,7 @@ pub(crate) fn find_k_sequence_opts(
     let allowed: &[&str] = match tm {
         ConfirmatoryMethod::RawPerm => &["n_perm"],
         ConfirmatoryMethod::SplitNb => &["n_splits", "force"],
-        ConfirmatoryMethod::SplitExact => &["n_perm", "n_splits"],
+        ConfirmatoryMethod::SplitExact | ConfirmatoryMethod::Auto => &["n_perm", "n_splits"],
         ConfirmatoryMethod::E => &[],
         // Score has no per-component reading, so no sequential variant.
         ConfirmatoryMethod::Score => {
@@ -270,7 +282,6 @@ pub(crate) fn find_k_sequence_opts(
         force: arg_bool(args, &label, "force", d.force)?,
         pre_standardized: c.pre_standardized,
         seed: c.seed,
-        disable_parallelism: c.disable_parallelism,
         verbose: c.verbose,
     })
 }
@@ -279,7 +290,6 @@ pub(crate) fn find_k_sequence_opts(
 pub(crate) fn keep_optimal_opts(
     args: Option<&Record<'_>>,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
 ) -> Result<FindKeepOptimalOpts, BindError> {
     validate_keys("method='keep_optimal'", args, &["n_folds"])?;
@@ -287,7 +297,6 @@ pub(crate) fn keep_optimal_opts(
     Ok(FindKeepOptimalOpts {
         n_folds: arg_usize(args, "method='keep_optimal'", "n_folds", d.n_folds)?,
         seed,
-        disable_parallelism,
         verbose,
     })
 }
@@ -350,29 +359,25 @@ mod tests {
     }
 
     #[test]
-    fn values_are_checked() {
-        let a = args(&[("n_perm", Value::F64(2.5))]);
+    fn auto_takes_n_perm_and_n_splits_only() {
+        let a = args(&[("n_perm", Value::I64(7)), ("n_splits", Value::I64(3))]);
+        let got = confirmatory_args("auto", Some(&a)).unwrap();
         assert_eq!(
-            confirmatory_args("split_exact", Some(&a)).unwrap_err().code,
-            "invalid_args"
+            format!("{got:?}"),
+            format!(
+                "{:?}",
+                ConfirmatoryArgs::Auto {
+                    n_perm: 7,
+                    n_splits: 3
+                }
+            )
         );
-        let a = args(&[("force", Value::I64(1))]);
-        assert_eq!(
-            confirmatory_args("split_nb", Some(&a)).unwrap_err().code,
-            "invalid_args"
-        );
-        let e = confirmatory_args("split_perm", None).unwrap_err();
-        assert_eq!(
-            (e.code, e.message.as_str()),
-            ("invalid_args", "unknown method: split_perm")
-        );
-    }
-
-    #[test]
-    fn pls3_takes_two_methods() {
-        assert!(pls3_confirmatory_args("split_nb", None).is_ok());
-        let e = pls3_confirmatory_args("raw_perm", None).unwrap_err();
+        let a = args(&[("force", Value::Bool(true))]);
+        let e = confirmatory_args("auto", Some(&a)).unwrap_err();
         assert_eq!(e.code, "invalid_args");
+        assert!(e.message.contains("does not accept arg 'force'"));
+        assert!(pls3_confirmatory_args("auto", None).is_ok());
+        assert!(pls3_confirmatory_args("split_nb", None).is_ok());
     }
 
     #[test]
@@ -380,7 +385,5 @@ mod tests {
         let got = varimax_args(None).unwrap();
         let want = VarimaxArgs::default();
         assert_eq!(format!("{got:?}"), format!("{want:?}"));
-        let a = args(&[("bogus", Value::I64(1))]);
-        assert_eq!(varimax_args(Some(&a)).unwrap_err().code, "invalid_args");
     }
 }

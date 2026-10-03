@@ -484,25 +484,31 @@ mod tests {
 
     #[test]
     fn rotate_with_l_uses_loading_basis() {
-        // Different L should produce a different R than L=None.
+        // R is found on L alone, so it is the R of rotating L itself, bit
+        // for bit.
         let w = random_w(8, 10, 3);
         let l = random_w(9, 40, 3);
-        let out_none = rotate(
-            w.as_ref(),
-            RotationMethod::Varimax(VarimaxArgs::default()),
-            None,
-        )
-        .unwrap();
         let out_l = rotate(
             w.as_ref(),
             RotationMethod::Varimax(VarimaxArgs::default()),
             Some(l.as_ref()),
         )
         .unwrap();
-        assert!(
-            !approx_eq_mat(out_none.r.as_ref(), out_l.r.as_ref(), 1e-6),
-            "R should differ when L is provided"
-        );
+        let of_l = rotate(
+            l.as_ref(),
+            RotationMethod::Varimax(VarimaxArgs::default()),
+            None,
+        )
+        .unwrap();
+        for j in 0..3 {
+            for i in 0..3 {
+                assert_eq!(
+                    out_l.r[(i, j)].to_bits(),
+                    of_l.r[(i, j)].to_bits(),
+                    "R[({i}, {j})]"
+                );
+            }
+        }
     }
 
     #[test]

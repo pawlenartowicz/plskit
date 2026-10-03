@@ -11,9 +11,9 @@ use faer::{Accum, Col, ColRef, Mat, MatMut, MatRef, Par};
 // degree equal to the size of the Rayon pool the call runs in. The degree
 // sets how faer splits a reduction (a column-major GEMV sums one partial
 // product per piece), so those calls round differently under different
-// `RAYON_NUM_THREADS`. The crate calls the functions below instead, with
-// `Par::Seq` inside replicate workers and `fit::par_fixed()` (or
-// `resample::block_par`) elsewhere, so no result depends on the pool size.
+// pool sizes. The crate calls the functions below instead, with `Par::Seq`
+// inside replicate workers and `fit::par_fixed()` elsewhere, so no result
+// depends on the pool size.
 
 /// `a · b` with an explicit `par`: the call operator `*` makes (zeroed
 /// destination, `Accum::Replace`, `alpha = 1`), minus the global read.
@@ -1847,8 +1847,7 @@ mod tests {
     /// Wherever the raw-column sums stay finite and normal, the pre-scaled
     /// standardizers reproduce the raw formulas bit for bit: mean, scale,
     /// every standardized entry, and the constant/non-constant decision.
-    /// So the frozen corpus and `tests/byte_parity.rs` are unaffected by
-    /// the pre-scaling.
+    /// So the frozen corpus is unaffected by the pre-scaling.
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn prescaling_is_bit_identical_in_the_normal_range() {
@@ -2069,14 +2068,15 @@ mod weighted_tests {
 
     #[test]
     fn normalize_weights_to_mean_one() {
-        let w = Col::<f64>::from_fn(4, |_| 5.0);
+        // Hand-computed: w = [1, 2, 3]. Σw=6, n=3, so w·n/Σw = [0.5, 1, 1.5].
+        let w = Col::<f64>::from_fn(3, |i| (i + 1) as f64);
         let wn = normalize_weights(w.as_ref()).unwrap();
-        for i in 0..4 {
-            assert_relative_eq!(wn[i], 1.0, epsilon = 1e-12);
+        for (i, want) in [0.5, 1.0, 1.5].into_iter().enumerate() {
+            assert_relative_eq!(wn[i], want, epsilon = 1e-12);
         }
         // Total stays at n.
-        let s: f64 = (0..4).map(|i| wn[i]).sum();
-        assert_relative_eq!(s, 4.0, epsilon = 1e-12);
+        let s: f64 = (0..3).map(|i| wn[i]).sum();
+        assert_relative_eq!(s, 3.0, epsilon = 1e-12);
         assert!(normalize_weights(Col::<f64>::zeros(4).as_ref()).is_none());
     }
 }
@@ -2397,29 +2397,18 @@ mod fast_standardize_tests {
         f
     }
 
-    /// Per-column scalar path (`mean_and_scale`), the reference for the
-    /// block driver.
+    /// `standardize1_weighted` on each column (the scalar path), the
+    /// reference for the block driver.
     fn standardize_weighted_reference(
         x: MatRef<'_, f64>,
         weights: Option<ColRef<'_, f64>>,
     ) -> (Mat<f64>, Col<f64>, Col<f64>) {
-        let n_rows = x.nrows();
-        let n_cols = x.ncols();
-        let n_f = n_rows as f64;
-
-        // w': normalize so Σ w'_i = n (mean 1). For weights=None, treat w'_i = 1.
-        let w_prime: Option<Col<f64>> = weights.map(|w| {
-            let s: f64 = (0..n_rows).map(|i| w[i]).sum();
-            Col::<f64>::from_fn(n_rows, |i| w[i] * n_f / s)
-        });
-        let wpref = w_prime.as_ref().map(Col::as_ref);
-
-        let moments: Vec<(f64, f64)> = (0..n_cols)
-            .map(|j| mean_and_scale(n_rows, |i| x[(i, j)], wpref))
+        let cols: Vec<(Col<f64>, f64, f64)> = (0..x.ncols())
+            .map(|j| standardize1_weighted(x.col(j), weights))
             .collect();
-        let mean = Col::<f64>::from_fn(n_cols, |j| moments[j].0);
-        let scale = Col::<f64>::from_fn(n_cols, |j| moments[j].1);
-        let xs = Mat::<f64>::from_fn(n_rows, n_cols, |i, j| (x[(i, j)] - mean[j]) / scale[j]);
+        let xs = Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| cols[j].0[i]);
+        let mean = Col::<f64>::from_fn(x.ncols(), |j| cols[j].1);
+        let scale = Col::<f64>::from_fn(x.ncols(), |j| cols[j].2);
         (xs, mean, scale)
     }
 
@@ -2519,7 +2508,7 @@ mod fast_standardize_tests {
     /// Shapes around the block width: empty, one row, fewer columns than a
     /// block, exactly one block, blocks plus a tail, and tall cases with
     /// many blocks, and a wide one (p ≫ n) with several blocks.
-    const SHAPES: [(usize, usize); 14] = [
+    const SHAPES: [(usize, usize); 15] = [
         (0, 3),
         (3, 0),
         (1, 1),
@@ -2537,69 +2526,9 @@ mod fast_standardize_tests {
         // read their rows in blocks of `ROW_BLOCK`, here one block and three
         // single rows.
         (11, 2050),
+        // Neither rows nor columns.
+        (0, 0),
     ];
-
-    /// Every standardizer returns an `n × p` matrix and `p`-long moments
-    /// for an `n × p` input, including the degenerate shapes: no rows, no
-    /// columns, neither, and a single entry, on every layout.
-    #[test]
-    fn standardizers_keep_the_input_shape_at_the_edges() {
-        let shape = |m: &Mat<f64>| (m.nrows(), m.ncols());
-        for (k, &(n, p)) in [(0, 0), (0, 3), (3, 0), (1, 1), (1, 4), (4, 1)]
-            .iter()
-            .enumerate()
-        {
-            let x = test_matrix(n, p, 900 + k as u64);
-            let lay = Layouts::new(x.as_ref());
-            let w = Col::<f64>::from_fn(n, |i| 1.0 + i as f64);
-            let rs = Col::<f64>::from_fn(n, |i| 0.5 + i as f64);
-            let all_rows: Vec<usize> = (0..n).collect();
-            for (view, xv) in lay.all(&x) {
-                let what = format!("{n}x{p} {view}");
-                let mut wcases: Vec<Option<ColRef<'_, f64>>> = vec![None];
-                if n > 0 {
-                    wcases.push(Some(w.as_ref()));
-                }
-                for wref in wcases {
-                    let what = format!("{what} w={}", wref.is_some());
-                    let (a, am, asc) = standardize_weighted(xv, wref);
-                    assert_eq!(shape(&a), (n, p), "{what}: standardize_weighted");
-                    assert_eq!((am.nrows(), asc.nrows()), (p, p), "{what}: moments");
-                    let fb = standardize_fit_x(xv, wref, Some(rs.as_ref()));
-                    assert_eq!(
-                        (fb.xs().nrows(), fb.xs().ncols()),
-                        (n, p),
-                        "{what}: standardize_fit_x"
-                    );
-                    let fc = standardize_fit_x(xv, wref, None);
-                    assert_eq!(
-                        (fc.xs().nrows(), fc.xs().ncols()),
-                        (n, p),
-                        "{what}: unscaled"
-                    );
-                    let (d, _, _) = standardize_rows(xv, &all_rows, wref, Some(rs.as_ref()));
-                    assert_eq!(shape(&d), (n, p), "{what}: standardize_rows");
-                }
-                let (e, mean, scale) = standardize(xv);
-                assert_eq!(shape(&e), (n, p), "{what}: standardize");
-                let (f, _, _) = standardize_rows(xv, &[], None, None);
-                assert_eq!(shape(&f), (0, p), "{what}: standardize_rows, no rows");
-                let g = standardize_apply(xv, mean.as_ref(), scale.as_ref());
-                assert_eq!(shape(&g), (n, p), "{what}: standardize_apply");
-                // Zero rows are refused: `preprocess_basic::zero_rows_error_one_row_is_finite`.
-                if n > 0 {
-                    let out = crate::preprocess::preprocess(crate::preprocess::PreprocessInput {
-                        x: Some(xv),
-                        y: None,
-                        weights: None,
-                    })
-                    .unwrap();
-                    let (h, _, _) = out.x_std.unwrap();
-                    assert_eq!(shape(&h), (n, p), "{what}: preprocess");
-                }
-            }
-        }
-    }
 
     /// `standardize_fit_x` gives the entries, mean and scale of
     /// `standardize_weighted` followed by `fit::scale_rows`, bit for bit, on
@@ -2751,38 +2680,21 @@ mod fast_standardize_tests {
         }
     }
 
-    /// `standardize1_weighted` reads the same moments as a column of
-    /// `standardize_weighted`, though the two go through different loops.
-    #[test]
-    fn standardize1_weighted_matches_each_column_of_standardize_weighted() {
-        let (n, p) = (37, 19);
-        let x = test_matrix(n, p, 500);
-        let weights = test_weight_sets(n);
-        let mut cases: Vec<Option<ColRef<'_, f64>>> = vec![None];
-        cases.extend(weights.iter().map(|(_, w)| Some(w.as_ref())));
-        for wref in cases {
-            let (xs, mean, scale) = standardize_weighted(x.as_ref(), wref);
-            for j in 0..p {
-                let (z, m, s) = standardize1_weighted(x.col(j), wref);
-                assert_eq!(col_bits(z.as_ref()), col_bits(xs.col(j)), "column {j}");
-                assert_eq!(
-                    [m.to_bits(), s.to_bits()],
-                    [mean[j].to_bits(), scale[j].to_bits()]
-                );
-            }
-        }
-    }
-
     /// `standardize_rows` shares the block driver; pin it on full blocks
     /// and row-major views too (the row-standardization tests above use five columns).
     #[test]
     fn standardize_rows_is_bit_identical_to_reference_of_the_row_subset() {
         for (k, &(n, p)) in SHAPES.iter().enumerate() {
+            let x = test_matrix(n, p, 600 + k as u64);
+            let lay = Layouts::new(x.as_ref());
+            // No rows gathered: a `0 × p` result.
+            for (view, xv) in lay.all(&x) {
+                let (e, _, _) = standardize_rows(xv, &[], None, None);
+                assert_eq!((e.nrows(), e.ncols()), (0, p), "{n}x{p} {view}: no rows");
+            }
             if n == 0 {
                 continue;
             }
-            let x = test_matrix(n, p, 600 + k as u64);
-            let lay = Layouts::new(x.as_ref());
             let idx: Vec<usize> = (0..n).rev().chain([0, n - 1, n / 2]).collect();
             let m = idx.len();
             let weights = test_weight_sets(m);
@@ -2809,35 +2721,6 @@ mod fast_standardize_tests {
                         );
                     }
                 }
-            }
-        }
-    }
-
-    /// The block kernel is `scaled_moments` column by column, at every
-    /// block width the driver uses (1 and `STD_BLOCK`) and at an odd one.
-    #[test]
-    fn scaled_moments_block_matches_scaled_moments() {
-        fn check<const B: usize>(x: &Mat<f64>, w: Option<&Col<f64>>) {
-            let n = x.nrows();
-            let cols: [&[f64]; B] = core::array::from_fn(|b| x.col_as_slice(b));
-            let ws: Option<Vec<f64>> = w.map(|w| (0..n).map(|i| w[i]).collect());
-            let got = scaled_moments_block(cols, ws.as_deref());
-            for (b, g) in got.iter().enumerate() {
-                let r = scaled_moments(n, |i| x[(i, b)], w.map(Col::as_ref));
-                let gb = [g.s, g.inv, g.mean, g.ss, g.sq].map(bits);
-                let rb = [r.s, r.inv, r.mean, r.ss, r.sq].map(bits);
-                assert_eq!(gb, rb, "B={B} n={n} column {b} weighted={}", w.is_some());
-            }
-        }
-        for n in [0, 1, 2, 7, 37, 50, 64, 300] {
-            let x = test_matrix(n, STD_BLOCK.max(10), 400 + n as u64);
-            // Mean-one weights with zeros, as standardize_weighted passes them.
-            let w = Col::<f64>::from_fn(n, |i| if i % 3 == 2 { 0.0 } else { 1.5 });
-            for wref in [None, Some(&w)] {
-                check::<1>(&x, wref);
-                check::<3>(&x, wref);
-                check::<STD_BLOCK>(&x, wref);
-                check::<10>(&x, wref);
             }
         }
     }

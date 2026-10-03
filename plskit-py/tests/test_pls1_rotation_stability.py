@@ -31,14 +31,6 @@ def test_none_defaults_are_recorded_as_resolved_values():
     assert out.level == pytest.approx(0.95)
 
 
-def test_rejects_l_shape_mismatch():
-    x, y = _synth()
-    L_bad = np.zeros((4, 3))     # k=2 but L.ncols=3
-    with pytest.raises(PlsKitError) as excinfo:
-        pls1_rotation_stability(x, y, k=2, L=L_bad, n_boot=200, seed=7)
-    assert excinfo.value.code == "shape_mismatch"
-
-
 def test_L_and_rotation_args_reach_the_engine():
     # L sets the loading basis and kaiser_normalize changes the rotation, so
     # each moves the rotated variance; a dropped argument would not.
@@ -65,7 +57,6 @@ def test_L_and_rotation_args_reach_the_engine():
         ({"n_boot": "x"}, "invalid_argument", "n_boot must be a non-negative whole number"),
         ({"k": -1}, "invalid_argument", "k must be a non-negative whole number"),
         ({"m_rate": "x"}, "invalid_argument", "m_rate must be a number"),
-        ({"disable_parallelism": "yes"}, "invalid_argument", "disable_parallelism must be a bool"),
     ],
 )
 def test_unusable_values_raise_coded_errors(kwargs, code, message):

@@ -4,6 +4,28 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+- Added: `test_method="auto"`, now the default of `pls1_confirmatory_test`,
+  `pls3_confirmatory_test`, `pls1_find_k_sequence` and
+  `spls1_find_k_sequence`, in Rust, Python, R and Julia. It runs
+  `split_exact` or `split_nb`, chosen once per call from `X` and the weights,
+  and `result.test_method` reports the method that ran. The two confirmatory
+  tests no longer require `test_method`.
+- Changed (breaking, Rust): the `Default` of `ConfirmatoryTestOpts` and
+  `Pls3ConfirmatoryTestOpts` changes from `SplitExact` to `Auto`, so large
+  designs now run `split_nb` by default.
+- Changed (breaking): the default `test_method` of `pls1_find_k_sequence` and
+  `spls1_find_k_sequence` changes from `split_nb` to `"auto"`, which can
+  change the method that runs by default. `pls1_fit(k="sequence")` inherits
+  it.
+- Changed: `spls1_find_k_sequence` runs `split_exact` by default on designs
+  where `"auto"` picks it (`n_eff < 250`, or the `split_nb` auto-gate
+  fires). That is a refit route, about `(n_perm + 1) * n_splits` fits per step
+  instead of `n_splits`.
+- Changed (breaking): `disable_parallelism` is removed from every function,
+  in Rust, Python, R and Julia. Set `PLSKIT_NUM_THREADS` to cap the thread
+  count; `PLSKIT_NUM_THREADS=1` runs on one core. Results do not depend on
+  the setting. The testdata manifest drops the `disable_parallelism` key;
+  numerical outputs are unchanged.
 - Changed (breaking): `pls1_confirmatory_test` and `pls3_confirmatory_test`
   take `test_method=` instead of `method=`, and their result reports
   `result.test_method` instead of `result.method`, in Python, R and Julia.

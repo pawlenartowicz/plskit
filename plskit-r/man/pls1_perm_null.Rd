@@ -12,13 +12,12 @@ pls1_perm_null(
   return_perm_matrix = FALSE,
   pre_standardized = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL
 )
 }
 \arguments{
-\item{X, y, k, n_perm, return_perm_matrix, pre_standardized, seed, disable_parallelism, verbose, weights}{See the canonical reference.}
+\item{X, y, k, n_perm, return_perm_matrix, pre_standardized, seed, verbose, weights}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("perm_null_result", "plskit_result")}.

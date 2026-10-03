@@ -25,9 +25,6 @@ def test_fit_returns_PLS1Result_with_expected_shapes():
     assert m.k_used == 3
     assert m.weights is None
     assert m.n_eff == 80.0
-    assert not hasattr(m, "seed")
-    assert not hasattr(m, "k_was_auto")
-    assert not hasattr(m, "find_k_certificate")
 
 
 def test_fit_pre_standardized_passes_through():
@@ -37,13 +34,6 @@ def test_fit_pre_standardized_passes_through():
     m = plskit.pls1_fit(Xs, ys, k=2, pre_standardized=True)
     np.testing.assert_allclose(m.beta, m.coef, atol=1e-15)
     assert m.intercept == 0.0
-
-
-def test_fit_dimension_mismatch_raises():
-    X = np.zeros((10, 5)); y = np.zeros(9)
-    with pytest.raises(plskit.PlsKitError) as ei:
-        plskit.pls1_fit(X, y, k=2)
-    assert ei.value.code == "dimension_mismatch"
 
 
 @pytest.mark.parametrize(
@@ -86,7 +76,7 @@ def test_fit_unknown_string_mode_raises():
 # Keys that live on pls1_fit itself (never inside find_k_args), plus an
 # unknown key; `sequence` also rejects the optimal-only keys.
 _NEVER_IN_FIND_K_ARGS = (
-    "seed", "pre_standardized", "weights", "disable_parallelism", "verbose",
+    "seed", "pre_standardized", "weights", "verbose",
     "bogus_key",
 )
 
@@ -238,7 +228,7 @@ def test_fit_edge_shapes_x_layouts_agree(shape, pre_standardized):
 @pytest.mark.parametrize("order", ["C", "F"])
 @pytest.mark.parametrize("pre_standardized", [False, True])
 @pytest.mark.parametrize("weighted", [False, True])
-def test_fit_non_finite_x_raises_on_every_layout(order, pre_standardized, weighted):
+def test_fit_non_finite_x_raises_in_both_orders(order, pre_standardized, weighted):
     X, y = _data(n=30, d=5, seed=3)
     X[7, 2] = np.inf
     w = None

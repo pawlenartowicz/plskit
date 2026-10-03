@@ -13,13 +13,12 @@ pls1_find_k_optimal(
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL
 )
 }
 \arguments{
-\item{X, y, k_max, selector, diagnostic, args, pre_standardized, seed, disable_parallelism, verbose, weights}{See the canonical reference.}
+\item{X, y, k_max, selector, diagnostic, args, pre_standardized, seed, verbose, weights}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("find_k_optimal_result", "plskit_result")}.

@@ -302,7 +302,15 @@ fn settle_cases_refuses_overlapping_paths() {
         ("inputs/a.npz", "outputs/x.npz", tol),
         ("outputs/x.npz", "outputs/y.npz", tol),
     ];
-    for cases in [&shared_output, &input_is_output] {
-        assert!(settle_cases(root.path(), root.path(), cases).is_err());
+    // Neither root holds a file, so settling any path fails with an I/O
+    // error: the message tells the refusal apart from that.
+    for (cases, message) in [
+        (&shared_output, "is the output of more than one case"),
+        (&input_is_output, "is both an input and an output"),
+    ] {
+        let err = settle_cases(root.path(), root.path(), cases)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(message), "{message}: got {err:?}");
     }
 }

@@ -30,8 +30,7 @@ fn vec_to_array(v: &[f64]) -> ndarray::ArrayD<f64> {
 
 /// Case: `pls1_rotation_stability` on `(n=80, d=6)` data at `k=2`.
 ///
-/// Uses `n_boot=100`, `m_rate=0.7`, `level=0.95`, `seed=42`, and
-/// `disable_parallelism=true` for byte-exact determinism.
+/// Uses `n_boot=100`, `m_rate=0.7`, `level=0.95`, and `seed=42`.
 ///
 /// Inputs: `X`, `y`.
 /// Outputs: scalar fields for `variance_ratio` (point/lower/upper/sd),
@@ -72,7 +71,6 @@ pub fn n80_d6_k2(root: &Path) -> Result<Case> {
             level: 0.95,
             pre_standardized: false,
             seed: Some(42),
-            disable_parallelism: true,
             verbose: false,
             max_skip_rate: 0.01,
         },
@@ -124,7 +122,7 @@ pub fn n80_d6_k2(root: &Path) -> Result<Case> {
         outputs: paths.rel_outputs,
         kwargs: serde_json::json!({
             "n": 80, "d": 6, "k": 2, "n_boot": 100, "m_rate": 0.7,
-            "level": 0.95, "seed": 42, "disable_parallelism": true
+            "level": 0.95, "seed": 42
         }),
         hashes: Hashes {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
@@ -151,7 +149,6 @@ fn rotation_stability_call(data: &Xyw, pre_standardized: bool) -> Result<Rotatio
             level: 0.95,
             pre_standardized,
             seed: Some(42),
-            disable_parallelism: true,
             verbose: false,
             max_skip_rate: 0.01,
         },
@@ -213,7 +210,7 @@ fn rotation_stability_on(
     let (n, d) = data.x.dim();
     let mut kwargs = serde_json::json!({
         "n": n, "d": d, "k": 2, "n_boot": 100, "m_rate": 0.7,
-        "level": 0.95, "seed": 42, "disable_parallelism": true,
+        "level": 0.95, "seed": 42,
         "weights": "nonuniform"
     });
     if pre_standardized {

@@ -92,9 +92,9 @@ without `y`: the `split_nb` auto-gate rule reads only the design.
 | `args` | method-specific kwargs (dict on the wrapper boundary, `enum` in Rust) | every method-axis function |
 | `rotation_method` | algorithm tag for the rotation applied inside the diagnostic (parallel to `method` for `rotate`) | `pls1_rotation_stability` |
 | `rotation_args` | method-specific kwargs for the inner rotation (parallel to `args` for `rotate`) | `pls1_rotation_stability` |
-| `find_k_args` | method-specific kwargs forwarded by `pls1_fit(k="optimal" \| "sequence")` to the underlying `pls1_find_k_*` call. Allowed keys are the public params of the target function except `seed` / `pre_standardized` / `weights` / `disable_parallelism` / `verbose`, which live on `pls1_fit`. Unknown keys raise `PlsKitError(code="invalid_args")` listing the allowed set. | `pls1_fit` |
+| `find_k_args` | method-specific kwargs forwarded by `pls1_fit(k="optimal" \| "sequence")` to the underlying `pls1_find_k_*` call. Allowed keys are the public params of the target function except `seed` / `pre_standardized` / `weights` / `verbose`, which live on `pls1_fit`. Unknown keys raise `PlsKitError(code="invalid_args")` listing the allowed set. | `pls1_fit` |
 | `selector` | K-selection criterion (`"r2_se"` / `"r2_max"` / `"bic"`) | `pls1_find_k_optimal` |
-| `test_method` | the test to run (string): on the confirmatory tests, the test itself (`"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`; `pls3_confirmatory_test` takes `"split_exact"` / `"split_nb"` only); on the sequence, the inner test of the closed-test path (same values, `"score"` rejected — no sequential variant) | `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_find_k_sequence` |
+| `test_method` | the test to run (string): on the confirmatory tests, the test itself (`"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"` / `"auto"`; `pls3_confirmatory_test` takes `"split_exact"` / `"split_nb"` / `"auto"` only); on the sequence, the inner test of the closed-test path (same values, `"score"` rejected — no sequential variant) | `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_find_k_sequence` |
 | `diagnostic` | optional same-sample sequential diagnostic on `pls1_find_k_optimal`; same enum as `test_method` but `None` disables it. Distinct param name encodes "diagnostic, not confirmatory inference." | `pls1_find_k_optimal` |
 | `quantity` | CI/BSR target (`"salience"` / `"loading"` / `"beta"` / `"score_loading"`) | `percentile_ci`, `bsr` |
 | `which` | scores to project (`"x_scores"` / `"y_scores"` / `"both"`) | `pls3_transform` |
@@ -138,7 +138,6 @@ There is no `at` argument (legacy `"fitted_k"` / `"first_k"` / `"postselection"`
 
 | name | description | functions |
 |---|---|---|
-| `disable_parallelism` | force serial execution of the replicate loops; single top-level products (a reference fit under `Auto`, a one-off scoring product or decomposition) keep the crate's fixed parallel split, so results match the parallel run | every long-running core function |
 | `verbose` | progress to stderr | every long-running core function |
 | `max_skip_rate` | float in [0, 1]; default `0.01`; subsample loop raises `PlsKitResamplingDegenerate` if the fraction of skipped resamples exceeds this threshold | `pls1_confirmatory_test(ci=True)`, `pls1_rotation_stability` |
 

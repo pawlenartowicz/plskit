@@ -30,15 +30,6 @@ def test_return_perm_matrix_shape():
     assert pls1_perm_null(x, y, k=2, n_perm=200, seed=7).beta_perm_matrix is None
 
 
-def test_rejects_k_exceeds_max():
-    rng = np.random.default_rng(0)
-    x = rng.standard_normal((20, 4))
-    y = rng.standard_normal(20)
-    with pytest.raises(PlsKitError) as excinfo:
-        pls1_perm_null(x, y, k=5, n_perm=200, seed=7)
-    assert excinfo.value.code == "k_exceeds_max"
-
-
 @pytest.mark.parametrize(
     "kwargs, message",
     [

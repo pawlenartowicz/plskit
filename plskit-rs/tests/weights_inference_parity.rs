@@ -21,9 +21,8 @@
 //!   then fits pre_standardized; pls1_fit standardizes internally).
 //!
 //! Methods deliberately NOT given a parity test here (split_nb/split_exact/score
-//! are FPR-calibrated in `calibration_mc.rs`; the CV selector gets a weighted
-//! end-to-end test below; weighted raw_perm / e numbers are pinned by the
-//! corpus):
+//! are FPR-calibrated in `calibration_mc.rs`; weighted raw_perm / e numbers are
+//! pinned by the corpus):
 //! - `score` → its statistic `T = ‖X̃'ỹ‖²` and the χ² p-value scale with the
 //!   *total* weight: row duplication inflates n_eff from n to total, so weighted
 //!   and duplicated p-values genuinely differ (more rows ⇒ more power). The test
@@ -38,7 +37,10 @@
 // would bury the explanation in noise.
 #![allow(clippy::doc_markdown)]
 
-use faer::{Col, ColRef, Mat, MatRef};
+mod common;
+
+use common::duplicate_rows;
+use faer::{Col, Mat};
 use plskit::{
     pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_null, ConfirmatoryMethod,
     FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, PermNullOpts, Selector,
@@ -52,26 +54,6 @@ fn synth(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
     let noise = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
     let y = Col::<f64>::from_fn(n, |i| x[(i, 0)] * snr + noise[i]);
     (x, y)
-}
-
-/// Expand `(x, y)` by integer weights into row-duplicated `(x_dup, y_dup)`.
-fn duplicate_rows(x: MatRef<'_, f64>, y: ColRef<'_, f64>, w_int: &[u32]) -> (Mat<f64>, Col<f64>) {
-    let n = x.nrows();
-    let p = x.ncols();
-    let total: usize = w_int.iter().map(|&w| w as usize).sum();
-    let mut x_dup = Mat::<f64>::zeros(total, p);
-    let mut y_dup = Col::<f64>::zeros(total);
-    let mut row = 0;
-    for i in 0..n {
-        for _ in 0..w_int[i] {
-            for j in 0..p {
-                x_dup[(row, j)] = x[(i, j)];
-            }
-            y_dup[row] = y[i];
-            row += 1;
-        }
-    }
-    (x_dup, y_dup)
 }
 
 /// Small-integer weights covering all n rows (cycled).
@@ -92,7 +74,6 @@ fn perm_null_beta_ref_integer_weights_match_row_duplication() {
         n_perm,
         return_perm_matrix: false,
         pre_standardized: false,
-        disable_parallelism: true,
         verbose: false,
     };
 
@@ -194,7 +175,6 @@ fn perm_null_beta_ref_matches_weighted_fit_coef() {
             n_perm: 100,
             return_perm_matrix: false,
             pre_standardized: false,
-            disable_parallelism: true,
             verbose: false,
         },
         Some(7),
@@ -219,21 +199,6 @@ fn perm_null_beta_ref_matches_weighted_fit_coef() {
             fit.coef[j]
         );
     }
-}
-
-// ── Weighted end-to-end coverage for the resampling entry points ─────────────
-//
-// These cover the paths whose observed statistic is
-// resampling-dependent (folds/splits/permutations drawn from the RNG) and so are
-// not replication-equivalent: parity is meaningless, FPR calibration covers what
-// is testable (calibration_mc.rs), and these pin that the weighted path runs
-// end-to-end with non-uniform weights and returns a valid result. The `n_eff`
-// field is the cheap observable invariant: Kish's effective sample size must sit
-// strictly between 1 and n for genuinely non-uniform weights.
-
-/// Strongly non-uniform weights, mean ≈ 1, every weight positive.
-fn nonuniform_weights(n: usize) -> Col<f64> {
-    Col::<f64>::from_fn(n, |i| 0.5 + (i as f64).cos().abs())
 }
 
 #[test]
@@ -265,30 +230,4 @@ fn find_k_sequence_weighted_deflation_not_inflated() {
         weighted.pvalues, unweighted.pvalues
     );
     assert_eq!(weighted.k_star, 2, "pvalues={:?}", weighted.pvalues);
-}
-
-#[test]
-fn find_k_optimal_cv_weighted_runs_end_to_end() {
-    // R2Se selector: CV folds are RNG-drawn ⇒ resampling (the BIC selector's
-    // deterministic parity is covered above). Pin the weighted CV path returns
-    // k_star, cv_scores, and a reduced n_eff.
-    let (x, y) = synth(60, 5, 4.0, 8);
-    let w = nonuniform_weights(60);
-    let r = pls1_find_k_optimal(
-        x.as_ref(),
-        y.as_ref(),
-        4,
-        Some(w.as_ref()),
-        FindKOptimalOpts {
-            selector: Selector::R2Se,
-            n_folds: 5,
-            seed: Some(17),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert!(r.k_star >= 1);
-    assert!(r.cv_scores.is_some());
-    assert!(r.cv_scores_se.is_some());
-    assert!(r.n_eff > 1.0 && r.n_eff < 60.0, "n_eff={}", r.n_eff);
 }

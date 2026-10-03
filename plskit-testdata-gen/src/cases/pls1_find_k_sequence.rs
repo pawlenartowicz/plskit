@@ -188,3 +188,30 @@ pub fn e(root: &Path) -> Result<Case> {
         },
     )
 }
+
+/// Case: `pls1_find_k_sequence` with `test_method=auto`, `n_perm=100`, `n_splits=20`, `seed=42`.
+/// At n = 80 the rule resolves every step to `split_exact`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_find_k_sequence` fails.
+pub fn auto(root: &Path) -> Result<Case> {
+    run_sequence_case(
+        root,
+        &SequenceCase {
+            name: "pls1_find_k_sequence_auto",
+            opts: FindKSequenceOpts {
+                test_method: ConfirmatoryMethod::Auto,
+                n_perm: 100,
+                n_splits: 20,
+                seed: Some(42),
+                ..FindKSequenceOpts::default()
+            },
+            kwargs: serde_json::json!({
+                "k_max": 4,
+                "test_method": "auto",
+                "args": {"n_perm": 100, "n_splits": 20},
+                "seed": 42
+            }),
+        },
+    )
+}

@@ -32,14 +32,6 @@ def test_preprocess_2d_y_round_trips_2d():
     np.testing.assert_array_equal(np.ravel(two.Y_scale), [one.Y_scale])
 
 
-def test_preprocess_negative_weight_raises():
-    X, y, w = _data()
-    w[0] = -1.0
-    with pytest.raises(plskit.PlsKitInvalidWeights) as ei:
-        plskit.preprocess(X=X, Y=y, weights=w)
-    assert ei.value.reason == "negative"
-
-
 def test_preprocess_2d_y_weights_length_mismatch_raises():
     X, y, w = _data()
     Y = y.reshape(-1, 1)

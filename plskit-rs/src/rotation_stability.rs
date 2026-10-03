@@ -34,13 +34,6 @@ pub struct RotationStabilityOpts {
     pub pre_standardized: bool,
     /// Optional fixed RNG seed; `None` draws from OS entropy.
     pub seed: Option<u64>,
-    /// Run resamples sequentially (disables Rayon). Useful for tests.
-    ///
-    /// Serial replicate loops only: single top-level products (a reference
-    /// fit under `ParChoice::Auto`, a one-off scoring product or
-    /// decomposition) keep the crate's fixed parallel split, so results
-    /// match the parallel run bit for bit.
-    pub disable_parallelism: bool,
     /// Reserved for future progress reporting.
     pub verbose: bool,
     /// Maximum fraction of subsamples that may be skipped (due to weight
@@ -56,7 +49,6 @@ impl Default for RotationStabilityOpts {
             level: 0.95,
             pre_standardized: false,
             seed: None,
-            disable_parallelism: false,
             verbose: false,
             max_skip_rate: 0.01,
         }
@@ -145,6 +137,22 @@ pub fn pls1_rotation_stability(
     weights: Option<ColRef<'_, f64>>,
     opts: RotationStabilityOpts,
 ) -> PlsKitResult<RotationStabilityOutput> {
+    crate::fit::with_thread_limit(|| rotation_stability_impl(x, y, k, method, l, weights, opts))
+}
+
+/// Body of [`pls1_rotation_stability`], on the caller's pool.
+#[allow(clippy::many_single_char_names)]
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn rotation_stability_impl(
+    x: MatRef<'_, f64>,
+    y: ColRef<'_, f64>,
+    k: usize,
+    method: RotationStabilityMethod,
+    l: Option<MatRef<'_, f64>>,
+    weights: Option<ColRef<'_, f64>>,
+    opts: RotationStabilityOpts,
+) -> PlsKitResult<RotationStabilityOutput> {
     // ── Validation ──
     let n = x.nrows();
     let d = x.ncols();
@@ -187,7 +195,6 @@ pub fn pls1_rotation_stability(
         m_rate: opts.m_rate,
         level: opts.level,
         pre_standardized: opts.pre_standardized,
-        disable_parallelism: opts.disable_parallelism,
         max_failure_rate: 1.0,
         // rotation_stability has its own skip-rate check; this value is only
         // used for shared-knob validation via validate(), not the CI loop.
@@ -204,8 +211,8 @@ pub fn pls1_rotation_stability(
     let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
 
     let fit_ref = {
-        use crate::fit::{pls1_fit, FitOpts, KSpec};
-        pls1_fit(
+        use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
+        pls1_fit_impl(
             x,
             y,
             KSpec::Fixed(k),
@@ -244,11 +251,8 @@ pub fn pls1_rotation_stability(
     }
 
     let pre_std = opts.pre_standardized;
-    let rows: Vec<RotationStabilityWorkerRow> = crate::resample::parallel_for_each_seeded(
-        &mut rng,
-        opts.n_boot,
-        opts.disable_parallelism,
-        |_, child| {
+    let rows: Vec<RotationStabilityWorkerRow> =
+        crate::resample::parallel_for_each_seeded(&mut rng, opts.n_boot, |_, child| {
             run_one_rotation_stability(
                 x,
                 y,
@@ -269,8 +273,7 @@ pub fn pls1_rotation_stability(
             // one that splits Skipped vs Failed; replicating it here would add
             // surface this diagnostic does not need.
             .unwrap_or_else(|_| RotationStabilityWorkerRow::nan(k))
-        },
-    );
+        });
 
     // ── Derive a second child seed for the paired bootstrap; nested from the
     // post-subsample parent state to avoid any overlap with subsample-draw seeds.
@@ -336,7 +339,7 @@ fn fit_subsample(
     pre_standardized_x: bool,
     weights: Option<ColRef<'_, f64>>,
 ) -> PlsKitResult<Mat<f64>> {
-    use crate::fit::{pls1_fit, validate_and_normalize_weights, FitOpts, KSpec};
+    use crate::fit::{pls1_fit_impl, validate_and_normalize_weights, FitOpts, KSpec};
     use crate::linalg::{col_row_subset, row_subset, standardize1_weighted};
 
     let m = sample_idx.len();
@@ -365,7 +368,7 @@ fn fit_subsample(
         (xs, ys)
     };
 
-    let fit_b = pls1_fit(
+    let fit_b = pls1_fit_impl(
         xs.as_ref(),
         ys.as_ref(),
         KSpec::Fixed(k),
@@ -669,6 +672,7 @@ fn build_ciscalar_from_bootstrap(point: f64, samples: &mut [f64], alpha: f64) ->
 mod tests {
     use super::*;
     use crate::rotate::VarimaxArgs;
+    use crate::test_support::synth;
     use faer::Mat;
     use rand::RngExt;
     use rand::SeedableRng;
@@ -680,7 +684,7 @@ mod tests {
     /// the weights once more on the reference path.
     #[test]
     fn weighted_subsample_uses_weighted_moments() {
-        let (x, y) = synth(60, 5, 2.0, 7);
+        let (x, y) = synth(60, 5, 2, 2.0, 7);
         let w = faer::Col::<f64>::from_fn(60, |i| 0.2 + (i % 5) as f64);
         let idx: Vec<usize> = (0..60).filter(|i| i % 3 != 0).collect();
         let k = 2;
@@ -711,16 +715,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    fn synth(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, faer::Col<f64>) {
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-        let x = Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0));
-        let beta = faer::Col::<f64>::from_fn(d, |j| if j < 2 { 1.0 } else { 0.0 });
-        let signal: faer::Col<f64> = &x * &beta;
-        let noise = faer::Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
-        let y = faer::Col::<f64>::from_fn(n, |i| signal[i] * snr + noise[i]);
-        (x, y)
     }
 
     /// Synthesize a 2-factor model where simple-structure axes are NOT
@@ -769,7 +763,6 @@ mod tests {
             m_rate: 0.7,
             level: 0.95,
             seed: Some(seed),
-            disable_parallelism: true,
             ..Default::default()
         };
         pls1_rotation_stability(
@@ -788,19 +781,12 @@ mod tests {
     /// loadings, the diagnostic produces a finite ratio in a reasonable
     /// range without flagging `degenerate_baseline`.
     ///
-    /// A tighter target (`variance_ratio.upper < 0.95`) requires an
-    /// explicit close-σ regime where NIPALS axes drift continuously
-    /// within the eigenspace. PLS1 (unlike PCA) pins both components via
-    /// y-driven deflation, so engineering reliable NIPALS drift on a
-    /// y-supervised model needs more careful design than this test
-    /// provides — see TODO. Until then, the reliable check is that the
-    /// diagnostic *runs* and produces a defensible value.
+    /// The bound (`upper < 1.5`) only rules out a blow-up: PLS1, unlike
+    /// PCA, pins both components through y-driven deflation, so the
+    /// unrotated axes do not drift on this design and the ratio stays near
+    /// 1 rather than below it.
     #[test]
     fn variance_ratio_is_bounded_on_factor_model() {
-        // TODO: tighten to `upper < 0.95` once
-        // a synthetic that reliably triggers PLS1 NIPALS drift in the
-        // close-σ block is calibrated. The current threshold (`upper <
-        // 1.5`) is a structural sanity bound, not the intended strict assertion.
         let (x, y) = synth_factor_model(300, 17);
         let r = run_one(&x, &y, 2, 500, 23);
         assert!(
@@ -844,7 +830,7 @@ mod tests {
     /// sum of per-axis V's must reproduce aggregate V.
     #[test]
     fn per_axis_decomposition_sums_to_aggregate() {
-        let (x, y) = synth(150, 6, 4.0, 11);
+        let (x, y) = synth(150, 6, 2, 4.0, 11);
         let r = run_one(&x, &y, 2, 200, 5);
         assert_eq!(r.method, "varimax");
         let sum_unrot: f64 = r.variance_unrot_per_axis.iter().sum();
@@ -875,7 +861,7 @@ mod tests {
     /// Bootstrap CI must bracket the point estimate.
     #[test]
     fn paired_bootstrap_ci_contains_point_estimate() {
-        let (x, y) = synth(120, 6, 3.0, 9);
+        let (x, y) = synth(120, 6, 2, 3.0, 9);
         let r = run_one(&x, &y, 2, 200, 14);
         assert!(
             r.variance_ratio.lower <= r.variance_ratio.point + 1e-10,
@@ -1006,7 +992,7 @@ mod tests {
 
     #[test]
     fn rotation_stability_rejects_k_eq_1() {
-        let (x, y) = synth(80, 5, 3.0, 1);
+        let (x, y) = synth(80, 5, 2, 3.0, 1);
         let err = pls1_rotation_stability(
             x.as_ref(),
             y.as_ref(),
@@ -1023,7 +1009,7 @@ mod tests {
 
     #[test]
     fn rotation_stability_rejects_k_gt_7() {
-        let (x, y) = synth(80, 10, 3.0, 1);
+        let (x, y) = synth(80, 10, 2, 3.0, 1);
         let err = pls1_rotation_stability(
             x.as_ref(),
             y.as_ref(),
@@ -1040,7 +1026,7 @@ mod tests {
 
     #[test]
     fn rotation_stability_rejects_l_shape_mismatch() {
-        let (x, y) = synth(80, 6, 3.0, 1);
+        let (x, y) = synth(80, 6, 2, 3.0, 1);
         let l_bad = Mat::<f64>::zeros(4, 3);
         let err = pls1_rotation_stability(
             x.as_ref(),

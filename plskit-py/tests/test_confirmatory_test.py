@@ -53,29 +53,16 @@ def test_raw_perm_rejects_leave_one_out_n_folds():
     assert exc_info.value.code == "invalid_argument"
 
 
-def test_confirmatory_at_param_no_longer_accepted():
+def test_unknown_method_names_raise():
+    """An unknown method string is a plain unknown-method error at every
+    surface that parses one."""
     X, y = _data()
-    with pytest.raises(TypeError):
-        plskit.pls1_confirmatory_test(X, y, k=1, test_method="split_nb", at="fitted_k")
-
-
-def test_confirmatory_score_n_perm_field_is_none():
-    X, y = _data()
-    r = plskit.pls1_confirmatory_test(X, y, k=1, test_method="score", seed=7)
-    assert r.n_perm is None
-    assert r.n_splits is None
-
-
-@pytest.mark.parametrize("removed", ["split_perm", "split_perm_nr"])
-def test_removed_method_names_raise(removed):
-    """The pre-split_exact names are gone from every surface that parses a
-    method string — plain unknown-method errors, no deprecation shim."""
-    X, y = _data()
-    unknown = f"unknown method: {removed}"
+    bogus = "bogus"
+    unknown = f"unknown method: {bogus}"
     for call in (
-        lambda: plskit.pls1_confirmatory_test(X, y, k=1, test_method=removed),  # type: ignore[arg-type]
-        lambda: plskit.pls1_find_k_sequence(X, y, k_max=3, test_method=removed, seed=7),  # type: ignore[arg-type]
-        lambda: plskit.pls1_find_k_optimal(X, y, k_max=3, diagnostic=removed, seed=7),  # type: ignore[arg-type]
+        lambda: plskit.pls1_confirmatory_test(X, y, k=1, test_method=bogus),  # type: ignore[arg-type]
+        lambda: plskit.pls1_find_k_sequence(X, y, k_max=3, test_method=bogus, seed=7),  # type: ignore[arg-type]
+        lambda: plskit.pls1_find_k_optimal(X, y, k_max=3, diagnostic=bogus, seed=7),  # type: ignore[arg-type]
     ):
         with pytest.raises(plskit.PlsKitError, match=unknown) as ei:
             call()
@@ -109,6 +96,8 @@ def test_optional_fields_are_filled_only_by_unweighted_split_nb():
         )
         assert r.rho_hat is None, method
         assert r.stable_rank is None, method
+        if method == "score":
+            assert r.n_perm is None and r.n_splits is None
 
 
 # ── split_nb auto-gate, seen from Python ────────────────────────────────────
@@ -330,8 +319,6 @@ _X, _Y = _data()
          'ci must be a bool, got the string "yes"'),
         ({"test_method": "score", "pre_standardized": 1}, "invalid_argument",
          "pre_standardized must be a bool, got 1"),
-        ({"test_method": "score", "disable_parallelism": 1}, "invalid_argument",
-         "disable_parallelism must be a bool"),
         ({"test_method": "score", "verbose": "no"}, "invalid_argument",
          "verbose must be a bool"),
         ({"test_method": 1}, "invalid_argument", "test_method must be a string, got 1"),
@@ -342,7 +329,7 @@ _X, _Y = _data()
         "args_negative", "args_fractional", "args_bool", "args_str",
         "n_boot", "k", "level_str", "level_overflow", "seed_negative",
         "seed_too_big", "ci_str", "pre_standardized_int",
-        "disable_parallelism_int", "verbose_str", "method_int", "args_list",
+        "verbose_str", "method_int", "args_list",
     ],
 )
 def test_unusable_values_raise_coded_errors(kwargs, code, message):
@@ -370,3 +357,48 @@ def test_args_none_and_whole_float_counts_are_accepted():
 def test_the_full_seed_range_is_accepted_and_echoed(seed):
     r = plskit.pls1_confirmatory_test(_X, _Y, 1, test_method="score", seed=seed)
     assert r.seed == int(seed) and type(r.seed) is int
+
+
+# ── test_method="auto" (the default) ────────────────────────────────────────
+
+
+def _large_data(n=300, d=10, seed=5):
+    """n_eff >= 250, p <= 100n, well-conditioned X: "auto" resolves to split_nb."""
+    return _data(n=n, d=d, snr=0.5, seed=seed)
+
+
+def test_auto_is_the_default_and_resolves_per_design():
+    X, y = _data()
+    with _no_warning():
+        small = plskit.pls1_confirmatory_test(
+            X, y, args={"n_perm": 100, "n_splits": 20}, seed=7,
+        )
+    assert small.test_method == "split_exact"
+    assert small.n_perm == 100
+
+    X, y = _large_data()
+    with _no_warning():
+        large = plskit.pls1_confirmatory_test(X, y, args={"n_splits": 10}, seed=7)
+    assert large.test_method == "split_nb"
+    assert large.n_perm is None
+    assert isinstance(large.stable_rank, float)
+
+
+def test_auto_accepts_n_perm_and_n_splits_but_not_force():
+    X, y = _data()
+    r = plskit.pls1_confirmatory_test(
+        X, y, test_method="auto", args={"n_perm": 60, "n_splits": 12}, seed=7,
+    )
+    assert (r.n_perm, r.n_splits) == (60, 12)
+    with pytest.raises(plskit.PlsKitError, match="does not accept arg 'force'") as ei:
+        plskit.pls1_confirmatory_test(
+            X, y, test_method="auto", args={"force": True}, seed=7,
+        )
+    assert ei.value.code == "invalid_args"
+
+
+def test_auto_validates_n_perm_on_a_design_that_resolves_to_split_nb():
+    X, y = _large_data()
+    with pytest.raises(plskit.PlsKitError) as ei:
+        plskit.pls1_confirmatory_test(X, y, args={"n_perm": 0, "n_splits": 10}, seed=7)
+    assert ei.value.code == "invalid_argument"

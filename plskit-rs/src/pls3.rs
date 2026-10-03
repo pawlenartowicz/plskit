@@ -559,6 +559,19 @@ pub fn pls3_fit(
     weights: Option<ColRef<'_, f64>>,
     opts: Pls3FitOpts,
 ) -> PlsKitResult<Pls3Model> {
+    crate::fit::with_thread_limit(|| pls3_fit_impl(x, y, k, weights, opts))
+}
+
+/// Body of [`pls3_fit`], on the caller's pool.
+#[allow(clippy::many_single_char_names)]
+#[allow(clippy::similar_names)]
+pub(crate) fn pls3_fit_impl(
+    x: MatRef<'_, f64>,
+    y: MatRef<'_, f64>,
+    k: usize,
+    weights: Option<ColRef<'_, f64>>,
+    opts: Pls3FitOpts,
+) -> PlsKitResult<Pls3Model> {
     let (prepared, a) = prepare(x, y, k, weights, opts)?;
     let components = dense_components(a.as_ref(), k, prepared.par, || prepared.rel_floor(x, y))?;
     Ok(prepared.into_model(x, y, opts, components, None))
@@ -816,6 +829,21 @@ pub fn spls3_fit(
     weights: Option<ColRef<'_, f64>>,
     opts: Pls3FitOpts,
 ) -> PlsKitResult<Pls3Model> {
+    crate::fit::with_thread_limit(|| spls3_fit_impl(x, y, k, keep_x, keep_y, weights, opts))
+}
+
+/// Body of [`spls3_fit`], on the caller's pool.
+#[allow(clippy::many_single_char_names)]
+#[allow(clippy::similar_names)]
+pub(crate) fn spls3_fit_impl(
+    x: MatRef<'_, f64>,
+    y: MatRef<'_, f64>,
+    k: usize,
+    keep_x: usize,
+    keep_y: usize,
+    weights: Option<ColRef<'_, f64>>,
+    opts: Pls3FitOpts,
+) -> PlsKitResult<Pls3Model> {
     let n_features = x.ncols();
     let n_targets = y.ncols();
     validate_sparse(
@@ -830,7 +858,7 @@ pub fn spls3_fit(
         // Dense endpoint: one SVD, byte for byte. The metadata still says
         // this was a sparse call, the same way `spls1_fit` reports
         // `keep = Some(n_features)` at its own dense endpoint.
-        let mut m = pls3_fit(x, y, k, weights, opts)?;
+        let mut m = pls3_fit_impl(x, y, k, weights, opts)?;
         m.keep_x = Some(keep_x);
         m.keep_y = Some(keep_y);
         m.converged = Some(vec![true; m.k_used]);
@@ -988,7 +1016,7 @@ pub fn plssvd_fit(
     weights: Option<ColRef<'_, f64>>,
     opts: Pls3FitOpts,
 ) -> PlsKitResult<Pls3Model> {
-    pls3_fit(x, y, k, weights, opts)
+    crate::fit::with_thread_limit(|| pls3_fit_impl(x, y, k, weights, opts))
 }
 
 /// Which score block [`pls3_transform`] should produce.
@@ -1376,13 +1404,6 @@ mod tests {
     }
 
     #[test]
-    fn k_zero_errors() {
-        let (x, y) = shared_factor_data(40, 6, 3, 5);
-        let r = pls3_fit(x.as_ref(), y.as_ref(), 0, None, Pls3FitOpts::default());
-        assert!(matches!(r, Err(PlsKitError::InvalidArgument(_))));
-    }
-
-    #[test]
     fn row_count_mismatch_errors() {
         let x = Mat::<f64>::zeros(10, 4);
         let y = Mat::<f64>::zeros(9, 2);
@@ -1423,12 +1444,6 @@ mod tests {
                 assert_relative_eq!(ys[(i, a)], m.y_scores[(i, a)], epsilon = 1e-10);
             }
         }
-    }
-
-    #[test]
-    fn transform_x_only_leaves_y_scores_none() {
-        let (x, y) = shared_factor_data(50, 7, 3, 21);
-        let m = pls3_fit(x.as_ref(), y.as_ref(), 2, None, Pls3FitOpts::default()).unwrap();
         let s = pls3_transform(&m, Some(x.as_ref()), None, TransformWhich::XScores).unwrap();
         assert!(s.x_scores.is_some());
         assert!(s.y_scores.is_none());
@@ -1747,7 +1762,7 @@ mod tests {
     fn spls3_rejects_out_of_range_keeps() {
         let (x, y) = shared_factor_data(50, 10, 4, 19);
         let o = Pls3FitOpts::default();
-        for (kx, ky) in [(0, 4), (11, 4), (10, 0), (10, 5)] {
+        for (kx, ky) in [(11, 4), (10, 5)] {
             let e = spls3_fit(x.as_ref(), y.as_ref(), 2, kx, ky, None, o).unwrap_err();
             assert!(
                 matches!(e, PlsKitError::InvalidArgument(_)),

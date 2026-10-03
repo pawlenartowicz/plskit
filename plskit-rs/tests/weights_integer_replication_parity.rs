@@ -3,6 +3,8 @@
 #![allow(clippy::many_single_char_names)]
 #![allow(clippy::cast_precision_loss)]
 
+mod common;
+
 use faer::{Col, Mat};
 use plskit::fit::{pls1_fit, FitOpts, KSpec};
 
@@ -26,19 +28,7 @@ fn integer_weights_match_row_duplication() {
     )
     .unwrap();
 
-    let total: usize = w_int.iter().sum::<u32>() as usize;
-    let mut x_dup = Mat::<f64>::zeros(total, p);
-    let mut y_dup = Col::<f64>::zeros(total);
-    let mut row = 0;
-    for i in 0..n {
-        for _ in 0..w_int[i] {
-            for j in 0..p {
-                x_dup[(row, j)] = x[(i, j)];
-            }
-            y_dup[row] = y[i];
-            row += 1;
-        }
-    }
+    let (x_dup, y_dup) = common::duplicate_rows(x.as_ref(), y.as_ref(), &w_int);
     let m_d = pls1_fit(
         x_dup.as_ref(),
         y_dup.as_ref(),

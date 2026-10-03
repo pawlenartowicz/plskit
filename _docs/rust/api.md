@@ -11,6 +11,9 @@ This page does not duplicate that reference — read docs.rs for the
 authoritative signatures and trait bounds. The role of this page is
 orientation and side-by-side examples for users moving between languages.
 
+To cap the thread count, set `PLSKIT_NUM_THREADS`; see
+[Threads](../concepts/threads.md).
+
 ## Surface at a glance
 
 The crate is organized around five thematic groups, the same as the
@@ -63,7 +66,7 @@ pub fn spls1_find_keep_optimal(
     k: usize,
     weights: Option<ColRef<f64>>,
     opts: FindKeepOptimalOpts,
-    // FindKeepOptimalOpts: n_folds (default 5), seed, disable_parallelism, verbose
+    // FindKeepOptimalOpts: n_folds (default 5), seed, verbose
 ) -> PlsKitResult<FindKeepOptimalOutput>
 // FindKeepOptimalOutput: keep_star, k, cv_scores, cv_scores_se, keep_grid, seed, n_eff
 
@@ -122,7 +125,7 @@ pub fn pls3_confirmatory_test(
     // args: ConfirmatoryArgs::SplitExact { n_perm, n_splits }
     //    or ConfirmatoryArgs::SplitNb { n_splits, force };
     // pre_standardized_x, pre_standardized_y, keep_x, keep_y, max_iter (100),
-    // tol (1e-8), seed, disable_parallelism, verbose
+    // tol (1e-8), seed, verbose
 ) -> PlsKitResult<ConfirmatoryTestOutput>
 ```
 
@@ -153,12 +156,14 @@ matching `pre_standardized_X` / `pre_standardized_Y`.
 
 ## Choosing the method in Rust
 
-The wrappers make `test_method` a required keyword with no default. In Rust the
-method is the `ConfirmatoryArgs` variant in `opts.args`, and the options
-structs implement `Default`: both `ConfirmatoryTestOpts::default()` and
-`Pls3ConfirmatoryTestOpts::default()` fill `args` with `split_exact`
-settings (`n_perm = 1000`, `n_splits = 50`). Setting `args` explicitly
-keeps the method visible at the call site:
+The wrappers default `test_method` to `"auto"`. In Rust the method is the
+`ConfirmatoryArgs` variant in `opts.args`, and the options structs implement
+`Default`: `ConfirmatoryTestOpts::default()`,
+`Pls3ConfirmatoryTestOpts::default()` and `FindKSequenceOpts::default()` all
+use `Auto` (`n_perm = 1000`, `n_splits = 50` where it applies). `Auto`
+resolves to `split_exact` or `split_nb` from `X`; see
+[`test_method="auto"`](../concepts/PLS1/inference.md#test_methodauto).
+Setting `args` explicitly keeps the method visible at the call site:
 
 ```rust
 use plskit::{ConfirmatoryArgs, ConfirmatoryTestOpts};

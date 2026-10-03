@@ -200,25 +200,25 @@ function pls1_predict(model, X_new)
 end
 
 """
-    pls1_find_k_optimal(X, y, k_max; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing) -> FindKOptimalResult
+    pls1_find_k_optimal(X, y, k_max; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKOptimalResult
 
 Call Python's `plskit.pls1_find_k_optimal` with the same arguments and defaults.
 Reference: [`pls1_find_k_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
-function pls1_find_k_optimal(X, y, k_max; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing)
-    _call(:pls1_find_k_optimal; X, y, k_max, selector, diagnostic, args, pre_standardized, seed, disable_parallelism, verbose, weights)
+function pls1_find_k_optimal(X, y, k_max; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
+    _call(:pls1_find_k_optimal; X, y, k_max, selector, diagnostic, args, pre_standardized, seed, verbose, weights)
 end
 
 """
-    pls1_find_k_sequence(X, y, k_max; test_method="split_nb", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing) -> FindKSequenceResult
+    pls1_find_k_sequence(X, y, k_max; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKSequenceResult
 
 Call Python's `plskit.pls1_find_k_sequence` with the same arguments and defaults.
 Reference: [`pls1_find_k_sequence` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
-function pls1_find_k_sequence(X, y, k_max; test_method="split_nb", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing)
-    _call(:pls1_find_k_sequence; X, y, k_max, test_method, alpha, args, pre_standardized, seed, disable_parallelism, verbose, weights)
+function pls1_find_k_sequence(X, y, k_max; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
+    _call(:pls1_find_k_sequence; X, y, k_max, test_method, alpha, args, pre_standardized, seed, verbose, weights)
 end
 
 """
@@ -233,36 +233,36 @@ function spls1_fit(X, y, k, keep; pre_standardized=false, weights=nothing)
 end
 
 """
-    spls1_find_keep_optimal(X, y, k; args=nothing, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing) -> FindKeepOptimalResult
+    spls1_find_keep_optimal(X, y, k; args=nothing, seed=nothing, verbose=false, weights=nothing) -> FindKeepOptimalResult
 
 Call Python's `plskit.spls1_find_keep_optimal` with the same arguments and defaults.
 Reference: [`spls1_find_keep_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
-function spls1_find_keep_optimal(X, y, k; args=nothing, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing)
-    _call(:spls1_find_keep_optimal; X, y, k, args, seed, disable_parallelism, verbose, weights)
+function spls1_find_keep_optimal(X, y, k; args=nothing, seed=nothing, verbose=false, weights=nothing)
+    _call(:spls1_find_keep_optimal; X, y, k, args, seed, verbose, weights)
 end
 
 """
-    spls1_find_k_optimal(X, y, k_max, keep; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing) -> FindKOptimalResult
+    spls1_find_k_optimal(X, y, k_max, keep; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKOptimalResult
 
 Call Python's `plskit.spls1_find_k_optimal` with the same arguments and defaults.
 Reference: [`spls1_find_k_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
-function spls1_find_k_optimal(X, y, k_max, keep; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing)
-    _call(:spls1_find_k_optimal; X, y, k_max, keep, selector, diagnostic, args, pre_standardized, seed, disable_parallelism, verbose, weights)
+function spls1_find_k_optimal(X, y, k_max, keep; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
+    _call(:spls1_find_k_optimal; X, y, k_max, keep, selector, diagnostic, args, pre_standardized, seed, verbose, weights)
 end
 
 """
-    spls1_find_k_sequence(X, y, k_max, keep; test_method="split_nb", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing) -> FindKSequenceResult
+    spls1_find_k_sequence(X, y, k_max, keep; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKSequenceResult
 
 Call Python's `plskit.spls1_find_k_sequence` with the same arguments and defaults.
 Reference: [`spls1_find_k_sequence` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
-function spls1_find_k_sequence(X, y, k_max, keep; test_method="split_nb", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing)
-    _call(:spls1_find_k_sequence; X, y, k_max, keep, test_method, alpha, args, pre_standardized, seed, disable_parallelism, verbose, weights)
+function spls1_find_k_sequence(X, y, k_max, keep; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
+    _call(:spls1_find_k_sequence; X, y, k_max, keep, test_method, alpha, args, pre_standardized, seed, verbose, weights)
 end
 
 """
@@ -321,14 +321,14 @@ function spls3_fit(X, Y, k, keep_X, keep_Y; pre_standardized_X=false, pre_standa
 end
 
 """
-    pls1_confirmatory_test(X, y; k=1, test_method, args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing, max_skip_rate=nothing) -> ConfirmatoryTestResult
+    pls1_confirmatory_test(X, y; k=1, test_method="auto", args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing) -> ConfirmatoryTestResult
 
 Call Python's `plskit.pls1_confirmatory_test` with the same arguments and defaults.
 Reference: [`pls1_confirmatory_test` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
-function pls1_confirmatory_test(X, y; k=1, test_method, args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing, max_skip_rate=nothing)
-    _call(:pls1_confirmatory_test; X, y, k, test_method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, disable_parallelism, verbose, weights, max_skip_rate)
+function pls1_confirmatory_test(X, y; k=1, test_method="auto", args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing)
+    _call(:pls1_confirmatory_test; X, y, k, test_method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, verbose, weights, max_skip_rate)
 end
 
 """
@@ -343,25 +343,25 @@ function split_nb_gate(X; weights=nothing)
 end
 
 """
-    pls1_perm_null(X, y, k; n_perm=nothing, return_perm_matrix=false, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing) -> PermNullResult
+    pls1_perm_null(X, y, k; n_perm=nothing, return_perm_matrix=false, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> PermNullResult
 
 Call Python's `plskit.pls1_perm_null` with the same arguments and defaults.
 Reference: [`pls1_perm_null` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
-function pls1_perm_null(X, y, k; n_perm=nothing, return_perm_matrix=false, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing)
-    _call(:pls1_perm_null; X, y, k, n_perm, return_perm_matrix, pre_standardized, seed, disable_parallelism, verbose, weights)
+function pls1_perm_null(X, y, k; n_perm=nothing, return_perm_matrix=false, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
+    _call(:pls1_perm_null; X, y, k, n_perm, return_perm_matrix, pre_standardized, seed, verbose, weights)
 end
 
 """
-    pls3_confirmatory_test(X, Y; k=1, test_method, args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, disable_parallelism=false, verbose=false) -> ConfirmatoryTestResult
+    pls3_confirmatory_test(X, Y; k=1, test_method="auto", args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, verbose=false) -> ConfirmatoryTestResult
 
 Call Python's `plskit.pls3_confirmatory_test` with the same arguments and defaults.
 Reference: [`pls3_confirmatory_test` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
-function pls3_confirmatory_test(X, Y; k=1, test_method, args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, disable_parallelism=false, verbose=false)
-    _call(:pls3_confirmatory_test; X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, disable_parallelism, verbose)
+function pls3_confirmatory_test(X, Y; k=1, test_method="auto", args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, verbose=false)
+    _call(:pls3_confirmatory_test; X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, verbose)
 end
 
 """
@@ -376,12 +376,12 @@ function rotate(model_or_W; method="varimax", L=nothing, args=nothing)
 end
 
 """
-    pls1_rotation_stability(X, y, k; rotation_method="varimax", rotation_args=nothing, L=nothing, n_boot=nothing, m_rate=nothing, level=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing, max_skip_rate=nothing) -> RotationStabilityResult
+    pls1_rotation_stability(X, y, k; rotation_method="varimax", rotation_args=nothing, L=nothing, n_boot=nothing, m_rate=nothing, level=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing) -> RotationStabilityResult
 
 Call Python's `plskit.pls1_rotation_stability` with the same arguments and defaults.
 Reference: [`pls1_rotation_stability` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
-function pls1_rotation_stability(X, y, k; rotation_method="varimax", rotation_args=nothing, L=nothing, n_boot=nothing, m_rate=nothing, level=nothing, pre_standardized=false, seed=nothing, disable_parallelism=false, verbose=false, weights=nothing, max_skip_rate=nothing)
-    _call(:pls1_rotation_stability; X, y, k, rotation_method, rotation_args, L, n_boot, m_rate, level, pre_standardized, seed, disable_parallelism, verbose, weights, max_skip_rate)
+function pls1_rotation_stability(X, y, k; rotation_method="varimax", rotation_args=nothing, L=nothing, n_boot=nothing, m_rate=nothing, level=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing)
+    _call(:pls1_rotation_stability; X, y, k, rotation_method, rotation_args, L, n_boot, m_rate, level, pre_standardized, seed, verbose, weights, max_skip_rate)
 end

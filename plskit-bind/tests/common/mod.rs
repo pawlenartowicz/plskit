@@ -87,13 +87,6 @@ pub fn field<'r>(r: &'r Record<'static>, key: &str) -> &'r Value<'static> {
     r.get(key).unwrap_or_else(|| panic!("missing field {key}"))
 }
 
-pub fn f(r: &Record<'static>, key: &str) -> f64 {
-    match field(r, key) {
-        Value::F64(x) => *x,
-        other => panic!("{key}: expected f64, got {other:?}"),
-    }
-}
-
 pub fn i(r: &Record<'static>, key: &str) -> i64 {
     match field(r, key) {
         Value::I64(n) => *n,

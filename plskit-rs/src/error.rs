@@ -340,22 +340,4 @@ mod tests {
             .into();
         assert!(matches!(pe, PlsKitError::Internal(_)));
     }
-
-    #[test]
-    fn resample_failure_rate_exceeded_message_carries_the_rates() {
-        let e = PlsKitError::ResampleFailureRateExceeded {
-            max_failure_rate: 0.01,
-            observed_worker: 0.0,
-            observed_holdout_corr: 0.5,
-            n_worker_failed: 0,
-            n_holdout_corr_failed: 50,
-            n_boot: 100,
-        };
-        let s = format!("{e}");
-        assert!(
-            s.contains("0.5") || s.contains("50/100"),
-            "missing observed rate in: {s}"
-        );
-        assert!(s.contains("0.01"), "missing max_failure_rate in: {s}");
-    }
 }

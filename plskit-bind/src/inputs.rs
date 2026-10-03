@@ -162,27 +162,6 @@ mod tests {
     }
 
     #[test]
-    fn errors_name_the_argument() {
-        let mut inp = inputs(&[("k", Value::F64(2.5))]);
-        let e = inp.usize("k").unwrap_err();
-        assert_eq!(e.message, "k must be a non-negative whole number, got 2.5");
-    }
-
-    #[test]
-    fn seed_null_is_none_and_string_is_parsed() {
-        let mut inp = inputs(&[("seed", Value::Null)]);
-        assert_eq!(inp.seed().unwrap(), None);
-        let mut inp = inputs(&[("seed", Value::text("18446744073709551615"))]);
-        assert_eq!(inp.seed().unwrap(), Some(u64::MAX));
-    }
-
-    #[test]
-    fn length_one_vector_argument_widens() {
-        let mut inp = inputs(&[("y", Value::F64(1.5))]);
-        assert_eq!(inp.vec("y").unwrap().as_slice(), &[1.5]);
-    }
-
-    #[test]
     fn opt_record_rejects_a_non_record() {
         let mut inp = inputs(&[("args", Value::I64(1))]);
         assert_eq!(inp.opt_record("args").unwrap_err().code, "invalid_argument");

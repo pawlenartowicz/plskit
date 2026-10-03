@@ -59,8 +59,8 @@ sig   = plskit.pls1_confirmatory_test(
 sig.pvalue, sig.statistic
 ```
 
-`test_method` has no default and must be passed. `k=1` with `split_exact`
-is the recommended choice: a split-half test calibrated by
+`test_method` defaults to `"auto"`, which picks `split_exact` or `split_nb`
+from `X`. `k=1` with `split_exact` is the recommended choice: a split-half test calibrated by
 permutation, so it holds its level on any design (its p-value is
 floored at `1/(n_perm + 1)`). `split_nb` is the faster asymptotic
 alternative. See the [Python API](_docs/python/api.md) (§3.1) for all

@@ -98,8 +98,10 @@ applies the fitted model to new rows.
 
 **2. Test.** `pls1_confirmatory_test` asks whether there is any `X`-`y`
 signal at a fixed `k`. The method is the `ConfirmatoryArgs` variant;
-`ConfirmatoryTestOpts::default()` fills `args` with `split_exact` settings
-(see [Choosing the method in Rust](api.md#choosing-the-method-in-rust)).
+`ConfirmatoryTestOpts::default()` fills `args` with `Auto`, which picks
+`split_exact` or `split_nb` from the design (see
+[`"auto"`](../concepts/PLS1/inference.md#test_methodauto) and
+[Choosing the method in Rust](api.md#choosing-the-method-in-rust)).
 `split_exact` at `k = 1` is the recommended method. A fixed `seed` makes
 the result reproducible, and the same seed gives byte-identical output at
 any thread count. `test.test_method` reports the method that actually ran.

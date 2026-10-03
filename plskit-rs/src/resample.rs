@@ -1,7 +1,7 @@
 //! Resampling engines used by signal_test, sequential, and find_k.
 //! Crate-internal — public surface is the callers.
 
-use faer::{Col, ColRef, Par};
+use faer::{Col, ColRef};
 use rand::seq::SliceRandom;
 
 use crate::rng::{child_rng, child_seeds, Rng};
@@ -51,19 +51,11 @@ pub(crate) fn permutation_from_seed(n: usize, seed: u64) -> Vec<usize> {
     permute_indices(n, &mut child_rng(seed))
 }
 
-/// Map `0..n` in parallel (or sequentially), collecting in index order. No
-/// randomness: element `i` is `f(i)` whichever worker computes it.
-pub(crate) fn map_indexed<T: Send>(
-    n: usize,
-    disable_parallelism: bool,
-    f: impl Fn(usize) -> T + Sync,
-) -> Vec<T> {
-    if disable_parallelism {
-        (0..n).map(&f).collect()
-    } else {
-        use rayon::prelude::*;
-        (0..n).into_par_iter().map(&f).collect()
-    }
+/// Map `0..n` in parallel, collecting in index order. No randomness:
+/// element `i` is `f(i)` whichever worker computes it.
+pub(crate) fn map_indexed<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    use rayon::prelude::*;
+    (0..n).into_par_iter().map(&f).collect()
 }
 
 /// The outcome columns of a replicate loop: column 0 is `y`, column
@@ -98,86 +90,48 @@ impl Columns<'_> {
     }
 }
 
-/// Parallelism of a replicate loop's per-block precompute (a matrix built
-/// once per fold, split or call and shared read-only by its columns):
-/// `Par::Seq` under `disable_parallelism`, else the crate's fixed-degree
-/// Rayon split (`fit::par_fixed`, never `Par::rayon(0)`, whose degree is
-/// the pool size). Every driver hands it to its block builder, so all
-/// routes share one policy. The primal blocks build nothing.
-pub(crate) fn block_par(disable_parallelism: bool) -> Par {
-    if disable_parallelism {
-        Par::Seq
-    } else {
-        crate::fit::par_fixed()
-    }
-}
-
-/// Sequentially compute J child seeds, then run `f(j, &mut child_rng)`
-/// in parallel via Rayon (or serially when `disable_parallelism` is set).
-/// The pre-computed seeds make both paths byte-identical.
+/// Sequentially compute J child seeds, then run `f(j, &mut child_rng)` in
+/// parallel. The pre-computed seeds make the result independent of which
+/// worker runs which `j`.
 pub(crate) fn parallel_for_each_seeded<T: Send>(
     parent: &mut Rng,
     n_iterations: usize,
-    disable_parallelism: bool,
     f: impl Fn(usize, &mut Rng) -> T + Sync,
 ) -> Vec<T> {
-    let seeds = child_seeds(parent, n_iterations);
-    if disable_parallelism {
-        seeds
-            .into_iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let mut crng = child_rng(s);
-                f(i, &mut crng)
-            })
-            .collect()
-    } else {
-        use rayon::prelude::*;
-        seeds
-            .into_par_iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let mut crng = child_rng(s);
-                f(i, &mut crng)
-            })
-            .collect()
-    }
+    use rayon::prelude::*;
+    child_seeds(parent, n_iterations)
+        .into_par_iter()
+        .enumerate()
+        .map(|(i, s)| f(i, &mut child_rng(s)))
+        .collect()
 }
 
 /// `child_seeds(parent, n_rows)` first (the same parent consumption as `parallel_for_each_seeded`), then a
 /// row-major `n_rows × row_len` buffer allocated once and filled in place,
-/// row `i` by `f(i, &mut child_rng(seeds[i]), row)`, in parallel chunks or
-/// sequentially. Row `i` sees the same stream whichever worker runs it, so
-/// the buffer is byte-identical across thread counts, and no per-row
-/// allocation outlives its row. `f` must write every entry of its row.
+/// row `i` by `f(i, &mut child_rng(seeds[i]), row)`, in parallel chunks.
+/// Row `i` sees the same stream whichever worker runs it, so the buffer is
+/// byte-identical across thread counts, and no per-row allocation outlives
+/// its row. `f` must write every entry of its row.
 /// With `row_len == 0` the buffer is empty and `f` is not called.
 pub(crate) fn parallel_fill_rows_seeded(
     parent: &mut Rng,
     n_rows: usize,
     row_len: usize,
-    disable_parallelism: bool,
     f: impl Fn(usize, &mut Rng, &mut [f64]) + Sync,
 ) -> Vec<f64> {
+    use rayon::prelude::*;
     let seeds = child_seeds(parent, n_rows);
     let mut buf = vec![0.0_f64; n_rows * row_len];
     if row_len == 0 {
         return buf;
     }
-    if disable_parallelism {
-        for (i, (row, s)) in buf.chunks_mut(row_len).zip(&seeds).enumerate() {
+    buf.par_chunks_mut(row_len)
+        .zip(seeds.par_iter())
+        .enumerate()
+        .for_each(|(i, (row, s))| {
             let mut crng = child_rng(*s);
             f(i, &mut crng, row);
-        }
-    } else {
-        use rayon::prelude::*;
-        buf.par_chunks_mut(row_len)
-            .zip(seeds.par_iter())
-            .enumerate()
-            .for_each(|(i, (row, s))| {
-                let mut crng = child_rng(*s);
-                f(i, &mut crng, row);
-            });
-    }
+        });
     buf
 }
 
@@ -187,21 +141,15 @@ mod tests {
     use crate::rng::resolve_seed;
 
     #[test]
-    #[allow(clippy::similar_names)]
-    fn split_sizes_halves_n() {
-        // n=10, k=1: n/2 = 5 and k+2 = 3 does not bump
-        let (n_tr, n_te) = split_sizes(10, 1);
-        assert_eq!(n_tr, 5);
-        assert_eq!(n_te, 5);
-    }
-
-    #[test]
-    #[allow(clippy::similar_names)]
-    fn split_sizes_bumps_for_small_train() {
-        // n=10, k=5: want=5, max(5, 5+2=7)=7
-        let (n_tr, n_te) = split_sizes(10, 5);
-        assert_eq!(n_tr, 7);
-        assert_eq!(n_te, 3);
+    fn split_sizes_halves_n_and_bumps_for_small_train() {
+        for (n, k, want) in [
+            // n=10, k=1: n/2 = 5 and k+2 = 3 does not bump
+            (10, 1, (5, 5)),
+            // n=10, k=5: want=5, max(5, 5+2=7)=7
+            (10, 5, (7, 3)),
+        ] {
+            assert_eq!(split_sizes(n, k), want, "n={n} k={k}");
+        }
     }
 
     #[test]
@@ -213,21 +161,6 @@ mod tests {
         let mut all: Vec<usize> = tr.iter().chain(te.iter()).copied().collect();
         all.sort_unstable();
         assert_eq!(all, (0..10).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn parallel_for_each_seeded_disable_parallelism_byte_exact() {
-        let (_, mut a) = resolve_seed(Some(99)).unwrap();
-        let (_, mut b) = resolve_seed(Some(99)).unwrap();
-        let par = parallel_for_each_seeded(&mut a, 64, false, |i, rng| {
-            use rand::Rng;
-            (i, rng.next_u64())
-        });
-        let ser = parallel_for_each_seeded(&mut b, 64, true, |i, rng| {
-            use rand::Rng;
-            (i, rng.next_u64())
-        });
-        assert_eq!(par, ser);
     }
 
     #[test]
@@ -243,7 +176,7 @@ mod tests {
     fn permutation_from_seed_is_the_replicate_loops_draw() {
         let (_, mut a) = resolve_seed(Some(12)).unwrap();
         let (_, mut b) = resolve_seed(Some(12)).unwrap();
-        let drawn = parallel_for_each_seeded(&mut a, 9, true, |_, rng| permute_indices(31, rng));
+        let drawn = parallel_for_each_seeded(&mut a, 9, |_, rng| permute_indices(31, rng));
         let seeds = child_seeds(&mut b, 9);
         let regenerated: Vec<Vec<usize>> = seeds
             .iter()
@@ -253,12 +186,10 @@ mod tests {
     }
 
     #[test]
-    fn map_indexed_collects_in_index_order_serial_and_parallel() {
+    fn map_indexed_collects_in_index_order() {
         let f = |i: usize| (i * 7919) % 101;
-        let serial = map_indexed(500, true, f);
-        assert_eq!(serial, (0..500).map(f).collect::<Vec<_>>());
-        assert_eq!(serial, map_indexed(500, false, f));
-        assert_eq!(map_indexed(0, false, f), Vec::<usize>::new());
+        assert_eq!(map_indexed(500, f), (0..500).map(f).collect::<Vec<_>>());
+        assert_eq!(map_indexed(0, f), Vec::<usize>::new());
     }
 
     #[test]
@@ -283,16 +214,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn block_par_is_sequential_exactly_when_parallelism_is_disabled() {
-        assert!(matches!(block_par(true), faer::Par::Seq));
-        assert!(
-            matches!(block_par(false), faer::Par::Rayon(d) if d.get() == crate::fit::PAR_DEGREE),
-            "{:?}",
-            block_par(false)
-        );
-    }
-
     fn demo_row(i: usize, rng: &mut Rng) -> Vec<f64> {
         use rand::Rng as _;
         (0..5)
@@ -303,22 +224,19 @@ mod tests {
     #[test]
     fn parallel_fill_rows_seeded_is_parallel_for_each_seeded_flattened() {
         use rand::Rng as _;
-        for dp in [true, false] {
-            let (_, mut a) = resolve_seed(Some(8)).unwrap();
-            let (_, mut b) = resolve_seed(Some(8)).unwrap();
-            let rows = parallel_for_each_seeded(&mut a, 37, true, demo_row);
-            let flat = parallel_fill_rows_seeded(&mut b, 37, 5, dp, |i, rng, out| {
-                out.copy_from_slice(&demo_row(i, rng));
-            });
-            let expected: Vec<f64> = rows.concat();
-            assert_eq!(
-                flat.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                "dp={dp}"
-            );
-            // Same parent consumption.
-            assert_eq!(a.next_u64(), b.next_u64());
-        }
+        let (_, mut a) = resolve_seed(Some(8)).unwrap();
+        let (_, mut b) = resolve_seed(Some(8)).unwrap();
+        let rows = parallel_for_each_seeded(&mut a, 37, demo_row);
+        let flat = parallel_fill_rows_seeded(&mut b, 37, 5, |i, rng, out| {
+            out.copy_from_slice(&demo_row(i, rng));
+        });
+        let expected: Vec<f64> = rows.concat();
+        assert_eq!(
+            flat.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        // Same parent consumption.
+        assert_eq!(a.next_u64(), b.next_u64());
     }
 
     #[test]
@@ -328,11 +246,11 @@ mod tests {
         let calls = AtomicUsize::new(0);
         let (_, mut p) = resolve_seed(Some(5)).unwrap();
         let (_, mut q) = resolve_seed(Some(5)).unwrap();
-        let zero_rows = parallel_fill_rows_seeded(&mut p, 0, 4, false, |_, _, _| {
+        let zero_rows = parallel_fill_rows_seeded(&mut p, 0, 4, |_, _, _| {
             calls.fetch_add(1, Ordering::Relaxed);
         });
         assert_eq!(zero_rows, Vec::<f64>::new());
-        let zero_cols = parallel_fill_rows_seeded(&mut p, 3, 0, false, |_, _, _| {
+        let zero_cols = parallel_fill_rows_seeded(&mut p, 3, 0, |_, _, _| {
             calls.fetch_add(1, Ordering::Relaxed);
         });
         assert_eq!(zero_cols, Vec::<f64>::new());

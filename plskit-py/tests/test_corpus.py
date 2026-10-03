@@ -34,6 +34,19 @@ def load_npz(rel_path: str) -> dict:
         return {k: f[k] for k in f.files}
 
 
+class _ReadKeys(dict):
+    """Fixture outputs that remember which keys an arm read, so a key no arm
+    knows about fails instead of going unchecked."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.read = set()
+
+    def __getitem__(self, key):
+        self.read.add(key)
+        return super().__getitem__(key)
+
+
 def assert_close(actual, expected, name: str):
     if expected is None:
         assert actual is None, f"{name}: expected None, got {actual!r}"
@@ -80,7 +93,8 @@ def _resolve_corpus_weights(case, kw, inputs):
 def test_corpus_case(case):
     fn = case["function"]
     inputs = load_npz(case["inputs"])
-    expected = load_npz(case["outputs"])
+    expected = _ReadKeys(load_npz(case["outputs"]))
+    assert expected, f"{case['name']}: fixture has no outputs"
     X = inputs.get("X")
     y = inputs.get("y")
     kwargs = case["kwargs"]
@@ -151,7 +165,8 @@ def test_corpus_case(case):
                 vs = expected[f"{d_field}__values"]
                 actual_dict = getattr(r, d_field)
                 assert actual_dict is not None, f"{case['name']}.{d_field}"
-                for k_int, v_exp in zip(ks.tolist(), vs.tolist()):
+                assert sorted(actual_dict) == sorted(ks.tolist()), f"{case['name']}.{d_field} keys"
+                for k_int, v_exp in zip(ks.tolist(), vs.tolist(), strict=True):
                     np.testing.assert_allclose(actual_dict[int(k_int)], v_exp,
                                                atol=ATOL_ARRAY, rtol=RTOL,
                                                err_msg=f"{case['name']}.{d_field}[{k_int}]")
@@ -272,7 +287,8 @@ def test_corpus_case(case):
                 ks = expected[keys_k]
                 vs = expected[f"{d_field}__values"]
                 actual_dict = getattr(r, d_field)
-                for k_int2, v_exp in zip(ks.tolist(), vs.tolist()):
+                assert sorted(actual_dict) == sorted(ks.tolist()), f"{case['name']}.{d_field} keys"
+                for k_int2, v_exp in zip(ks.tolist(), vs.tolist(), strict=True):
                     np.testing.assert_allclose(actual_dict[int(k_int2)], v_exp,
                                                atol=ATOL_ARRAY, rtol=RTOL,
                                                err_msg=f"{case['name']}.{d_field}[{k_int2}]")
@@ -291,7 +307,8 @@ def test_corpus_case(case):
                 vs = expected[f"{d_field}__values"]
                 actual_dict = getattr(r, d_field)
                 assert actual_dict is not None, f"{case['name']}.{d_field}"
-                for k_int2, v_exp in zip(ks.tolist(), vs.tolist()):
+                assert sorted(actual_dict) == sorted(ks.tolist()), f"{case['name']}.{d_field} keys"
+                for k_int2, v_exp in zip(ks.tolist(), vs.tolist(), strict=True):
                     np.testing.assert_allclose(actual_dict[int(k_int2)], v_exp,
                                                atol=ATOL_ARRAY, rtol=RTOL,
                                                err_msg=f"{case['name']}.{d_field}[{k_int2}]")
@@ -353,3 +370,5 @@ def test_corpus_case(case):
                 assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
     else:
         pytest.fail(f"{case['name']}: no Python arm for manifest function {fn!r}")
+    unread = sorted(set(expected) - expected.read)
+    assert not unread, f"{case['name']}: fixture keys no arm reads: {unread}"

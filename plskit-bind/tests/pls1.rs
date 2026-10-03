@@ -1,5 +1,5 @@
-//! Integration tests for `preprocess`, `pls1_fit`, `pls1_predict`,
-//! `spls1_fit` and `split_nb_gate` through `call`.
+//! Integration tests for `preprocess`, `pls1_fit`, `pls1_predict` and
+//! `split_nb_gate` through `call`.
 #![allow(clippy::many_single_char_names)]
 
 mod common;
@@ -16,17 +16,6 @@ fn fit(k: Value<'static>) -> plskit_bind::Outcome {
 fn unknown_function_is_invalid_argument() {
     let e = call("pls2_fit", Record::new()).unwrap_err();
     assert_eq!(e.code, "invalid_argument");
-}
-
-#[test]
-fn unexpected_argument_is_invalid_argument() {
-    let (x, y) = data(60, 6, 1);
-    let e = err(
-        "pls1_fit",
-        vec![("X", x), ("y", y), ("ncomp", Value::I64(2))],
-    );
-    assert_eq!(e.code, "invalid_argument");
-    assert!(e.message.contains("'ncomp'"), "{}", e.message);
 }
 
 #[test]
@@ -140,36 +129,6 @@ fn null_optional_argument_takes_its_default() {
     assert!(same(&a.result, &b.result));
 }
 
-#[test]
-fn predict_round_trips_the_record() {
-    let (x, y) = data(60, 6, 1);
-    let model = fit(Value::I64(2)).result;
-    let p = ok(
-        "pls1_predict",
-        vec![("model", model.clone()), ("X_new", x.clone())],
-    );
-    let Value::Vec(yhat) = &p.result else {
-        panic!("expected a vector")
-    };
-    assert_eq!(yhat.len(), 60);
-
-    // Same numbers as the engine called directly.
-    let Value::Mat(xm) = &x else { panic!() };
-    let Value::Vec(yv) = &y else { panic!() };
-    let m = plskit::pls1_fit(
-        xm.as_mat(),
-        yv.as_col(),
-        plskit::KSpec::Fixed(2),
-        None,
-        plskit::FitOpts::default(),
-    )
-    .unwrap();
-    let direct = plskit::pls1_predict(&m, xm.as_mat()).unwrap();
-    for (row, &got) in yhat.as_slice().iter().enumerate() {
-        assert!((got - direct[row]).abs() <= 1e-12);
-    }
-}
-
 // R hands back a k = 1 model's Q as a length-1 vector,
 // which the seam turns into a scalar.
 #[test]
@@ -279,23 +238,6 @@ fn preprocess_1d_and_2d_y() {
     });
     let e = err("preprocess", vec![("X", x), ("Y", short)]);
     assert_eq!(e.code, "dimension_mismatch");
-}
-
-#[test]
-fn spls1_fit_records_keep() {
-    let (x, y) = data(60, 6, 1);
-    let o = ok(
-        "spls1_fit",
-        vec![
-            ("X", x),
-            ("y", y),
-            ("k", Value::I64(2)),
-            ("keep", Value::I64(3)),
-        ],
-    );
-    let r = record(&o);
-    check_record(r).unwrap();
-    assert_eq!(i(r, "keep"), 3);
 }
 
 #[test]

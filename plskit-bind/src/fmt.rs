@@ -72,10 +72,4 @@ mod tests {
             assert_eq!(g4(x), want, "g4({x})");
         }
     }
-
-    #[test]
-    fn python_reprs() {
-        assert_eq!(py_repr("optimal"), "'optimal'");
-        assert_eq!(py_list(&["selector", "args"]), "['selector', 'args']");
-    }
 }

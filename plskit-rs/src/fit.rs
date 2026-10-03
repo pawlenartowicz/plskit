@@ -27,8 +27,8 @@ pub enum KSpec {
 /// The parallel arm splits each product into a fixed number of pieces
 /// (8), however many threads the pool has, so a fit's bits
 /// depend on its inputs and on whether `Auto` chose the parallel arm (a
-/// function of the shape), never on the pool size: `RAYON_NUM_THREADS=1`
-/// and `RAYON_NUM_THREADS=16` give the same result. `Seq` and the parallel
+/// function of the shape), never on the pool size: `PLSKIT_NUM_THREADS=1`
+/// and `PLSKIT_NUM_THREADS=16` give the same result. `Seq` and the parallel
 /// arm of `Auto` can differ from each other in the last bits.
 ///
 /// Resamplers (`pls1_perm_null`, `pls1_rotation_stability`,
@@ -116,6 +116,97 @@ pub(crate) const PAR_DEGREE: usize = 8;
 /// [`PAR_DEGREE`]).
 pub(crate) fn par_fixed() -> Par {
     Par::rayon(PAR_DEGREE)
+}
+
+/// Environment variable that caps plskit's thread count; read once per
+/// top-level call by [`with_thread_limit`].
+pub(crate) const NUM_THREADS_ENV: &str = "PLSKIT_NUM_THREADS";
+
+/// `PLSKIT_NUM_THREADS` as read from the environment: unset or `0` → `None`
+/// (no cap: run on the current Rayon pool); a positive integer → `Some(n)`,
+/// the cap; anything else is an error that quotes the value (no trimming,
+/// so stray whitespace shows in the message).
+pub(crate) fn parse_num_threads(raw: Option<&str>) -> PlsKitResult<Option<usize>> {
+    match raw {
+        None | Some("0") => Ok(None),
+        Some(s) => match s.parse::<usize>() {
+            Ok(n) if n >= 1 => Ok(Some(n)),
+            _ => Err(PlsKitError::InvalidArgument(format!(
+                "{NUM_THREADS_ENV} must be a positive integer or 0, got {s:?}"
+            ))),
+        },
+    }
+}
+
+/// The plskit-owned pool for the last `n` asked for. One size is cached:
+/// a different `n` builds a new pool and drops the old one once its last
+/// running call finishes (each call holds its own `Arc`).
+static NUM_THREADS_POOL: std::sync::Mutex<Option<(usize, std::sync::Arc<rayon::ThreadPool>)>> =
+    std::sync::Mutex::new(None);
+
+/// Run `f` on at most `n` threads: on the current pool when `n` is `None`
+/// or not below the current pool's size (the core count when called
+/// outside any pool), otherwise on a plskit pool of `n`
+/// threads, so a cap at or above the pool size never starts threads. The
+/// cache lock is held only to fetch or replace the pool, never while `f`
+/// runs, so concurrent calls with different `n` do not serialize.
+pub(crate) fn run_with_threads<T: Send>(
+    n: Option<usize>,
+    f: impl FnOnce() -> T + Send,
+) -> PlsKitResult<T> {
+    // Outside any pool, `rayon::current_num_threads()` would start Rayon's
+    // global pool of all cores just to read its size; compare to the core
+    // count instead, so a cap never leaves an idle global pool behind.
+    let pool_size = if rayon::current_thread_index().is_some() {
+        rayon::current_num_threads()
+    } else {
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+    };
+    let Some(n) = n.filter(|&n| n < pool_size) else {
+        return Ok(f());
+    };
+    let pool = {
+        let mut cache = NUM_THREADS_POOL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match cache.as_ref() {
+            Some((m, p)) if *m == n => std::sync::Arc::clone(p),
+            _ => {
+                let p = std::sync::Arc::new(
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(n)
+                        .build()
+                        .map_err(|e| {
+                            PlsKitError::Internal(format!(
+                                "could not start a {n}-thread pool for {NUM_THREADS_ENV}: {e}"
+                            ))
+                        })?,
+                );
+                *cache = Some((n, std::sync::Arc::clone(&p)));
+                p
+            }
+        }
+    };
+    Ok(pool.install(f))
+}
+
+/// Every public entry point that reaches Rayon runs its body through this:
+/// it reads `PLSKIT_NUM_THREADS` once and runs `f` on the matching pool.
+/// Crate-internal callers call the `_impl` functions instead, so inner fits
+/// inside replicate workers never re-read the variable.
+pub(crate) fn with_thread_limit<T: Send>(
+    f: impl FnOnce() -> PlsKitResult<T> + Send,
+) -> PlsKitResult<T> {
+    let n = match std::env::var(NUM_THREADS_ENV) {
+        Ok(s) => parse_num_threads(Some(&s))?,
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            return Err(PlsKitError::InvalidArgument(format!(
+                "{NUM_THREADS_ENV} must be a positive integer or 0, got {raw:?}"
+            )))
+        }
+    };
+    run_with_threads(n, f)?
 }
 
 /// Translate a `ParChoice` into a concrete `faer::Par` for the given problem size.
@@ -438,6 +529,18 @@ pub fn pls1_fit(
     weights: Option<ColRef<'_, f64>>,
     opts: FitOpts,
 ) -> PlsKitResult<Pls1Model> {
+    crate::fit::with_thread_limit(|| pls1_fit_impl(x, y, k, weights, opts))
+}
+
+/// Body of [`pls1_fit`], on the caller's pool.
+#[allow(clippy::many_single_char_names, clippy::too_many_lines)]
+pub(crate) fn pls1_fit_impl(
+    x: MatRef<'_, f64>,
+    y: ColRef<'_, f64>,
+    k: KSpec,
+    weights: Option<ColRef<'_, f64>>,
+    opts: FitOpts,
+) -> PlsKitResult<Pls1Model> {
     let n_samples = x.nrows();
     let n_features = x.ncols();
     let KSpec::Fixed(k_requested) = k;
@@ -650,16 +753,18 @@ pub fn spls1_fit(
     weights: Option<ColRef<'_, f64>>,
     opts: FitOpts,
 ) -> PlsKitResult<Pls1Model> {
-    pls1_fit(
-        x,
-        y,
-        k,
-        weights,
-        FitOpts {
-            keep: Some(keep),
-            ..opts
-        },
-    )
+    crate::fit::with_thread_limit(|| {
+        pls1_fit_impl(
+            x,
+            y,
+            k,
+            weights,
+            FitOpts {
+                keep: Some(keep),
+                ..opts
+            },
+        )
+    })
 }
 
 /// The kernel-and-coefficient tail of `pls1_fit`, on arrays that are
@@ -1412,7 +1517,7 @@ pub(crate) fn pls1_coef_at_k(
 #[allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
 mod tests {
     use super::*;
-    use crate::test_support::{orthonormal_basis, project_off};
+    use crate::test_support::orthogonal_y;
     use approx::assert_relative_eq;
 
     /// The explicit-deflation PLS1 kernel (textbook NIPALS deflation), kept
@@ -1547,33 +1652,16 @@ mod tests {
     }
 
     #[test]
-    fn fit_returns_correct_shapes() {
+    fn fit_pre_standardized_skips_centering() {
+        // Uncentred, unscaled input: the fit is the kernel's on the arrays
+        // as given, with no back-projection. A fit that standardized anyway
+        // would return the coefficients of the standardized arrays.
         let (x, y) = linear_data(50, 8, 3, 1);
+        let x = Mat::<f64>::from_fn(50, 8, |i, j| x[(i, j)] + 3.0);
+        let y = Col::<f64>::from_fn(50, |i| 2.0 * y[i] + 10.0);
         let m = pls1_fit(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(3),
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
-        assert_eq!((m.t_scores.nrows(), m.t_scores.ncols()), (50, 3));
-        assert_eq!((m.p_loadings.nrows(), m.p_loadings.ncols()), (8, 3));
-        assert_eq!((m.w_star.nrows(), m.w_star.ncols()), (8, 3));
-        assert_eq!(m.q_loadings.nrows(), 3);
-        assert_eq!(m.coef.nrows(), 8);
-        assert_eq!(m.beta.nrows(), 8);
-        assert_eq!(m.k_used, 3);
-    }
-
-    #[test]
-    fn fit_pre_standardized_skips_centering() {
-        let (x, y) = linear_data(50, 8, 3, 1);
-        let (xs, _, _) = crate::linalg::standardize(x.as_ref());
-        let (ys, _, _) = crate::linalg::standardize1(y.as_ref());
-        let m = pls1_fit(
-            xs.as_ref(),
-            ys.as_ref(),
             KSpec::Fixed(3),
             None,
             FitOpts {
@@ -1583,10 +1671,14 @@ mod tests {
         )
         .unwrap();
         assert!(m.pre_standardized);
+        let (_, p_ref, w_ref, q_ref) =
+            nipals_pls1_reference(x.as_ref(), y.as_ref(), 3, None, Par::Seq).unwrap();
+        let raw = pls1_coef_at_k(&w_ref, &p_ref, &q_ref, 3, Par::Seq);
         for j in 0..m.coef.nrows() {
-            assert_relative_eq!(m.beta[j], m.coef[j], epsilon = 1e-15);
+            assert_relative_eq!(m.coef[j], raw[j], max_relative = 1e-10);
+            assert_eq!(m.beta[j].to_bits(), m.coef[j].to_bits(), "beta[{j}]");
         }
-        assert_relative_eq!(m.intercept, 0.0, epsilon = 1e-15);
+        assert_eq!(m.intercept.to_bits(), 0.0f64.to_bits());
     }
 
     // ── spls1 sparse kernel ──────────────────────────────────────────
@@ -1719,24 +1811,53 @@ mod tests {
         Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0))
     }
 
-    /// `n = 2000`, `d = 40`, last column the sum of the first two (rank
-    /// 39), `y` independent of `X`: `y`'s projection onto the span of `X`
-    /// is fitted within about 17 components, after which `‖X_a'y_a‖` is
-    /// rounding noise near `1e-13` that the absolute floor let through.
-    fn exhausted_y_design() -> (Mat<f64>, Col<f64>) {
-        let (n, d) = (2000, 40);
-        let mut x = uniform_mat(n, d, 11);
+    /// `n × 40`, last column the sum of the first two (rank 39), `y`
+    /// independent of `X`. At `n = 2000`, `seed = 11`, `y`'s projection onto
+    /// the span of `X` is fitted within about 17 components, after which
+    /// `‖X_a'y_a‖` is rounding noise near `1e-13`, above the absolute floor.
+    pub(super) fn exhausted_design(n: usize, seed: u64) -> (Mat<f64>, Col<f64>) {
+        let d = 40;
+        let mut x = uniform_mat(n, d, seed);
         for i in 0..n {
             x[(i, d - 1)] = x[(i, 0)] + x[(i, 1)];
         }
-        let yc = uniform_mat(n, 1, 12);
-        let y = Col::<f64>::from_fn(n, |i| yc[(i, 0)]);
+        let yc = uniform_mat(n, 1, seed + 1);
+        (x, Col::<f64>::from_fn(n, |i| yc[(i, 0)]))
+    }
+
+    /// A `y` orthogonal to the standardized `X` plus `signal` times `X b`:
+    /// with `signal = 0` the first component is already noise, with
+    /// `signal = 1e-6` the real components are weak (the design of
+    /// `nipals_floor_is_relative_*`).
+    #[allow(clippy::many_single_char_names)]
+    pub(super) fn orthogonal_design(
+        n: usize,
+        d: usize,
+        signal: f64,
+        seed: u64,
+    ) -> (Mat<f64>, Col<f64>) {
+        let x = uniform_mat(n, d, seed);
+        let (xs, _, _) = crate::linalg::standardize(x.as_ref());
+        let svd = xs.thin_svd().expect("svd");
+        let u = svd.U();
+        let e = uniform_mat(n, 1, seed + 1);
+        let mut e_perp = Col::<f64>::from_fn(n, |i| e[(i, 0)]);
+        for j in 0..d {
+            let c: f64 = (0..n).map(|i| u[(i, j)] * e_perp[i]).sum();
+            for i in 0..n {
+                e_perp[i] -= c * u[(i, j)];
+            }
+        }
+        let b = uniform_mat(d, 1, seed + 2);
+        let y = Col::<f64>::from_fn(n, |i| {
+            e_perp[i] + signal * (0..d).map(|j| xs[(i, j)] * b[(j, 0)]).sum::<f64>()
+        });
         (x, y)
     }
 
     #[test]
     fn nipals_drops_noise_components_once_y_is_exhausted() {
-        let (x, y) = exhausted_y_design();
+        let (x, y) = exhausted_design(2000, 11);
         let m = pls1_fit(
             x.as_ref(),
             y.as_ref(),
@@ -1758,8 +1879,10 @@ mod tests {
     #[test]
     fn spls1_drops_noise_components_once_y_is_exhausted() {
         // Same design through the sparse path: selection runs before the
-        // floor, so the floor sees the selected norm.
-        let (x, y) = exhausted_y_design();
+        // floor, so the floor sees the selected norm. The selected norm
+        // crosses the relative floor after 28 components; with the floor
+        // disabled the fit keeps 39.
+        let (x, y) = exhausted_design(2000, 11);
         let m = spls1_fit(
             x.as_ref(),
             y.as_ref(),
@@ -1770,7 +1893,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            m.k_used < 36,
+            (20..=34).contains(&m.k_used),
             "expected truncation before the noise tail, got k_used={}",
             m.k_used
         );
@@ -1801,28 +1924,11 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::many_single_char_names)]
     fn nipals_floor_is_relative_to_x_and_y_not_to_the_first_component() {
         // y = (component orthogonal to X) + 1e-6 · (signal in X): the first
         // `‖X'y‖` is about 1e-6 of `‖X‖_F·‖y‖`, so a floor relative to it
         // would sit below the rounding noise and keep all 20 components.
-        let (n, d) = (1000, 20);
-        let x = uniform_mat(n, d, 31);
-        let (xs, _, _) = crate::linalg::standardize(x.as_ref());
-        let svd = xs.thin_svd().unwrap();
-        let u = svd.U();
-        let e = uniform_mat(n, 1, 32);
-        let mut e_perp = Col::<f64>::from_fn(n, |i| e[(i, 0)]);
-        for j in 0..d {
-            let c: f64 = (0..n).map(|i| u[(i, j)] * e_perp[i]).sum();
-            for i in 0..n {
-                e_perp[i] -= c * u[(i, j)];
-            }
-        }
-        let b = uniform_mat(d, 1, 33);
-        let y = Col::<f64>::from_fn(n, |i| {
-            e_perp[i] + 1e-6 * (0..d).map(|j| xs[(i, j)] * b[(j, 0)]).sum::<f64>()
-        });
+        let (x, y) = orthogonal_design(1000, 20, 1e-6, 31);
         let m = pls1_fit(
             x.as_ref(),
             y.as_ref(),
@@ -1839,15 +1945,11 @@ mod tests {
     /// twice), plus the standardized `X`. `X'y` is then rounding noise near
     /// `1e-14`: under the relative floor but, for this `y`, not always under
     /// the absolute one.
-    #[allow(clippy::many_single_char_names)]
     fn orthogonal_y_design(seed: u64) -> (Mat<f64>, Mat<f64>, Col<f64>) {
         let (n, d) = (200, 10);
         let x = uniform_mat(n, d, seed);
         let (xs, _, _) = crate::linalg::standardize(x.as_ref());
-        let basis = orthonormal_basis(Col::<f64>::from_fn(n, |_| 1.0).as_ref(), xs.as_ref(), 0.0);
-        let e = uniform_mat(n, 1, seed + 1);
-        let mut y = Col::<f64>::from_fn(n, |i| 5.0 + e[(i, 0)]);
-        project_off(&basis, &mut y);
+        let y = orthogonal_y(&xs, seed + 1);
         (x, xs, y)
     }
 
@@ -1968,6 +2070,67 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mw.k_used, 20);
+    }
+
+    #[test]
+    fn parse_num_threads_follows_the_documented_table() {
+        use super::parse_num_threads as p;
+        assert_eq!(p(None).unwrap(), None);
+        assert_eq!(p(Some("0")).unwrap(), None);
+        assert_eq!(p(Some("1")).unwrap(), Some(1));
+        assert_eq!(p(Some("4")).unwrap(), Some(4));
+        for bad in ["", " 4 ", "-1", "2.5", "abc"] {
+            match p(Some(bad)) {
+                Err(PlsKitError::InvalidArgument(msg)) => {
+                    assert!(msg.contains("PLSKIT_NUM_THREADS"), "{msg}");
+                    assert!(msg.contains(&format!("{bad:?}")), "{msg}");
+                }
+                other => panic!("{bad:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn run_with_threads_caps_the_callers_pool() {
+        let outer = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        for (n, want) in [
+            (Some(1), 1),
+            (Some(3), 3),
+            (Some(4), 4),
+            (Some(100_000), 4),
+            (None, 4),
+        ] {
+            let got =
+                outer.install(|| super::run_with_threads(n, rayon::current_num_threads).unwrap());
+            assert_eq!(got, want, "cap {n:?}");
+        }
+    }
+
+    #[test]
+    fn run_with_threads_concurrent_sizes_each_get_their_own_pool() {
+        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let handles: Vec<_> = [1usize, 3, 1, 3, 2, 2]
+            .into_iter()
+            .map(|n| {
+                std::thread::spawn(move || {
+                    (0..20)
+                        .map(|_| {
+                            super::run_with_threads(Some(n), rayon::current_num_threads).unwrap()
+                        })
+                        .all(|got| {
+                            got == if n < cores {
+                                n
+                            } else {
+                                rayon::current_num_threads()
+                            }
+                        })
+                })
+            })
+            .collect();
+        assert!(handles.into_iter().all(|h| h.join().unwrap()));
     }
 }
 

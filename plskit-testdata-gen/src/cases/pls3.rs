@@ -202,9 +202,11 @@ pub fn transform_basic_n80_p6_q3_k2(root: &Path) -> Result<Case> {
 }
 
 /// Synth shape and permutation counts for one `pls3_confirmatory_test`
-/// `split_exact` case.
+/// `split_exact` case. `auto` requests `test_method=auto` instead, on a
+/// design that resolves to `split_exact`.
 struct Pls3SplitExactCase<'a> {
     name: &'a str,
+    auto: bool,
     n: usize,
     p: usize,
     q: usize,
@@ -240,9 +242,16 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
         yf.as_ref(),
         1,
         Pls3ConfirmatoryTestOpts {
-            args: ConfirmatoryArgs::SplitExact {
-                n_perm: c.n_perm,
-                n_splits: c.n_splits,
+            args: if c.auto {
+                ConfirmatoryArgs::Auto {
+                    n_perm: c.n_perm,
+                    n_splits: c.n_splits,
+                }
+            } else {
+                ConfirmatoryArgs::SplitExact {
+                    n_perm: c.n_perm,
+                    n_splits: c.n_splits,
+                }
             },
             seed: Some(CASE_SEED),
             ..Pls3ConfirmatoryTestOpts::default()
@@ -281,7 +290,7 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
         outputs: paths.rel_outputs,
         kwargs: serde_json::json!({
             "k": 1,
-            "test_method": "split_exact",
+            "test_method": if c.auto { "auto" } else { "split_exact" },
             "args": {"n_perm": c.n_perm, "n_splits": c.n_splits},
             "seed": CASE_SEED
         }),
@@ -303,6 +312,28 @@ pub fn confirmatory_split_exact(root: &Path) -> Result<Case> {
         root,
         &Pls3SplitExactCase {
             name: "pls3_confirmatory_split_exact",
+            auto: false,
+            n: 80,
+            p: 6,
+            q: 3,
+            n_perm: 200,
+            n_splits: 30,
+        },
+    )
+}
+
+/// Case: `pls3_confirmatory_test` with `test_method=auto`, `n_perm=200`,
+/// `n_splits=30`, `seed=42` on n=80, p=6, q=3. n is below the cutoff of 250,
+/// so the rule resolves to `split_exact`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or the test fails.
+pub fn confirmatory_auto_split_exact(root: &Path) -> Result<Case> {
+    split_exact_case(
+        root,
+        &Pls3SplitExactCase {
+            name: "pls3_confirmatory_auto_split_exact",
+            auto: true,
             n: 80,
             p: 6,
             q: 3,
@@ -331,6 +362,7 @@ pub fn confirmatory_split_exact_wide(root: &Path) -> Result<Case> {
         root,
         &Pls3SplitExactCase {
             name: "pls3_confirmatory_split_exact_wide",
+            auto: false,
             n: 30,
             p: 100,
             q: 3,

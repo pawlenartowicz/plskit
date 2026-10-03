@@ -1,6 +1,6 @@
 # Every testdata/ case through the R surface, compared with the frozen
 # outputs at the corpus tolerances (scalars 1e-12, arrays 1e-10, plus
-# rtol 1e-14 for finite expected values; integers and strings exact). Mirrors plskit-bind/tests/corpus.rs: each case makes
+# rtol 1e-14 for finite expected values; integers and strings exact). Each case makes
 # the call plskit-py/tests/test_corpus.py makes, and a fixture key maps
 # onto the result by name: exact, then ASCII case-insensitive, then into
 # nested named lists, recursively. `{field}__keys` / `{field}__values`
@@ -133,6 +133,9 @@ compare <- function(got, want) {
       isTRUE(all(!is.na(got_num) & got_num == as.vector(want)))
     if (ok) return(NULL)
     return(sprintf("[%s] vs [%s]", toString(got_num), toString(want)))
+  }
+  if (!is.double(got)) {
+    return(sprintf("R type %s, expected double for an f64 field", typeof(got)))
   }
   if (length(shape) == 2L) {
     if (!is.matrix(got) || !identical(dim(got), as.integer(shape))) {

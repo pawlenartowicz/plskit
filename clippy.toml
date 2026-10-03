@@ -1,7 +1,7 @@
 # faer's global parallelism defaults to `Par::rayon(0)`, whose degree is the
 # size of the Rayon pool at the call; the degree sets how faer splits a
 # reduction, so anything that reads it rounds differently per
-# `RAYON_NUM_THREADS`. Core code uses the explicit-`Par` helpers in
+# pool size. Core code uses the explicit-`Par` helpers in
 # `plskit-rs/src/linalg.rs` instead. The list covers every faer 0.24
 # high-level entry that reads the global: the solver methods on
 # `mat::generic::Mat` (so `Mat`, `MatRef` and `MatMut` alike), the

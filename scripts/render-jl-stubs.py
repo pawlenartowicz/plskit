@@ -9,8 +9,7 @@ the export list.
 
 Julia call rule: a parameter that is required and not
 keyword-only in Python is a Julia positional argument; every other
-parameter is a Julia keyword, required when Python requires it
-(`test_method` in the confirmatory tests).
+parameter is a Julia keyword, required when Python requires it.
 
 Usage (from the workspace root):
     python3 scripts/render-jl-stubs.py                  # run the dump, rewrite

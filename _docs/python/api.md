@@ -12,6 +12,8 @@ a function or read its result.
 
 ## Conventions
 
+- To cap the thread count, set `PLSKIT_NUM_THREADS`; see
+  [Threads](../concepts/threads.md).
 - **Method-axis dispatch** uses `(method, args)`: a `method` string +
   an `args` dict for method-specific kwargs. Cross-cutting kwargs
   (`seed`, `weights`, `pre_standardized`) live at the top level.
@@ -78,7 +80,7 @@ rows raises `code="invalid_argument"` (an empty column has no mean).
 (dict of method-specific kwargs forwarded to `pls1_find_k_optimal` /
 `pls1_find_k_sequence`; allowed keys are the public params of the
 target function except `seed` / `pre_standardized` / `weights` /
-`disable_parallelism` / `verbose`, which live on `pls1_fit` itself;
+`verbose`, which live on `pls1_fit` itself;
 unknown keys raise `PlsKitError(code="invalid_args")`);
 `pre_standardized` (bool, default `False`); `seed` (`int | None`,
 forwarded to the k-selection call when `k` is a string);
@@ -122,8 +124,7 @@ data; optionally a per-component same-sample diagnostic.
 selector key `n_folds`; diagnostic keys `n_perm` for `raw_perm` /
 `split_exact`, `n_splits` for `split_nb` / `split_exact`, `force` for
 `split_nb`. Diagnostic keys require `diagnostic` to be set.);
-`pre_standardized`; `weights`; `seed`; `disable_parallelism`;
-`verbose`.
+`pre_standardized`; `weights`; `seed`; `verbose`.
 `diagnostic="raw_perm"` uses a fixed 5-fold CV at every step and needs
 `n > 5`; below that it raises `invalid_argument` (leave-one-out would
 otherwise make every validation fold a single row). For `selector`
@@ -150,18 +151,20 @@ unaffected).
 components carry signal at α?" with exact FWER control.
 **arguments:** `X`, `y`, `k_max`
 **options:** `test_method` (`"raw_perm"` | `"split_nb"` |
-`"split_exact"` | `"e"`; default `"split_nb"`); `args` (dict of
+`"split_exact"` | `"e"` | `"auto"`; default `"auto"`, see
+[`test_method="auto"`](../concepts/PLS1/inference.md#test_methodauto)); `args` (dict of
 method-specific kwargs: `n_perm`, `n_splits`, and `force` for
-`split_nb`); `alpha` (default `None`: the engine default,
+`split_nb`; `"auto"` takes `n_perm` and `n_splits`, not `force`); `alpha` (default `None`: the engine default,
 `0.05`); `pre_standardized`; `weights`; `seed`;
-`disable_parallelism`; `verbose`. `test_method="raw_perm"` uses a
+`verbose`. `test_method="raw_perm"` uses a
 fixed 5-fold CV at every step and needs `n > 5`; below that it raises
 `invalid_argument` (leave-one-out would otherwise make every
 validation fold a single row). Stop-early at the first
 non-rejection is hard-coded on; `K*` is the count of components that
 rejected before the first failure. The `split_nb` auto-gate is
-evaluated once for the whole sequence: a flagged request runs
-`split_exact` for every step and `result.test_method` says so.
+evaluated once for the whole sequence: a flagged explicit `split_nb` request runs
+`split_exact` for every step and `result.test_method` says so. `"auto"`
+resolves once on the full `X` and runs that method for every step.
 **returns:** `FindKSequenceResult`. Closed testing on nested H is
 exact, so the per-step pvalues form an honest FWER-controlled
 sequence. To recover the path-max p-value, compute
@@ -208,7 +211,7 @@ axis.
 **arguments:** `X`, `y`, `k` (fixed component count for every fit in the
 sweep)
 **options:** `args` (`{'n_folds': int}`, default 5); `seed`;
-`disable_parallelism`; `verbose`; `weights`. `n_folds` is capped at
+`verbose`; `weights`. `n_folds` is capped at
 `n - 2` and floored at 2; at very small `n` (`n <= 2`) that floor pushes
 the effective fold count back up to `n`, leave-one-out (every validation
 fold a single row), which raises `invalid_argument`.
@@ -233,7 +236,7 @@ dense function bit-exactly.
 **options:** `selector` (`"r2_se"` | `"r2_max"` | `"bic"`; default
 `"r2_se"`); `diagnostic` (`"raw_perm"` | `"split_nb"` | `"split_exact"`
 | `"e"` | `None`; default `None`); `args`; `pre_standardized`; `seed`;
-`disable_parallelism`; `verbose`; `weights`.
+`verbose`; `weights`.
 **Dense-BIC caveat:** `selector='bic'` reuses the dense complexity
 penalty — it does not account for `keep`; under sparsity this
 under-penalizes added components and biases the selected k upward.
@@ -247,10 +250,10 @@ residual and tests the sparse marginal component — a coherent sequential
 test. `keep = n_features` reproduces the dense function bit-exactly.
 **arguments:** `X`, `y`, `k_max`, `keep`
 **options:** `test_method` (`"raw_perm"` | `"split_nb"` | `"split_exact"`
-| `"e"`; default `"split_nb"`; `"raw_perm"` uses a fixed 5-fold CV at
+| `"e"` | `"auto"`; default `"auto"`; `"raw_perm"` uses a fixed 5-fold CV at
 every step and needs `n > 5`, else `invalid_argument`); `alpha`
 (default `None`: the engine default, `0.05`); `args`;
-`pre_standardized`; `seed`; `disable_parallelism`; `verbose`; `weights`.
+`pre_standardized`; `seed`; `verbose`; `weights`.
 **returns:** `FindKSequenceResult` (same type as `pls1_find_k_sequence`).
 
 ---
@@ -340,7 +343,7 @@ directions; reporting both side-by-side is the canonical pattern.
 ρ = ½ and drifts off level when `n_eff < 25` or the stable rank of the
 standardized `X` is `< 3`. Since stable rank can never exceed the column
 count, `X` with 4 columns or fewer is rerouted outright, without
-consulting the computed rank. A `split_nb` request on a design that trips
+consulting the computed rank. An explicit `split_nb` request on a design that trips
 any of these reroutes to `split_exact` at `n_perm=1000`;
 `result.test_method` reports `"split_exact"` and Python raises a
 `UserWarning`. Pass `args={'force': True}` to run `split_nb` anyway.
@@ -354,8 +357,9 @@ rotation-invariant CIs.
 **options:**
 
 - `test_method` (`"raw_perm"` | `"split_nb"` | `"split_exact"` |
-  `"score"` | `"e"`; keyword-only and required, with no default;
-  `"split_exact"` is recommended)
+  `"score"` | `"e"` | `"auto"`; keyword-only, default `"auto"`, which picks
+  `"split_exact"` or `"split_nb"` from `X`; see
+  [`test_method="auto"`](../concepts/PLS1/inference.md#test_methodauto))
 - `args` (dict of method-specific kwargs)
 - `ci` (bool, default `False`) — when `True`, runs an independent
   resampling pass after the headline test and populates `result.ci`.
@@ -372,8 +376,7 @@ rotation-invariant CIs.
   `m_rate` and `level` are recorded on `result.ci` as the resolved
   value, not `None`; `max_skip_rate` and `max_failure_rate` are not
   carried on any result field (they only gate the resampling loop).
-- `pre_standardized`; `weights`; `seed`; `disable_parallelism`;
-  `verbose`.
+- `pre_standardized`; `weights`; `seed`; `verbose`.
 
 **args by method:**
 
@@ -388,6 +391,7 @@ rotation-invariant CIs.
 - `"split_nb"`: `n_splits`, `force` (bool, default `False`; run `split_nb`
   even on a design the auto-gate flags)
 - `"split_exact"`: `n_perm`, `n_splits`
+- `"auto"`: `n_perm`, `n_splits` (no `force`)
 - `"score"`: none (anisotropy handled internally by Welch–Satterthwaite)
 - `"e"`: none
 
@@ -434,8 +438,8 @@ design, before spending a test run to discover it from
 one rule, it does not restate it.
 **arguments:** `X`
 **options:** `weights`.
-**returns:** `SplitNbGateResult` — `fires` (would a `"split_nb"`
-request reroute?), plus the `stable_rank` and `n_eff` the rule read.
+**returns:** `SplitNbGateResult` — `fires` (would an explicit
+`"split_nb"` request reroute?), plus the `stable_rank` and `n_eff` the rule read.
 `y` is not an argument: only `X` and the weights enter the rule.
 
 ### 3.3 Permutation-null engine
@@ -449,7 +453,7 @@ fMRI / NIRS scale.
 `1000`; must be `≥ 100`, recorded on `result.n_perm` as the resolved
 value, not `None`); `return_perm_matrix`
 (bool, default `False`); `pre_standardized`; `seed`;
-`disable_parallelism`; `verbose`; `weights`.
+`verbose`; `weights`.
 **returns:** `PermNullResult`. Pair with
 `pls1_confirmatory_test(test_method="split_exact")` as an omnibus gate before
 spending the `n_perm` permutation budget.
@@ -461,20 +465,22 @@ spending the `n_perm` permutation budget.
 latent-variable correlation, calibrated by permutation or against a t
 reference.
 **arguments:** `X`, `Y`, `k` (must be `1`)
-**options:** `test_method` (`"split_exact"` | `"split_nb"`; keyword-only and
-required, with no default; `"split_exact"` is recommended); `args`
+**options:** `test_method` (`"split_exact"` | `"split_nb"` | `"auto"`;
+keyword-only, default `"auto"`, see
+[`test_method="auto"`](../concepts/PLS1/inference.md#test_methodauto)); `args`
 (`"split_exact"`: `{"n_perm": int, "n_splits": int}`, defaults `1000` / `50`;
-`"split_nb"`: `{"n_splits": int, "force": bool}`, defaults `50` / `False`);
-`pre_standardized_X`; `pre_standardized_Y`; `seed`; `disable_parallelism`;
-`verbose`. `pre_standardized_X` / `pre_standardized_Y` are accepted but have
+`"split_nb"`: `{"n_splits": int, "force": bool}`, defaults `50` / `False`;
+`"auto"`: `{"n_perm": int, "n_splits": int}`, defaults `1000` / `50`);
+`pre_standardized_X`; `pre_standardized_Y`; `seed`; `verbose`. `pre_standardized_X` / `pre_standardized_Y` are accepted but have
 no effect on either method: each training half is re-standardized with its
 own moments regardless, and the flags exist only so the signature does not
 change when a method that reads them lands.
 **returns:** `ConfirmatoryTestResult` — the same object
 `pls1_confirmatory_test` returns. `ci` is always `None` here and `n_eff`
 equals `n`. `rho_hat` is populated for `split_nb` only (and only when the
-test half has at least 4 rows); `stable_rank` is populated whenever
-`split_nb` was requested; `n_perm` is `None` for `split_nb`.
+test half has at least 4 rows); `stable_rank` is set on an explicit `split_nb`
+request, and on an `"auto"` request that reached the stable-rank check
+(p > 4, n_eff ≥ 250); `None` otherwise. `n_perm` is `None` for `split_nb`.
 
 Concepts: [PLS3 inference](../concepts/PLS3/inference.md).
 
@@ -509,8 +515,8 @@ and permuting Y rows individually breaks within-subject exchangeability.
 Blocked splits and blocked permutation are not implemented.
 
 **The `split_nb` auto-gate.** Identical to `pls1_confirmatory_test`'s and
-applied to X only: a flagged design runs `split_exact` instead
-(`result.test_method` says so, and Python warns), and `args={"force": True}`
+applied to X only: a flagged design on an explicit `split_nb` request runs
+`split_exact` instead (`result.test_method` says so, and Python warns), and `args={"force": True}`
 overrides it. Y never enters the gate — `q` is small by construction in
 PLSC, so a stable-rank floor on Y would flag almost every design. The gate
 thresholds are the PLS1 ones and have not been re-derived for a two-block
@@ -576,7 +582,7 @@ A ratio below 1 means rotation made the axes more stable.
 `0.5 < m_rate < 0.95`); `level` (float, default `None`: the engine
 default, `0.95`, `0.5 ≤ level ≤ 0.99`); `pre_standardized`; `weights`;
 `max_skip_rate` (float, default `None`: the engine default, `0.01`);
-`seed`; `disable_parallelism`; `verbose`. `n_boot`, `m_rate` and
+`seed`; `verbose`. `n_boot`, `m_rate` and
 `level` are recorded on the result as the resolved value, not `None`.
 
 **Constraints on k:** `2 ≤ k ≤ 7`. `k = 1` is rejected because

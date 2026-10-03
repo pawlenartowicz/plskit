@@ -25,6 +25,13 @@ pub enum ConfirmatoryMethod {
     Score,
     /// Universal-inference split-LR e-value.
     E,
+    /// Pick `split_exact` or `split_nb` from X and the weights (never from
+    /// y), once per call, before any randomness is drawn. `split_exact` runs
+    /// when the `split_nb` auto-gate fires, when `n_eff` < 250, or when X
+    /// has more than 100 columns per row (p > 100·n) on a PLS1 request at
+    /// k = 1 without `keep`; `split_nb` runs otherwise. The thresholds may change between versions. A result never reports
+    /// `"auto"`: its `test_method` names the method that ran.
+    Auto,
 }
 
 impl ConfirmatoryMethod {
@@ -37,6 +44,7 @@ impl ConfirmatoryMethod {
             ConfirmatoryMethod::SplitExact => "split_exact",
             ConfirmatoryMethod::Score => "score",
             ConfirmatoryMethod::E => "e",
+            ConfirmatoryMethod::Auto => "auto",
         }
     }
 }
@@ -106,6 +114,16 @@ pub enum ConfirmatoryArgs {
     Score,
     /// Universal-inference split-LR e-value.
     E,
+    /// `split_exact` or `split_nb`, resolved per design (see
+    /// [`ConfirmatoryMethod::Auto`]). Both counts are checked against
+    /// `split_exact`'s floors on every design; `n_perm` is unused when the
+    /// call resolves to `split_nb`.
+    Auto {
+        /// Number of permutations if `split_exact` runs.
+        n_perm: usize,
+        /// Number of split-half repetitions.
+        n_splits: usize,
+    },
 }
 
 impl ConfirmatoryArgs {
@@ -118,6 +136,7 @@ impl ConfirmatoryArgs {
             ConfirmatoryArgs::SplitExact { .. } => ConfirmatoryMethod::SplitExact,
             ConfirmatoryArgs::Score => ConfirmatoryMethod::Score,
             ConfirmatoryArgs::E => ConfirmatoryMethod::E,
+            ConfirmatoryArgs::Auto { .. } => ConfirmatoryMethod::Auto,
         }
     }
 
@@ -140,6 +159,10 @@ impl ConfirmatoryArgs {
             },
             ConfirmatoryMethod::Score => ConfirmatoryArgs::Score,
             ConfirmatoryMethod::E => ConfirmatoryArgs::E,
+            ConfirmatoryMethod::Auto => ConfirmatoryArgs::Auto {
+                n_perm: 1000,
+                n_splits: 50,
+            },
         }
     }
 }
@@ -173,6 +196,23 @@ const SPLIT_NB_GATE_MIN_STABLE_RANK: f64 = 3.0;
 // number written as f64 because `stable_rank` returns f64.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 const SPLIT_NB_GATE_MAX_COLS_PRECHECK: usize = SPLIT_NB_GATE_MIN_STABLE_RANK as usize + 1;
+
+/// Sample-size floor of `test_method = "auto"`: below this Kish `n_eff` it
+/// runs `split_exact`, because `split_nb` gives up power on small samples.
+/// The value is also stated in `ConfirmatoryMethod::Auto`'s doc comment and in
+/// every doc, doc comment and docstring that states the thresholds (search
+/// for `100·n`, `100*n`, `250`, `AUTO_MIN_N_EFF`) — change together.
+const AUTO_MIN_N_EFF: f64 = 250.0;
+
+/// Width ceiling of `test_method = "auto"`: with more than this many columns
+/// per row it runs `split_exact`, because on very wide X `split_exact`'s
+/// no-refit route (K = 1, dense) costs about as much as `split_nb`. Only
+/// requests that take that route use the ceiling: on the refit route
+/// `split_exact` costs about `n_perm + 1` times `split_nb`. The
+/// value is also stated in `ConfirmatoryMethod::Auto`'s doc comment and in
+/// every doc, doc comment and docstring that states the thresholds (search
+/// for `100·n`, `100*n`, `250`, `AUTO_MAX_P_PER_N`) — change together.
+const AUTO_MAX_P_PER_N: usize = 100;
 
 /// Permutation budget of the `split_nb` -> `split_exact` reroute: `split_exact`'s
 /// own default, written once. Every reroute site reads it from here; the
@@ -210,7 +250,8 @@ impl SplitNbResolution {
 /// evaluates it calls this: the public [`split_nb_gate`] query,
 /// `pls1_confirmatory_test`, the hoisted sequence gate in
 /// `sequential::run_incremental_sequence` (which the `find_k` diagnostic also
-/// goes through, including its `k_star = 0` branch), and the PLS3 test.
+/// goes through, including its `k_star = 0` branch), the PLS3 test, and
+/// [`resolve_auto`], which every `test_method = "auto"` site calls.
 ///
 /// Inputs are the validated weights, exactly as
 /// `fit::validate_and_normalize_weights` returns them: `w_norm` the
@@ -243,6 +284,44 @@ pub(crate) fn resolve_split_nb(
     }
 }
 
+/// Resolve `test_method = "auto"` to `split_exact` or `split_nb`, in the one
+/// place the rule is written. Returns the method and, when the `split_nb`
+/// auto-gate was evaluated, the stable rank it saw.
+///
+/// `w_norm` and `n_eff` are the validated pair `resolve_split_nb` takes.
+/// `no_refit` says whether `split_exact` would take its no-refit route on
+/// this request ([`split_exact_no_refit_route`]; always `false` for PLS3,
+/// which has none). The clauses that need no spectrum run first: a narrow X
+/// (the gate's column precheck), `n_eff < AUTO_MIN_N_EFF` (which contains
+/// the gate's own `n_eff` floor) and, when `no_refit`,
+/// `p > AUTO_MAX_P_PER_N · n` decide `split_exact` without standardizing X,
+/// and the stable rank stays `None`. Skipping the
+/// standardized copy and its SVD matters most on the widest designs, where
+/// that copy is as large as X. Every other design goes through
+/// `resolve_split_nb`, and a fired gate means `split_exact`. Draws no
+/// randomness.
+pub(crate) fn resolve_auto(
+    x: MatRef<'_, f64>,
+    w_norm: Option<ColRef<'_, f64>>,
+    n_eff: f64,
+    no_refit: bool,
+) -> (ConfirmatoryMethod, Option<f64>) {
+    if x.ncols() <= SPLIT_NB_GATE_MAX_COLS_PRECHECK
+        || n_eff < AUTO_MIN_N_EFF
+        || (no_refit && x.ncols() > AUTO_MAX_P_PER_N * x.nrows())
+    {
+        return (ConfirmatoryMethod::SplitExact, None);
+    }
+    // `force` only decides the reroute flag, which is not read here.
+    let gate = resolve_split_nb(x, w_norm, n_eff, false);
+    let method = if gate.fires {
+        ConfirmatoryMethod::SplitExact
+    } else {
+        ConfirmatoryMethod::SplitNb
+    };
+    (method, Some(gate.stable_rank))
+}
+
 /// What the `split_nb` auto-gate sees on a design. Returned by
 /// [`split_nb_gate`].
 #[derive(Debug, Clone, Copy)]
@@ -271,6 +350,14 @@ pub struct SplitNbGateOutput {
 /// Never — the finiteness check runs ahead of the SVD in
 /// `linalg::stable_rank`, which is the only fallible step.
 pub fn split_nb_gate(
+    x: MatRef<'_, f64>,
+    weights: Option<ColRef<'_, f64>>,
+) -> PlsKitResult<SplitNbGateOutput> {
+    crate::fit::with_thread_limit(|| split_nb_gate_impl(x, weights))
+}
+
+/// Body of [`split_nb_gate`], on the caller's pool.
+pub(crate) fn split_nb_gate_impl(
     x: MatRef<'_, f64>,
     weights: Option<ColRef<'_, f64>>,
 ) -> PlsKitResult<SplitNbGateOutput> {
@@ -331,13 +418,6 @@ pub struct ConfirmatoryTestOpts {
     pub pre_standardized: bool,
     /// RNG seed; `None` draws from OS entropy.
     pub seed: Option<u64>,
-    /// Disable Rayon parallelism (forces serial execution; useful for deterministic debugging).
-    ///
-    /// Serial replicate loops only: single top-level products (a reference
-    /// fit under `ParChoice::Auto`, a one-off scoring product or
-    /// decomposition) keep the crate's fixed parallel split, so results
-    /// match the parallel run bit for bit.
-    pub disable_parallelism: bool,
     /// Print progress to stderr (reserved for future verbose mode).
     pub verbose: bool,
     /// Optional CI bundle. When `Some`, runs an independent subsampling pass
@@ -364,14 +444,15 @@ pub struct ConfirmatoryTestOpts {
 }
 
 impl Default for ConfirmatoryTestOpts {
-    /// `args` defaults to `split_exact`, the recommended method and the same
-    /// default as [`Pls3ConfirmatoryTestOpts`](crate::Pls3ConfirmatoryTestOpts).
+    /// `args` defaults to `Auto` (`split_exact` or `split_nb`, chosen per
+    /// design; see [`ConfirmatoryMethod::Auto`]), the same default as
+    /// [`Pls3ConfirmatoryTestOpts`](crate::Pls3ConfirmatoryTestOpts) and every
+    /// wrapper.
     fn default() -> Self {
         Self {
-            args: ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::SplitExact),
+            args: ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::Auto),
             pre_standardized: false,
             seed: None,
-            disable_parallelism: false,
             verbose: false,
             ci: None,
             max_skip_rate: 0.01,
@@ -412,10 +493,12 @@ pub struct ConfirmatoryTestOutput {
     /// `n_eff` (that field is the weights effective-n).
     pub rho_hat: Option<f64>,
     /// Stable rank `‖X_std‖²_F / ‖X_std‖²₂` of the standardized X, as seen by
-    /// the `split_nb` auto-gate. `Some` whenever `split_nb` was the requested
-    /// method — whether the gate fired or not, and also under `force` (the
-    /// point of the field is to show what the gate saw); `None` for every
-    /// other requested method, which never evaluates the gate.
+    /// the `split_nb` auto-gate. `Some` on an explicit `split_nb` request, and
+    /// on an `"auto"` request that reached the stable-rank check (p > 4,
+    /// `n_eff` ≥ 250, and, on a PLS1 request at k = 1 without `keep`,
+    /// p ≤ 100·n); `None` otherwise. On a `split_nb` request it
+    /// is set whether the gate fired or not, and also under `force` (the
+    /// point of the field is to show what the gate saw).
     pub stable_rank: Option<f64>,
 }
 
@@ -442,7 +525,7 @@ pub fn pls1_confirmatory_test(
     input: ConfirmatoryTestInput<'_>,
     opts: ConfirmatoryTestOpts,
 ) -> PlsKitResult<ConfirmatoryTestOutput> {
-    confirmatory_test_impl(input, opts, GateMode::Owned)
+    crate::fit::with_thread_limit(|| confirmatory_test_impl(input, opts, GateMode::Owned))
 }
 
 /// Who owns the `split_nb` auto-gate decision for one confirmatory call.
@@ -457,6 +540,26 @@ pub(crate) enum GateMode {
     /// re-evaluating there could flip methods mid-chain — which closed testing
     /// cannot use.
     Decided,
+}
+
+/// Count floors of `split_exact` (and of `split_nb`'s `n_splits`), shared by
+/// every entry point that can run `split_exact` (PLS1 and PLS3 confirmatory
+/// tests and the sequence, explicit or through `auto`). `n_perm` is `None`
+/// for a `split_nb` request, which has no permutation count.
+pub(crate) fn check_split_exact_counts(n_perm: Option<usize>, n_splits: usize) -> PlsKitResult<()> {
+    if n_splits < 2 {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "n_splits must be ≥ 2, got {n_splits}"
+        )));
+    }
+    if let Some(b) = n_perm {
+        if b < 1 {
+            return Err(PlsKitError::InvalidArgument(format!(
+                "n_perm must be ≥ 1, got {b}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -516,24 +619,13 @@ pub(crate) fn confirmatory_test_impl(
                 )));
             }
         }
-        ConfirmatoryArgs::SplitNb { n_splits, .. } => {
-            if n_splits < 2 {
-                return Err(PlsKitError::InvalidArgument(format!(
-                    "n_splits must be ≥ 2, got {n_splits}"
-                )));
-            }
-        }
-        ConfirmatoryArgs::SplitExact { n_perm, n_splits } => {
-            if n_splits < 2 {
-                return Err(PlsKitError::InvalidArgument(format!(
-                    "n_splits must be ≥ 2, got {n_splits}"
-                )));
-            }
-            if n_perm < 1 {
-                return Err(PlsKitError::InvalidArgument(format!(
-                    "n_perm must be ≥ 1, got {n_perm}"
-                )));
-            }
+        ConfirmatoryArgs::SplitNb { n_splits, .. } => check_split_exact_counts(None, n_splits)?,
+        // `Auto` takes split_exact's floors before it resolves, so a bad
+        // `n_perm` errors on every design, not only on those that resolve to
+        // split_exact.
+        ConfirmatoryArgs::SplitExact { n_perm, n_splits }
+        | ConfirmatoryArgs::Auto { n_perm, n_splits } => {
+            check_split_exact_counts(Some(n_perm), n_splits)?;
         }
         ConfirmatoryArgs::Score | ConfirmatoryArgs::E => {}
     }
@@ -582,17 +674,40 @@ pub(crate) fn confirmatory_test_impl(
     // Under `GateMode::Decided` the whole block is skipped: the caller settled
     // the method already and would only be re-paying for a standardize plus a
     // full SVD (`linalg::stable_rank`) whose answer it discards.
+    //
+    // `Auto` resolves in the same place and for the same reason: the output
+    // reports the method that ran, never `"auto"`.
     let mut args_resolved = opts.args;
     let mut stable_rank_out = None;
-    if let (GateMode::Owned, ConfirmatoryArgs::SplitNb { n_splits, force }) = (gate, opts.args) {
-        let gate = resolve_split_nb(x_ref, w_norm.as_ref().map(Col::as_ref), n_eff_val, force);
-        stable_rank_out = Some(gate.stable_rank);
-        if gate.reroute {
-            args_resolved = ConfirmatoryArgs::SplitExact {
-                n_perm: SPLIT_NB_REROUTE_N_PERM,
-                n_splits,
+    match (gate, opts.args) {
+        (GateMode::Owned, ConfirmatoryArgs::SplitNb { n_splits, force }) => {
+            let gate = resolve_split_nb(x_ref, w_norm.as_ref().map(Col::as_ref), n_eff_val, force);
+            stable_rank_out = Some(gate.stable_rank);
+            if gate.reroute {
+                args_resolved = ConfirmatoryArgs::SplitExact {
+                    n_perm: SPLIT_NB_REROUTE_N_PERM,
+                    n_splits,
+                };
+            }
+        }
+        (GateMode::Owned, ConfirmatoryArgs::Auto { n_perm, n_splits }) => {
+            let (method, sr) = resolve_auto(
+                x_ref,
+                w_norm.as_ref().map(Col::as_ref),
+                n_eff_val,
+                split_exact_no_refit_route(k_resolved, opts.keep),
+            );
+            stable_rank_out = sr;
+            args_resolved = if method == ConfirmatoryMethod::SplitNb {
+                ConfirmatoryArgs::SplitNb {
+                    n_splits,
+                    force: false,
+                }
+            } else {
+                ConfirmatoryArgs::SplitExact { n_perm, n_splits }
             };
         }
+        _ => {}
     }
 
     let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
@@ -682,6 +797,13 @@ pub(crate) fn confirmatory_test_impl(
             None,
             None,
         ),
+        // Resolved above under `GateMode::Owned`; a `Decided` caller passes
+        // the method it already resolved.
+        ConfirmatoryArgs::Auto { .. } => {
+            return Err(PlsKitError::Internal(
+                "test_method='auto' reached dispatch unresolved".into(),
+            ))
+        }
     };
 
     let ci_payload = if let Some(ci_opts) = opts.ci {
@@ -690,7 +812,6 @@ pub(crate) fn confirmatory_test_impl(
             m_rate: ci_opts.m_rate,
             level: ci_opts.level,
             pre_standardized: opts.pre_standardized,
-            disable_parallelism: opts.disable_parallelism,
             max_failure_rate: ci_opts.max_failure_rate,
             max_skip_rate: opts.max_skip_rate,
         };
@@ -706,8 +827,8 @@ pub(crate) fn confirmatory_test_impl(
 
         // Reference fit on full data.
         let fit_ref = {
-            use crate::fit::{pls1_fit, FitOpts, KSpec};
-            pls1_fit(
+            use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
+            pls1_fit_impl(
                 x_ref,
                 y_ref,
                 KSpec::Fixed(k_resolved),
@@ -772,7 +893,7 @@ struct RunResult {
 /// (`fold_split`'s groups differ by at most one), so the memory side of the
 /// rule sees the worst case and the whole statistic runs on one route.
 /// Decided from shape alone; internal and silent.
-pub(crate) fn raw_perm_k1_gram_route(
+fn raw_perm_k1_gram_route(
     n: usize,
     n_folds: usize,
     p: usize,
@@ -805,7 +926,10 @@ thread_local! {
 /// calling thread before any parallel work, so a test's override reaches
 /// exactly the calls that test makes. The override never forces a route
 /// onto an input the route's rule rejects; it only removes `Nspace` and
-/// `GramP` from the choice.
+/// `GramP` from the choice. With `PLSKIT_NUM_THREADS` set to a cap, a
+/// public call runs on a plskit pool worker, which this thread-local does
+/// not reach, so `with_gram_routes_disabled` panics when the variable sets
+/// a cap.
 pub(crate) fn gram_routes_disabled() -> bool {
     GRAM_ROUTES_DISABLED.with(std::cell::Cell::get)
 }
@@ -822,6 +946,10 @@ pub(crate) fn with_gram_routes_disabled<T>(f: impl FnOnce() -> T) -> T {
             GRAM_ROUTES_DISABLED.with(|c| c.set(self.0));
         }
     }
+    assert!(
+        std::env::var_os(crate::fit::NUM_THREADS_ENV).is_none_or(|v| v == "0"),
+        "unset PLSKIT_NUM_THREADS or set it to 0: the override does not reach plskit's pool"
+    );
     let _restore = Restore(GRAM_ROUTES_DISABLED.with(|c| c.replace(true)));
     f()
 }
@@ -974,12 +1102,7 @@ fn run_raw_perm(
                     y_mat[(i, c)] = yc[i];
                 }
             }
-            crate::dual_route::pls1_cv_r2_columns(
-                x,
-                y_mat.as_ref(),
-                &folds,
-                opts.disable_parallelism,
-            )
+            crate::dual_route::pls1_cv_r2_columns(x, y_mat.as_ref(), &folds)
         }
         // Folds outer, replicate columns inner: each fold's X side (gather,
         // standardize, √w) is built once instead of once per replicate.
@@ -988,17 +1111,9 @@ fn run_raw_perm(
         // (not permuted). Null column c regenerates its permutation from
         // seeds[c - 1] inside each unit, so no n_perm·n buffer is held.
         route @ (ReplicateRoute::Primal | ReplicateRoute::Nspace | ReplicateRoute::GramP) => {
-            pooled_cv_r2_columns(
-                route,
-                x,
-                &folds,
-                w_norm,
-                k,
-                opts.keep,
-                cols.len(),
-                opts.disable_parallelism,
-                &|c| cols.column(c),
-            )?
+            pooled_cv_r2_columns(route, x, &folds, w_norm, k, opts.keep, cols.len(), &|c| {
+                cols.column(c)
+            })?
         }
     };
     let cv_r2_obs = r2[0];
@@ -1048,7 +1163,6 @@ fn pls1_cv_r2(
         k,
         keep,
         1,
-        true,
         &|_| y.to_owned(),
     )?;
     Ok(r2[0])
@@ -1283,7 +1397,7 @@ pub(crate) enum FoldBlock<'f> {
 }
 
 /// The block of `route` for one prepared fold, its precompute run under
-/// `par` ([`crate::resample::block_par`]). `Special` never reaches a
+/// `par` ([`crate::fit::par_fixed`]). `Special` never reaches a
 /// driver; handed one, it gets the primal block. `Nspace` builds `G`, its
 /// norms and `M` once per fold; `GramP` builds `C` on [`fold_fit_matrix`]
 /// and its norm estimate once per fold.
@@ -1336,8 +1450,8 @@ pub(crate) fn fold_unit(
 ///
 /// Folds outer and columns inner: each fold is prepared once
 /// ([`prepare_cv_fold`], where the X check runs), its block is built once
-/// ([`fold_block`] under [`crate::resample::block_par`]), and the columns
-/// map through [`fold_unit`] in parallel (or sequentially), so no `B·n`
+/// ([`fold_block`] under [`crate::fit::par_fixed`]), and the columns
+/// map through [`fold_unit`] in parallel, so no `B·n`
 /// outcome buffer is held; `column_y(c)` builds column `c` (length n, raw)
 /// inside the unit that needs it. `ss_res` and `ss_tot` accumulate per
 /// column in fold order, from `0.0`, exactly as the single-column loop
@@ -1355,11 +1469,10 @@ pub(crate) fn pooled_cv_r2_columns(
     k: usize,
     keep: Option<usize>,
     n_cols: usize,
-    disable_parallelism: bool,
     column_y: &(dyn Fn(usize) -> Col<f64> + Sync),
 ) -> PlsKitResult<Vec<f64>> {
     debug_assert!(k <= x.ncols(), "k <= p is the caller's precondition");
-    let par = crate::resample::block_par(disable_parallelism);
+    let par = crate::fit::par_fixed();
     let mut ss_res = vec![0.0_f64; n_cols];
     let mut ss_tot = vec![0.0_f64; n_cols];
     let mut failed = vec![false; n_cols];
@@ -1367,7 +1480,7 @@ pub(crate) fn pooled_cv_r2_columns(
         let fold = prepare_cv_fold(x, folds, fi, weights)?;
         let block = fold_block(route, &fold, par);
         let contrib: Vec<Option<PlsKitResult<(f64, f64)>>> =
-            crate::resample::map_indexed(n_cols, disable_parallelism, |c| {
+            crate::resample::map_indexed(n_cols, |c| {
                 if failed[c] {
                     return None;
                 }
@@ -1423,20 +1536,23 @@ pub(crate) struct SplitIdx {
 /// sum-then-divide, column by column. Averaging `r` first,
 /// dividing inside the loop, or summing in completion order would not
 /// reproduce it.
+///
+/// `parallel_splits`: `true` maps the splits with Rayon, `false` one at a time
+/// (one prepared split alive; the parallelism is over columns inside `per_split`).
 pub(crate) fn zbars_over_splits<F>(
     splits: &[SplitIdx],
     n_cols: usize,
-    disable_parallelism: bool,
+    parallel_splits: bool,
     per_split: F,
 ) -> Vec<f64>
 where
     F: Fn(&SplitIdx) -> Vec<f64> + Sync,
 {
-    let per_split_z: Vec<Vec<f64>> = if disable_parallelism {
-        splits.iter().map(&per_split).collect()
-    } else {
+    let per_split_z: Vec<Vec<f64>> = if parallel_splits {
         use rayon::prelude::*;
         splits.par_iter().map(&per_split).collect()
+    } else {
+        splits.iter().map(&per_split).collect()
     };
     let mut z_sum = vec![0.0_f64; n_cols];
     for per in &per_split_z {
@@ -1466,7 +1582,6 @@ pub(crate) fn draw_splits(
     n: usize,
     k: usize,
     n_splits: usize,
-    disable_parallelism: bool,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<Vec<SplitIdx>> {
     use crate::resample::{one_split, split_sizes};
@@ -1484,7 +1599,6 @@ pub(crate) fn draw_splits(
     Ok(crate::resample::parallel_for_each_seeded(
         rng,
         n_splits,
-        disable_parallelism,
         |_, child| {
             let (tr, te) = one_split(n, n_train, child);
             SplitIdx { tr, te }
@@ -1522,16 +1636,13 @@ fn split_half_correlations(
     k: usize,
     splits: &[SplitIdx],
     w_norm: Option<ColRef<'_, f64>>,
-    disable_parallelism: bool,
     keep: Option<usize>,
 ) -> Col<f64> {
     let per_split = |sp: &SplitIdx| split_half_r(x, y, k, sp, w_norm, keep);
 
     // Same shape as split_perm_nr_zbars' per-split dispatch: collect preserves
-    // split order in both arms, so serial and parallel results are byte-equal.
-    let r_vec: Vec<f64> = if disable_parallelism {
-        splits.iter().map(per_split).collect()
-    } else {
+    // split order, so the result does not depend on which worker runs which split.
+    let r_vec: Vec<f64> = {
         use rayon::prelude::*;
         splits.par_iter().map(per_split).collect()
     };
@@ -1699,7 +1810,7 @@ pub(crate) struct SplitGram<'a> {
 
 impl<'a> SplitGram<'a> {
     /// Build the block for `prep` (the driver passes
-    /// `resample::block_par(disable_parallelism)` as `par`).
+    /// `fit::par_fixed()` as `par`).
     pub(crate) fn new(prep: &'a PreparedSplit, par: Par) -> Self {
         Self {
             block: crate::gram_p::GramPBlock::new(prep.xs_tr.as_ref(), par),
@@ -1821,7 +1932,7 @@ pub(crate) enum SplitBlock<'s> {
 }
 
 /// The block of `route` for one prepared split, its precompute run under
-/// `par` ([`crate::resample::block_par`]). `Special` never reaches a
+/// `par` ([`crate::fit::par_fixed`]). `Special` never reaches a
 /// driver; handed one, it gets the primal block. `Nspace` builds `G`, its
 /// norms and `M` once per split; `GramP` builds `C = X̃_tr'X̃_tr` of the
 /// training half ([`SplitGram`]) once per split.
@@ -1882,18 +1993,17 @@ pub(crate) fn split_columns_nspace(
     ns: &crate::dual_route::NspaceSplit,
     n_cols: usize,
     k: usize,
-    disable_parallelism: bool,
     column_y: &(dyn Fn(usize) -> Col<f64> + Sync),
 ) -> Vec<f64> {
     let batch = crate::dual_route::NSPACE_BATCH;
-    let runs = crate::resample::map_indexed(n_cols.div_ceil(batch), disable_parallelism, |run| {
+    let runs = crate::resample::map_indexed(n_cols.div_ceil(batch), |run| {
         let c0 = run * batch;
         let ys: Vec<Col<f64>> = (c0..n_cols.min(c0 + batch)).map(column_y).collect();
         crate::dual_route::split_columns_r_nspace(sp, ns, ys.len(), &|j, i| ys[j][i], k)
     });
     let decided: Vec<Option<f64>> = runs.into_iter().flatten().collect();
     let undecided: Vec<usize> = (0..n_cols).filter(|&c| decided[c].is_none()).collect();
-    let fallbacks = crate::resample::map_indexed(undecided.len(), disable_parallelism, |u| {
+    let fallbacks = crate::resample::map_indexed(undecided.len(), |u| {
         let yc = column_y(undecided[u]);
         split_column_r(prep, sp, &|i| yc[i], k, None)
     });
@@ -1908,8 +2018,8 @@ pub(crate) fn split_columns_nspace(
 /// driver, splits outer and replicate columns inner (the PLS3 primal
 /// route's shape, with one difference): the splits run one at a time, so
 /// exactly one prepared split and its block ([`split_block`] under
-/// [`crate::resample::block_par`]) are alive, and the `n_cols` columns of
-/// that split map in parallel (or sequentially) through [`split_unit`], the
+/// [`crate::fit::par_fixed`]) are alive, and the `n_cols` columns of
+/// that split map in parallel through [`split_unit`], the
 /// same width the replicate-outer loop had. On the `Nspace` route the
 /// columns go through [`split_columns_nspace`] instead, in fixed runs with
 /// the fallbacks mapped per column. `column_y(c)` builds column `c` (raw,
@@ -1934,25 +2044,24 @@ pub(crate) fn split_zbars_columns(
     k: usize,
     keep: Option<usize>,
     n_cols: usize,
-    disable_parallelism: bool,
     column_y: &(dyn Fn(usize) -> Col<f64> + Sync),
 ) -> Vec<f64> {
     debug_assert!(k <= x.ncols(), "k <= p is the caller's precondition");
-    let par = crate::resample::block_par(disable_parallelism);
-    // `true`: splits run one at a time; the parallelism is over columns.
-    zbars_over_splits(splits, n_cols, true, |sp: &SplitIdx| {
+    let par = crate::fit::par_fixed();
+    // `false`: splits run one at a time; the parallelism is over columns.
+    zbars_over_splits(splits, n_cols, false, |sp: &SplitIdx| {
         let prep = prepare_split(x, sp, w_norm);
         let block = split_block(route, &prep, par);
         // ±0.9999 pre-atanh clamp mirrored from nb_test (change together).
         let fisher_z = |r: f64| r.clamp(-0.9999, 0.9999).atanh();
         match &block {
             SplitBlock::Nspace(ns) if prep.x_finite => {
-                split_columns_nspace(&prep, sp, ns, n_cols, k, disable_parallelism, column_y)
+                split_columns_nspace(&prep, sp, ns, n_cols, k, column_y)
                     .into_iter()
                     .map(fisher_z)
                     .collect()
             }
-            _ => crate::resample::map_indexed(n_cols, disable_parallelism, |c| {
+            _ => crate::resample::map_indexed(n_cols, |c| {
                 let yc = column_y(c);
                 fisher_z(split_unit(&block, &prep, sp, &|i| yc[i], k, keep))
             }),
@@ -2026,16 +2135,8 @@ fn run_split_nb(
     // Raw (X, y) and weights flow into split_half_correlations, which does the
     // per-half weighted-standardize-then-√w (the √w row-scaling convention)
     // internally.
-    let splits = draw_splits(n, k, n_splits, opts.disable_parallelism, rng)?;
-    let r_splits = split_half_correlations(
-        x,
-        y,
-        k,
-        &splits,
-        w_norm,
-        opts.disable_parallelism,
-        opts.keep,
-    );
+    let splits = draw_splits(n, k, n_splits, rng)?;
+    let r_splits = split_half_correlations(x, y, k, &splits, w_norm, opts.keep);
     let (p, mean_r, _t_stat, _df) = nb_test(&r_splits, n_train, n_test);
 
     // ρ̂ additionally needs unweighted input; the n_test floor is nb_rho_hat's.
@@ -2129,7 +2230,7 @@ fn run_split_perm(
     // scatter into the null, so the reference distribution would stop
     // isolating the y–X association the observed statistic measures.
     // split_perm_nr_zbars holds its splits fixed the same way.
-    let splits = draw_splits(n, k, n_splits, opts.disable_parallelism, rng)?;
+    let splits = draw_splits(n, k, n_splits, rng)?;
 
     // One child seed per null column, drawn right after the splits, in
     // `parallel_for_each_seeded`'s order, so every route sees the same
@@ -2141,17 +2242,9 @@ fn run_split_perm(
     // row-scaling convention: weighted-standardize-then-√w); permuted y
     // rows, weights tied to row positions (w[i] always pairs with
     // destination row i).
-    let z = split_zbars_columns(
-        route,
-        x,
-        &splits,
-        w_norm,
-        k,
-        opts.keep,
-        cols.len(),
-        opts.disable_parallelism,
-        &|c| cols.column(c),
-    );
+    let z = split_zbars_columns(route, x, &splits, w_norm, k, opts.keep, cols.len(), &|c| {
+        cols.column(c)
+    });
     let (z_bar_obs, null_zbars) = (z[0], &z[1..]);
 
     // A non-finite null statistic counts as an exceedance so it biases p
@@ -2579,12 +2672,7 @@ fn split_perm_nr_zbars(
             .collect()
     };
 
-    Ok(zbars_over_splits(
-        &splits,
-        n_cols,
-        opts.disable_parallelism,
-        per_split_z,
-    ))
+    Ok(zbars_over_splits(&splits, n_cols, true, per_split_z))
 }
 
 #[allow(clippy::many_single_char_names)]
@@ -2806,7 +2894,7 @@ fn run_e(
     opts: &ConfirmatoryTestOpts,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<RunResult> {
-    use crate::fit::{pls1_fit, FitOpts, KSpec};
+    use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
     use crate::linalg::{col_row_subset, standardize1, standardize1_weighted};
     use crate::resample::{one_split, split_sizes};
 
@@ -2845,7 +2933,7 @@ fn run_e(
     };
     let (xs_tr, xs_te) = (prep.xs_tr, prep.xs_te);
 
-    let m = pls1_fit(
+    let m = pls1_fit_impl(
         xs_tr.as_ref(),
         ys_tr.as_ref(),
         KSpec::Fixed(k),
@@ -2898,7 +2986,7 @@ fn run_e(
     let p = (1.0 / e).min(1.0);
 
     // opts unused by e method; pre_standardized has no effect (re-standardizes each half by
-    // design); disable_parallelism moot (single split, no inner loop).
+    // design).
     let _ = opts;
 
     Ok(RunResult {
@@ -2917,28 +3005,7 @@ mod tests {
     use super::*;
     use crate::fit::{pls1_fit, FitOpts, KSpec};
     use crate::linalg::{centered_moments, constant_to_rounding, normalize_weights};
-    use crate::test_support::{orthonormal_basis, project_off, signal_data};
-
-    fn synth_with_signal(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
-        use rand::RngExt;
-        use rand::SeedableRng;
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-        let x = Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0));
-        let beta = Col::<f64>::from_fn(d, |j| if j < 3 { 1.0 } else { 0.0 });
-        let signal: Col<f64> = &x * &beta;
-        let noise = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
-        let y = Col::<f64>::from_fn(n, |i| signal[i] * snr + noise[i]);
-        (x, y)
-    }
-
-    fn synth_no_signal(n: usize, d: usize, seed: u64) -> (Mat<f64>, Col<f64>) {
-        use rand::RngExt;
-        use rand::SeedableRng;
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-        let x = Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0));
-        let y = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
-        (x, y)
-    }
+    use crate::test_support::{orthonormal_basis, project_off, signal_data, synth};
 
     /// Each method rejects on a strong-signal design, and reports its own
     /// name. `split_exact` at k = 2 takes the refit route; its p-values lie
@@ -2995,7 +3062,7 @@ mod tests {
             ((80, 5, 3.0, 41), 2, ConfirmatoryArgs::E, 5, "e", 0.5),
         ];
         for ((n, d, snr, data_seed), k, args, seed, method, bound) in rows {
-            let (x, y) = synth_with_signal(n, d, snr, data_seed);
+            let (x, y) = synth(n, d, 3, snr, data_seed);
             let r = pls1_confirmatory_test(
                 ConfirmatoryTestInput::Raw {
                     x: x.as_ref(),
@@ -3031,9 +3098,9 @@ mod tests {
 
     #[test]
     fn rho_hat_follows_the_ruler() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
+        let (x, y) = synth(60, 5, 3, 4.0, 17);
         let w = Col::<f64>::from_fn(60, |i| if i % 2 == 0 { 1.5 } else { 0.5 });
-        let (x10, y10) = synth_no_signal(10, 5, 9);
+        let (x10, y10) = synth(10, 5, 0, 0.0, 9);
         let nb = |n_splits, force| ConfirmatoryArgs::SplitNb { n_splits, force };
         let exact = ConfirmatoryArgs::SplitExact {
             n_perm: 49,
@@ -3085,7 +3152,7 @@ mod tests {
         // (linalg::fold_split). An empty fold contributes (0, 0) to the
         // pooled sums, so every non-empty validation fold is still a single
         // row: the same degeneracy, rejected the same way.
-        let (x, y) = synth_no_signal(10, 3, 5);
+        let (x, y) = synth(10, 3, 0, 0.0, 5);
         for n_folds in [10, 11] {
             let r = pls1_confirmatory_test(
                 ConfirmatoryTestInput::Raw {
@@ -3119,26 +3186,16 @@ mod tests {
     /// quantity two ways and must agree on every column, not just on the
     /// final p-value. Small B and n keep the refitting route affordable.
     ///
-    /// `expect_dual` re-derives the routing rule the runner uses internally
-    /// and asserts which branch a given configuration lands on, so the
-    /// coverage claim is enforced rather than assumed.
-    ///
-    /// The routing decision is a pure function of shape (`n_tr_max`, `p`,
-    /// `B+1`, `k`) with no caller-facing override, so the production
-    /// runner cannot be run twice on identical inputs to land on both
-    /// branches — whichever `p` is chosen picks one branch
-    /// deterministically. The check below instead calls the public
+    /// The fixture's shape must put `raw_perm_route` on the K = 1 Gram
+    /// route, which is asserted first. The check then calls the public
     /// `pls1_confirmatory_test` (not just the isolated `dual_route` module)
-    /// on the branch this fixture's shape selects, and compares its
-    /// aggregate output against the reference built from primitives, so a
-    /// bug in the production permutation loop — dual or primal — cannot
-    /// hide behind an in-test reimplementation. Replaying the fold draw and
+    /// and compares its aggregate output against the reference built from
+    /// primitives, so a bug in the production permutation loop cannot hide
+    /// behind an in-test reimplementation. Replaying the fold draw and
     /// child seeds from the same seed also pins that no RNG draw sits
     /// between `resolve_seed` and the dispatch, and that the runner's
     /// child-seed stream is the one `parallel_for_each_seeded` draws.
     #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::similar_names)]
-    #[allow(clippy::too_many_arguments)]
     fn assert_raw_perm_dual_route_matches_primal(
         n: usize,
         p: usize,
@@ -3147,12 +3204,11 @@ mod tests {
         n_perm: usize,
         n_folds: usize,
         seed: u64,
-        expect_dual: bool,
     ) {
         use crate::resample::permute_indices;
         use rand::seq::SliceRandom;
 
-        let (x, y) = synth_with_signal(n, p, snr, data_seed);
+        let (x, y) = synth(n, p, 3, snr, data_seed);
         let n_cols = n_perm + 1;
 
         // Rebuild the runner's fold draw off the same seed, then its child
@@ -3174,13 +3230,11 @@ mod tests {
             }
         });
 
-        // Routing-rule check, mirroring the runner's own expression.
-        let n_tr_max = n - n / n_folds;
-        let dual = crate::dual_route::use_dual_route(n_tr_max, p, n_cols, 1);
         assert_eq!(
-            dual, expect_dual,
-            "routing check: expected dual={expect_dual}, computed={dual} \
-             (n_tr_max={n_tr_max}, p={p}, B+1={n_cols})"
+            raw_perm_route(n, n_folds, p, n_perm, 1, None, false),
+            ReplicateRoute::Special,
+            "test premise: the shape must take the K = 1 Gram route \
+             (n={n}, n_folds={n_folds}, p={p}, n_perm={n_perm})"
         );
 
         // Route A: the shipped primal path, one refit per column.
@@ -3194,8 +3248,7 @@ mod tests {
         // Call the public entry at the same seed: it consumes the identical
         // shuffle/child-seed sequence only if no draw sits between
         // `resolve_seed` and the dispatch to `run_raw_perm`, and it lands on
-        // whichever branch this fixture's shape selects (asserted above via
-        // `expect_dual`).
+        // the K = 1 Gram route (asserted above).
         let prod = pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
@@ -3206,7 +3259,6 @@ mod tests {
             ConfirmatoryTestOpts {
                 args: ConfirmatoryArgs::RawPerm { n_perm, n_folds },
                 seed: Some(seed),
-                disable_parallelism: true,
                 ..Default::default()
             },
         )
@@ -3237,7 +3289,7 @@ mod tests {
         );
 
         // Route B: the Gram path, all columns at once.
-        let b = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds, false);
+        let b = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds);
 
         assert_eq!(a.len(), b.len());
         // Pure relative tolerance — no absolute escape hatch. Scale by the
@@ -3264,25 +3316,7 @@ mod tests {
     fn raw_perm_dual_route_matches_primal_when_selected() {
         // n=60, p=3000, n_folds=5 ⇒ n_tr_max=48, B+1=50:
         // 48·(50+3000) = 146,400 < 3000·50 = 150,000 ⇒ dual is live.
-        assert_raw_perm_dual_route_matches_primal(60, 3000, 4.0, 7, 49, 5, 11, true);
-    }
-
-    #[test]
-    fn raw_perm_dual_route_serial_and_parallel_are_byte_equal() {
-        let (x, y) = synth_with_signal(60, 3000, 4.0, 7);
-        let (_, mut rng) = crate::rng::resolve_seed(Some(3)).unwrap();
-        let mut indices: Vec<usize> = (0..60).collect();
-        {
-            use rand::seq::SliceRandom;
-            indices.shuffle(&mut rng);
-        }
-        let folds = crate::linalg::fold_split(&indices, 5);
-        let y_mat = Mat::<f64>::from_fn(60, 5, |i, _| y[i]);
-        let par = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds, false);
-        let ser = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds, true);
-        for (a, b) in par.iter().zip(ser.iter()) {
-            assert_eq!(a.to_bits(), b.to_bits());
-        }
+        assert_raw_perm_dual_route_matches_primal(60, 3000, 4.0, 7, 49, 5, 11);
     }
 
     #[test]
@@ -3295,10 +3329,10 @@ mod tests {
         // mean is not 0. The claim under test is finiteness (never NaN) and
         // agreement with the primal route, not a particular value.
         let x = Mat::<f64>::from_fn(40, 8, |_, _| 3.0);
-        let (_, y) = synth_with_signal(40, 8, 4.0, 5);
+        let (_, y) = synth(40, 8, 3, 4.0, 5);
         let folds = crate::linalg::fold_split(&(0..40).collect::<Vec<_>>(), 4);
         let y_mat = Mat::<f64>::from_fn(40, 3, |i, _| y[i]);
-        let dual = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds, true);
+        let dual = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds);
         for (col, v) in dual.iter().enumerate() {
             assert!(v.is_finite(), "col {col} is not finite: {v}");
             let primal = {
@@ -3378,7 +3412,7 @@ mod tests {
             );
         }
 
-        let dual = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds, true);
+        let dual = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds);
         for (col, v) in dual.iter().enumerate() {
             let y_col = Col::<f64>::from_fn(n, |i| y_mat[(i, col)]);
             let primal = pls1_cv_r2(x.as_ref(), y_col.as_ref(), 1, &folds, None, None).unwrap();
@@ -3408,12 +3442,12 @@ mod tests {
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn split_exact_selects_route_from_input_shape() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
+        let (x, y) = synth(60, 5, 3, 4.0, 17);
         let w = Col::<f64>::from_fn(60, |i| if i % 2 == 0 { 1.5 } else { 0.5 });
         let (n_perm, n_splits) = (49_usize, 5_usize);
         let n = 60_usize;
 
-        let run_exact = |k: usize, weights: Option<ColRef<'_, f64>>, keep| {
+        let run_exact = |k: usize, weights: Option<ColRef<'_, f64>>, keep, seed: u64| {
             pls1_confirmatory_test(
                 ConfirmatoryTestInput::Raw {
                     x: x.as_ref(),
@@ -3423,7 +3457,7 @@ mod tests {
                 },
                 ConfirmatoryTestOpts {
                     args: ConfirmatoryArgs::SplitExact { n_perm, n_splits },
-                    seed: Some(2),
+                    seed: Some(seed),
                     keep,
                     ..Default::default()
                 },
@@ -3467,7 +3501,7 @@ mod tests {
 
         // k=1, dense ⇒ no-refit route, weighted or not.
         for weights in [None, Some(w.as_ref())] {
-            let a = run_exact(1, weights, None);
+            let a = run_exact(1, weights, None, 2);
             let b = run_route(1, weights, None, false);
             assert_eq!(a.test_method, "split_exact");
             assert_eq!(
@@ -3478,12 +3512,20 @@ mod tests {
             );
             assert_eq!(a.statistic.to_bits(), b.statistic.to_bits());
         }
+        // The seed reaches the no-refit route: another seed draws other
+        // splits, and the statistic (tanh of the observed column's z̄) only
+        // matches when the splits do.
+        assert_ne!(
+            run_exact(1, None, None, 2).statistic.to_bits(),
+            run_exact(1, None, None, 3).statistic.to_bits(),
+            "different seed should (generally) draw different splits"
+        );
 
         // k>1 and sparse keep each independently force the refit route,
         // weighted or not.
         for weights in [None, Some(w.as_ref())] {
             for (k, keep) in [(2, None), (1, Some(3))] {
-                let e = run_exact(k, weights, keep);
+                let e = run_exact(k, weights, keep, 2);
                 let s = run_route(k, weights, keep, true);
                 let what = format!("weighted={} k={k} keep={keep:?}", weights.is_some());
                 assert_eq!(e.test_method, "split_exact");
@@ -3539,7 +3581,7 @@ mod tests {
         use crate::resample::{one_split, permute_indices, split_sizes};
 
         let k = 1_usize;
-        let (x, y) = synth_with_signal(n, p, snr, data_seed);
+        let (x, y) = synth(n, p, 3, snr, data_seed);
         let n_cols = n_perm + 1;
 
         // Globally mean-1-normalized weights, exactly what
@@ -3547,12 +3589,7 @@ mod tests {
         // not aligned to the split boundary, so per-half renormalization
         // actually changes the numbers (a uniform w would pass even if the
         // implementation ignored weights entirely).
-        let w_all: Option<Col<f64>> = weighted.then(|| {
-            normalize_weights(
-                Col::<f64>::from_fn(n, |i| 0.25 + ((i * 7) % 5) as f64 * 0.5).as_ref(),
-            )
-            .unwrap()
-        });
+        let w_all: Option<Col<f64>> = weighted.then(|| degenerate_half_weights(n));
         let w_norm = w_all.as_ref().map(Col::as_ref);
 
         // Cost-model check (mirrors split_perm_nr_zbars' own comparison):
@@ -3752,25 +3789,21 @@ mod tests {
     }
 
     // Same case as above, degenerate: every X row identical ⇒ standardize's
-    // zero-variance branch makes xs_tr exactly the zero matrix, so both
-    // routes' test-half scores are constant (zero) for every split/column —
-    // the guard must fire and return r = 0.0 for both, never NaN.
+    // zero-variance branch makes xs_tr exactly the zero matrix, so the
+    // no-refit route's test-half scores are constant (zero) for every
+    // split/column — the guard must fire and return r = 0.0, never NaN.
     #[test]
     #[allow(clippy::many_single_char_names)]
-    #[allow(clippy::similar_names)]
     #[allow(clippy::float_cmp)] // exact 0.0 is the point: the guard must never emit NaN
     fn split_perm_nr_guard_constant_scores_give_zero_correlation() {
-        use crate::linalg::{row_subset, standardize, standardize1, standardize_apply};
-        use crate::resample::{one_split, split_sizes};
-
         let n = 20;
         let d = 3;
         let x = Mat::<f64>::from_fn(n, d, |_, j| (j + 1) as f64); // every row identical
         let y = Col::<f64>::from_fn(n, |i| i as f64);
         let (n_perm, n_splits, k, seed) = (9_usize, 4_usize, 1_usize, 3_u64);
 
-        let (_, mut rng_b) = crate::rng::resolve_seed(Some(seed)).unwrap();
-        let z_bar_b = split_perm_nr_zbars(
+        let (_, mut rng) = crate::rng::resolve_seed(Some(seed)).unwrap();
+        let z_bar = split_perm_nr_zbars(
             x.as_ref(),
             y.as_ref(),
             k,
@@ -3782,50 +3815,13 @@ mod tests {
                 seed: Some(seed),
                 ..Default::default()
             },
-            &mut rng_b,
+            &mut rng,
         )
         .unwrap();
-        for zb in &z_bar_b {
-            assert_eq!(*zb, 0.0, "route B must return exactly 0, not NaN");
-        }
-
-        // Route A: honest refit hits the same degeneracy (xs_tr = 0 ⇒
-        // pls1_fit's Err arm or a zero coef; either way scores_te is
-        // constant), and the guard above returns 0.0 rather than propagating
-        // pls1_fit's failure into a skipped/NaN entry.
-        let (_, mut rng_a) = crate::rng::resolve_seed(Some(seed)).unwrap();
-        let (n_train, _) = split_sizes(n, k);
-        for _ in 0..n_splits {
-            let (tr, te) = one_split(n, n_train, &mut rng_a);
-            let x_tr = row_subset(x.as_ref(), &tr);
-            let x_te = row_subset(x.as_ref(), &te);
-            let (xs_tr, mean, scale) = standardize(x_tr.as_ref());
-            let xs_te = standardize_apply(x_te.as_ref(), mean.as_ref(), scale.as_ref());
-            let y_tr_col = crate::linalg::col_row_subset(y.as_ref(), &tr);
-            let (ys_tr, _, _) = standardize1(y_tr_col.as_ref());
-            let n_te = te.len();
-            let (s_mean, ss_s) = match pls1_fit(
-                xs_tr.as_ref(),
-                ys_tr.as_ref(),
-                KSpec::Fixed(1),
-                None,
-                FitOpts {
-                    pre_standardized: true,
-                    check_n_eff: false,
-                    ..Default::default()
-                },
-            ) {
-                Ok(m) => {
-                    let scores_te: Col<f64> = &xs_te * &m.coef;
-                    let s_mean: f64 = (0..n_te).map(|i| scores_te[i]).sum::<f64>() / n_te as f64;
-                    let ss_s: f64 = (0..n_te).map(|i| (scores_te[i] - s_mean).powi(2)).sum();
-                    (s_mean, ss_s)
-                }
-                Err(_) => (0.0, 0.0),
-            };
-            assert!(
-                ss_s < 1e-15,
-                "expected the honest-refit route to also hit the zero-variance guard: ss_s={ss_s}, s_mean={s_mean}"
+        for zb in &z_bar {
+            assert_eq!(
+                *zb, 0.0,
+                "the no-refit route must return exactly 0, not NaN"
             );
         }
     }
@@ -3858,11 +3854,11 @@ mod tests {
             })
             .collect();
         let perms: Vec<Vec<usize>> = (0..n_perm).map(|_| permute_indices(n, &mut rng)).collect();
-        let r_obs = split_half_correlations(x, y, 1, &splits, w_norm, true, None);
+        let r_obs = split_half_correlations(x, y, 1, &splits, w_norm, None);
         let mut zbars = vec![mean_fisher_z(&r_obs)];
         for perm in &perms {
             let y_perm = Col::<f64>::from_fn(n, |i| y[perm[i]]);
-            let r = split_half_correlations(x, y_perm.as_ref(), 1, &splits, w_norm, true, None);
+            let r = split_half_correlations(x, y_perm.as_ref(), 1, &splits, w_norm, None);
             zbars.push(mean_fisher_z(&r));
         }
         (splits, zbars, r_obs)
@@ -4038,7 +4034,7 @@ mod tests {
             let w_norm = weighted.then_some(w.as_ref());
             let (x, y_orth) =
                 design_with_orthogonal_train_half(n, p, &splits[0].tr, w_norm, 1.0, 17);
-            let (_, y_plain) = synth_with_signal(n, p, 0.3, 23);
+            let (_, y_plain) = synth(n, p, 3, 0.3, 23);
             for (label, y) in [("orthogonal half", &y_orth), ("ordinary", &y_plain)] {
                 let z_nr = nr_zbars(x.as_ref(), y.as_ref(), n_perm, n_splits, w_norm, seed);
                 let (_, z_re, _) =
@@ -4208,7 +4204,7 @@ mod tests {
     #[allow(clippy::many_single_char_names)]
     fn split_statistics_are_invariant_to_extreme_scales_of_x_and_y() {
         let n = 60_usize;
-        let (x, y) = synth_with_signal(n, 5, 1.0, 29);
+        let (x, y) = synth(n, 5, 3, 1.0, 29);
         let w = Col::<f64>::from_fn(n, |i| if i % 3 == 0 { 2.0 } else { 0.5 });
         let run = |x: MatRef<'_, f64>, y: ColRef<'_, f64>, k, weights, args| {
             pls1_confirmatory_test(
@@ -4283,47 +4279,6 @@ mod tests {
         }
     }
 
-    // Test 3: determinism. Same seed ⇒ identical p; different seed ⇒
-    // generally different p. Splits are drawn once, so same seed ⇒ same
-    // splits too — checked here via the identical statistic (tanh(z̄[0])),
-    // which only matches if both the splits and the observed column agree.
-    // k=1, dense, unweighted ⇒ split_exact's no-refit route via the public
-    // API.
-    #[test]
-    fn split_exact_no_refit_route_deterministic_under_same_seed() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 5);
-        let mk = |seed| {
-            pls1_confirmatory_test(
-                ConfirmatoryTestInput::Raw {
-                    x: x.as_ref(),
-                    y: y.as_ref(),
-                    k: 1,
-                    weights: None,
-                },
-                ConfirmatoryTestOpts {
-                    args: ConfirmatoryArgs::SplitExact {
-                        n_perm: 100,
-                        n_splits: 10,
-                    },
-                    seed: Some(seed),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-        };
-        let a1 = mk(42);
-        let a2 = mk(42);
-        assert_eq!(a1.pvalue.to_bits(), a2.pvalue.to_bits());
-        assert_eq!(a1.statistic.to_bits(), a2.statistic.to_bits());
-
-        let b = mk(43);
-        assert_ne!(
-            a1.statistic.to_bits(),
-            b.statistic.to_bits(),
-            "different seed should (generally) draw different splits"
-        );
-    }
-
     // ── split_nb auto-gate ───────────────────────────────────────────────────
 
     /// Single dominant factor: every column is the same latent `f` plus a tiny
@@ -4367,7 +4322,7 @@ mod tests {
     fn gate_reroutes_when_n_below_floor() {
         // n = 20 < 25, spectrum flat (iid) — the size clause fires. d = 10 so
         // neither the rank clause nor the column precheck can be the reason.
-        let (x, y) = synth_no_signal(20, 10, 5);
+        let (x, y) = synth(20, 10, 0, 0.0, 5);
         let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
         assert_eq!(r.test_method, "split_exact");
         let sr = r.stable_rank.expect("gate was evaluated");
@@ -4383,7 +4338,7 @@ mod tests {
     /// precheck — not the rank clause — is what fired.
     #[test]
     fn gate_reroutes_on_narrow_x_despite_adequate_rank() {
-        let (x, y) = synth_no_signal(60, 4, 11);
+        let (x, y) = synth(60, 4, 0, 0.0, 11);
         let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
         assert_eq!(r.test_method, "split_exact");
         let sr = r.stable_rank.expect("gate was evaluated");
@@ -4396,10 +4351,13 @@ mod tests {
     #[test]
     fn gate_reroutes_when_stable_rank_below_floor() {
         let (x, y) = synth_one_factor(40, 5, 6);
-        let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
+        let r = gate_run(x.as_ref(), y.as_ref(), None, 12, false);
         assert_eq!(r.test_method, "split_exact");
         let sr = r.stable_rank.expect("gate was evaluated");
         assert!(sr < SPLIT_NB_GATE_MIN_STABLE_RANK, "stable_rank={sr}");
+        // n_perm is split_exact's own default; n_splits is what the caller asked for.
+        assert_eq!(r.n_perm, Some(1000));
+        assert_eq!(r.n_splits, Some(12));
     }
 
     #[test]
@@ -4408,7 +4366,7 @@ mod tests {
         // rank lands around 3.1, so the negative case would clear the floor by
         // a few percent and turn into a coin flip under any reseeding. Ten iid
         // columns put it near 7.
-        let (x, y) = synth_no_signal(60, 10, 7);
+        let (x, y) = synth(60, 10, 0, 0.0, 7);
         let r = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
         assert_eq!(r.test_method, "split_nb");
         // No rank assertion — `test_method == "split_nb"` at n = 60 already implies
@@ -4427,7 +4385,7 @@ mod tests {
     fn gate_force_runs_nb_on_flagged_design_and_still_reports_rank() {
         for (name, (x, y)) in [
             ("one factor", synth_one_factor(40, 5, 6)),
-            ("narrow x", synth_no_signal(60, 4, 11)),
+            ("narrow x", synth(60, 4, 0, 0.0, 11)),
         ] {
             let r = gate_run(x.as_ref(), y.as_ref(), None, 20, true);
             assert_eq!(r.test_method, "split_nb", "{name}");
@@ -4444,7 +4402,7 @@ mod tests {
     fn gate_uses_n_eff_under_weights() {
         // Raw n = 40 clears the floor; the weights pull Kish n_eff under it.
         // Σw = 22, Σw² = 20.2 ⇒ n_eff = 22²/20.2 ≈ 23.96 < 25.
-        let (x, y) = synth_no_signal(40, 5, 8);
+        let (x, y) = synth(40, 5, 0, 0.0, 8);
         let w = Col::<f64>::from_fn(40, |i| if i % 2 == 0 { 1.0 } else { 0.1 });
 
         let unweighted = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
@@ -4465,7 +4423,7 @@ mod tests {
         // At the floor itself, n = 25: equal weights are no weights. Kish's
         // ratio of 25 × 0.3 rounds to 24.999999999999975, which would fire
         // the gate on a design that clears it unweighted.
-        let x25 = synth_no_signal(25, 10, 8).0;
+        let x25 = synth(25, 10, 0, 0.0, 8).0;
         let equal = Col::<f64>::from_fn(25, |_| 0.3);
         let absent = split_nb_gate(x25.as_ref(), None).unwrap();
         assert!(!absent.fires, "n = 25 must clear the gate unweighted");
@@ -4528,16 +4486,6 @@ mod tests {
         assert!(sr_w < SPLIT_NB_GATE_MIN_STABLE_RANK, "weighted sr={sr_w}");
     }
 
-    #[test]
-    fn gate_result_counts_read_off_resolved_args() {
-        let (x, y) = synth_one_factor(40, 5, 6);
-        let r = gate_run(x.as_ref(), y.as_ref(), None, 12, false);
-        assert_eq!(r.test_method, "split_exact");
-        // n_perm is split_exact's own default; n_splits is what the caller asked for.
-        assert_eq!(r.n_perm, Some(1000));
-        assert_eq!(r.n_splits, Some(12));
-    }
-
     // ── the public gate query ────────────────────────────────────────────────
     //
     // These are the whole contract of `split_nb_gate`: it must answer exactly
@@ -4554,8 +4502,8 @@ mod tests {
         let half = Col::<f64>::from_fn(40, |i| if i % 2 == 0 { 1.0 } else { 0.1 });
         for ((x, y), w, expect_fires) in [
             (synth_one_factor(40, 5, 6), None, true),
-            (synth_no_signal(60, 10, 7), None, false),
-            (synth_no_signal(40, 5, 8), Some(half.as_ref()), true),
+            (synth(60, 10, 0, 0.0, 7), None, false),
+            (synth(40, 5, 0, 0.0, 8), Some(half.as_ref()), true),
         ] {
             let embedded = gate_run(x.as_ref(), y.as_ref(), w, 20, false);
             let q = split_nb_gate(x.as_ref(), w).unwrap();
@@ -4573,7 +4521,7 @@ mod tests {
     /// NaN reaches `linalg::stable_rank`'s SVD instead of this error.
     #[test]
     fn public_gate_rejects_non_finite_x() {
-        let mut x = synth_no_signal(60, 10, 7).0;
+        let mut x = synth(60, 10, 0, 0.0, 7).0;
         x[(3, 2)] = f64::NAN;
         assert!(matches!(
             split_nb_gate(x.as_ref(), None),
@@ -4583,7 +4531,7 @@ mod tests {
 
     #[test]
     fn public_gate_rejects_bad_weights() {
-        let x = synth_no_signal(60, 10, 7).0;
+        let x = synth(60, 10, 0, 0.0, 7).0;
         let neg = Col::<f64>::from_fn(60, |i| if i == 0 { -1.0 } else { 1.0 });
         assert!(matches!(
             split_nb_gate(x.as_ref(), Some(neg.as_ref())),
@@ -4598,11 +4546,180 @@ mod tests {
         ));
     }
 
+    // ── `test_method = "auto"` ───────────────────────────────────────────────
+
+    /// The sample-size clause at its floor, on unweighted X where `n_eff` is
+    /// the row count. Ten iid columns clear the gate and the width clause, so
+    /// one row below the floor is the only reason for `split_exact`, and that
+    /// decision is made without the stable-rank check.
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn auto_n_eff_floor() {
+        let floor = AUTO_MIN_N_EFF as usize;
+        for (n, expect, checked) in [
+            (floor - 1, ConfirmatoryMethod::SplitExact, false),
+            (floor, ConfirmatoryMethod::SplitNb, true),
+        ] {
+            let x = synth(n, 10, 0, 0.0, 21).0;
+            let (method, sr) = resolve_auto(x.as_ref(), None, n as f64, true);
+            assert_eq!(method, expect, "n={n}");
+            assert_eq!(sr.is_some(), checked, "n={n}");
+        }
+    }
+
+    /// The width clause at its ceiling. `n_eff` is passed apart from the
+    /// row count, so a 10-row X with `n_eff` above the floor tests the
+    /// clause without a 250-row, 25 000-column SVD: `p = AUTO_MAX_P_PER_N · n`
+    /// goes on to the stable-rank check (iid columns clear it), one column
+    /// more decides `split_exact` without it. Off the no-refit route (k ≥ 2,
+    /// a set `keep`, PLS3) the ceiling does not apply.
+    #[test]
+    fn auto_p_per_n_ceiling() {
+        let n = 10;
+        let n_eff = AUTO_MIN_N_EFF;
+        let ceiling = AUTO_MAX_P_PER_N * n;
+        for (p, no_refit, expect, checked) in [
+            (ceiling, true, ConfirmatoryMethod::SplitNb, true),
+            (ceiling + 1, true, ConfirmatoryMethod::SplitExact, false),
+            (ceiling + 1, false, ConfirmatoryMethod::SplitNb, true),
+        ] {
+            let x = synth(n, p, 0, 0.0, 22).0;
+            let (method, sr) = resolve_auto(x.as_ref(), None, n_eff, no_refit);
+            assert_eq!(method, expect, "p={p} no_refit={no_refit}");
+            assert_eq!(sr.is_some(), checked, "p={p} no_refit={no_refit}");
+        }
+    }
+
+    /// The sample-size clause reads Kish `n_eff`, the width clause reads
+    /// rows. 300 rows weighted 1 / 0.1 alternately give
+    /// `n_eff` = 165² / 151.5 ≈ 180, so `split_exact`; the same X unweighted
+    /// runs `split_nb`.
+    #[test]
+    fn auto_n_eff_clause_reads_weights() {
+        let x = synth(300, 10, 0, 0.0, 23).0;
+        let w = Col::<f64>::from_fn(300, |i| if i % 2 == 0 { 1.0 } else { 0.1 });
+        let (w_norm, n_eff) =
+            crate::fit::validate_and_normalize_weights(Some(w.as_ref()), 300, 0).unwrap();
+        assert!(n_eff < AUTO_MIN_N_EFF, "n_eff={n_eff}");
+        let weighted = resolve_auto(x.as_ref(), w_norm.as_ref().map(Col::as_ref), n_eff, true);
+        assert_eq!(weighted, (ConfirmatoryMethod::SplitExact, None));
+        let (method, sr) = resolve_auto(x.as_ref(), None, 300.0, true);
+        assert_eq!(method, ConfirmatoryMethod::SplitNb);
+        assert!(sr.is_some());
+    }
+
+    /// Above both size clauses the `split_nb` gate still decides: a
+    /// one-factor X (stable rank near 1) runs `split_exact` and reports the
+    /// rank, and a 4-column X runs `split_exact` on the column precheck
+    /// without computing it.
+    #[test]
+    fn auto_defers_to_the_split_nb_gate() {
+        let x = synth_one_factor(300, 10, 6).0;
+        let (method, sr) = resolve_auto(x.as_ref(), None, 300.0, true);
+        assert_eq!(method, ConfirmatoryMethod::SplitExact);
+        let sr = sr.expect("the stable-rank check ran");
+        assert!(sr < SPLIT_NB_GATE_MIN_STABLE_RANK, "stable_rank={sr}");
+
+        let x = synth(300, 4, 0, 0.0, 11).0;
+        assert_eq!(
+            resolve_auto(x.as_ref(), None, 300.0, true),
+            (ConfirmatoryMethod::SplitExact, None)
+        );
+    }
+
+    /// Resolution draws no randomness, so at one seed `Auto` returns what an
+    /// explicit call of the resolved method returns, field by field except
+    /// `stable_rank`. One design per resolved method, and the CI branch on
+    /// the `split_exact` one.
+    #[test]
+    fn auto_matches_the_resolved_method_at_the_same_seed() {
+        let run = |(x, y): &(Mat<f64>, Col<f64>), args, ci| {
+            pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k: 1,
+                    weights: None,
+                },
+                ConfirmatoryTestOpts {
+                    args,
+                    seed: Some(31),
+                    ci,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let small = synth(60, 8, 3, 1.0, 12);
+        let large = synth(300, 10, 3, 0.3, 13);
+        let auto = ConfirmatoryArgs::Auto {
+            n_perm: 49,
+            n_splits: 6,
+        };
+        let exact = ConfirmatoryArgs::SplitExact {
+            n_perm: 49,
+            n_splits: 6,
+        };
+        let nb = ConfirmatoryArgs::SplitNb {
+            n_splits: 6,
+            force: false,
+        };
+        let ci = Some(CIOpts {
+            n_boot: 100,
+            ..CIOpts::default()
+        });
+        for (data, explicit, ci, has_rank) in [
+            (&small, exact, None, false),
+            (&small, exact, ci, false),
+            (&large, nb, None, true),
+        ] {
+            let tag = format!("{explicit:?} ci={}", ci.is_some());
+            let mut got = run(data, auto, ci);
+            let mut want = run(data, explicit, ci);
+            assert_eq!(got.test_method, explicit.method().as_str(), "{tag}");
+            assert_eq!(got.stable_rank.is_some(), has_rank, "{tag}");
+            got.stable_rank = None;
+            want.stable_rank = None;
+            assert_eq!(format!("{got:?}"), format!("{want:?}"), "{tag}");
+        }
+    }
+
+    /// `Auto` checks `split_exact`'s count floors before it resolves, so
+    /// they hold on a design that resolves to `split_nb`, where `n_perm` is
+    /// otherwise unused.
+    #[test]
+    fn auto_count_floors_hold_on_a_split_nb_design() {
+        let (x, y) = synth(300, 10, 3, 0.3, 13);
+        assert_eq!(
+            resolve_auto(x.as_ref(), None, 300.0, true).0,
+            ConfirmatoryMethod::SplitNb
+        );
+        for (n_perm, n_splits) in [(0, 6), (49, 1)] {
+            let r = pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k: 1,
+                    weights: None,
+                },
+                ConfirmatoryTestOpts {
+                    args: ConfirmatoryArgs::Auto { n_perm, n_splits },
+                    seed: Some(31),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                matches!(r, Err(PlsKitError::InvalidArgument(_))),
+                "n_perm={n_perm} n_splits={n_splits}: {r:?}"
+            );
+        }
+    }
+
     // ── input validation ─────────────────────────────────────────────────────
 
     #[test]
     fn confirmatory_rejects_keep_with_ci() {
-        let (x, y) = synth_with_signal(80, 5, 4.0, 99);
+        let (x, y) = synth(80, 5, 3, 4.0, 99);
         let e = pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
@@ -4627,7 +4744,7 @@ mod tests {
 
     #[test]
     fn confirmatory_rejects_bad_keep() {
-        let (x, y) = synth_with_signal(60, 5, 4.0, 17);
+        let (x, y) = synth(60, 5, 3, 4.0, 17);
         let e = pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
@@ -4646,7 +4763,7 @@ mod tests {
 
     #[test]
     fn ci_branch_rejects_invalid_m_rate() {
-        let (x, y) = synth_with_signal(80, 5, 4.0, 11);
+        let (x, y) = synth(80, 5, 3, 4.0, 11);
         let err = pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
@@ -4676,23 +4793,6 @@ mod tests {
     // ── internals without a public-surface proof ─────────────────────────────
 
     #[test]
-    fn the_route_override_restores_the_previous_value_even_on_panic() {
-        assert!(!gram_routes_disabled());
-        with_gram_routes_disabled(|| {
-            assert!(gram_routes_disabled());
-            with_gram_routes_disabled(|| assert!(gram_routes_disabled()));
-            assert!(
-                gram_routes_disabled(),
-                "the inner guard restores the outer value"
-            );
-        });
-        assert!(!gram_routes_disabled());
-        let caught = std::panic::catch_unwind(|| with_gram_routes_disabled(|| panic!("inside")));
-        assert!(caught.is_err());
-        assert!(!gram_routes_disabled(), "restored on unwind");
-    }
-
-    #[test]
     fn pooled_columns_fail_soft_on_a_null_and_hard_on_the_observed_column() {
         let (x, y0) = signal_data(48, 7, 101);
         let n = x.nrows();
@@ -4705,32 +4805,27 @@ mod tests {
             y
         };
         let primal = ReplicateRoute::Primal;
-        let clean =
-            pooled_cv_r2_columns(primal, x.as_ref(), &folds, None, 2, None, 4, true, &|c| {
-                column(c, None)
-            })
-            .unwrap();
-        for dp in [true, false] {
-            let hit =
-                pooled_cv_r2_columns(primal, x.as_ref(), &folds, None, 2, None, 4, dp, &|c| {
-                    column(c, Some(2))
-                })
-                .unwrap();
-            assert!(hit[2].is_nan(), "a failed null column is NaN");
-            for c in [0, 1, 3] {
-                assert_eq!(hit[c].to_bits(), clean[c].to_bits(), "column {c} untouched");
-            }
-            let err =
-                pooled_cv_r2_columns(primal, x.as_ref(), &folds, None, 2, None, 4, dp, &|c| {
-                    column(c, Some(0))
-                })
-                .unwrap_err();
-            assert_eq!(
-                err.code(),
-                "non_finite_input",
-                "column 0 propagates its error"
-            );
+        let clean = pooled_cv_r2_columns(primal, x.as_ref(), &folds, None, 2, None, 4, &|c| {
+            column(c, None)
+        })
+        .unwrap();
+        let hit = pooled_cv_r2_columns(primal, x.as_ref(), &folds, None, 2, None, 4, &|c| {
+            column(c, Some(2))
+        })
+        .unwrap();
+        assert!(hit[2].is_nan(), "a failed null column is NaN");
+        for c in [0, 1, 3] {
+            assert_eq!(hit[c].to_bits(), clean[c].to_bits(), "column {c} untouched");
         }
+        let err = pooled_cv_r2_columns(primal, x.as_ref(), &folds, None, 2, None, 4, &|c| {
+            column(c, Some(0))
+        })
+        .unwrap_err();
+        assert_eq!(
+            err.code(),
+            "non_finite_input",
+            "column 0 propagates its error"
+        );
         // A non-finite X fails once, in the preparation of the first fold
         // that trains on it (row 7 sits in fold 0, so fold 1 fails).
         let mut bad_x = x.clone();
@@ -4884,19 +4979,9 @@ mod tests {
 #[cfg(test)]
 mod tests_gram_p {
     use super::*;
-    use crate::gram_p::test_designs::{linear_y, unif};
     use crate::resample::Columns;
+    use crate::test_support::{gram_p_weights, linear_y, unif};
     use faer::Par;
-
-    fn weights(n: usize) -> Col<f64> {
-        Col::<f64>::from_fn(n, |i| {
-            if i % 9 == 0 {
-                0.0
-            } else {
-                0.5 + (i % 5) as f64 * 0.3
-            }
-        })
-    }
 
     fn seeds(n_perm: usize, seed: u64) -> Vec<u64> {
         let (_, mut rng) = crate::rng::resolve_seed(Some(seed)).expect("seed");
@@ -4952,13 +5037,10 @@ mod tests_gram_p {
         k: usize,
         keep: Option<usize>,
         w: Option<ColRef<'_, f64>>,
-        dp: bool,
     ) -> Vec<f64> {
         let cols = Columns { y, seeds };
-        pooled_cv_r2_columns(route, x, folds, w, k, keep, cols.len(), dp, &|c| {
-            cols.column(c)
-        })
-        .expect("columns")
+        pooled_cv_r2_columns(route, x, folds, w, k, keep, cols.len(), &|c| cols.column(c))
+            .expect("columns")
     }
 
     const CASES: [(&str, usize, Option<usize>, bool); 5] = [
@@ -4970,12 +5052,16 @@ mod tests_gram_p {
     ];
 
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn raw_perm_gram_fold_units_match_primal_units() {
-        // Per fold: ss_tot bit for bit (it depends only on y),
-        // |Δss_res| ≤ 1e-10·max(1, ss_tot).
+        // Dense K = 1 and K = 2, sparse, weighted, weighted sparse: the
+        // weighted and sparse cells have no corpus fixture, so this test and
+        // the route-invisibility test below carry them. Per fold: ss_tot bit
+        // for bit (it depends only on y), |Δss_res| ≤ 1e-10·max(1, ss_tot);
+        // then the pooled columns.
         let x = unif(2000, 50, 81);
         let y = linear_y(&x, 3.0, 82);
-        let w = weights(2000);
+        let w = gram_p_weights(2000);
         let folds = folds5(2000);
         let seeds = seeds(20, 83);
         let cols = Columns {
@@ -5034,23 +5120,6 @@ mod tests_gram_p {
                 "{label}: no unit's ss_res bits differed from the Primal arm: the GramP arm \
                  may be falling back on every unit"
             );
-        }
-    }
-
-    #[test]
-    #[allow(clippy::many_single_char_names)]
-    fn raw_perm_gram_columns_match_primal_columns() {
-        // Dense K = 1 and K = 2, sparse, weighted, weighted sparse: the
-        // weighted and sparse cells have no corpus fixture, so this test and
-        // the route-invisibility test below carry them.
-        let x = unif(2000, 50, 84);
-        let y = linear_y(&x, 3.0, 85);
-        let w = weights(2000);
-        let folds = folds5(2000);
-        let seeds = seeds(60, 86);
-        for (label, k, keep, weighted) in CASES {
-            let wn = normalized(weighted.then_some(&w));
-            let wref = wn.as_ref().map(Col::as_ref);
             let p = raw_perm_columns(
                 ReplicateRoute::Primal,
                 x.as_ref(),
@@ -5060,23 +5129,19 @@ mod tests_gram_p {
                 k,
                 keep,
                 wref,
-                true,
             );
-            for dp in [true, false] {
-                let g = raw_perm_columns(
-                    ReplicateRoute::GramP,
-                    x.as_ref(),
-                    y.as_ref(),
-                    &folds,
-                    &seeds,
-                    k,
-                    keep,
-                    wref,
-                    dp,
-                );
-                assert_columns_close(&g, &p, &format!("{label} dp={dp}"));
-                assert_same_exceedances(&g, &p, label);
-            }
+            let g = raw_perm_columns(
+                ReplicateRoute::GramP,
+                x.as_ref(),
+                y.as_ref(),
+                &folds,
+                &seeds,
+                k,
+                keep,
+                wref,
+            );
+            assert_columns_close(&g, &p, label);
+            assert_same_exceedances(&g, &p, label);
         }
     }
 
@@ -5111,7 +5176,6 @@ mod tests_gram_p {
                 2,
                 keep,
                 wref,
-                true,
             );
             let p = raw_perm_columns(
                 ReplicateRoute::Primal,
@@ -5122,7 +5186,6 @@ mod tests_gram_p {
                 2,
                 keep,
                 wref,
-                true,
             );
             assert_columns_close(&g, &p, label);
             assert_same_exceedances(&g, &p, label);
@@ -5145,7 +5208,6 @@ mod tests_gram_p {
                 2,
                 keep,
                 None,
-                true,
             )
         };
         let (dense, keep_p) = (run(None), run(Some(50)));
@@ -5177,17 +5239,9 @@ mod tests_gram_p {
             yc
         };
         let run = |route: ReplicateRoute, bad: Option<usize>| {
-            pooled_cv_r2_columns(
-                route,
-                x.as_ref(),
-                &folds,
-                None,
-                2,
-                None,
-                cols.len(),
-                true,
-                &|c| column(c, bad),
-            )
+            pooled_cv_r2_columns(route, x.as_ref(), &folds, None, 2, None, cols.len(), &|c| {
+                column(c, bad)
+            })
         };
         let clean = run(ReplicateRoute::GramP, None).expect("clean");
         let hit = run(ReplicateRoute::GramP, Some(2)).expect("a failed null column fails soft");
@@ -5206,7 +5260,7 @@ mod tests_gram_p {
     fn raw_perm_gram_route_is_invisible() {
         let x = unif(2000, 50, 96);
         let y = linear_y(&x, 30.0, 97);
-        let w = weights(2000);
+        let w = gram_p_weights(2000);
         for (label, wopt, keep) in [
             ("dense", None, None),
             ("weighted", Some(&w), None),
@@ -5264,10 +5318,9 @@ mod tests_gram_p {
         k: usize,
         keep: Option<usize>,
         w: Option<ColRef<'_, f64>>,
-        dp: bool,
     ) -> Vec<f64> {
         let cols = Columns { y, seeds };
-        split_zbars_columns(route, x, splits, w, k, keep, cols.len(), dp, &|c| {
+        split_zbars_columns(route, x, splits, w, k, keep, cols.len(), &|c| {
             cols.column(c)
         })
     }
@@ -5289,9 +5342,9 @@ mod tests_gram_p {
         // 1e-10 absolute, then the z̄ statistics.
         let x = unif(2000, 50, 99);
         let y = linear_y(&x, 2.0, 100);
-        let w = weights(2000);
+        let w = gram_p_weights(2000);
         let (_, mut rng) = crate::rng::resolve_seed(Some(101)).expect("seed");
-        let splits = draw_splits(2000, 2, 3, true, &mut rng).expect("splits");
+        let splits = draw_splits(2000, 2, 3, &mut rng).expect("splits");
         let seeds = crate::rng::child_seeds(&mut rng, 40);
         let cols = Columns {
             y: y.as_ref(),
@@ -5354,23 +5407,19 @@ mod tests_gram_p {
                 k,
                 keep,
                 wref,
-                true,
             );
-            for dp in [true, false] {
-                let g = split_exact_zbars(
-                    ReplicateRoute::GramP,
-                    x.as_ref(),
-                    y.as_ref(),
-                    &splits,
-                    &seeds,
-                    k,
-                    keep,
-                    wref,
-                    dp,
-                );
-                assert_columns_close(&g, &p, &format!("{label} dp={dp}"));
-                assert_same_exceedances(&g, &p, label);
-            }
+            let g = split_exact_zbars(
+                ReplicateRoute::GramP,
+                x.as_ref(),
+                y.as_ref(),
+                &splits,
+                &seeds,
+                k,
+                keep,
+                wref,
+            );
+            assert_columns_close(&g, &p, label);
+            assert_same_exceedances(&g, &p, label);
         }
     }
 
@@ -5383,7 +5432,7 @@ mod tests_gram_p {
         let x = unif(2000, 50, 102);
         let y = Col::<f64>::from_fn(2000, |_| 3.0);
         let (_, mut rng) = crate::rng::resolve_seed(Some(103)).expect("seed");
-        let splits = draw_splits(2000, 2, 2, true, &mut rng).expect("splits");
+        let splits = draw_splits(2000, 2, 2, &mut rng).expect("splits");
         for sp in &splits {
             let prep = prepare_split(x.as_ref(), sp, None);
             let g_block = split_block(ReplicateRoute::GramP, &prep, Par::Seq);
@@ -5392,6 +5441,7 @@ mod tests_gram_p {
             let r_g = split_unit(&g_block, &prep, sp, &y_of, 2, None);
             let r_p = split_unit(&p_block, &prep, sp, &y_of, 2, None);
             assert_eq!(r_g.to_bits(), r_p.to_bits());
+            assert_eq!(r_p.to_bits(), 0.0_f64.to_bits());
         }
     }
 
@@ -5404,9 +5454,9 @@ mod tests_gram_p {
         // (1..=K_GRAM_MAX), dense and sparse, unweighted and weighted.
         let x = unif(2000, 50, 104);
         let y = linear_y(&x, 2.0, 105);
-        let w = weights(2000);
+        let w = gram_p_weights(2000);
         let (_, mut rng) = crate::rng::resolve_seed(Some(106)).expect("seed");
-        let splits = draw_splits(2000, 2, 3, true, &mut rng).expect("splits");
+        let splits = draw_splits(2000, 2, 3, &mut rng).expect("splits");
         let seeds = crate::rng::child_seeds(&mut rng, 40);
         let cols = Columns {
             y: y.as_ref(),
@@ -5485,7 +5535,7 @@ mod tests_gram_p {
         let x = unif(2000, 50, 107);
         let e = linear_y(&x, 20.0, 108);
         let y = Col::<f64>::from_fn(2000, |i| 1e8 + e[i]);
-        let w = weights(2000);
+        let w = gram_p_weights(2000);
         for (label, wopt) in [("dense", None), ("weighted", Some(&w))] {
             assert_eq!(
                 split_exact_refit_route(2000, 50, 600, 2, None, wopt.is_some()),
@@ -5592,7 +5642,7 @@ mod tests_gram_p {
         // below SCORE_BAND, yet far from constant to rounding, so the
         // Primal arm reports a nonzero r. The GramP arm must hand the unit
         // to it and return its bits.
-        let e = crate::gram_p::test_designs::unif_col(100, 116);
+        let e = crate::test_support::unif_col(100, 116);
         let (x, y, sp) = near_constant_test_half(1e-6, |i| e[i]);
         let prep = prepare_split(x.as_ref(), &sp, None);
         let y_of = |i: usize| y[i];

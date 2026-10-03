@@ -13,13 +13,13 @@ lists what looks different from Julia.
   ```julia
   pls1_fit(X, y; k=3, seed=42)
   spls1_fit(X, y, 3, 20)                                       # k and keep: positional
-  pls1_confirmatory_test(X, y; k=1, test_method="split_exact") # test_method: required keyword
+  pls1_confirmatory_test(X, y; k=1, test_method="split_exact")
   preprocess(; X=X, Y=y)                                       # every argument has a default
   pls3_transform(model; X_new=X2, which=:x_scores)
   ```
 
   Python's `pls3_transform(model, X_new)` is `pls3_transform(model; X_new=X_new)`
-  in Julia. Leaving out `test_method=` raises Julia's own `UndefKeywordError`.
+  in Julia.
 - **`args`, `find_k_args`, `rotation_args`** take a `NamedTuple` or a
   `Dict` with `Symbol` or `String` keys, nested like Python's dicts:
   `find_k_args=(selector=:bic, args=(n_folds=5,))`.
@@ -73,10 +73,6 @@ lists what looks different from Julia.
   | `list[bool]` | `Vector{Bool}` |
   | `list[CIScalar]` | `Vector{PlsKitResult}` |
   | result dataclass | `PlsKitResult{T}` |
-
-  An integer that does not fit the target width (an `Int` overflow, or an
-  unsigned array with a value above `typemax(Int)`) raises an error naming
-  the field, rather than wrapping silently.
 - `pls1_predict` returns a plain `Vector{Float64}`.
 - Display is a compact summary: the type, then each field with its value
   (scalars, strings) or a short description (arrays, dicts). Results have no
@@ -113,7 +109,7 @@ lists what looks different from Julia.
 
 ## Warnings
 
-Python warnings raised during a call (the `split_nb` reroute notice) are
+Python warnings raised during a call (the explicit `split_nb` reroute notice) are
 re-emitted with `@warn`, message verbatim, `_group=:plskit`, once per call.
 Silence them with Julia's logging (for example
 `Logging.with_logger(Logging.NullLogger()) do ... end`) or match them in

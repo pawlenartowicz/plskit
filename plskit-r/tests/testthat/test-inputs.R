@@ -81,10 +81,6 @@ test_that("unsupported R values raise invalid_argument", {
     catch_plskit(pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", args = list(1, 2)))$code,
     "invalid_argument"
   )
-  expect_identical(
-    catch_plskit(pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", args = list(n_perm = 10, n_perm = 20)))$code,
-    "invalid_argument"
-  )
 })
 
 test_that("an empty args list and NULL args entries mean the defaults", {
@@ -95,9 +91,10 @@ test_that("an empty args list and NULL args entries mean the defaults", {
   expect_identical(b, c)
 })
 
-test_that("a missing required argument is R's own error", {
-  expect_error(pls1_fit(d$X), "argument \"y\" is missing, with no default", fixed = TRUE)
-  expect_error(pls1_fit(d$X, d$y, bogus = 1), "unused argument")
+test_that("an empty args list nested in find_k_args means the defaults", {
+  a <- pls1_fit(d$X, d$y, k = "optimal", k_max = 3, find_k_args = list(args = list()), seed = 1)
+  b <- pls1_fit(d$X, d$y, k = "optimal", k_max = 3, seed = 1)
+  expect_identical(a, b)
 })
 
 test_that("bit64::integer64 seed converts exactly; elsewhere it is rejected", {

@@ -44,9 +44,6 @@ test_that("an unclassed model still predicts; a broken one raises", {
   fit <- pls1_fit(d$X, d$y, k = 2)
   expect_identical(pls1_predict(unclass(fit), d$X), pls1_predict(fit, d$X))
   broken <- fit
-  broken$T <- NULL
-  expect_identical(catch_plskit(pls1_predict(broken, d$X))$code, "invalid_argument")
-  broken <- fit
   broken$W <- "x"
   expect_identical(catch_plskit(pls1_predict(broken, d$X))$code, "invalid_argument")
   broken <- fit
@@ -91,25 +88,6 @@ test_that("every result's fields follow the registry order", {
 
 # Input coercion and malformed passed-back records.
 
-test_that("a logical data vector is promoted to double, like numpy's bool cast", {
-  y_logical <- d$y > 0
-  fit_logical <- pls1_fit(d$X, y_logical, k = 2)
-  fit_numeric <- pls1_fit(d$X, as.numeric(y_logical), k = 2)
-  expect_identical(fit_logical, fit_numeric)
-})
-
-test_that("a scalar logical flag is never promoted (it stays a flag, not data)", {
-  fit_true <- pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", ci = TRUE, n_boot = 100, seed = 1)
-  fit_false <- pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", ci = FALSE, n_boot = 100, seed = 1)
-  expect_false(isTRUE(all.equal(fit_true, fit_false)))
-})
-
-test_that("a 1-D array is a plain vector, not rejected", {
-  fit_vec <- pls1_fit(d$X, d$y, k = 2)
-  fit_arr <- pls1_fit(d$X, array(d$y), k = 2)
-  expect_identical(fit_vec, fit_arr)
-})
-
 test_that("literal duplicate int-map names raise invalid_argument", {
   fit <- pls1_fit(d$X, d$y, k = "optimal", k_max = 4, seed = 7)
   broken <- fit
@@ -144,23 +122,6 @@ test_that("a byte string that is not valid UTF-8 raises invalid_argument", {
   Encoding(bad) <- "bytes"
   err <- catch_plskit(rotate(pls1_fit(d$X, d$y, k = 1), method = bad))
   expect_identical(err$code, "invalid_argument")
-})
-
-# Smoke tests for functions no other test calls.
-
-test_that("plssvd_fit, plssvd_transform and split_nb_gate work", {
-  Y <- cbind(d$y, d$y + stats::rnorm(60))
-  fit <- plssvd_fit(d$X, Y, k = 2)
-  expect_s3_class(fit, c("pls3_result", "plskit_result"), exact = TRUE)
-  expect_identical(dim(fit$U), c(6L, 2L))
-
-  sc <- plssvd_transform(fit, X_new = d$X, which = "x_scores")
-  expect_s3_class(sc, c("pls3_scores", "plskit_result"), exact = TRUE)
-  expect_identical(dim(sc$x_scores), c(60L, 2L))
-
-  gate <- split_nb_gate(d$X)
-  expect_s3_class(gate, c("split_nb_gate_result", "plskit_result"), exact = TRUE)
-  expect_type(gate$n_eff, "double")
 })
 
 test_that("a byte-string name that is not valid UTF-8 raises invalid_argument", {

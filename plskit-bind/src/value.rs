@@ -3,7 +3,8 @@
 //! Inputs borrow host memory (an R `REALSXP`, a Julia `Matrix{Float64}`);
 //! outputs are owned. Owned matrices are stored column-major and
 //! contiguous rather than as `faer::Mat`: faer pads an owned matrix's
-//! column stride, and the C ABI hands the host one pointer per array.
+//! column stride, and a wrapper copies each array out as one contiguous
+//! column-major slice.
 
 use std::borrow::Cow;
 
@@ -334,27 +335,6 @@ pub enum Value<'a> {
 }
 
 impl Value<'_> {
-    /// The C ABI kind code: 0 Null, 1 Bool, 2 I64, 3 U64, 4 F64, 5 Str,
-    /// 6 Vec, 7 Mat, 8 `IntMap`, 9 `IntVec`, 10 `BoolVec`, 11 Record, 12 List.
-    #[must_use]
-    pub fn kind_code(&self) -> u8 {
-        match self {
-            Self::Null => 0,
-            Self::Bool(_) => 1,
-            Self::I64(_) => 2,
-            Self::U64(_) => 3,
-            Self::F64(_) => 4,
-            Self::Str(_) => 5,
-            Self::Vec(_) => 6,
-            Self::Mat(_) => 7,
-            Self::IntMap(_) => 8,
-            Self::IntVec(_) => 9,
-            Self::BoolVec(_) => 10,
-            Self::Record(_) => 11,
-            Self::List(_) => 12,
-        }
-    }
-
     /// A short name of the variant, for error messages.
     #[must_use]
     pub fn kind_name(&self) -> &'static str {
@@ -427,45 +407,11 @@ impl Outcome {
             warnings: Vec::new(),
         }
     }
-
-    /// `{ result, warnings }`, the shape the C ABI hands out.
-    #[must_use]
-    pub fn into_record(self) -> Record<'static> {
-        Record::new().field("result", self.result).field(
-            "warnings",
-            Value::List(self.warnings.into_iter().map(Value::Record).collect()),
-        )
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn kind_codes_follow_declaration_order() {
-        let vals = [
-            Value::Null,
-            Value::Bool(true),
-            Value::I64(1),
-            Value::U64(1),
-            Value::F64(1.0),
-            Value::text("a"),
-            Value::Vec(VecF64::Owned(vec![1.0])),
-            Value::Mat(MatF64::Owned {
-                data: vec![1.0],
-                nrows: 1,
-                ncols: 1,
-            }),
-            Value::IntMap(vec![(1, 1.0)]),
-            Value::IntVec(vec![1]),
-            Value::BoolVec(vec![true]),
-            Value::Record(Record::new()),
-            Value::List(vec![]),
-        ];
-        let codes: Vec<u8> = vals.iter().map(Value::kind_code).collect();
-        assert_eq!(codes, (0u8..=12).collect::<Vec<_>>());
-    }
 
     #[test]
     fn push_rejects_a_duplicate_key() {
@@ -477,69 +423,8 @@ mod tests {
     }
 
     #[test]
-    fn set_replaces_in_place_and_appends_new_keys() {
-        let mut r = Record::new()
-            .field("a", Value::I64(1))
-            .field("b", Value::I64(2));
-        r.set("a", Value::I64(9));
-        r.set("c", Value::I64(3));
-        let keys: Vec<&str> = r.keys().collect();
-        assert_eq!(keys, ["a", "b", "c"]);
-        assert!(matches!(r.get("a"), Some(Value::I64(9))));
-    }
-
-    #[test]
-    fn into_owned_detaches_borrowed_arrays() {
-        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let owned = {
-            let m = MatF64::from_col_major(&data, 2, 3).unwrap();
-            Value::Record(Record::new().field("M", Value::Mat(m))).into_owned()
-        };
-        let Value::Record(r) = owned else { panic!() };
-        let Some(Value::Mat(MatF64::Owned {
-            data: d,
-            nrows: 2,
-            ncols: 3,
-        })) = r.get("M")
-        else {
-            panic!("expected an owned 2x3 matrix")
-        };
-        assert_eq!(d, &data);
-    }
-
-    #[test]
-    fn from_mat_is_column_major_and_contiguous() {
-        let m = Mat::<f64>::from_fn(2, 3, |i, j| (10 * i + j) as f64);
-        let MatF64::Owned { data, nrows, ncols } = MatF64::from_mat(&m) else {
-            panic!()
-        };
-        assert_eq!((nrows, ncols), (2, 3));
-        assert_eq!(data, vec![0.0, 10.0, 1.0, 11.0, 2.0, 12.0]);
-    }
-
-    #[test]
-    fn from_row_major_transposes_the_layout() {
-        // 2 x 3, rows [0 1 2] and [10 11 12]
-        let flat = [0.0, 1.0, 2.0, 10.0, 11.0, 12.0];
-        let m = MatF64::from_row_major(&flat, 2, 3);
-        assert_eq!(m.as_mat()[(1, 2)], 12.0);
-        assert_eq!(m.col_major().as_ref(), &[0.0, 10.0, 1.0, 11.0, 2.0, 12.0]);
-    }
-
-    #[test]
     fn from_col_major_checks_the_length() {
         let e = MatF64::from_col_major(&[1.0, 2.0, 3.0], 2, 2).unwrap_err();
         assert_eq!(e.code, "invalid_argument");
-    }
-
-    #[test]
-    fn outcome_record_has_result_and_warnings() {
-        let o = Outcome {
-            result: Value::F64(1.0),
-            warnings: vec![Record::new().field("kind", Value::text("rerouted"))],
-        };
-        let r = o.into_record();
-        assert_eq!(r.keys().collect::<Vec<_>>(), ["result", "warnings"]);
-        assert!(matches!(r.get("warnings"), Some(Value::List(l)) if l.len() == 1));
     }
 }

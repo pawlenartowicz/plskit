@@ -4,7 +4,7 @@ use std::any::Any;
 use std::fmt::Write as _;
 use std::panic::{self, AssertUnwindSafe};
 
-use crate::error::{BindError, ERROR_CODES};
+use crate::error::BindError;
 use crate::fns;
 use crate::inputs::Inputs;
 use crate::types::result_types;
@@ -148,15 +148,6 @@ const fn kw(name: &'static str, kind: ParamKind, default: DefaultValue) -> Param
     }
 }
 
-const fn kw_req(name: &'static str, kind: ParamKind) -> Param {
-    Param {
-        name,
-        kind,
-        default: DefaultValue::Required,
-        keyword_only: true,
-    }
-}
-
 // Kinds are written `K::Mat` rather than imported: a bare `Vec` variant
 // would shadow the prelude's `Vec` in this file.
 use DefaultValue::{Bool as B, Int as I, Null as N, Str as S};
@@ -205,7 +196,6 @@ static REGISTRY: &[FnSpec] = &[
             kw("args", K::Args, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("disable_parallelism", K::Bool, B(false)),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
         ],
@@ -218,12 +208,11 @@ static REGISTRY: &[FnSpec] = &[
             pos("X", K::Mat),
             pos("y", K::Vec),
             pos("k_max", K::Int),
-            kw("test_method", K::Str, S("split_nb")),
+            kw("test_method", K::Str, S("auto")),
             kw("alpha", K::Float, N),
             kw("args", K::Args, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("disable_parallelism", K::Bool, B(false)),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
         ],
@@ -251,7 +240,6 @@ static REGISTRY: &[FnSpec] = &[
             pos("k", K::Int),
             kw("args", K::Args, N),
             kw("seed", K::Seed, N),
-            kw("disable_parallelism", K::Bool, B(false)),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
         ],
@@ -270,7 +258,6 @@ static REGISTRY: &[FnSpec] = &[
             kw("args", K::Args, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("disable_parallelism", K::Bool, B(false)),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
         ],
@@ -284,12 +271,11 @@ static REGISTRY: &[FnSpec] = &[
             pos("y", K::Vec),
             pos("k_max", K::Int),
             pos("keep", K::Int),
-            kw("test_method", K::Str, S("split_nb")),
+            kw("test_method", K::Str, S("auto")),
             kw("alpha", K::Float, N),
             kw("args", K::Args, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("disable_parallelism", K::Bool, B(false)),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
         ],
@@ -367,7 +353,7 @@ static REGISTRY: &[FnSpec] = &[
             pos("X", K::Mat),
             pos("y", K::Vec),
             pos_d("k", K::Int, I(1)),
-            kw_req("test_method", K::Str),
+            kw("test_method", K::Str, S("auto")),
             kw("args", K::Args, N),
             kw("ci", K::Bool, B(false)),
             kw("n_boot", K::Int, N),
@@ -376,7 +362,6 @@ static REGISTRY: &[FnSpec] = &[
             kw("max_failure_rate", K::Float, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("disable_parallelism", K::Bool, B(false)),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
             kw("max_skip_rate", K::Float, N),
@@ -400,7 +385,6 @@ static REGISTRY: &[FnSpec] = &[
             kw("return_perm_matrix", K::Bool, B(false)),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("disable_parallelism", K::Bool, B(false)),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
         ],
@@ -413,12 +397,11 @@ static REGISTRY: &[FnSpec] = &[
             pos("X", K::Mat),
             pos("Y", K::Mat),
             pos_d("k", K::Int, I(1)),
-            kw_req("test_method", K::Str),
+            kw("test_method", K::Str, S("auto")),
             kw("args", K::Args, N),
             kw("pre_standardized_X", K::Bool, B(false)),
             kw("pre_standardized_Y", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("disable_parallelism", K::Bool, B(false)),
             kw("verbose", K::Bool, B(false)),
         ],
         result_types: &["ConfirmatoryTestResult"],
@@ -449,7 +432,6 @@ static REGISTRY: &[FnSpec] = &[
             kw("level", K::Float, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("disable_parallelism", K::Bool, B(false)),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
             kw("max_skip_rate", K::Float, N),
@@ -554,7 +536,7 @@ fn json_list<T>(items: &[T], f: impl Fn(&T) -> String) -> String {
     items.iter().map(f).collect::<Vec<_>>().join(", ")
 }
 
-/// The registry, the error codes and the result types as JSON: the input
+/// The registry and the result types as JSON: the input
 /// of the R / Julia stub renderers and of `scripts/check-bind-registry.py`.
 /// Hand-written so the crate needs no serde dependency.
 #[must_use]
@@ -608,9 +590,8 @@ pub fn registry_json() -> String {
         })
         .collect();
     format!(
-        "{{\n  \"engine_version\": {},\n  \"error_codes\": [{}],\n  \"functions\": [\n{}\n  ],\n  \"result_types\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"engine_version\": {},\n  \"functions\": [\n{}\n  ],\n  \"result_types\": [\n{}\n  ]\n}}\n",
         json_str(plskit::version()),
-        json_list(ERROR_CODES, |c| json_str(c)),
         functions.join(",\n"),
         types.join(",\n")
     )

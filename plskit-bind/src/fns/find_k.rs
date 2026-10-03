@@ -96,7 +96,6 @@ fn common(inp: &mut Inputs<'_>) -> Result<Common, BindError> {
     Ok(Common {
         pre_standardized: inp.bool("pre_standardized")?,
         seed: inp.seed()?,
-        disable_parallelism: inp.bool("disable_parallelism")?,
         verbose: inp.bool("verbose")?,
     })
 }
@@ -168,7 +167,7 @@ fn sequence_entry(inp: &mut Inputs<'_>, sparse: bool) -> Result<Outcome, BindErr
 }
 
 /// `pls1_find_k_optimal(X, y, k_max, *, selector="r2_se", diagnostic=None,
-/// args=None, pre_standardized=False, seed=None, disable_parallelism=False,
+/// args=None, pre_standardized=False, seed=None,
 /// verbose=False, weights=None)`.
 pub(crate) fn pls1_find_k_optimal(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     optimal_entry(inp, false)
@@ -179,8 +178,8 @@ pub(crate) fn spls1_find_k_optimal(inp: &mut Inputs<'_>) -> Result<Outcome, Bind
     optimal_entry(inp, true)
 }
 
-/// `pls1_find_k_sequence(X, y, k_max, *, test_method="split_nb", alpha=None,
-/// args=None, pre_standardized=False, seed=None, disable_parallelism=False,
+/// `pls1_find_k_sequence(X, y, k_max, *, test_method="auto", alpha=None,
+/// args=None, pre_standardized=False, seed=None,
 /// verbose=False, weights=None)`.
 pub(crate) fn pls1_find_k_sequence(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     sequence_entry(inp, false)
@@ -192,18 +191,17 @@ pub(crate) fn spls1_find_k_sequence(inp: &mut Inputs<'_>) -> Result<Outcome, Bin
 }
 
 /// `spls1_find_keep_optimal(X, y, k, *, args=None, seed=None,
-/// disable_parallelism=False, verbose=False, weights=None)`.
+/// verbose=False, weights=None)`.
 pub(crate) fn spls1_find_keep_optimal(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = inp.vec("y")?;
     let k = inp.usize("k")?;
     let args = inp.opt_record("args")?;
     let seed = inp.seed()?;
-    let disable_parallelism = inp.bool("disable_parallelism")?;
     let verbose = inp.bool("verbose")?;
     let w = inp.opt_vec("weights")?;
     inp.finish()?;
-    let opts = methods::keep_optimal_opts(args.as_ref(), seed, disable_parallelism, verbose)?;
+    let opts = methods::keep_optimal_opts(args.as_ref(), seed, verbose)?;
     let r = engine(plskit::spls1_find_keep_optimal(
         x.as_mat(),
         y.as_col(),
@@ -278,7 +276,6 @@ pub(crate) fn select_k(
     let c = Common {
         pre_standardized,
         seed,
-        disable_parallelism: false,
         verbose: false,
     };
     match mode {
@@ -304,7 +301,7 @@ pub(crate) fn select_k(
         }
         "sequence" => {
             check_find_k_args(&fk, &["test_method", "alpha", "args"])?;
-            let test_method = fk_str(&fk, "test_method")?.unwrap_or_else(|| "split_nb".to_owned());
+            let test_method = fk_str(&fk, "test_method")?.unwrap_or_else(|| "auto".to_owned());
             let alpha = fk_f64(&fk, "alpha")?;
             let (r, w) =
                 sequence_core(d, k_max, None, &test_method, alpha, fk_args(&fk)?, &c, true)?;

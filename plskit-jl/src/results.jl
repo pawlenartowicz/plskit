@@ -54,7 +54,7 @@ function _to_julia(x::Py, name::Symbol=:_)
 end
 
 # A Python `int` to Julia; the target width depends on the field (`seed`
-# spans the full u64 range). Overflow errors name the field,
+# spans the full u64 range). A seed overflow error names the field,
 # matching the ndarray dtype/dimension errors below.
 function _to_int(x::Py, name::Symbol)
     if name === :seed
@@ -65,12 +65,7 @@ function _to_int(x::Py, name::Symbol)
                   "($(sprint(showerror, e)))")
         end
     end
-    try
-        return pyconvert(Int, x)
-    catch e
-        error("PLSKit: integer value in field `$(name)` does not fit in Int " *
-              "($(sprint(showerror, e)))")
-    end
+    return pyconvert(Int, x)
 end
 
 function _array(x::Py, name::Symbol)
@@ -79,13 +74,6 @@ function _array(x::Py, name::Symbol)
     kind = pyconvert(String, x.dtype.kind)
     T = kind == "f" ? Float64 : kind == "b" ? Bool : kind in ("i", "u") ? Int :
         error("PLSKit: unsupported ndarray dtype $(x.dtype) in field `$(name)`")
-    # uint64 values above typemax(Int) would silently wrap when cast to
-    # int64 below; raise instead. Smaller unsigned
-    # widths (uint8/16/32) always fit, so the comparison is cheap and safe.
-    if kind == "u" && pytruth(_np.any(x > _np.uint64(typemax(Int))))
-        error("PLSKit: an unsigned integer array in field `$(name)` has a value " *
-              "above typemax(Int)")
-    end
     dtype = T === Float64 ? _np.float64 : T === Bool ? _np.bool_ : _np.int64
     # A single Julia-owned copy, laid out F-order (Julia's own column-major
     # order) so `pyconvert` does not need to transpose it; `copy=true`

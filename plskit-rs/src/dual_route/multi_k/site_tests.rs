@@ -307,7 +307,7 @@ fn both_r(x: &Mat<f64>, sp: &SplitIdx, y_of: &dyn Fn(usize) -> f64, k: usize) ->
 fn split_exact_units_match_the_primal_arm() {
     let (x, y) = wide(40, 2000, 0.5, 71);
     let (_, mut rng) = resolve_seed(Some(72)).expect("seed");
-    let splits = draw_splits(40, 2, 5, true, &mut rng).expect("splits");
+    let splits = draw_splits(40, 2, 5, &mut rng).expect("splits");
     let seeds = seeds_for(20, 73);
     let cols = Columns {
         y: y.as_ref(),
@@ -396,20 +396,6 @@ fn split_exact_keeps_its_other_routes() {
 }
 
 #[test]
-fn constant_halves_give_the_primal_r_to_the_bit() {
-    // A constant training half (z exactly zero, the zero model) and a
-    // constant test half (the guard's degenerate y).
-    let (x, noise) = wide(40, 2000, 0.0, 101);
-    let sp = halves();
-    let constant_train = Col::<f64>::from_fn(40, |i| if i < 20 { 2.5 } else { noise[i] });
-    let constant_test = Col::<f64>::from_fn(40, |i| if i < 20 { noise[i] } else { -1.0 });
-    for (what, y) in [("training", &constant_train), ("test", &constant_test)] {
-        let (r_g, r_p) = both_r(&x, &sp, &|i: usize| y[i], K_DUAL_MAX);
-        assert_eq!(r_g.to_bits(), r_p.to_bits(), "constant {what} half");
-    }
-}
-
-#[test]
 fn identical_test_rows_fall_back_through_the_score_gate() {
     // Every test-half row of X is the same row, so both routes' scores are
     // constant up to rounding: the score gate must hand the column to the
@@ -457,8 +443,7 @@ fn a_run_of_columns_answers_each_column_as_its_own_unit() {
     ];
     let ns = crate::dual_route::NspaceSplit::new(&prep, Par::Seq);
     let column_y = |c: usize| cols[c].clone();
-    let run =
-        crate::signal_test::split_columns_nspace(&prep, &sp, &ns, cols.len(), 2, true, &column_y);
+    let run = crate::signal_test::split_columns_nspace(&prep, &sp, &ns, cols.len(), 2, &column_y);
     for (j, y) in cols.iter().enumerate() {
         let (r_g, r_p) = both_r(&x, &sp, &|i: usize| y[i], 2);
         if j == 0 || j == 2 {
@@ -474,6 +459,7 @@ fn a_run_of_columns_answers_each_column_as_its_own_unit() {
             );
         } else {
             assert_eq!(run[j].to_bits(), r_p.to_bits(), "column {j}");
+            assert_eq!(r_g.to_bits(), r_p.to_bits(), "column {j}: single unit");
         }
     }
     assert_eq!(run[0].to_bits(), run[2].to_bits(), "same column, same run");

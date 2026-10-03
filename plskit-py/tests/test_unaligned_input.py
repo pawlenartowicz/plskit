@@ -113,12 +113,6 @@ def _public_cases():
 
 
 @pytest.mark.parametrize("name", list(_public_cases()))
-def test_public_api_reads_misaligned_arrays(name):
-    call = _public_cases()[name]
-    assert _bits(call(_misaligned)) == _bits(call(np.ascontiguousarray))
-
-
-@pytest.mark.parametrize("name", list(_public_cases()))
 def test_public_api_hands_the_seam_misaligned_arrays(name, monkeypatch):
     """Every array the public API validates reaches the extension misaligned,
     so each entry's seam path is exercised, not just the wrapper's copy."""

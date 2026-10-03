@@ -255,7 +255,6 @@ pub(crate) fn pls1_cv_r2_columns(
     x: MatRef<'_, f64>,
     y_mat: MatRef<'_, f64>,
     folds: &[Vec<usize>],
-    disable_parallelism: bool,
 ) -> Vec<f64> {
     use crate::linalg::{standardize1, standardize_apply_rows, standardize_rows};
 
@@ -279,7 +278,7 @@ pub(crate) fn pls1_cv_r2_columns(
 
         // Built once per fold and reused by every column: this is the whole
         // saving. G is n_tr × n_tr, M is n_val × n_tr; neither carries p.
-        let bpar = crate::resample::block_par(disable_parallelism);
+        let bpar = crate::fit::par_fixed();
         let g = crate::linalg::mat_mul(xs_tr.as_ref(), xs_tr.transpose(), bpar);
         let m = crate::linalg::mat_mul(xs_val.as_ref(), xs_tr.transpose(), bpar);
 
@@ -361,12 +360,10 @@ pub(crate) fn pls1_cv_r2_columns(
             (res, tot)
         };
 
-        // `collect` preserves column order in both arms, so serial and
-        // parallel results are byte-equal (same shape as
+        // `collect` preserves column order, so the result does not depend
+        // on which worker runs which column (same shape as
         // split_perm_nr_zbars' per-split dispatch).
-        let contrib: Vec<(f64, f64)> = if disable_parallelism {
-            (0..n_cols).map(per_col).collect()
-        } else {
+        let contrib: Vec<(f64, f64)> = {
             use rayon::prelude::*;
             (0..n_cols).into_par_iter().map(per_col).collect()
         };
@@ -608,7 +605,6 @@ pub(crate) fn pls3_split_zbars_columns(
     keep_y: Option<usize>,
     max_iter: usize,
     tol: f64,
-    disable_parallelism: bool,
 ) -> Vec<f64> {
     use crate::linalg::{standardize, standardize_apply, standardize_apply_rows, standardize_rows};
 
@@ -663,7 +659,7 @@ pub(crate) fn pls3_split_zbars_columns(
         let xs_te = standardize_apply_rows(x, te, x_mean.as_ref(), x_scale.as_ref(), None);
 
         // Built once per split; neither carries p into the replicate loop.
-        let bpar = crate::resample::block_par(disable_parallelism);
+        let bpar = crate::fit::par_fixed();
         let g = crate::linalg::mat_mul(xs_tr.as_ref(), xs_tr.transpose(), bpar);
         let m = crate::linalg::mat_mul(xs_te.as_ref(), xs_tr.transpose(), bpar);
         let (n_tr, n_te) = (tr.len(), te.len());
@@ -674,7 +670,7 @@ pub(crate) fn pls3_split_zbars_columns(
         #[allow(clippy::cast_precision_loss)]
         let lam_err_x = ((p + 2 * n_tr + q) as f64) * f64::EPSILON * x_fro * x_fro;
 
-        crate::resample::map_indexed(n_cols, disable_parallelism, |col| {
+        crate::resample::map_indexed(n_cols, |col| {
             // Column 0 is the identity row map; column c > 0 applies
             // permutation c−1, exactly as the primal route permutes Y's
             // rows as units against X.
@@ -873,9 +869,9 @@ pub(crate) fn pls3_split_zbars_columns(
         })
     };
 
-    // Splits run one at a time (`true`): one prepared split (x_tr, x_te,
+    // Splits run one at a time (`false`): one prepared split (x_tr, x_te,
     // G, M) is alive, and the columns of each split run in parallel.
-    crate::signal_test::zbars_over_splits(splits, n_cols, true, per_split)
+    crate::signal_test::zbars_over_splits(splits, n_cols, false, per_split)
 }
 
 /// `1/g` for the relative gap `g = (λ₁ − λ₂)/λ₁` between the top two
@@ -936,14 +932,10 @@ mod tests {
     // its constants.
 
     #[test]
-    fn pls3_fmri_scale_takes_the_dual_route() {
-        // n_tr = 50, p = 300_000, q = 10 ⇒ est. ~200× speedup.
+    fn wide_shapes_take_the_dual_route() {
+        // PLS3 at fMRI scale: n_tr = 50, p = 300_000, q = 10 ⇒ est. ~200× speedup.
         assert!(use_dual_route(50, 300_000, 1000, 10));
-    }
-
-    #[test]
-    fn pls1_small_n_wide_p_takes_the_dual_route() {
-        // n_tr = 80, p = 300_000, q = 1 ⇒ est. ~12× speedup.
+        // PLS1, small n and wide p: n_tr = 80, p = 300_000, q = 1 ⇒ est. ~12× speedup.
         assert!(use_dual_route(80, 300_000, 1000, 1));
     }
 
@@ -1002,75 +994,8 @@ mod tests {
         assert!(!use_dual_route(10, 0, 100, 1));
         assert!(!use_dual_route(10, 100, 0, 1));
         assert!(!use_dual_route(10, 100, 100, 0));
-    }
-}
-
-#[cfg(test)]
-mod layout_invariance {
-    use super::*;
-    use crate::test_support::{assert_bits_eq, copy_free_families, for_each_layout};
-
-    fn perms(n: usize, count: usize, seed: u64) -> Vec<Vec<usize>> {
-        let (_, mut rng) = crate::rng::resolve_seed(Some(seed)).unwrap();
-        (0..count)
-            .map(|_| crate::resample::permute_indices(n, &mut rng))
-            .collect()
-    }
-
-    /// Both column engines read X only through `standardize_rows` /
-    /// `standardize_apply_rows`, which build owned column-major copies, so
-    /// every memory layout of X gives the owned matrix's bits.
-    #[test]
-    fn the_gram_routes_are_bit_identical_across_layouts() {
-        let tol = crate::pls3::Pls3FitOpts::default().tol;
-        let max_iter = crate::pls3::Pls3FitOpts::default().max_iter;
-        for f in copy_free_families().into_iter().filter(|f| f.w.is_none()) {
-            let n = f.x.nrows();
-            // pls1_cv_r2_columns: column 0 is y, the rest permuted copies.
-            let ps = perms(n, 7, 4);
-            let y_mat =
-                Mat::<f64>::from_fn(n, 8, |i, c| if c == 0 { f.y[i] } else { f.y[ps[c - 1][i]] });
-            let folds = crate::linalg::fold_split(&ps[0], 5);
-            for dp in [true, false] {
-                for_each_layout(
-                    &f.x,
-                    |_, xv| pls1_cv_r2_columns(xv, y_mat.as_ref(), &folds, dp),
-                    |view, got, want| {
-                        assert_bits_eq(got, want, &format!("pls1 {} {view} dp={dp}", f.name));
-                    },
-                );
-            }
-            // pls3_split_zbars_columns.
-            let y = Mat::<f64>::from_fn(n, 4, |i, j| f.x[(i, j)] + 0.5 * f.y[(i + 3 * j) % n]);
-            let (_, mut rng) = crate::rng::resolve_seed(Some(6)).unwrap();
-            let splits = crate::signal_test::draw_splits(n, 1, 4, true, &mut rng).unwrap();
-            let ps = perms(n, 5, 7);
-            for keep_y in [None, Some(2)] {
-                for dp in [true, false] {
-                    for_each_layout(
-                        &f.x,
-                        |_, xv| {
-                            pls3_split_zbars_columns(
-                                xv,
-                                y.as_ref(),
-                                &splits,
-                                &ps,
-                                keep_y,
-                                max_iter,
-                                tol,
-                                dp,
-                            )
-                        },
-                        |view, got, want| {
-                            assert_bits_eq(
-                                got,
-                                want,
-                                &format!("pls3 {} {view} keep_y={keep_y:?} dp={dp}", f.name),
-                            );
-                        },
-                    );
-                }
-            }
-        }
+        // No training rows: the flop rule alone would accept it
+        // (0 < 100·100), so the guard is what refuses.
+        assert!(!use_dual_route(0, 100, 100, 1));
     }
 }

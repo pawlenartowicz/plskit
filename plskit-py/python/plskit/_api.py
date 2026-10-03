@@ -334,6 +334,10 @@ def _warn_if_rerouted(
 ):
     """Tell the caller when the split_nb auto-gate sent the run elsewhere.
 
+    Only an explicit ``split_nb`` request warns; ``"auto"`` choosing
+    ``split_exact`` is the ordinary outcome of that request. Mirrors
+    ``rerouted`` in ``plskit-bind/src/warn.rs`` — change together.
+
     The gate rule lives in Rust and only there — this reports the values the
     engine already returned (which condition fired is read off them), never
     the thresholds and never a recomputed stable rank.
@@ -343,7 +347,7 @@ def _warn_if_rerouted(
     """
     # A caller that requested nothing (`diagnostic=None`) gets nothing back
     # (`result.diagnostic is None`), so the equality test covers that case too.
-    if requested == actual:
+    if requested == actual or requested == "auto":
         return
     saw = []
     if stable_rank is not None:
@@ -423,8 +427,8 @@ def pls1_fit(
     find_k_args : dict | None
         Extra kwargs forwarded to `pls1_find_k_optimal` / `pls1_find_k_sequence`.
         Allowed keys are the public params of the target function *except*
-        ``seed``, ``pre_standardized``, ``weights``, ``disable_parallelism``,
-        and ``verbose`` — pass those on ``pls1_fit`` directly. Unknown keys
+        ``seed``, ``pre_standardized``, ``weights``, and ``verbose`` — pass
+        those on ``pls1_fit`` directly. Unknown keys
         raise ``PlsKitError(code="invalid_args")`` listing the allowed set.
         Must be ``None`` when ``k`` is an int.
     pre_standardized : bool, default False
@@ -767,12 +771,11 @@ def pls3_confirmatory_test(
     Y: np.ndarray,
     k: int = 1,
     *,
-    test_method: Literal["split_exact", "split_nb"],
+    test_method: Literal["auto", "split_exact", "split_nb"] = "auto",
     args: dict | None = None,
     pre_standardized_X: bool = False,
     pre_standardized_Y: bool = False,
     seed: int | None = None,
-    disable_parallelism: bool = False,
     verbose: bool = False,
 ) -> ConfirmatoryTestResult:
     """Confirmatory PLS3 omnibus test at LV1.
@@ -795,8 +798,17 @@ def pls3_confirmatory_test(
         Must be 1. Above LV1 the training-half component ordering need not
         survive to the test half, and whether the statistic should then be
         per-component or subspace-level is not settled.
-    test_method : {'split_exact', 'split_nb'}
-        ``'split_exact'`` is recommended (``test_method`` has no default): the p-value comes from
+    test_method : {'auto', 'split_exact', 'split_nb'}, default 'auto'
+        ``'auto'`` runs ``'split_exact'`` or ``'split_nb'``, chosen once per
+        call from X (never Y), and ``result.test_method`` says which ran. It
+        picks ``'split_exact'`` when the ``'split_nb'`` auto-gate flags the
+        design (validity), or when ``n`` is below 250 (power); otherwise
+        ``'split_nb'``. Unlike ``pls1_confirmatory_test``, a very wide X does
+        not pick ``'split_exact'``: in PLS3 it refits for every permutation,
+        so there it costs more than ``'split_nb'``. The thresholds may change between versions. See
+        _docs/concepts/PLS1/inference.md.
+
+        ``'split_exact'``: the p-value comes from
         a permutation reference built by shuffling the rows of Y against X,
         with the splits held fixed across all permutations, so it is exact
         whenever the rows are exchangeable under the null. Neither method is
@@ -818,7 +830,7 @@ def pls3_confirmatory_test(
         designs, ``'split_nb'`` came out conservative, never
         anti-conservative.
 
-        ``'split_nb'`` requests are auto-gated on X exactly as in
+        Explicit ``'split_nb'`` requests are auto-gated on X exactly as in
         ``pls1_confirmatory_test``: a flagged design runs ``'split_exact'``
         instead (``result.test_method`` says so, and Python warns). Pass
         ``args={'force': True}`` to run ``'split_nb'`` anyway. Y never
@@ -836,7 +848,8 @@ def pls3_confirmatory_test(
     args : dict | None
         ``'split_exact'``: ``{'n_perm': int, 'n_splits': int}``, defaults
         1000 and 50. ``'split_nb'``: ``{'n_splits': int, 'force': bool}``,
-        defaults 50 and False.
+        defaults 50 and False. ``'auto'``: ``{'n_perm': int, 'n_splits': int}``,
+        defaults 1000 and 50; ``n_perm`` is ignored when ``'split_nb'`` runs.
     pre_standardized_X, pre_standardized_Y : bool, default False
         Accepted but have no effect on either method: each training half is
         re-standardized with its own moments regardless, and the gate
@@ -852,15 +865,15 @@ def pls3_confirmatory_test(
         ``ci`` is always ``None`` for this family, and ``n_eff`` equals ``n``
         (weights are not implemented). ``rho_hat`` is populated for
         ``'split_nb'`` only, and only when the test half has at least 4 rows.
-        ``stable_rank`` is populated whenever ``'split_nb'`` was requested —
-        it is what the auto-gate saw. ``n_perm`` is ``None`` for
-        ``'split_nb'``, which runs no permutations.
+        ``stable_rank`` is not ``None`` on an explicit ``'split_nb'``
+        request, and on an ``"auto"`` request that reached the stable-rank
+        check (p > 4, n_eff ≥ 250); ``None`` otherwise. ``n_perm``
+        is ``None`` for ``'split_nb'``, which runs no permutations.
     """
-    test_method = _string(test_method, "test_method")
+    test_method = _string(test_method, "test_method", "auto")
     args = _args_dict(args, "args")
     pre_standardized_X = _flag(pre_standardized_X, "pre_standardized_X")
     pre_standardized_Y = _flag(pre_standardized_Y, "pre_standardized_Y")
-    disable_parallelism = _flag(disable_parallelism, "disable_parallelism")
     verbose = _flag(verbose, "verbose")
     X = _ensure_array(X, "X", 2)
     Y = _ensure_2d_Y(Y)
@@ -870,7 +883,6 @@ def pls3_confirmatory_test(
         pre_standardized_X=pre_standardized_X,
         pre_standardized_Y=pre_standardized_Y,
         seed=_seed(seed),
-        disable_parallelism=disable_parallelism,
         verbose=verbose,
     )
     raw.pop("ci", None)
@@ -888,7 +900,9 @@ def pls3_confirmatory_test(
 def pls1_confirmatory_test(
     X: np.ndarray, y: np.ndarray, k: int = 1,
     *,
-    test_method: Literal["raw_perm", "split_nb", "split_exact", "score", "e"],
+    test_method: Literal[
+        "auto", "raw_perm", "split_nb", "split_exact", "score", "e"
+    ] = "auto",
     args: dict | None = None,
     ci: bool = False,
     n_boot: int | None = None,
@@ -897,7 +911,6 @@ def pls1_confirmatory_test(
     max_failure_rate: float | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    disable_parallelism: bool = False,
     verbose: bool = False,
     weights: np.ndarray | None = None,
     max_skip_rate: float | None = None,
@@ -912,11 +925,23 @@ def pls1_confirmatory_test(
         Response vector.
     k : int, default 1
         Number of components to test.
-    test_method : str
-        Test method: ``'raw_perm'``, ``'split_nb'``, ``'split_exact'``,
-        ``'score'``, or ``'e'``.
+    test_method : str, default 'auto'
+        Test method: ``'auto'``, ``'raw_perm'``, ``'split_nb'``,
+        ``'split_exact'``, ``'score'``, or ``'e'``.
 
-        ``'split_exact'`` is recommended (``test_method`` has no default): a split-half test
+        ``'auto'`` runs ``'split_exact'`` or ``'split_nb'``, chosen once per
+        call from X and ``weights`` (never y), and ``result.test_method`` says
+        which ran. It picks ``'split_exact'`` when the ``'split_nb'``
+        auto-gate flags the design (validity), when ``n_eff`` is below 250
+        (power), or, at ``k=1`` without ``keep``, when p exceeds 100 times n
+        (cost: there ``'split_exact'`` costs about as much as ``'split_nb'``
+        on very wide X; with ``k >= 2`` or a sparse ``keep`` it refits for
+        every permutation and costs more, so this clause does not apply);
+        otherwise ``'split_nb'``. The
+        thresholds may change between versions. See
+        _docs/concepts/PLS1/inference.md.
+
+        ``'split_exact'``: a split-half test
         (statistic ``tanh(z̄)``, the mean Fisher-z of held-out correlations)
         calibrated by permutation, so it holds its level on any design.
         ``'split_nb'`` uses the same statistic with an asymptotic correction
@@ -925,8 +950,8 @@ def pls1_confirmatory_test(
         coarse version of that: it flags a design whose X has 4 columns or
         fewer, whose effective sample size ``n_eff`` is below 25, or whose
         standardized X (weighted, when ``weights`` is given) has a stable
-        rank below 3. A flagged ``'split_nb'`` request runs ``'split_exact'``
-        (``n_perm=1000``) instead (``result.test_method`` says so, and Python
+        rank below 3. A flagged explicit ``'split_nb'`` request runs
+        ``'split_exact'`` (``n_perm=1000``) instead (``result.test_method`` says so, and Python
         warns). A design that passes the gate is not thereby shown to be in
         the regime above. Pass ``args={'force': True}`` to run
         ``'split_nb'`` anyway; ``split_nb_gate`` reports the decision
@@ -936,11 +961,14 @@ def pls1_confirmatory_test(
         other method, including ``'split_exact'``, and ``None`` for
         ``'split_nb'`` itself when the weights are non-uniform (all-equal
         weights count as none) or the test half is too small.
-        ``stable_rank`` is populated whenever ``'split_nb'`` was requested:
-        it is what the auto-gate saw.
+        ``stable_rank`` is not ``None`` on an explicit ``'split_nb'``
+        request, and on an ``"auto"`` request that reached the stable-rank
+        check (p > 4, n_eff ≥ 250, and p ≤ 100·n at ``k=1`` without
+        ``keep``); ``None`` otherwise.
     args : dict | None
         Method-specific kwargs (e.g. ``{'n_perm': 500}`` for ``raw_perm``,
-        ``{'force': True}`` for ``split_nb``).
+        ``{'force': True}`` for ``split_nb``; ``'auto'`` takes ``n_perm`` and
+        ``n_splits``, with ``n_perm`` ignored when ``'split_nb'`` runs).
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
@@ -969,11 +997,10 @@ def pls1_confirmatory_test(
     seed : int | None
         RNG seed.
     """
-    test_method = _string(test_method, "test_method")
+    test_method = _string(test_method, "test_method", "auto")
     args = _args_dict(args, "args")
     ci = _flag(ci, "ci")
     pre_standardized = _flag(pre_standardized, "pre_standardized")
-    disable_parallelism = _flag(disable_parallelism, "disable_parallelism")
     verbose = _flag(verbose, "verbose")
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
@@ -989,7 +1016,6 @@ def pls1_confirmatory_test(
         max_failure_rate=_number_or_none(max_failure_rate, "max_failure_rate"),
         pre_standardized=pre_standardized,
         seed=_seed(seed),
-        disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=weights,
         max_skip_rate=_number_or_none(max_skip_rate, "max_skip_rate"),
@@ -1048,7 +1074,6 @@ def pls1_find_k_optimal(
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    disable_parallelism: bool = False,
     verbose: bool = False,
     weights: np.ndarray | None = None,
 ) -> FindKOptimalResult:
@@ -1067,7 +1092,7 @@ def pls1_find_k_optimal(
     diagnostic : str | None, default None
         Optional same-sample sequential diagnostic to attach to K*. One of
         ``'raw_perm'`` / ``'split_nb'`` / ``'split_exact'`` / ``'e'``, or
-        ``None`` (no diagnostic). Selection and test share data, so the
+        ``None`` (no diagnostic); ``'auto'`` is not accepted. Selection and test share data, so the
         resulting ``pvalues`` are a robustness check, not honest inference.
         A ``'split_nb'`` diagnostic the auto-gate flags runs ``'split_exact'``
         instead; ``result.diagnostic`` says so and Python warns. Pass
@@ -1082,10 +1107,6 @@ def pls1_find_k_optimal(
         unit-variance.
     seed : int | None
         RNG seed.
-    disable_parallelism : bool, default False
-        Run the replicate loops serially; single top-level products keep
-        the fixed parallel split, so results are bit-identical to the
-        parallel run.
     verbose : bool, default False
         Print progress to stderr.
     weights : np.ndarray | None, shape (n,), default None
@@ -1104,7 +1125,6 @@ def pls1_find_k_optimal(
         args=args,
         pre_standardized=pre_standardized,
         seed=seed,
-        disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=weights,
         for_fit=False,
@@ -1113,7 +1133,7 @@ def pls1_find_k_optimal(
 
 def _pls1_find_k_optimal(
     X, y, k_max, *, selector="r2_se", diagnostic=None, args=None,
-    pre_standardized=False, seed=None, disable_parallelism=False,
+    pre_standardized=False, seed=None,
     verbose=False, weights=None, for_fit,
 ) -> FindKOptimalResult:
     """Body of `pls1_find_k_optimal`; `for_fit=True` is `pls1_fit(k="optimal")`."""
@@ -1121,7 +1141,6 @@ def _pls1_find_k_optimal(
     diagnostic = None if diagnostic is None else _string(diagnostic, "diagnostic")
     args = _args_dict(args, "args")
     pre_standardized = _flag(pre_standardized, "pre_standardized")
-    disable_parallelism = _flag(disable_parallelism, "disable_parallelism")
     verbose = _flag(verbose, "verbose")
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
@@ -1134,7 +1153,6 @@ def _pls1_find_k_optimal(
         args=args,
         pre_standardized=pre_standardized,
         seed=_seed(seed),
-        disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=weights,
         for_fit=for_fit,
@@ -1155,12 +1173,11 @@ def _pls1_find_k_optimal(
 def pls1_find_k_sequence(
     X: np.ndarray, y: np.ndarray, k_max: int,
     *,
-    test_method: Literal["raw_perm", "split_nb", "split_exact", "e"] = "split_nb",
+    test_method: Literal["auto", "raw_perm", "split_nb", "split_exact", "e"] = "auto",
     alpha: float | None = None,
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    disable_parallelism: bool = False,
     verbose: bool = False,
     weights: np.ndarray | None = None,
 ) -> FindKSequenceResult:
@@ -1178,15 +1195,18 @@ def pls1_find_k_sequence(
         Response vector.
     k_max : int
         Maximum number of components to test.
-    test_method : str, default 'split_nb'
-        Per-step test method: ``'raw_perm'``, ``'split_nb'``,
-        ``'split_exact'``, or ``'e'``. ``'split_exact'`` is the recommended
-        method (permutation-calibrated, holds its level on any design);
-        ``'split_nb'``, the default, is the cheaper asymptotic alternative,
-        meant for n large relative to p with a flat X spectrum. Its auto-gate
-        flags only X with 4 columns or fewer, ``n_eff`` below 25, or a stable
-        rank of the standardized X below 3 (see ``pls1_confirmatory_test``),
-        and is evaluated once for the whole sequence: a flagged
+    test_method : str, default 'auto'
+        Per-step test method: ``'auto'``, ``'raw_perm'``, ``'split_nb'``,
+        ``'split_exact'``, or ``'e'``. ``'auto'``, the default, resolves once
+        on the full X to ``'split_exact'`` or ``'split_nb'`` by the rule in
+        ``pls1_confirmatory_test`` (see _docs/concepts/PLS1/inference.md) and
+        runs that method for every step; ``result.test_method`` says which.
+        ``'split_exact'`` is permutation-calibrated and holds its level on any
+        design; ``'split_nb'`` is the cheaper asymptotic alternative, meant
+        for n large relative to p with a flat X spectrum. Its auto-gate flags
+        only X with 4 columns or fewer, ``n_eff`` below 25, or a stable rank
+        of the standardized X below 3 (see ``pls1_confirmatory_test``), and
+        is evaluated once for the whole sequence: a flagged explicit
         ``'split_nb'`` request runs ``'split_exact'`` for every step and
         ``result.test_method`` says so.
     alpha : float | None, default None
@@ -1194,16 +1214,14 @@ def pls1_find_k_sequence(
         default, 0.05.
     args : dict | None
         Method-specific kwargs (e.g. ``{'n_splits': 50}``, or
-        ``{'force': True}`` to run ``split_nb`` past the auto-gate).
+        ``{'force': True}`` to run ``split_nb`` past the auto-gate;
+        ``'auto'`` takes ``n_perm`` and ``n_splits`` only, and ``n_perm`` is
+        ignored when ``'split_nb'`` runs).
     pre_standardized : bool, default False
         If True, skip standardization — X and y are assumed already zero-mean,
         unit-variance.
     seed : int | None
         RNG seed.
-    disable_parallelism : bool, default False
-        Run the replicate loops serially; single top-level products keep
-        the fixed parallel split, so results are bit-identical to the
-        parallel run.
     verbose : bool, default False
         Print progress to stderr.
     weights : np.ndarray | None, shape (n,), default None
@@ -1222,7 +1240,6 @@ def pls1_find_k_sequence(
         args=args,
         pre_standardized=pre_standardized,
         seed=seed,
-        disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=weights,
         for_fit=False,
@@ -1230,15 +1247,14 @@ def pls1_find_k_sequence(
 
 
 def _pls1_find_k_sequence(
-    X, y, k_max, *, test_method="split_nb", alpha=None, args=None,
-    pre_standardized=False, seed=None, disable_parallelism=False,
+    X, y, k_max, *, test_method="auto", alpha=None, args=None,
+    pre_standardized=False, seed=None,
     verbose=False, weights=None, for_fit,
 ) -> FindKSequenceResult:
     """Body of `pls1_find_k_sequence`; `for_fit=True` is `pls1_fit(k="sequence")`."""
-    test_method = _string(test_method, "test_method", "split_nb")
+    test_method = _string(test_method, "test_method", "auto")
     args = _args_dict(args, "args")
     pre_standardized = _flag(pre_standardized, "pre_standardized")
-    disable_parallelism = _flag(disable_parallelism, "disable_parallelism")
     verbose = _flag(verbose, "verbose")
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
@@ -1251,7 +1267,6 @@ def _pls1_find_k_sequence(
         args=args,
         pre_standardized=pre_standardized,
         seed=_seed(seed),
-        disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=weights,
         for_fit=for_fit,
@@ -1328,7 +1343,6 @@ def spls1_find_keep_optimal(
     *,
     args: dict | None = None,
     seed: int | None = None,
-    disable_parallelism: bool = False,
     verbose: bool = False,
     weights: np.ndarray | None = None,
 ) -> FindKeepOptimalResult:
@@ -1348,7 +1362,7 @@ def spls1_find_keep_optimal(
         Fixed component count for every fit in the sweep.
     args : dict | None
         ``{'n_folds': int}`` (default 5).
-    seed, disable_parallelism, verbose, weights
+    seed, verbose, weights
         As on ``pls1_find_k_optimal``.
 
     Returns
@@ -1356,7 +1370,6 @@ def spls1_find_keep_optimal(
     FindKeepOptimalResult
     """
     args = _args_dict(args, "args")
-    disable_parallelism = _flag(disable_parallelism, "disable_parallelism")
     verbose = _flag(verbose, "verbose")
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
@@ -1366,7 +1379,6 @@ def spls1_find_keep_optimal(
         X, y, _whole(k, "k"),
         args=args,
         seed=_seed(seed),
-        disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=weights,
     )
@@ -1382,7 +1394,6 @@ def spls1_find_k_optimal(
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    disable_parallelism: bool = False,
     verbose: bool = False,
     weights: np.ndarray | None = None,
 ) -> FindKOptimalResult:
@@ -1398,7 +1409,6 @@ def spls1_find_k_optimal(
     diagnostic = None if diagnostic is None else _string(diagnostic, "diagnostic")
     args = _args_dict(args, "args")
     pre_standardized = _flag(pre_standardized, "pre_standardized")
-    disable_parallelism = _flag(disable_parallelism, "disable_parallelism")
     verbose = _flag(verbose, "verbose")
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
@@ -1411,7 +1421,6 @@ def spls1_find_k_optimal(
         args=args,
         pre_standardized=pre_standardized,
         seed=_seed(seed),
-        disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=weights,
     )
@@ -1430,12 +1439,11 @@ def spls1_find_k_optimal(
 def spls1_find_k_sequence(
     X: np.ndarray, y: np.ndarray, k_max: int, keep: int,
     *,
-    test_method: Literal["raw_perm", "split_nb", "split_exact", "e"] = "split_nb",
+    test_method: Literal["auto", "raw_perm", "split_nb", "split_exact", "e"] = "auto",
     alpha: float | None = None,
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    disable_parallelism: bool = False,
     verbose: bool = False,
     weights: np.ndarray | None = None,
 ) -> FindKSequenceResult:
@@ -1444,10 +1452,9 @@ def spls1_find_k_sequence(
     AND tests the sparse marginal component (coherent sequential test).
     ``keep = n_features`` reproduces the dense function exactly.
     """
-    test_method = _string(test_method, "test_method", "split_nb")
+    test_method = _string(test_method, "test_method", "auto")
     args = _args_dict(args, "args")
     pre_standardized = _flag(pre_standardized, "pre_standardized")
-    disable_parallelism = _flag(disable_parallelism, "disable_parallelism")
     verbose = _flag(verbose, "verbose")
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
@@ -1460,7 +1467,6 @@ def spls1_find_k_sequence(
         args=args,
         pre_standardized=pre_standardized,
         seed=_seed(seed),
-        disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=weights,
     )
@@ -1550,7 +1556,6 @@ def pls1_rotation_stability(
     level: float | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    disable_parallelism: bool = False,
     verbose: bool = False,
     weights: np.ndarray | None = None,
     max_skip_rate: float | None = None,
@@ -1581,10 +1586,6 @@ def pls1_rotation_stability(
         Set ``True`` when ``X`` is already column-standardized.
     seed : int or None
         RNG seed for reproducibility.
-    disable_parallelism : bool
-        Run the replicate loops serially; single top-level products keep
-        the fixed parallel split, so results are bit-identical to the
-        parallel run.
     verbose : bool
         Reserved for future progress reporting.
     weights : np.ndarray or None, shape (n,)
@@ -1597,7 +1598,6 @@ def pls1_rotation_stability(
     rotation_method = _string(rotation_method, "rotation_method", "varimax")
     rotation_args = _args_dict(rotation_args, "rotation_args")
     pre_standardized = _flag(pre_standardized, "pre_standardized")
-    disable_parallelism = _flag(disable_parallelism, "disable_parallelism")
     verbose = _flag(verbose, "verbose")
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
@@ -1613,7 +1613,6 @@ def pls1_rotation_stability(
         level=_number_or_none(level, "level"),
         pre_standardized=pre_standardized,
         seed=_seed(seed),
-        disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=w_arr,
         max_skip_rate=_number_or_none(max_skip_rate, "max_skip_rate"),
@@ -1645,7 +1644,6 @@ def pls1_perm_null(
     return_perm_matrix: bool = False,
     pre_standardized: bool = False,
     seed: int | None = None,
-    disable_parallelism: bool = False,
     verbose: bool = False,
     weights: np.ndarray | None = None,
 ) -> PermNullResult:
@@ -1673,10 +1671,6 @@ def pls1_perm_null(
         unit-variance.
     seed : int | None
         RNG seed for reproducibility.
-    disable_parallelism : bool, default False
-        Run the replicate loops serially; single top-level products keep
-        the fixed parallel split, so results are bit-identical to the
-        parallel run.
     verbose : bool, default False
         Reserved for future progress reporting.
     weights : np.ndarray | None, shape (n,), default None
@@ -1686,7 +1680,6 @@ def pls1_perm_null(
     """
     return_perm_matrix = _flag(return_perm_matrix, "return_perm_matrix")
     pre_standardized = _flag(pre_standardized, "pre_standardized")
-    disable_parallelism = _flag(disable_parallelism, "disable_parallelism")
     verbose = _flag(verbose, "verbose")
     X = _ensure_array(X, "X", 2)
     y = _ensure_array(y, "y", 1)
@@ -1698,7 +1691,6 @@ def pls1_perm_null(
         return_perm_matrix=return_perm_matrix,
         pre_standardized=pre_standardized,
         seed=_seed(seed),
-        disable_parallelism=disable_parallelism,
         verbose=verbose,
         weights=weights,
     )

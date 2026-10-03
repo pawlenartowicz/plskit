@@ -46,8 +46,8 @@ component count from the data; see `pls1_find_k_optimal` and
 ## 2. Test for signal
 
 `pls1_confirmatory_test` asks whether there is any predictive signal at a
-pre-specified `k`. `test_method` has no default and must be passed;
-`"split_exact"` is the recommended method. The permutation and split
+pre-specified `k`. `test_method` defaults to `"auto"`, which picks `split_exact` or
+`split_nb` from `X` (see [`test_method="auto"`](../concepts/PLS1/inference.md#test_methodauto)); the example passes `"split_exact"` explicitly. The permutation and split
 counts here are kept small so the example runs in seconds; the defaults
 are `n_perm=1000`, `n_splits=50`.
 

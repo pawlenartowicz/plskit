@@ -40,8 +40,8 @@ fn call_inner(name: &str, inputs: &List) -> std::result::Result<Robj, BindError>
     Ok(to_r::outcome(outcome))
 }
 
-/// The registry, error codes and result types as an R list (for tests,
-/// `print` and condition classes).
+/// The registry and result types as an R list (for tests, argument kinds
+/// and `print`).
 #[extendr]
 fn plskit_registry_impl() -> Robj {
     to_r::registry_list()

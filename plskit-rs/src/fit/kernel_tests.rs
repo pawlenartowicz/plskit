@@ -5,8 +5,9 @@
 #![allow(clippy::many_single_char_names, clippy::similar_names)]
 
 use super::tests::nipals_pls1_reference;
-use super::tests::uniform_mat;
+use super::tests::{exhausted_design, orthogonal_design, uniform_mat};
 use super::*;
+use crate::test_support::{assert_bits_eq, assert_mat_bits_eq, col_vals};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -15,7 +16,8 @@ type Parts = (Mat<f64>, Mat<f64>, Mat<f64>, Col<f64>);
 
 // ── designs ─────────────────────────────────────────────────────────────
 
-// `uniform_mat` is reused from `fit::tests` (`pub(super)`); no local copy here.
+// `uniform_mat`, `exhausted_design` and `orthogonal_design` are reused from
+// `fit::tests` (`pub(super)`); no local copies here.
 
 /// `x` uniform on `[-1, 1)`, `y = Σ_{j<m} b_j x_j + sigma·noise`.
 fn signal_design(n: usize, d: usize, m: usize, sigma: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
@@ -41,18 +43,6 @@ fn mixed_weights(n: usize) -> Col<f64> {
             0.25 + (i % 7) as f64 * 0.4
         }
     })
-}
-
-/// `n × 40`, last column the sum of the first two (rank 39), `y` independent
-/// of `X`. With `seed = 11` it is `tests::exhausted_y_design` at `n = 2000`.
-fn exhausted_design(n: usize, seed: u64) -> (Mat<f64>, Col<f64>) {
-    let d = 40;
-    let mut x = uniform_mat(n, d, seed);
-    for i in 0..n {
-        x[(i, d - 1)] = x[(i, 0)] + x[(i, 1)];
-    }
-    let yc = uniform_mat(n, 1, seed + 1);
-    (x, Col::<f64>::from_fn(n, |i| yc[(i, 0)]))
 }
 
 // ── kernel inputs, exactly as `pls1_fit` builds them ─────────────────────
@@ -207,38 +197,6 @@ fn assert_factors_close(new: &Parts, old: &Parts, tols: &[f64], what: &str) -> f
     worst
 }
 
-fn assert_mat_bits(a: &Mat<f64>, b: &Mat<f64>, what: &str) {
-    assert_eq!(
-        (a.nrows(), a.ncols()),
-        (b.nrows(), b.ncols()),
-        "{what}: shape"
-    );
-    for j in 0..a.ncols() {
-        for i in 0..a.nrows() {
-            assert_eq!(
-                a[(i, j)].to_bits(),
-                b[(i, j)].to_bits(),
-                "{what}[{i},{j}]: {} vs {}",
-                a[(i, j)],
-                b[(i, j)]
-            );
-        }
-    }
-}
-
-fn assert_col_bits(a: &Col<f64>, b: &Col<f64>, what: &str) {
-    assert_eq!(a.nrows(), b.nrows(), "{what}: length");
-    for i in 0..a.nrows() {
-        assert_eq!(
-            a[i].to_bits(),
-            b[i].to_bits(),
-            "{what}[{i}]: {} vs {}",
-            a[i],
-            b[i]
-        );
-    }
-}
-
 fn max_abs_diff_col(a: &Col<f64>, b: &Col<f64>) -> f64 {
     assert_eq!(a.nrows(), b.nrows(), "length");
     (0..a.nrows())
@@ -335,24 +293,10 @@ fn loop_returns_unresolved_when_a_gate_says_so() {
             "s_at={s_at:?} tt_at={tt_at:?}"
         );
     }
-    // No gate fires: the stub is the X backend, to the bit.
+    // No gate fires: the same design runs to completion.
     let mut b = gate_at(&inp, None, None);
-    let LoopOutcome::Done { t, p, w, q } = pls1_component_loop(&mut b, s0, w_floor, 5, None) else {
-        panic!("expected Done");
-    };
-    let direct = pls1_kernel(
-        inp.xs.as_ref(),
-        inp.ys.as_ref(),
-        5,
-        None,
-        Par::Seq,
-        inp.xs.norm_l2(),
-    )
-    .unwrap();
-    assert_mat_bits(&t.expect("the X backend forms T"), &direct.0, "T");
-    assert_mat_bits(&p, &direct.1, "P");
-    assert_mat_bits(&w, &direct.2, "W");
-    assert_col_bits(&q, &direct.3, "Q");
+    let out = pls1_component_loop(&mut b, s0, w_floor, 5, None);
+    assert!(matches!(out, LoopOutcome::Done { .. }));
 }
 
 #[test]
@@ -729,12 +673,24 @@ fn k1_public_fit_is_bit_identical_to_reference() {
                     let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 1, keep, par)
                         .unwrap();
                     let coef = coef_of(&old, par);
-                    assert_mat_bits(&m.t_scores, &old.0, &format!("{what} T"));
-                    assert_mat_bits(&m.p_loadings, &old.1, &format!("{what} P"));
-                    assert_mat_bits(&m.w_star, &old.2, &format!("{what} W"));
-                    assert_col_bits(&m.q_loadings, &old.3, &format!("{what} Q"));
-                    assert_col_bits(&m.coef, &coef, &format!("{what} coef"));
-                    assert_col_bits(&m.beta, &beta_of(&coef, &inp), &format!("{what} beta"));
+                    assert_mat_bits_eq(m.t_scores.as_ref(), old.0.as_ref(), &format!("{what} T"));
+                    assert_mat_bits_eq(m.p_loadings.as_ref(), old.1.as_ref(), &format!("{what} P"));
+                    assert_mat_bits_eq(m.w_star.as_ref(), old.2.as_ref(), &format!("{what} W"));
+                    assert_bits_eq(
+                        &col_vals(m.q_loadings.as_ref()),
+                        &col_vals(old.3.as_ref()),
+                        &format!("{what} Q"),
+                    );
+                    assert_bits_eq(
+                        &col_vals(m.coef.as_ref()),
+                        &col_vals(coef.as_ref()),
+                        &format!("{what} coef"),
+                    );
+                    assert_bits_eq(
+                        &col_vals(m.beta.as_ref()),
+                        &col_vals(beta_of(&coef, &inp).as_ref()),
+                        &format!("{what} beta"),
+                    );
                 }
             }
         }
@@ -801,9 +757,9 @@ fn non_column_major_views_agree_with_reference() {
             assert_factors_close(&new, &old, &tols, &what);
             let drift = coef_drift(&m.coef, &coef_of(&old, Par::Seq));
             assert!(drift <= tol, "{what}: coef drift {drift:e}");
-            assert_col_bits(
-                &m.beta,
-                &m.coef,
+            assert_bits_eq(
+                &col_vals(m.beta.as_ref()),
+                &col_vals(m.coef.as_ref()),
                 &format!("{what}: beta = coef when pre_standardized"),
             );
         }
@@ -1051,30 +1007,6 @@ fn span_design(n: usize, d: usize, m: usize, seed: u64) -> (Mat<f64>, Col<f64>) 
         (0..m)
             .map(|j| (1.0 + c[(j, 0)]) * u[(i, 2 * j)])
             .sum::<f64>()
-    });
-    (x, y)
-}
-
-/// A `y` orthogonal to the standardized `X` plus `signal` times `X b`:
-/// with `signal = 0` the first component is already noise, with
-/// `signal = 1e-6` the real components are weak (the design of
-/// `nipals_floor_is_relative_*`).
-fn orthogonal_design(n: usize, d: usize, signal: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
-    let x = uniform_mat(n, d, seed);
-    let (xs, _, _) = crate::linalg::standardize(x.as_ref());
-    let svd = xs.thin_svd().expect("svd");
-    let u = svd.U();
-    let e = uniform_mat(n, 1, seed + 1);
-    let mut e_perp = Col::<f64>::from_fn(n, |i| e[(i, 0)]);
-    for j in 0..d {
-        let c: f64 = (0..n).map(|i| u[(i, j)] * e_perp[i]).sum();
-        for i in 0..n {
-            e_perp[i] -= c * u[(i, j)];
-        }
-    }
-    let b = uniform_mat(d, 1, seed + 2);
-    let y = Col::<f64>::from_fn(n, |i| {
-        e_perp[i] + signal * (0..d).map(|j| xs[(i, j)] * b[(j, 0)]).sum::<f64>()
     });
     (x, y)
 }

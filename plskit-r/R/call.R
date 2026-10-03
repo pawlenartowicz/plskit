@@ -4,7 +4,7 @@
 
 .plskit_env <- new.env(parent = emptyenv())
 
-# The registry (functions, error codes, result types), read once from Rust.
+# The registry (functions, result types), read once from Rust.
 .plskit_registry <- function() {
   if (is.null(.plskit_env$registry)) {
     .plskit_env$registry <- .plskit_registry_impl()

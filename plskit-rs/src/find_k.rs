@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use rand::seq::SliceRandom;
 
 use crate::error::{PlsKitError, PlsKitResult};
-use crate::fit::{pls1_fit, FitOpts, KSpec};
+use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
 use crate::linalg::{
     col_row_subset, normalize_weights, standardize1_weighted, standardize_apply_rows,
     standardize_rows, standardize_weighted,
@@ -37,7 +37,7 @@ pub struct FindKOptimalOpts {
     pub n_folds: usize,
     /// Optional same-sample sequential diagnostic to run on K*. `None` disables
     /// the diagnostic; `Some(method)` enables it (any `ConfirmatoryMethod`
-    /// except `Score`). Selection and test share data, so the resulting
+    /// except `Score` and `Auto`). Selection and test share data, so the resulting
     /// pvalues are diagnostic only and not honest inference.
     pub diagnostic: Option<ConfirmatoryMethod>,
     /// Number of permutations for `raw_perm` / `split_exact` diagnostic. Inert
@@ -54,13 +54,6 @@ pub struct FindKOptimalOpts {
     pub pre_standardized: bool,
     /// RNG seed; `None` draws from OS entropy.
     pub seed: Option<u64>,
-    /// Disable Rayon parallelism (forces serial execution; useful for deterministic debugging).
-    ///
-    /// Serial replicate loops only: single top-level products (a reference
-    /// fit under `ParChoice::Auto`, a one-off scoring product or
-    /// decomposition) keep the crate's fixed parallel split, so results
-    /// match the parallel run bit for bit.
-    pub disable_parallelism: bool,
     /// Print progress to stderr (reserved for future verbose mode).
     pub verbose: bool,
 }
@@ -76,7 +69,6 @@ impl Default for FindKOptimalOpts {
             force: false,
             pre_standardized: false,
             seed: None,
-            disable_parallelism: false,
             verbose: false,
         }
     }
@@ -163,7 +155,7 @@ impl FindKOptimalOutput {
 /// - `InvalidArgument` for `k_max == 0`
 /// - `KExceedsMax` for `k_max > n_features`
 /// - `DimensionMismatch` for shape disagreements
-/// - `InvalidArgument` if `diagnostic == Some(Score)`
+/// - `InvalidArgument` if `diagnostic == Some(Score)` or `Some(Auto)`
 /// - `NonFiniteInput` when X, y, or weights contain NaN/inf
 /// - `InvalidWeights` for negative, all-zero, or insufficient-`n_eff` weights
 pub fn pls1_find_k_optimal(
@@ -173,7 +165,7 @@ pub fn pls1_find_k_optimal(
     weights: Option<ColRef<'_, f64>>,
     opts: FindKOptimalOpts,
 ) -> PlsKitResult<FindKOptimalOutput> {
-    find_k_optimal_impl(x, y, k_max, None, weights, opts)
+    crate::fit::with_thread_limit(|| find_k_optimal_impl(x, y, k_max, None, weights, opts))
 }
 
 /// Sparse counterpart of [`pls1_find_k_optimal`] (`_docs/python/api.md`
@@ -201,8 +193,18 @@ pub fn spls1_find_k_optimal(
     weights: Option<ColRef<'_, f64>>,
     opts: FindKOptimalOpts,
 ) -> PlsKitResult<FindKOptimalOutput> {
-    crate::fit::validate_keep(keep, x.ncols())?;
-    find_k_optimal_impl(x, y, k_max, Some(keep), weights, opts)
+    crate::fit::with_thread_limit(|| {
+        crate::fit::validate_keep(keep, x.ncols())?;
+        // `keep = n_features` runs the dense path; see `spls1_find_k_sequence`.
+        find_k_optimal_impl(
+            x,
+            y,
+            k_max,
+            (keep < x.ncols()).then_some(keep),
+            weights,
+            opts,
+        )
+    })
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -236,6 +238,11 @@ fn find_k_optimal_impl(
     if matches!(opts.diagnostic, Some(ConfirmatoryMethod::Score)) {
         return Err(PlsKitError::InvalidArgument(
             "score has no sequential variant".into(),
+        ));
+    }
+    if matches!(opts.diagnostic, Some(ConfirmatoryMethod::Auto)) {
+        return Err(PlsKitError::InvalidArgument(
+            "diagnostic does not accept 'auto'".into(),
         ));
     }
     // Hoisted ahead of selection: `diagnostic="raw_perm"` uses a fixed
@@ -278,7 +285,6 @@ fn find_k_optimal_impl(
                 k_max,
                 opts.n_folds,
                 true,
-                &opts,
                 w_norm.as_ref().map(Col::as_ref),
                 keep,
                 &mut rng,
@@ -292,7 +298,6 @@ fn find_k_optimal_impl(
                 k_max,
                 opts.n_folds,
                 false,
-                &opts,
                 w_norm.as_ref().map(Col::as_ref),
                 keep,
                 &mut rng,
@@ -351,6 +356,9 @@ fn find_k_optimal_impl(
                 n_splits: opts.n_splits,
             },
             SequentialArgs::E => SequentialArgs::E,
+            SequentialArgs::Auto { .. } => {
+                unreachable!("`Some(Auto)` is rejected at the top of this function")
+            }
         };
         let r = run_incremental_sequence(
             x,
@@ -367,7 +375,6 @@ fn find_k_optimal_impl(
                     use rand::Rng;
                     rng.next_u64()
                 }),
-                disable_parallelism: opts.disable_parallelism,
                 verbose: opts.verbose,
                 keep,
             },
@@ -400,29 +407,26 @@ pub struct FindKSequenceOpts {
     /// Per-step test method (any `ConfirmatoryMethod` except `Score`).
     /// `SplitNb` is subject to the sequence-level auto-gate:
     /// a flagged design runs `split_exact` instead, and
-    /// `FindKSequenceOutput.test_method` says so.
+    /// `FindKSequenceOutput.test_method` says so. `Auto` (the default)
+    /// resolves once on the full X to `split_exact` or `split_nb` (see
+    /// [`ConfirmatoryMethod::Auto`]), and every step runs that method.
     pub test_method: ConfirmatoryMethod,
     /// Significance threshold for sequential rejection.
     pub alpha: f64,
-    /// Number of permutations for `raw_perm` / `split_exact`.
+    /// Number of permutations for `raw_perm` / `split_exact` / `auto`.
     pub n_perm: usize,
-    /// Number of split-half repetitions for `split_nb` / `split_exact`.
+    /// Number of split-half repetitions for `split_nb` / `split_exact` /
+    /// `auto`.
     pub n_splits: usize,
     /// `split_nb` only: run NB even on a design the sequence-level auto-gate
     /// flags. Default `false`, which reroutes the whole sequence to
-    /// `split_exact`. Inert for every other `test_method`.
+    /// `split_exact`. `true` with `test_method = Auto` is an
+    /// `InvalidArgument`; inert for every other `test_method`.
     pub force: bool,
     /// Caller asserts X and y are already standardized; skips centering/scaling.
     pub pre_standardized: bool,
     /// RNG seed; `None` draws from OS entropy.
     pub seed: Option<u64>,
-    /// Disable Rayon parallelism (forces serial execution; useful for deterministic debugging).
-    ///
-    /// Serial replicate loops only: single top-level products (a reference
-    /// fit under `ParChoice::Auto`, a one-off scoring product or
-    /// decomposition) keep the crate's fixed parallel split, so results
-    /// match the parallel run bit for bit.
-    pub disable_parallelism: bool,
     /// Print progress to stderr (reserved for future verbose mode).
     pub verbose: bool,
 }
@@ -430,14 +434,13 @@ pub struct FindKSequenceOpts {
 impl Default for FindKSequenceOpts {
     fn default() -> Self {
         Self {
-            test_method: ConfirmatoryMethod::SplitNb,
+            test_method: ConfirmatoryMethod::Auto,
             alpha: 0.05,
             n_perm: 1000,
             n_splits: 50,
             force: false,
             pre_standardized: false,
             seed: None,
-            disable_parallelism: false,
             verbose: false,
         }
     }
@@ -460,9 +463,10 @@ pub struct FindKSequenceOutput {
     /// Kish's effective sample size. Equals `n_samples` for uniform/absent weights.
     pub n_eff: f64,
     /// Stable rank of the standardized X, as the sequence-level auto-gate saw
-    /// it. `Some` whenever `test_method == SplitNb` — whether the gate fired
-    /// or not, and also under `force`. `None` for every other test method,
-    /// which never evaluates the gate.
+    /// it. `Some` on an explicit `split_nb` request, and on an `"auto"`
+    /// request that reached the stable-rank check (p > 4, `n_eff` ≥ 250,
+    /// and p ≤ 100·n without `keep`); `None` otherwise. On a `split_nb` request it is set
+    /// whether the gate fired or not, and also under `force`.
     pub stable_rank: Option<f64>,
 }
 
@@ -497,6 +501,8 @@ impl FindKSequenceOutput {
 /// - `KExceedsMax` for `k_max > n_features`
 /// - `DimensionMismatch` for shape disagreements
 /// - `InvalidArgument` for `Score` test method (no sequential variant)
+/// - `InvalidArgument` for `Auto` with `n_splits < 2`, `n_perm < 1`, or
+///   `force = true`
 /// - `NonFiniteInput` when X, y, or weights contain NaN/inf
 /// - `InvalidWeights` for negative, all-zero, or insufficient-`n_eff` weights
 pub fn pls1_find_k_sequence(
@@ -506,7 +512,7 @@ pub fn pls1_find_k_sequence(
     weights: Option<ColRef<'_, f64>>,
     opts: FindKSequenceOpts,
 ) -> PlsKitResult<FindKSequenceOutput> {
-    find_k_sequence_impl(x, y, k_max, None, weights, opts)
+    crate::fit::with_thread_limit(|| find_k_sequence_impl(x, y, k_max, None, weights, opts))
 }
 
 /// Sparse counterpart of [`pls1_find_k_sequence`] (`_docs/python/api.md`
@@ -528,8 +534,21 @@ pub fn spls1_find_k_sequence(
     weights: Option<ColRef<'_, f64>>,
     opts: FindKSequenceOpts,
 ) -> PlsKitResult<FindKSequenceOutput> {
-    crate::fit::validate_keep(keep, x.ncols())?;
-    find_k_sequence_impl(x, y, k_max, Some(keep), weights, opts)
+    crate::fit::with_thread_limit(|| {
+        crate::fit::validate_keep(keep, x.ncols())?;
+        // `keep = n_features` keeps every column, so it runs the dense path
+        // (`None`). Passing `Some` would force split_exact's refit route and
+        // switch off auto's width rule, which key on whether `keep` is set,
+        // and the result would no longer match the dense function bit for bit.
+        find_k_sequence_impl(
+            x,
+            y,
+            k_max,
+            (keep < x.ncols()).then_some(keep),
+            weights,
+            opts,
+        )
+    })
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -581,7 +600,22 @@ fn find_k_sequence_impl(
             n_splits: opts.n_splits,
         },
         SequentialArgs::E => SequentialArgs::E,
+        SequentialArgs::Auto { .. } => SequentialArgs::Auto {
+            n_perm: opts.n_perm,
+            n_splits: opts.n_splits,
+        },
     };
+    // `Auto` takes split_exact's count floors before it resolves, so a bad
+    // `n_perm` errors on every design. `force` belongs to an explicit
+    // `split_nb` request only.
+    if let SequentialArgs::Auto { n_perm, n_splits } = seq_args {
+        crate::signal_test::check_split_exact_counts(Some(n_perm), n_splits)?;
+        if opts.force {
+            return Err(PlsKitError::InvalidArgument(
+                "force applies to test_method='split_nb' only, not 'auto'".into(),
+            ));
+        }
+    }
     let r = run_incremental_sequence(
         x,
         y,
@@ -594,7 +628,6 @@ fn find_k_sequence_impl(
             stop_early_override: false,
             pre_standardized: opts.pre_standardized,
             seed: opts.seed,
-            disable_parallelism: opts.disable_parallelism,
             verbose: opts.verbose,
             keep,
         },
@@ -781,7 +814,7 @@ fn reject_cv_leave_one_out(n: usize, requested: usize, effective: usize) -> PlsK
 /// nothing from `rng`.
 ///
 /// Each fold is independent and RNG-free (the only RNG use is the shuffle),
-/// so byte-parity holds for both serial and parallel execution.
+/// so the result does not depend on which worker runs which fold.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 fn cv_select<F>(
@@ -792,7 +825,6 @@ fn cv_select<F>(
     n_folds: usize,
     candidates: &[usize],
     use_1se: bool,
-    disable_parallelism: bool,
     rng: &mut crate::rng::Rng,
     fold_work: F,
 ) -> PlsKitResult<(usize, BTreeMap<usize, f64>, BTreeMap<usize, f64>)>
@@ -809,13 +841,7 @@ where
     let run = |fi: usize, val_idx: &Vec<usize>| {
         fold_work(&prep_fold(x, y, weights, &folds, fi, val_idx.as_slice()))
     };
-    let r2_matrix: Vec<Vec<f64>> = if disable_parallelism {
-        folds
-            .iter()
-            .enumerate()
-            .map(|(fi, val_idx)| run(fi, val_idx))
-            .collect::<PlsKitResult<Vec<_>>>()?
-    } else {
+    let r2_matrix: Vec<Vec<f64>> = {
         use rayon::prelude::*;
         folds
             .par_iter()
@@ -887,7 +913,6 @@ fn select_cv(
     k_max: usize,
     n_folds: usize,
     use_1se: bool,
-    opts: &FindKOptimalOpts,
     weights: Option<ColRef<'_, f64>>,
     keep: Option<usize>,
     rng: &mut crate::rng::Rng,
@@ -906,7 +931,7 @@ fn select_cv(
     // row[k-1] = CV R² for this fold and k components.
     let fold_work = |fd: &FoldData| -> PlsKitResult<Vec<f64>> {
         let train_wref = fd.train_w.as_ref().map(Col::as_ref);
-        let m = pls1_fit(
+        let m = pls1_fit_impl(
             fd.xs_tr.as_ref(),
             fd.ys_tr.as_ref(),
             KSpec::Fixed(max_comp),
@@ -948,7 +973,6 @@ fn select_cv(
         n_folds,
         &candidates,
         use_1se,
-        opts.disable_parallelism,
         rng,
         fold_work,
     )?;
@@ -970,7 +994,7 @@ fn select_bic(
 ) -> PlsKitResult<(usize, BTreeMap<usize, f64>)> {
     let (xs, _, _) = standardize_weighted(x, weights);
     let (ys, _, _) = standardize1_weighted(y, weights);
-    let m = pls1_fit(
+    let m = pls1_fit_impl(
         xs.as_ref(),
         ys.as_ref(),
         KSpec::Fixed(k_max),
@@ -1026,7 +1050,7 @@ fn first_component_exhausted(
 ) -> PlsKitResult<bool> {
     let (xs, _, _) = standardize_weighted(x, weights);
     let (ys, _, _) = standardize1_weighted(y, weights);
-    let m = pls1_fit(
+    let m = pls1_fit_impl(
         xs.as_ref(),
         ys.as_ref(),
         KSpec::Fixed(1),
@@ -1065,13 +1089,6 @@ pub struct FindKeepOptimalOpts {
     pub n_folds: usize,
     /// RNG seed; `None` draws from OS entropy.
     pub seed: Option<u64>,
-    /// Disable Rayon parallelism (forces serial execution; useful for deterministic debugging).
-    ///
-    /// Serial replicate loops only: single top-level products (a reference
-    /// fit under `ParChoice::Auto`, a one-off scoring product or
-    /// decomposition) keep the crate's fixed parallel split, so results
-    /// match the parallel run bit for bit.
-    pub disable_parallelism: bool,
     /// Print the swept keep grid to stderr.
     pub verbose: bool,
 }
@@ -1081,7 +1098,6 @@ impl Default for FindKeepOptimalOpts {
         Self {
             n_folds: 5,
             seed: None,
-            disable_parallelism: false,
             verbose: false,
         }
     }
@@ -1144,6 +1160,19 @@ pub fn spls1_find_keep_optimal(
     weights: Option<ColRef<'_, f64>>,
     opts: FindKeepOptimalOpts,
 ) -> PlsKitResult<FindKeepOptimalOutput> {
+    crate::fit::with_thread_limit(|| find_keep_optimal_impl(x, y, k, weights, opts))
+}
+
+/// Body of [`spls1_find_keep_optimal`], on the caller's pool.
+#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::many_single_char_names)]
+pub(crate) fn find_keep_optimal_impl(
+    x: MatRef<'_, f64>,
+    y: ColRef<'_, f64>,
+    k: usize,
+    weights: Option<ColRef<'_, f64>>,
+    opts: FindKeepOptimalOpts,
+) -> PlsKitResult<FindKeepOptimalOutput> {
     let n = x.nrows();
     if y.nrows() != n {
         return Err(PlsKitError::DimensionMismatch {
@@ -1177,7 +1206,7 @@ pub fn spls1_find_keep_optimal(
         let ss_tot = fd.ss_tot();
         let mut row = vec![f64::NAN; grid.len()];
         for (gi, &kp) in grid.iter().enumerate() {
-            let m = pls1_fit(
+            let m = pls1_fit_impl(
                 fd.xs_tr.as_ref(),
                 fd.ys_tr.as_ref(),
                 KSpec::Fixed(k),
@@ -1200,18 +1229,8 @@ pub fn spls1_find_keep_optimal(
     // shrinks the first weight vector (`‖select(X'y)‖ ≤ ‖X'y‖`), so a `y` the
     // dense fit cannot extract a component from gives none at any keep, and
     // one it can gives a component at the dense endpoint of the grid.
-    let (keep_star, cv_scores, cv_scores_se) = cv_select(
-        x,
-        y,
-        wref,
-        None,
-        n_folds,
-        &grid,
-        true,
-        opts.disable_parallelism,
-        &mut rng,
-        fold_work,
-    )?;
+    let (keep_star, cv_scores, cv_scores_se) =
+        cv_select(x, y, wref, None, n_folds, &grid, true, &mut rng, fold_work)?;
     // Nothing was swept when there is no first component (`keep_star = 0`).
     let grid = if keep_star == 0 { Vec::new() } else { grid };
 
@@ -1229,18 +1248,10 @@ pub fn spls1_find_keep_optimal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fit::pls1_fit;
+    use crate::test_support::synth;
     use faer::Mat;
     use rand::SeedableRng;
-
-    fn synth(n: usize, d: usize, k_signal: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
-        use rand::RngExt;
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-        let x = Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0));
-        let beta = Col::<f64>::from_fn(d, |j| if j < k_signal { 1.0 } else { 0.0 });
-        let y_signal: Col<f64> = x.as_ref() * beta.as_ref();
-        let y = Col::<f64>::from_fn(n, |i| y_signal[i] * snr + rng.random_range(-1.0..1.0));
-        (x, y)
-    }
 
     /// The two inputs whose full-data fit truncates at the first component:
     /// a constant `y`, and a `y` residualized on `[1, X]` (orthogonal to the
@@ -1525,6 +1536,8 @@ mod tests {
     /// zero-variance column happens to fit; either way `n = 2` must be
     /// rejected, the same degeneracy `raw_perm` rejects, just surfacing
     /// through the per-fold-averaged convention instead of the pooled one.
+    /// The `spls1_find_keep_optimal` row covers the second call site of
+    /// `reject_cv_leave_one_out`.
     #[test]
     fn optimal_rejects_leave_one_out_at_n_eq_2() {
         let (x, y) = synth(2, 3, 1, 4.0, 6);
@@ -1544,6 +1557,17 @@ mod tests {
                 "{selector:?}: expected InvalidArgument for n = 2, got {r:?}"
             );
         }
+        let r = spls1_find_keep_optimal(
+            x.as_ref(),
+            y.as_ref(),
+            1,
+            None,
+            FindKeepOptimalOpts::default(),
+        );
+        assert!(
+            matches!(r, Err(PlsKitError::InvalidArgument(_))),
+            "find_keep: expected InvalidArgument for n = 2, got {r:?}"
+        );
     }
 
     /// The `split_nb` gate reads its effective-sample input off ONE formula
@@ -1669,27 +1693,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn optimal_score_diagnostic_rejected() {
-        let (x, y) = synth(60, 5, 1, 4.0, 3);
-        let err = pls1_find_k_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            3,
-            None,
-            FindKOptimalOpts {
-                diagnostic: Some(ConfirmatoryMethod::Score),
-                ..Default::default()
-            },
-        );
-        assert!(matches!(err, Err(PlsKitError::InvalidArgument(_))));
-    }
-
     /// `force` has to be reachable from the optimal entry point's diagnostic
     /// too, not only from the sequence API: n = 20 trips the gate, and only
     /// the opts field can hold NB in place. The gate is hoisted into
     /// `run_incremental_sequence`, so the diagnostic path inherits it and the
     /// echoed name says what ran (`"split_exact"` on the unforced call).
+    /// The gate's rank survives the trip out through the diagnostic branch,
+    /// and only the `split_nb` diagnostic produces it.
     #[test]
     fn optimal_diagnostic_force_is_settable_from_public_opts() {
         let (x, y) = synth(20, 5, 1, 5.0, 1);
@@ -1703,8 +1713,26 @@ mod tests {
         };
         let rerouted = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, None, opts(false)).unwrap();
         assert_eq!(rerouted.diagnostic.as_deref(), Some("split_exact"));
+        assert!(rerouted.stable_rank.is_some());
         let forced = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, None, opts(true)).unwrap();
         assert_eq!(forced.diagnostic.as_deref(), Some("split_nb"));
+        for diagnostic in [Some(ConfirmatoryMethod::RawPerm), None] {
+            let r = pls1_find_k_optimal(
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                None,
+                FindKOptimalOpts {
+                    diagnostic,
+                    n_splits: 10,
+                    n_perm: 50,
+                    seed: Some(7),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(r.stable_rank.is_none(), "{diagnostic:?}");
+        }
     }
 
     /// On an adequate design (n = 80) the `split_nb` gate clears, and the
@@ -1757,38 +1785,102 @@ mod tests {
         assert!(rerouted.stable_rank.is_some());
     }
 
-    /// The sequence-level rank has to survive the trip out through
-    /// `find_k_optimal`'s diagnostic branch, and only that branch produces it.
+    /// The sequence resolves `Auto` once on the full X, so at one seed it
+    /// returns what an explicit sequence of the resolved method returns,
+    /// field by field except `stable_rank`: n = 60 resolves to
+    /// `split_exact`, n = 300 with ten iid columns to `split_nb`.
     #[test]
-    fn optimal_diagnostic_carries_the_gate_rank() {
-        let (x, y) = synth(20, 5, 1, 5.0, 1);
-        let run = |diagnostic| {
+    fn sequence_auto_matches_the_resolved_method_at_the_same_seed() {
+        let opts = |test_method| FindKSequenceOpts {
+            test_method,
+            n_perm: 19,
+            n_splits: 4,
+            seed: Some(5),
+            ..Default::default()
+        };
+        for ((x, y), explicit, has_rank) in [
+            (
+                synth(60, 6, 1, 4.0, 2),
+                ConfirmatoryMethod::SplitExact,
+                false,
+            ),
+            (synth(300, 10, 1, 1.0, 3), ConfirmatoryMethod::SplitNb, true),
+        ] {
+            let run = |m| pls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, None, opts(m)).unwrap();
+            let mut got = run(ConfirmatoryMethod::Auto);
+            let mut want = run(explicit);
+            assert_eq!(got.test_method, explicit.as_str());
+            assert_eq!(got.stable_rank.is_some(), has_rank, "{explicit:?}");
+            got.stable_rank = None;
+            want.stable_rank = None;
+            assert_eq!(format!("{got:?}"), format!("{want:?}"), "{explicit:?}");
+        }
+    }
+
+    /// Under `Auto` the sequence checks `split_exact`'s count floors and
+    /// refuses `force` before it resolves, so all three hold on a design that
+    /// resolves to `split_nb`.
+    #[test]
+    fn sequence_auto_rejects_bad_counts_and_force() {
+        let (x, y) = synth(300, 10, 1, 1.0, 3);
+        let base = FindKSequenceOpts {
+            test_method: ConfirmatoryMethod::Auto,
+            n_perm: 19,
+            n_splits: 4,
+            seed: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(
+            pls1_find_k_sequence(x.as_ref(), y.as_ref(), 1, None, base)
+                .unwrap()
+                .test_method,
+            "split_nb"
+        );
+        for (tag, opts) in [
+            ("n_perm = 0", FindKSequenceOpts { n_perm: 0, ..base }),
+            (
+                "n_splits = 1",
+                FindKSequenceOpts {
+                    n_splits: 1,
+                    ..base
+                },
+            ),
+            (
+                "force",
+                FindKSequenceOpts {
+                    force: true,
+                    ..base
+                },
+            ),
+        ] {
+            let r = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 1, None, opts);
+            assert!(
+                matches!(r, Err(PlsKitError::InvalidArgument(_))),
+                "{tag}: {r:?}"
+            );
+        }
+    }
+
+    /// `Score` has no sequential variant, as a diagnostic or as the
+    /// sequence's own method, and `Auto` is not a diagnostic. Each refusal
+    /// has its own message.
+    #[test]
+    fn score_and_auto_are_refused_where_they_have_no_meaning() {
+        let (x, y) = synth(60, 5, 1, 4.0, 3);
+        let optimal = |diagnostic| {
             pls1_find_k_optimal(
                 x.as_ref(),
                 y.as_ref(),
-                2,
+                3,
                 None,
                 FindKOptimalOpts {
-                    diagnostic,
-                    n_splits: 10,
-                    n_perm: 50,
-                    seed: Some(7),
+                    diagnostic: Some(diagnostic),
                     ..Default::default()
                 },
             )
-            .unwrap()
+            .map(|_| ())
         };
-        let gated = run(Some(ConfirmatoryMethod::SplitNb));
-        assert_eq!(gated.diagnostic.as_deref(), Some("split_exact"));
-        assert!(gated.stable_rank.is_some());
-        assert!(run(Some(ConfirmatoryMethod::RawPerm)).stable_rank.is_none());
-        assert!(run(None).stable_rank.is_none());
-    }
-
-    #[test]
-    fn sequence_score_rejected() {
-        let (x, y) = synth(60, 5, 1, 4.0, 3);
-        let err = pls1_find_k_sequence(
+        let sequence = pls1_find_k_sequence(
             x.as_ref(),
             y.as_ref(),
             3,
@@ -1797,8 +1889,30 @@ mod tests {
                 test_method: ConfirmatoryMethod::Score,
                 ..Default::default()
             },
-        );
-        assert!(matches!(err, Err(PlsKitError::InvalidArgument(_))));
+        )
+        .map(|_| ());
+        for (row, got, want) in [
+            (
+                "optimal, diagnostic score",
+                optimal(ConfirmatoryMethod::Score),
+                "score has no sequential variant",
+            ),
+            (
+                "sequence, test_method score",
+                sequence,
+                "test_method='score' has no sequential variant",
+            ),
+            (
+                "optimal, diagnostic auto",
+                optimal(ConfirmatoryMethod::Auto),
+                "diagnostic does not accept 'auto'",
+            ),
+        ] {
+            match got {
+                Err(PlsKitError::InvalidArgument(msg)) => assert_eq!(msg, want, "{row}"),
+                other => panic!("{row}: expected InvalidArgument, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1806,19 +1920,39 @@ mod tests {
         // keep = n_features must reproduce pls1_find_k_optimal exactly
         // (same seed → same RNG stream → identical floats).
         let (x, y) = synth(80, 5, 1, 5.0, 1);
-        let opts = FindKOptimalOpts {
-            selector: Selector::R2Se,
-            seed: Some(7),
-            ..Default::default()
-        };
-        let dense = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, None, opts).unwrap();
-        let sparse = spls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, 5, None, opts).unwrap();
-        assert_eq!(dense.k_star, sparse.k_star);
-        assert_eq!(dense.seed, sparse.seed);
-        let (dm, sm) = (dense.cv_scores.unwrap(), sparse.cv_scores.unwrap());
-        assert_eq!(dm.len(), sm.len());
-        for (k, v) in &dm {
-            assert_eq!(v.to_bits(), sm[k].to_bits(), "cv_scores[{k}]");
+        for diagnostic in [None, Some(ConfirmatoryMethod::SplitExact)] {
+            let opts = FindKOptimalOpts {
+                selector: Selector::R2Se,
+                diagnostic,
+                n_perm: 99,
+                seed: Some(7),
+                ..Default::default()
+            };
+            let dense = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, None, opts).unwrap();
+            let sparse = spls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, 5, None, opts).unwrap();
+            assert_eq!(dense.k_star, sparse.k_star, "{diagnostic:?}");
+            assert_eq!(dense.seed, sparse.seed, "{diagnostic:?}");
+            let (dm, sm) = (dense.cv_scores.unwrap(), sparse.cv_scores.unwrap());
+            assert_eq!(dm.len(), sm.len());
+            for (k, v) in &dm {
+                assert_eq!(
+                    v.to_bits(),
+                    sm[k].to_bits(),
+                    "{diagnostic:?} cv_scores[{k}]"
+                );
+            }
+            let bits =
+                |p: Option<Col<f64>>| p.map(|p| p.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
+            assert_eq!(
+                bits(dense.pvalues),
+                bits(sparse.pvalues),
+                "{diagnostic:?} pvalues"
+            );
+            assert_eq!(
+                dense.stable_rank.map(f64::to_bits),
+                sparse.stable_rank.map(f64::to_bits),
+                "{diagnostic:?} stable_rank"
+            );
         }
     }
 
@@ -1856,59 +1990,71 @@ mod tests {
         );
     }
 
-    /// `keep` outside `1..=n_features` is rejected by both keep-taking
-    /// `find_k` entry points.
+    /// `keep` above `n_features` is rejected by both keep-taking `find_k`
+    /// entry points.
     #[test]
     fn spls1_find_k_entries_reject_bad_keep() {
         let (x, y) = synth(60, 5, 1, 4.0, 3);
-        for keep in [0_usize, 9] {
-            let e = spls1_find_k_optimal(
-                x.as_ref(),
-                y.as_ref(),
-                3,
-                keep,
-                None,
-                FindKOptimalOpts::default(),
-            );
-            assert!(
-                matches!(e, Err(PlsKitError::InvalidArgument(_))),
-                "optimal keep={keep}: {e:?}"
-            );
-            let e = spls1_find_k_sequence(
-                x.as_ref(),
-                y.as_ref(),
-                3,
-                keep,
-                None,
-                FindKSequenceOpts::default(),
-            );
-            assert!(
-                matches!(e, Err(PlsKitError::InvalidArgument(_))),
-                "sequence keep={keep}: {e:?}"
-            );
-        }
+        let keep = 9;
+        let e = spls1_find_k_optimal(
+            x.as_ref(),
+            y.as_ref(),
+            3,
+            keep,
+            None,
+            FindKOptimalOpts::default(),
+        );
+        assert!(
+            matches!(e, Err(PlsKitError::InvalidArgument(_))),
+            "optimal keep={keep}: {e:?}"
+        );
+        let e = spls1_find_k_sequence(
+            x.as_ref(),
+            y.as_ref(),
+            3,
+            keep,
+            None,
+            FindKSequenceOpts::default(),
+        );
+        assert!(
+            matches!(e, Err(PlsKitError::InvalidArgument(_))),
+            "sequence keep={keep}: {e:?}"
+        );
     }
 
     #[test]
     fn spls1_find_k_sequence_dense_endpoint_bit_parity() {
         let (x, y) = synth(80, 5, 1, 5.0, 1);
-        let opts = FindKSequenceOpts {
-            test_method: ConfirmatoryMethod::SplitNb,
-            n_splits: 30,
-            alpha: 0.05,
-            seed: Some(7),
-            ..Default::default()
-        };
-        let dense = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, None, opts).unwrap();
-        let sparse = spls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, 5, None, opts).unwrap();
-        assert_eq!(dense.k_star, sparse.k_star);
-        assert_eq!(dense.seed, sparse.seed);
-        for i in 0..4 {
+        for test_method in [
+            ConfirmatoryMethod::SplitNb,
+            ConfirmatoryMethod::SplitExact,
+            ConfirmatoryMethod::Auto,
+        ] {
+            let opts = FindKSequenceOpts {
+                test_method,
+                n_splits: 30,
+                n_perm: 99,
+                alpha: 0.05,
+                seed: Some(7),
+                ..Default::default()
+            };
+            let dense = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, None, opts).unwrap();
+            let sparse = spls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, 5, None, opts).unwrap();
+            assert_eq!(dense.k_star, sparse.k_star, "{test_method:?}");
+            assert_eq!(dense.seed, sparse.seed, "{test_method:?}");
+            assert_eq!(dense.test_method, sparse.test_method, "{test_method:?}");
             assert_eq!(
-                dense.pvalues[i].to_bits(),
-                sparse.pvalues[i].to_bits(),
-                "pvalues[{i}]"
+                dense.stable_rank.map(f64::to_bits),
+                sparse.stable_rank.map(f64::to_bits),
+                "{test_method:?} stable_rank"
             );
+            for i in 0..4 {
+                assert_eq!(
+                    dense.pvalues[i].to_bits(),
+                    sparse.pvalues[i].to_bits(),
+                    "{test_method:?} pvalues[{i}]"
+                );
+            }
         }
     }
 
@@ -1967,30 +2113,7 @@ mod tests {
         assert!(r.keep_grid.contains(&r.keep_star));
     }
 
-    /// `n = 2` is leave-one-out: `cv_n_folds`'s floor of 2 pushes the
-    /// effective fold count back up to `n`, so every training fold has 1
-    /// row, too few to fit anything. The CV score is then `NaN` or an
-    /// uninformative constant (this fold's zero-variance training column
-    /// happens to fit a trivial zero model, so the score comes out finite
-    /// but still uninformative); either way `n = 2` must be rejected, the
-    /// same degeneracy `raw_perm` rejects.
-    #[test]
-    fn spls1_find_keep_optimal_rejects_leave_one_out_at_n_eq_2() {
-        let (x, y) = synth(2, 5, 1, 4.0, 2);
-        let r = spls1_find_keep_optimal(
-            x.as_ref(),
-            y.as_ref(),
-            1,
-            None,
-            FindKeepOptimalOpts::default(),
-        );
-        assert!(
-            matches!(r, Err(PlsKitError::InvalidArgument(_))),
-            "expected InvalidArgument for n = 2, got {r:?}"
-        );
-    }
-
-    /// `k = 0` is `fit::boundary_tests::k_zero_is_invalid_argument_at_every_entry`.
+    /// `k = 0` is `fit::boundary_tests::zero_count_is_invalid_argument_at_every_entry`.
     #[test]
     fn spls1_find_keep_optimal_rejects_k_above_n_features() {
         let (x, y) = synth(40, 5, 1, 4.0, 2);

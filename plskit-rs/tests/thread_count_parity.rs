@@ -1,11 +1,10 @@
 //! Byte-parity across Rayon pool sizes.
 //!
-//! `byte_parity.rs` compares serial (`disable_parallelism`) with parallel
-//! execution at whatever pool size the process has, so it cannot see a
-//! result whose bits depend on *how many* threads the pool has: one process
-//! has one `RAYON_NUM_THREADS`. This file runs the same public call inside
-//! Rayon pools of 1, 3 and 5 threads (`ThreadPoolBuilder::install`) in one
-//! process and requires the outputs to be bitwise identical.
+//! One process has one global pool size, so a result whose bits depend on
+//! *how many* threads the pool has cannot show up in a single run. This file
+//! runs the same public call inside Rayon pools of 1, 3 and 5 threads
+//! (`ThreadPoolBuilder::install`) in one process and requires the outputs
+//! to be bitwise identical.
 //!
 //! Outputs are compared through their `Debug` rendering. Rust prints an
 //! `f64` with `{:?}` as the shortest string that round-trips to the same
@@ -35,70 +34,22 @@
 //! these calls reach panics, naming the site, instead of passing by luck
 //! at a shape too small to split.
 
+mod common;
+
 use std::fmt::Debug;
 
+use common::{perm_opts, synth};
 use faer::{Col, Mat, MatRef};
 use plskit::{
     pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_null,
-    pls1_rotation_stability, pls3_confirmatory_test, pls3_fit, split_nb_gate, spls1_fit, spls3_fit,
-    CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
-    FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, PermNullOpts, Pls1Model,
-    Pls3ConfirmatoryTestOpts, Pls3FitOpts, RotationStabilityMethod, RotationStabilityOpts,
-    Selector, VarimaxArgs,
+    pls1_rotation_stability, pls3_confirmatory_test, pls3_fit, split_nb_gate,
+    spls1_find_k_sequence, spls1_fit, spls3_fit, CIOpts, ConfirmatoryArgs, ConfirmatoryMethod,
+    ConfirmatoryTestInput, ConfirmatoryTestOpts, FindKOptimalOpts, FindKSequenceOpts, FitOpts,
+    KSpec, PermNullOpts, Pls3ConfirmatoryTestOpts, Pls3FitOpts, RotationStabilityMethod,
+    RotationStabilityOpts, Selector, VarimaxArgs,
 };
 
 const POOL_SIZES: [usize; 3] = [1, 3, 5];
-
-/// `a` and `b` agree entry by entry to `tol` relative to `1 + |b|`, with
-/// the same `k_used` and flags: the check for two fits whose only
-/// difference is the memory layout of `X`.
-fn assert_fit_close(a: &Pls1Model, b: &Pls1Model, tol: f64, what: &str) {
-    fn mat(m: &Mat<f64>) -> Vec<f64> {
-        (0..m.ncols())
-            .flat_map(|j| (0..m.nrows()).map(move |i| m[(i, j)]))
-            .collect()
-    }
-    fn col(c: &Col<f64>) -> Vec<f64> {
-        (0..c.nrows()).map(|i| c[i]).collect()
-    }
-    assert_eq!(a.k_used, b.k_used, "{what}: k_used");
-    assert_eq!(
-        (a.pre_standardized, a.keep),
-        (b.pre_standardized, b.keep),
-        "{what}: flags"
-    );
-    let pairs = [
-        ("t_scores", mat(&a.t_scores), mat(&b.t_scores)),
-        ("p_loadings", mat(&a.p_loadings), mat(&b.p_loadings)),
-        ("w_star", mat(&a.w_star), mat(&b.w_star)),
-        ("q", col(&a.q_loadings), col(&b.q_loadings)),
-        ("coef", col(&a.coef), col(&b.coef)),
-        ("beta", col(&a.beta), col(&b.beta)),
-        (
-            "scalars",
-            vec![a.intercept, a.n_eff],
-            vec![b.intercept, b.n_eff],
-        ),
-    ];
-    for (name, x, y) in pairs {
-        assert_eq!(x.len(), y.len(), "{what}: {name} length");
-        for (i, (u, v)) in x.iter().zip(&y).enumerate() {
-            assert!(
-                (u - v).abs() <= tol * (1.0 + v.abs()),
-                "{what}: {name}[{i}] {u} vs {v}"
-            );
-        }
-    }
-}
-
-fn synth(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
-    use rand::{RngExt, SeedableRng};
-    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-    let x = Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0));
-    let noise = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
-    let y = Col::<f64>::from_fn(n, |i| (x[(i, 0)] + 0.5 * x[(i, 1)]) * snr + noise[i]);
-    (x, y)
-}
 
 #[allow(clippy::many_single_char_names)]
 fn two_block(n: usize, p: usize, q: usize, seed: u64) -> (Mat<f64>, Mat<f64>) {
@@ -202,10 +153,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
     // The Python seam hands the kernel a row-major *view* of `X`
     // (`np_mat_view`, `MatRef::from_row_major_slice`) instead of a
     // column-major copy. The standardized X keeps a row-major input's
-    // layout, so that view agrees with the column-major case above to
-    // 1e-10 (not bit for bit), and must be pool-invariant on its own: a
-    // future change could make the row-major path pool-sensitive while
-    // each half-test still passes in isolation.
+    // layout, so that view must be pool-invariant on its own.
     let (x_col_major, y5) = synth(2000, 600, 1.0, 3);
     let mut x_row_major: Vec<f64> = Vec::with_capacity(2000 * 600);
     for i in 0..2000 {
@@ -214,32 +162,6 @@ fn pls1_fit_auto_is_pool_size_invariant() {
         }
     }
     let x_row_view = MatRef::from_row_major_slice(&x_row_major, 2000, 600);
-    let col_major_out = pool(1).install(|| {
-        pls1_fit(
-            x_col_major.as_ref(),
-            y5.as_ref(),
-            KSpec::Fixed(5),
-            None,
-            FitOpts::default(),
-        )
-        .unwrap()
-    });
-    let row_major_out = pool(1).install(|| {
-        pls1_fit(
-            x_row_view,
-            y5.as_ref(),
-            KSpec::Fixed(5),
-            None,
-            FitOpts::default(),
-        )
-        .unwrap()
-    });
-    assert_fit_close(
-        &row_major_out,
-        &col_major_out,
-        1e-10,
-        "pls1_fit 2000x600 k=5: row-major view vs column-major copy",
-    );
     c.check("pls1_fit row-major view 2000x600 k=5", || {
         pls1_fit(
             x_row_view,
@@ -421,6 +343,30 @@ fn split_exact_primal_is_pool_size_invariant() {
             26,
         )
     });
+    // Guard only (not shown to be pool-sensitive): the Gram-p refit route
+    // with `keep` (shape pinned in
+    // `fixture_route_pins::thread_count_parity_shapes_take_their_routes`).
+    let (xk, yk) = synth(2000, 200, 0.3, 63);
+    c.check("split_exact gram-p 2000x200 k=1 keep=10", || {
+        pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: xk.as_ref(),
+                y: yk.as_ref(),
+                k: 1,
+                weights: None,
+            },
+            ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::SplitExact {
+                    n_perm: 400,
+                    n_splits: 5,
+                },
+                seed: Some(3033),
+                keep: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    });
     c.finish();
 }
 
@@ -429,7 +375,7 @@ fn split_exact_nspace_is_pool_size_invariant() {
     let mut c = Checker::default();
     // Guard only: the n-space refit route (dense k = 2, 40x2000; the shape
     // and `n_perm` are pinned in
-    // `fixture_route_pins::byte_parity_shapes_take_their_routes`). Its 58
+    // `fixture_route_pins::thread_count_parity_shapes_take_their_routes`). Its 58
     // outcome columns run as three full runs of `dual_route::NSPACE_BATCH`
     // (16) and a partial one of 10.
     let (x, y) = synth(40, 2000, 1.0, 31);
@@ -498,6 +444,46 @@ fn other_pls1_confirmatory_methods_are_pool_size_invariant() {
             11,
         )
     });
+    // Guard only (not shown to be pool-sensitive): `raw_perm` on the n-space
+    // and the p-space Gram routes (shapes pinned in
+    // `fixture_route_pins::thread_count_parity_shapes_take_their_routes`).
+    // n_folds = 20 puts n_tr·d = 38·2000 past faer's GEMV split, but no pool
+    // size has been seen to change its output.
+    let (xw, yw) = synth(40, 2000, 1.0, 3);
+    for n_folds in [5, 20] {
+        c.check(
+            &format!("raw_perm n-space 40x2000 k=2 n_folds={n_folds}"),
+            || {
+                confirmatory(
+                    &xw,
+                    &yw,
+                    2,
+                    None,
+                    ConfirmatoryArgs::RawPerm {
+                        n_perm: 50,
+                        n_folds,
+                    },
+                    None,
+                    21,
+                )
+            },
+        );
+    }
+    let (xg, yg) = synth(2000, 50, 0.3, 62);
+    c.check("raw_perm gram-p 2000x50 k=2", || {
+        confirmatory(
+            &xg,
+            &yg,
+            2,
+            None,
+            ConfirmatoryArgs::RawPerm {
+                n_perm: 300,
+                n_folds: 5,
+            },
+            None,
+            3032,
+        )
+    });
     c.finish();
 }
 
@@ -512,16 +498,6 @@ fn subsample_ci_holdout_is_pool_size_invariant() {
         confirmatory(&x, &y, 2, None, ConfirmatoryArgs::Score, Some(CI), 14)
     });
     c.finish();
-}
-
-fn perm_opts() -> PermNullOpts {
-    PermNullOpts {
-        n_perm: 100,
-        return_perm_matrix: true,
-        pre_standardized: false,
-        disable_parallelism: false,
-        verbose: false,
-    }
 }
 
 #[test]
@@ -539,7 +515,7 @@ fn perm_null_is_pool_size_invariant() {
     });
     // Guard only (not shown to be pool-sensitive): the public
     // calls on the n-space and the p-space Gram routes (shapes pinned in
-    // `fixture_route_pins::byte_parity_shapes_take_their_routes`). Their
+    // `fixture_route_pins::thread_count_parity_shapes_take_their_routes`). Their
     // block builds are pinned kernel-level by
     // `dual_route::multi_k::tests::gram_products_are_thread_count_invariant_at_the_route_shapes`
     // and `gram_p::tests_block::c_build_is_thread_count_invariant_at_the_route_shapes`.
@@ -665,6 +641,55 @@ fn find_k_and_rotation_stability_are_pool_size_invariant() {
         )
         .unwrap()
     });
+    c.finish();
+}
+
+#[test]
+fn sparse_weighted_sequence_is_pool_size_invariant() {
+    let mut c = Checker::default();
+    // Guard only: the sparse weighted sequence (deflation, then one
+    // confirmatory test per k) under weights, keep and `pre_standardized`,
+    // on the two refitting engines. A weak signal and alpha = 0.95 keep
+    // every step running, with p-values off the 1 / (n_perm + 1) floor.
+    let (xs, ys) = {
+        use rand::{RngExt, SeedableRng};
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(4);
+        let x = Mat::<f64>::from_fn(60, 8, |_, _| rng.random_range(-1.0..1.0));
+        let noise = Col::<f64>::from_fn(60, |_| rng.random_range(-1.0..1.0));
+        let y = Col::<f64>::from_fn(60, |i| x[(i, 0)] * 0.5 + noise[i]);
+        (x, y)
+    };
+    let ws = Col::<f64>::from_fn(60, |i| {
+        if i % 9 == 8 {
+            0.0
+        } else {
+            0.5 + f64::from(u32::try_from(i % 5).unwrap()) * 0.25
+        }
+    });
+    for test_method in [ConfirmatoryMethod::RawPerm, ConfirmatoryMethod::SplitExact] {
+        c.check(
+            &format!("spls1_find_k_sequence 60x8 {test_method:?}"),
+            || {
+                spls1_find_k_sequence(
+                    xs.as_ref(),
+                    ys.as_ref(),
+                    3,
+                    3,
+                    Some(ws.as_ref()),
+                    FindKSequenceOpts {
+                        test_method,
+                        n_perm: 50,
+                        n_splits: 4,
+                        alpha: 0.95,
+                        pre_standardized: true,
+                        seed: Some(31),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+            },
+        );
+    }
     c.finish();
 }
 

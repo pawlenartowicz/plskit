@@ -384,6 +384,7 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_find_k_sequence::split_nb(root)?);
     cases.push(pls1_find_k_sequence::split_exact(root)?);
     cases.push(pls1_find_k_sequence::e(root)?);
+    cases.push(pls1_find_k_sequence::auto(root)?);
 
     cases.push(pls1_confirmatory_test::raw_perm(root)?);
     cases.push(pls1_confirmatory_test::split_nb(root)?);
@@ -391,6 +392,8 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_confirmatory_test::split_exact_k1(root)?);
     cases.push(pls1_confirmatory_test::score(root)?);
     cases.push(pls1_confirmatory_test::e(root)?);
+    cases.push(pls1_confirmatory_test::auto_split_exact(root)?);
+    cases.push(pls1_confirmatory_test::auto_split_nb(root)?);
     cases.push(pls1_confirmatory_test::split_nb_ci(root)?);
     cases.push(pls1_confirmatory_test::split_nb_ci_level80(root)?);
     cases.push(pls1_confirmatory_test::weighted_raw_perm(root)?);
@@ -447,6 +450,7 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls3::confirmatory_split_exact(root)?);
     cases.push(pls3::confirmatory_split_exact_wide(root)?);
     cases.push(pls3::confirmatory_split_nb(root)?);
+    cases.push(pls3::confirmatory_auto_split_exact(root)?);
 
     cases.push(spls3_fit::small_n50_p10_q4_keep3_2_k2(root)?);
     cases.push(spls3_fit::dense_endpoint_n50_p10_q4_k2(root)?);

@@ -1,4 +1,4 @@
-//! K selection (`*_find_k_optimal`, `*_find_k_sequence`,
+//! K selection (`*_find_k_optimal`, `pls1_find_k_sequence`,
 //! `spls1_find_keep_optimal`) and `pls1_fit`'s string `k`.
 #![allow(clippy::many_single_char_names)]
 
@@ -39,12 +39,6 @@ fn r2_se_scores_cover_one_to_k_max() {
     };
     assert_eq!(cv.iter().map(|p| p.0).collect::<Vec<_>>(), [1, 2, 3, 4]);
     assert!(field(r, "bic_scores").is_null());
-}
-
-#[test]
-fn bic_fills_bic_scores() {
-    let o = optimal(vec![("selector", Value::text("bic"))]).unwrap();
-    assert!(matches!(field(record(&o), "bic_scores"), Value::IntMap(_)));
 }
 
 #[test]
@@ -295,20 +289,4 @@ fn keep_optimal_reports_its_grid() {
         ],
     );
     assert_eq!(e.code, "invalid_args");
-}
-
-#[test]
-fn spls1_sequence_runs_at_a_fixed_keep() {
-    let (x, y) = xy();
-    let o = ok(
-        "spls1_find_k_sequence",
-        vec![
-            ("X", x),
-            ("y", y),
-            ("k_max", Value::I64(3)),
-            ("keep", Value::I64(3)),
-            ("seed", Value::U64(1)),
-        ],
-    );
-    check_record(record(&o)).unwrap();
 }

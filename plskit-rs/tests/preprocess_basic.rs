@@ -47,6 +47,23 @@ fn preprocess_populates_exactly_the_inputs_given() {
     }
 }
 
+/// An X with no columns is accepted and comes back with no columns.
+#[test]
+fn zero_column_x_keeps_its_shape() {
+    let x = Mat::<f64>::zeros(3, 0);
+    let r = preprocess(PreprocessInput {
+        x: Some(x.as_ref()),
+        y: None,
+        weights: None,
+    })
+    .unwrap();
+    let (xs, mean, scale) = r.x_std.unwrap();
+    assert_eq!(
+        (xs.nrows(), xs.ncols(), mean.nrows(), scale.nrows()),
+        (3, 0, 0, 0)
+    );
+}
+
 #[test]
 fn x_y_shape_mismatch_errors() {
     let (x, _, _) = small();
@@ -171,16 +188,18 @@ fn y_std_matches_hand_computed_weighted_population_std() {
 /// All-equal weights: `weights_normalized` is still echoed, and `n_eff` is
 /// exactly `n`, the value `pls1_fit` reports for the same weights (Kish's
 /// ratio of 0.3s rounds an ulp below 3). Unequal weights keep Kish's value.
+/// The fitted model echoes all-equal weights as `None` and unequal ones
+/// normalized to mean one (`w·n/Σw`).
 #[test]
 #[allow(clippy::many_single_char_names)]
 fn all_equal_weights_report_n_eff_n_like_the_fits() {
     let x = Mat::from_fn(3, 2, |i, j| ((i + 1) * (j + 2)) as f64 + (i * i) as f64);
     let y = Col::<f64>::from_fn(3, |i| [1.0, 3.0, 2.0][i]);
     let yb = Mat::from_fn(3, 1, |i, _| y[i]);
-    for (w, want) in [
-        ([0.3; 3], 3.0_f64),
-        ([1e6; 3], 3.0),
-        ([1.0, 1.0, 2.0], 16.0 / 6.0),
+    for (w, want, echo) in [
+        ([0.3; 3], 3.0_f64, None),
+        ([1e6; 3], 3.0, None),
+        ([1.0, 1.0, 2.0], 16.0 / 6.0, Some([0.75, 0.75, 1.5])),
     ] {
         let w = Col::<f64>::from_fn(3, |i| w[i]);
         let r = preprocess(PreprocessInput {
@@ -208,6 +227,16 @@ fn all_equal_weights_report_n_eff_n_like_the_fits() {
         assert_eq!(r.n_eff.map(f64::to_bits), Some(want.to_bits()), "{what}");
         assert_eq!(b.n_eff.map(f64::to_bits), Some(want.to_bits()), "{what}");
         assert_eq!(fit.n_eff.to_bits(), want.to_bits(), "{what}: pls1_fit");
+        match (&fit.weights, echo) {
+            (None, None) => {}
+            (Some(got), Some(want)) => {
+                assert_eq!(got.nrows(), 3, "{what}: echoed weights");
+                for i in 0..3 {
+                    assert_relative_eq!(got[i], want[i], epsilon = 1e-15);
+                }
+            }
+            (got, want) => panic!("{what}: echoed weights {got:?}, expected {want:?}"),
+        }
     }
 }
 

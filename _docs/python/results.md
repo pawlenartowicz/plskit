@@ -121,7 +121,7 @@ method the auto-gate resolved to.
 | `alpha` | `float` | always |
 | `seed` | `int` | always |
 | `n_eff` | `float` | always; equals `n` for uniform/absent weights |
-| `stable_rank` | `float \| None` | `test_method="split_nb"` requested — fired or not, including under `force` |
+| `stable_rank` | `float \| None` | set on an explicit `test_method="split_nb"` request (fired or not, including under `force`), and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff ≥ 250, and p ≤ 100·n without `keep`); `None` otherwise |
 
 Closed testing on nested H is exact, so `pvalues[:k_star]` is an
 honest FWER-controlled sequence. To get the path-max p-value
@@ -129,7 +129,7 @@ along the rejected chain, compute `np.nanmax(pvalues[:k_star])`.
 
 On both result types `stable_rank` is what the auto-gate saw on the
 undeflated `X`, so when `test_method` / `diagnostic` reads
-`"split_exact"` after a `"split_nb"` request, it and `n_eff` are the
+`"split_exact"` after an explicit `"split_nb"` request, it and `n_eff` are the
 two numbers that explain why. Use `split_nb_gate` to get them without
 running a test.
 
@@ -163,14 +163,14 @@ input gives `k_star = 0` from `spls1_find_k_optimal`.
 |---|---|---|
 | `pvalue` | `float` | always |
 | `statistic` | `float` | always |
-| `test_method` | `str` | one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`; `"split_exact"` when a `"split_nb"` request was rerouted by the auto-gate |
+| `test_method` | `str` | the method that ran: one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`, never `"auto"`; `"split_exact"` when an explicit `"split_nb"` request was rerouted by the auto-gate |
 | `k` | `int` | the K tested (echoed from the input) |
 | `n_perm` | `int \| None` | not None for resampling-family methods, None for `score` / `e` |
 | `n_splits` | `int \| None` | not None for `split_*` methods, None for `raw_perm` / `score` / `e` |
 | `seed` | `int` | always |
 | `n_eff` | `float` | always; Kish effective sample size, equals `n` for uniform/absent weights |
 | `rho_hat` | `float \| None` | `split_nb` only, and only when unweighted (no weights, or all-equal weights) with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
-| `stable_rank` | `float \| None` | stable rank of the standardized `X`, as seen by the `split_nb` auto-gate; populated whenever `"split_nb"` was requested (fired or not, including under `force`), `None` for every other requested method |
+| `stable_rank` | `float \| None` | stable rank of the standardized `X`, as seen by the `split_nb` auto-gate; set on an explicit `"split_nb"` request (fired or not, including under `force`), and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff ≥ 250, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise |
 | `ci` | `ConfirmatoryCI \| None` | not None when called with `ci=True`; carries the rotation-invariant resampling CIs (subsampling for β and `holdout_corr`, bootstrap for leverage) |
 
 There is no `at` field (legacy concept dropped). There is no
@@ -182,7 +182,7 @@ dropped from the public surface; only the headline result and
 
 | Field | Python type | Notes |
 |---|---|---|
-| `fires` | `bool` | `True` → a `"split_nb"` request on this `X` reroutes to `"split_exact"` |
+| `fires` | `bool` | `True` → an explicit `"split_nb"` request on this `X` reroutes to `"split_exact"` |
 | `stable_rank` | `float` | stable rank of the standardized `X` |
 | `n_eff` | `float` | Kish effective sample size; equals `n` for uniform/absent weights |
 

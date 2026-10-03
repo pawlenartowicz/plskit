@@ -214,7 +214,6 @@ fn coverage_mc_two_sided_grid() {
                                 max_failure_rate: 0.0,
                             }),
                             seed: Some(oracle_seed ^ 0xC0FF_EE00_C0FF_EE00),
-                            disable_parallelism: false,
                             ..Default::default()
                         };
                         let oracle_r = pls1_confirmatory_test(
@@ -267,7 +266,6 @@ fn coverage_mc_two_sided_grid() {
                                 max_failure_rate: 0.0,
                             }),
                             seed: Some(dataset_seed ^ 0xBEEF_BEEF_BEEF_BEEF),
-                            disable_parallelism: false,
                             ..Default::default()
                         };
                         let r = pls1_confirmatory_test(

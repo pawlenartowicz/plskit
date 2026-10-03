@@ -3,7 +3,7 @@
 
 Usage:
     python3 scripts/memprobe.py CALL N P B PAR [--k K] [--n-folds F]
-        one probe; PAR is 0 (serial) or 1 (parallel)
+        one probe; PAR is 0 (PLSKIT_NUM_THREADS=1) or 1 (unset)
     python3 scripts/memprobe.py --table [--out FILE] [--k K] [--n-folds F]
         the reference shapes, serial and parallel
     python3 scripts/memprobe.py --list
@@ -23,6 +23,7 @@ workspace root). A dev tool, not a CI gate.
 from __future__ import annotations
 
 import argparse
+import os
 import resource
 import subprocess
 import sys
@@ -53,36 +54,36 @@ def peak_mb() -> float:
     return r / 2**20 if sys.platform == "darwin" else r / 2**10
 
 
-def calls(plskit, X, y, Y, w, b: int, dp: bool, k: int = 2, n_folds: int | None = None) -> dict:
+def calls(plskit, X, y, Y, w, b: int, k: int = 2, n_folds: int | None = None) -> dict:
     rp_args = {"n_perm": b} if n_folds is None else {"n_perm": b, "n_folds": n_folds}
     return {
         "fit": lambda: plskit.pls1_fit(X, y, k=k),
-        "perm": lambda: plskit.pls1_perm_null(X, y, k=k, n_perm=b, seed=1, disable_parallelism=dp),
+        "perm": lambda: plskit.pls1_perm_null(X, y, k=k, n_perm=b, seed=1),
         "perm_w": lambda: plskit.pls1_perm_null(
-            X, y, k=k, n_perm=b, seed=1, disable_parallelism=dp, weights=w
+            X, y, k=k, n_perm=b, seed=1, weights=w
         ),
         "perm_mat": lambda: plskit.pls1_perm_null(
-            X, y, k=k, n_perm=b, seed=1, disable_parallelism=dp, return_perm_matrix=True
+            X, y, k=k, n_perm=b, seed=1, return_perm_matrix=True
         ),
         "rotstab": lambda: plskit.pls1_rotation_stability(
-            X, y, k=k, n_boot=b, seed=1, disable_parallelism=dp
+            X, y, k=k, n_boot=b, seed=1
         ),
         "ci": lambda: plskit.pls1_confirmatory_test(
-            X, y, k=k, test_method="split_exact", ci=True, n_boot=b, seed=1, disable_parallelism=dp
+            X, y, k=k, test_method="split_exact", ci=True, n_boot=b, seed=1
         ),
         "split_exact": lambda: plskit.pls1_confirmatory_test(
-            X, y, k=k, test_method="split_exact", args={"n_perm": b}, seed=1, disable_parallelism=dp
+            X, y, k=k, test_method="split_exact", args={"n_perm": b}, seed=1
         ),
         "raw_perm": lambda: plskit.pls1_confirmatory_test(
-            X, y, k=k, test_method="raw_perm", args=rp_args, seed=1, disable_parallelism=dp
+            X, y, k=k, test_method="raw_perm", args=rp_args, seed=1
         ),
         "raw_perm_w": lambda: plskit.pls1_confirmatory_test(
-            X, y, k=k, test_method="raw_perm", args=rp_args, seed=1, disable_parallelism=dp,
+            X, y, k=k, test_method="raw_perm", args=rp_args, seed=1,
             weights=w,
         ),
-        "findk": lambda: plskit.pls1_find_k_optimal(X, y, k_max=4, seed=1, disable_parallelism=dp),
+        "findk": lambda: plskit.pls1_find_k_optimal(X, y, k_max=4, seed=1),
         "pls3": lambda: plskit.pls3_confirmatory_test(
-            X, Y, k=1, test_method="split_exact", seed=1, disable_parallelism=dp
+            X, Y, k=1, test_method="split_exact", seed=1
         ),
     }
 
@@ -91,6 +92,10 @@ def probe(call: str, n: int, p: int, b: int, par: bool, k: int, n_folds: int | N
     import numpy as np
     import plskit
 
+    if par:
+        os.environ.pop("PLSKIT_NUM_THREADS", None)
+    else:
+        os.environ["PLSKIT_NUM_THREADS"] = "1"
     rng = np.random.default_rng(0)
     X = rng.standard_normal((n, p))
     y = X[:, :5].sum(axis=1) + rng.standard_normal(n)
@@ -98,7 +103,7 @@ def probe(call: str, n: int, p: int, b: int, par: bool, k: int, n_folds: int | N
         [y, X[:, 5:8].sum(axis=1) + rng.standard_normal(n), rng.standard_normal(n)]
     )
     w = 0.5 + (np.arange(n) % 5) * 0.25
-    fn = calls(plskit, X, y, Y, w, b, not par, k, n_folds)[call]
+    fn = calls(plskit, X, y, Y, w, b, k, n_folds)[call]
     base = peak_mb()
     t0 = time.perf_counter()
     fn()
@@ -143,7 +148,7 @@ def main() -> int:
     ap.add_argument("--n-folds", type=int, default=None, help="raw_perm fold count")
     args = ap.parse_args()
     if args.list:
-        print("\n".join(calls(None, None, None, None, None, 0, True)))
+        print("\n".join(calls(None, None, None, None, None, 0)))
         return 0
     if args.table:
         return table(args.out, args.k, args.n_folds)

@@ -11,30 +11,13 @@
 use super::*;
 use crate::fit::{pls1_fit_prepared_fro, ParChoice, PreparedFit};
 use crate::linalg::{standardize, standardize1};
-use crate::resample::block_par;
+use crate::test_support::assert_mat_bits_eq;
 use faer::{Col, Mat, Par};
 use rand::{RngExt, SeedableRng};
 
 fn uniform(n: usize, p: usize, seed: u64) -> Mat<f64> {
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
     Mat::<f64>::from_fn(n, p, |_, _| rng.random_range(-1.0..1.0))
-}
-
-fn assert_bits_eq(a: &Mat<f64>, b: &Mat<f64>, what: &str) {
-    assert_eq!(
-        (a.nrows(), a.ncols()),
-        (b.nrows(), b.ncols()),
-        "{what}: shape"
-    );
-    for j in 0..a.ncols() {
-        for i in 0..a.nrows() {
-            assert_eq!(
-                a[(i, j)].to_bits(),
-                b[(i, j)].to_bits(),
-                "{what}[({i}, {j})]"
-            );
-        }
-    }
 }
 
 #[test]
@@ -114,8 +97,8 @@ fn k_is_the_per_replicate_multiplicity_of_the_flop_rule() {
 
 #[test]
 fn gram_products_are_thread_count_invariant_at_the_route_shapes() {
-    // (n_te, n_tr, p): the blocks this route builds in tests/byte_parity.rs
-    // and for the corpus fixtures (perm_null 40 × 2000 and 60 × 3000;
+    // (n_te, n_tr, p): the blocks this route builds for the corpus
+    // fixtures (perm_null 40 × 2000 and 60 × 3000;
     // raw_perm folds 8 × 32 over 2000 and 12 × 48 over 3000; split_exact
     // halves 20 × 20 over 2000 and 30 × 30 over 3000), the leave-one-out M
     // (1 × 39 over 2000 and 1 × 19 over 4000: n_tr·p ≥ 65 536, where faer's
@@ -139,9 +122,9 @@ fn gram_products_are_thread_count_invariant_at_the_route_shapes() {
         let g_seq = gram_of(xs.as_ref(), Par::Seq);
         let m_seq = cross_of(xt.as_ref(), xs.as_ref(), Par::Seq);
         let what = format!("n_te={n_te} n_tr={n_tr} p={p}");
-        assert_bits_eq(
-            &gram_of(xs.as_ref(), block_par(true)),
-            &g_seq,
+        assert_mat_bits_eq(
+            gram_of(xs.as_ref(), Par::Seq).as_ref(),
+            g_seq.as_ref(),
             &format!("G, {what}, serial"),
         );
         for threads in [2_usize, 7] {
@@ -151,12 +134,20 @@ fn gram_products_are_thread_count_invariant_at_the_route_shapes() {
                 .expect("pool");
             let (g, m) = pool.install(|| {
                 (
-                    gram_of(xs.as_ref(), block_par(false)),
-                    cross_of(xt.as_ref(), xs.as_ref(), block_par(false)),
+                    gram_of(xs.as_ref(), crate::fit::par_fixed()),
+                    cross_of(xt.as_ref(), xs.as_ref(), crate::fit::par_fixed()),
                 )
             });
-            assert_bits_eq(&g, &g_seq, &format!("G, {what}, {threads} threads"));
-            assert_bits_eq(&m, &m_seq, &format!("M, {what}, {threads} threads"));
+            assert_mat_bits_eq(
+                g.as_ref(),
+                g_seq.as_ref(),
+                &format!("G, {what}, {threads} threads"),
+            );
+            assert_mat_bits_eq(
+                m.as_ref(),
+                m_seq.as_ref(),
+                &format!("M, {what}, {threads} threads"),
+            );
         }
     }
 }

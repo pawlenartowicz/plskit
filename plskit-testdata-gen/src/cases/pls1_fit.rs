@@ -8,9 +8,7 @@ use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
 use anyhow::{bail, Result};
 
-use plskit::{
-    pls1_find_k_sequence, pls1_fit, ConfirmatoryMethod, FindKSequenceOpts, FitOpts, KSpec,
-};
+use plskit::{pls1_find_k_sequence, pls1_fit, FindKSequenceOpts, FitOpts, KSpec};
 use std::path::Path;
 
 /// Synth parameters for a fixed-k `pls1_fit` case.
@@ -181,15 +179,8 @@ pub fn small_n50_d10_sequence(root: &Path) -> Result<Case> {
         4_usize,
         None,
         FindKSequenceOpts {
-            test_method: ConfirmatoryMethod::SplitNb,
-            alpha: 0.05,
-            n_perm: 1000,
-            n_splits: 50,
-            force: false,
-            pre_standardized: false,
             seed: Some(42),
-            disable_parallelism: false,
-            verbose: false,
+            ..FindKSequenceOpts::default()
         },
     )?;
 

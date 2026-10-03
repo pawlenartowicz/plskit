@@ -8,18 +8,17 @@ pls1_find_k_sequence(
   X,
   y,
   k_max,
-  test_method = "split_nb",
+  test_method = "auto",
   alpha = NULL,
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL
 )
 }
 \arguments{
-\item{X, y, k_max, test_method, alpha, args, pre_standardized, seed, disable_parallelism, verbose, weights}{See the canonical reference.}
+\item{X, y, k_max, test_method, alpha, args, pre_standardized, seed, verbose, weights}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("find_k_sequence_result", "plskit_result")}.

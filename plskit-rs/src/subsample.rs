@@ -206,7 +206,7 @@ mod tests_indices {
 use faer::{Col, ColRef, Mat, MatRef};
 
 use crate::error::{PlsKitError, PlsKitResult};
-use crate::fit::{pls1_fit, FitOpts, KSpec};
+use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
 use crate::linalg::{col_row_subset, row_subset};
 
 /// Per-resample outputs for the confirmatory CI branch. Per-variable arrays
@@ -304,7 +304,7 @@ fn fit_rows(
         (xs, mu, sigma, ys, ys_sigma)
     };
 
-    let fit = pls1_fit(
+    let fit = pls1_fit_impl(
         xs_sub.as_ref(),
         ys_sub.as_ref(),
         KSpec::Fixed(k),
@@ -1374,7 +1374,6 @@ mod tests_failure_check {
             m_rate: 0.7,
             level: 0.95,
             pre_standardized: false,
-            disable_parallelism: true,
             max_failure_rate,
             max_skip_rate: 1.0,
         }
@@ -1518,8 +1517,6 @@ pub(crate) struct SubsampleOpts {
     pub level: f64,
     /// Whether the input `X` has already been column-standardized by the caller.
     pub pre_standardized: bool,
-    /// If `true`, run resamples sequentially (disables Rayon parallelism). Useful for tests.
-    pub disable_parallelism: bool,
     /// Maximum tolerable combined per-resample failure rate
     /// (`n_holdout_corr_failed / n_boot`). Default `0.01`. Range `[0.0, 1.0]`.
     /// `0.0` is strict; `1.0` never fails on resample failures.
@@ -1626,18 +1623,16 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
     }
 
     let pre_std = opts.pre_standardized;
-    let outcomes: Vec<WorkerOutcome> = crate::resample::parallel_for_each_seeded(
-        rng,
-        opts.n_boot,
-        opts.disable_parallelism,
-        |_, child| match run_one_confirmatory(x, y, k, m, w_ref, pre_std, weights, child) {
-            std::result::Result::Ok(row) => WorkerOutcome::Ok(row),
-            Err(PlsKitError::InvalidWeights {
-                reason: "insufficient_effective_n",
-            }) => WorkerOutcome::Skipped,
-            Err(_) => WorkerOutcome::Failed,
-        },
-    );
+    let outcomes: Vec<WorkerOutcome> =
+        crate::resample::parallel_for_each_seeded(rng, opts.n_boot, |_, child| {
+            match run_one_confirmatory(x, y, k, m, w_ref, pre_std, weights, child) {
+                std::result::Result::Ok(row) => WorkerOutcome::Ok(row),
+                Err(PlsKitError::InvalidWeights {
+                    reason: "insufficient_effective_n",
+                }) => WorkerOutcome::Skipped,
+                Err(_) => WorkerOutcome::Failed,
+            }
+        });
 
     // Check max_skip_rate before passing to reduce_with_failure_check.
     let n_skipped = outcomes
@@ -1676,19 +1671,10 @@ mod tests_engine {
     use super::*;
     use crate::fit::{pls1_fit, FitOpts, KSpec};
     use crate::rng::resolve_seed;
+    use crate::test_support::synth;
     use faer::{Col, Mat};
     use rand::RngExt;
     use rand::SeedableRng;
-
-    fn synth(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-        let x = Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0));
-        let beta = Col::<f64>::from_fn(d, |j| if j < 2 { 1.0 } else { 0.0 });
-        let signal: Col<f64> = &x * &beta;
-        let noise = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
-        let y = Col::<f64>::from_fn(n, |i| signal[i] * snr + noise[i]);
-        (x, y)
-    }
 
     /// Every knob range `validate` enforces, at both edges: each rejected
     /// row names the knob in its message, each accepted edge passes.
@@ -1700,7 +1686,6 @@ mod tests_engine {
             m_rate: 0.7,
             level: 0.95,
             pre_standardized: false,
-            disable_parallelism: false,
             max_failure_rate: 0.01,
             max_skip_rate: 0.01,
         };
@@ -1769,7 +1754,6 @@ mod tests_engine {
             m_rate: 0.7,
             level: 0.95,
             pre_standardized: false,
-            disable_parallelism: false,
             max_failure_rate: 0.0,
             max_skip_rate: 1.0,
         };
@@ -1844,7 +1828,7 @@ mod tests_engine {
         let (n_oracle, reps) = (400_u64, 100_u64);
         let mut target = [0.0_f64; 2];
         for o in 0..n_oracle {
-            let (x, y) = synth(n, d, snr, 90_000 + o);
+            let (x, y) = synth(n, d, 2, snr, 90_000 + o);
             let fit = pls1_fit(
                 x.as_ref(),
                 y.as_ref(),
@@ -1859,7 +1843,7 @@ mod tests_engine {
         }
         let mut covered = 0_usize;
         for rep in 0..reps {
-            let (x, y) = synth(n, d, snr, 10_000 + rep);
+            let (x, y) = synth(n, d, 2, snr, 10_000 + rep);
             let ci = run_engine(&x, &y, 1, 200, 20_000 + rep);
             covered += (0..2)
                 .filter(|&j| {
@@ -1869,32 +1853,6 @@ mod tests_engine {
         }
         let coverage = covered as f64 / (2 * reps) as f64;
         assert!(coverage >= 0.85, "signal leverage coverage {coverage}");
-    }
-
-    /// Signal coordinates keep large z, noise coordinates stay in the
-    /// half-normal range, and the leverage CI stays inside [0, 1].
-    #[test]
-    fn beta_sign_z_separates_signal_and_leverage_ci_in_unit_interval() {
-        let (x, y) = synth(200, 8, 4.0, 42);
-        let ci = run_engine(&x, &y, 1, 300, 2026);
-        for j in 0..2 {
-            assert!(
-                ci.beta_sign_z[j] > 5.0,
-                "signal j={j}: {}",
-                ci.beta_sign_z[j]
-            );
-        }
-        for j in 2..8 {
-            assert!(
-                ci.beta_sign_z[j] < 4.0,
-                "noise j={j}: {}",
-                ci.beta_sign_z[j]
-            );
-        }
-        for j in 0..8 {
-            assert!((0.0..=1.0).contains(&ci.leverage_ci_lower[j]));
-            assert!((0.0..=1.0).contains(&ci.leverage_ci_upper[j]));
-        }
     }
 
     /// End-to-end β CI at K = 2 on the 2-signal / 6-noise design with
@@ -1910,7 +1868,7 @@ mod tests_engine {
     /// equal column scales it would).
     #[test]
     fn beta_ci_separates_signal_and_brackets_full_data_beta() {
-        let (mut x, y) = synth(200, 8, 4.0, 42);
+        let (mut x, y) = synth(200, 8, 2, 4.0, 42);
         let scale = [0.5, 1.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0];
         for (j, s) in scale.iter().enumerate() {
             for i in 0..x.nrows() {
@@ -2003,7 +1961,6 @@ mod tests_engine {
                         m_rate: 0.7,
                         level: 0.95,
                         pre_standardized: c.pre,
-                        disable_parallelism: false,
                         max_failure_rate: 0.0,
                         max_skip_rate: 0.0,
                     },

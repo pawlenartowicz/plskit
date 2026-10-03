@@ -10,28 +10,6 @@
     t = PLSKit._to_py(permutedims(X)')
     @test pyisinstance(t, np.ndarray) && pyconvert(Float64, t[0, 1]) == 99.0
     @test pyisinstance(PLSKit._to_py(view(X, :, 1)), np.ndarray)
-    m = PLSKit._to_py(Union{Missing,Float64}[1.0, missing])
-    @test pyconvert(Vector{Float64}, m)[1] == 1.0 && isnan(pyconvert(Vector{Float64}, m)[2])
-    # a Matrix{Any} holding `missing` (a DataFrame column mix, say) takes
-    # the same missing -> NaN path
-    ma = Matrix{Any}(undef, 2, 2)
-    ma[1, 1] = 1.0; ma[1, 2] = 2; ma[2, 1] = missing; ma[2, 2] = 4.0
-    ca = PLSKit._to_py(ma)
-    @test pyisinstance(ca, np.ndarray)
-    v = pyconvert(Matrix{Float64}, ca)
-    @test v[1, 1] == 1.0 && isnan(v[2, 1])
-    va = Any[1.0, 2, missing]
-    cv = PLSKit._to_py(va)
-    @test isnan(pyconvert(Vector{Float64}, cv)[3])
-    @test PLSKit._to_py(nothing) === pybuiltins.None
-    @test pyconvert(String, PLSKit._to_py(:raw_perm)) == "raw_perm"
-    d = PLSKit._to_py((n_perm=100, inner=(selector=:bic,)))
-    @test pyisinstance(d, pybuiltins.dict)
-    @test pyconvert(Int, d["n_perm"]) == 100
-    @test pyconvert(String, d["inner"]["selector"]) == "bic"
-    @test pyconvert(Int, PLSKit._to_py(Dict(:n_perm => 7))["n_perm"]) == 7
-    @test pyconvert(Int, PLSKit._to_py(Dict("n_perm" => 7))["n_perm"]) == 7
-    @test pyconvert(UInt64, PLSKit._to_py(typemax(UInt64))) === typemax(UInt64)
     @test_throws ArgumentError PLSKit._to_py(Dict(1 => 2))
 end
 
@@ -48,32 +26,6 @@ end
         e
     end
     @test occursin("main thread", err.msg)
-    if Threads.nthreads() > 1
-        # A spawned task usually lands off the main thread; when it happens
-        # to land back on thread 1 the guard correctly lets it through, so
-        # that outcome is not a test failure either.
-        t = Threads.@spawn begin
-            PLSKit._check_main_thread()
-            :ran_on_main_thread
-        end
-        result = try
-            fetch(t)
-        catch e
-            e
-        end
-        @test result === :ran_on_main_thread || result isa TaskFailedException ||
-              result isa ErrorException
-    else
-        @test_skip "Threads.nthreads() == 1: the off-main-thread path is untested here"
-    end
-end
-
-@testset "a stub call returns a result and hands it back" begin
-    X, y = pls1_data()
-    fit = pls1_fit(X, y; k=2)
-    @test fit isa PLS1Result
-    @test PLSKit._to_py(fit) === getfield(fit, :py)
-    @test plskit_error(() -> pls1_fit(X, y[1:59])).code === :dimension_mismatch
 end
 
 @testset "arguments through the public API" begin

@@ -113,7 +113,7 @@ pub(crate) fn nspace_eligible_split_exact(
 }
 
 /// `G = X̃X̃'` (`n × n`) for the block `xs` (`n × p`). Callers pass
-/// `resample::block_par(disable_parallelism)`, not faer's `*` operator,
+/// `fit::par_fixed()`, not faer's `*` operator,
 /// which reads the global parallelism setting;
 /// `gram_products_are_thread_count_invariant_at_the_route_shapes` pins that
 /// the result does not depend on the pool size.
@@ -242,7 +242,7 @@ pub(crate) struct NspaceGram {
 
 impl NspaceGram {
     /// `G = xs·xs'` with `par` (the drivers pass
-    /// `resample::block_par(disable_parallelism)`), then `‖xs‖_F` and the
+    /// `fit::par_fixed()`), then `‖xs‖_F` and the
     /// sequential `‖G‖₂` bound.
     pub(crate) fn new(xs: MatRef<'_, f64>, par: Par) -> Self {
         #[cfg(test)]
@@ -282,9 +282,15 @@ thread_local! {
 
 /// How many [`NspaceGram`]s this thread has built (test builds). The
 /// drivers build blocks on the calling thread, so a test can assert that a
-/// public call ran the n-space route.
+/// public call ran the n-space route. With `PLSKIT_NUM_THREADS` set to a
+/// cap, a public call runs on a plskit pool worker, which this thread-local
+/// does not reach, so this panics when the variable sets a cap.
 #[cfg(test)]
 pub(crate) fn nspace_blocks_built() -> usize {
+    assert!(
+        std::env::var_os(crate::fit::NUM_THREADS_ENV).is_none_or(|v| v == "0"),
+        "unset PLSKIT_NUM_THREADS or set it to 0: the block counter does not reach plskit's pool"
+    );
     BLOCKS_BUILT.with(std::cell::Cell::get)
 }
 
@@ -785,7 +791,7 @@ pub(crate) fn nspace_perm_row(
 
 /// The n-space block of one prepared `raw_perm` fold: [`NspaceGram`] of
 /// `X̃_tr` and `M = X̃_val X̃_tr'`, built once per fold on the calling thread
-/// with `par` (`resample::block_par`). Unweighted folds only, so `xs_tr` is
+/// with `par` (`fit::par_fixed()`). Unweighted folds only, so `xs_tr` is
 /// the matrix the primal fold fit is handed.
 pub(crate) struct NspaceFold {
     gram: NspaceGram,
@@ -840,7 +846,7 @@ pub(crate) fn fold_column_nspace(
 
 /// The n-space block of one prepared `split_exact` split: [`NspaceGram`] of
 /// `X̃_tr` and `M = X̃_te X̃_tr'`, built once per split on the calling
-/// thread with `par` (`resample::block_par`). Unweighted splits only.
+/// thread with `par` (`fit::par_fixed()`). Unweighted splits only.
 pub(crate) struct NspaceSplit {
     gram: NspaceGram,
     m: Mat<f64>,

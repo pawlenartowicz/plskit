@@ -6,7 +6,7 @@ use crate::fmt::g4;
 use crate::value::{Record, Value};
 
 /// A warning record when the auto-gate ran something other than what was
-/// asked; `None` when `requested == actual`.
+/// asked; `None` when `requested == actual` or the request was `"auto"`.
 pub(crate) fn rerouted(
     requested: Option<&str>,
     actual: Option<&str>,
@@ -14,7 +14,7 @@ pub(crate) fn rerouted(
     stable_rank: Option<f64>,
     n_eff: Option<f64>,
 ) -> Option<Record<'static>> {
-    if requested == actual {
+    if requested == actual || requested == Some("auto") {
         return None;
     }
     let requested = requested.unwrap_or("None");
@@ -64,6 +64,18 @@ mod tests {
         )
         .is_none());
         assert!(rerouted(None, None, None, None, Some(60.0)).is_none());
+    }
+
+    #[test]
+    fn nothing_for_an_auto_request() {
+        assert!(rerouted(
+            Some("auto"),
+            Some("split_exact"),
+            Some(1000),
+            Some(2.5),
+            Some(60.0)
+        )
+        .is_none());
     }
 
     #[test]

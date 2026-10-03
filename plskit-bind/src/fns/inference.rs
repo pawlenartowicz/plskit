@@ -30,9 +30,9 @@ pub(crate) fn split_nb_gate(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> 
     ))
 }
 
-/// `pls1_confirmatory_test(X, y, k=1, *, test_method, args=None, ci=False,
+/// `pls1_confirmatory_test(X, y, k=1, *, test_method="auto", args=None, ci=False,
 /// n_boot=None, m_rate=None, level=None, max_failure_rate=None,
-/// pre_standardized=False, seed=None, disable_parallelism=False,
+/// pre_standardized=False, seed=None,
 /// verbose=False, weights=None, max_skip_rate=None)`.
 pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
@@ -47,7 +47,6 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     let max_failure_rate = inp.opt_f64("max_failure_rate")?;
     let pre_standardized = inp.bool("pre_standardized")?;
     let seed = inp.seed()?;
-    let disable_parallelism = inp.bool("disable_parallelism")?;
     let verbose = inp.bool("verbose")?;
     let w = inp.opt_vec("weights")?;
     let max_skip_rate = inp.opt_f64("max_skip_rate")?;
@@ -65,7 +64,6 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
         args: methods::confirmatory_args(&test_method, args.as_ref())?,
         pre_standardized,
         seed,
-        disable_parallelism,
         verbose,
         ci: ci_opts,
         max_skip_rate: max_skip_rate.unwrap_or(od.max_skip_rate),
@@ -90,9 +88,9 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     Ok(with_warning(convert::confirmatory_test(r), warning))
 }
 
-/// `pls3_confirmatory_test(X, Y, k=1, *, test_method, args=None,
+/// `pls3_confirmatory_test(X, Y, k=1, *, test_method="auto", args=None,
 /// pre_standardized_X=False, pre_standardized_Y=False, seed=None,
-/// disable_parallelism=False, verbose=False)`.
+/// verbose=False)`.
 pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = pls3_y(inp)?;
@@ -102,7 +100,6 @@ pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     let pre_standardized_x = inp.bool("pre_standardized_X")?;
     let pre_standardized_y = inp.bool("pre_standardized_Y")?;
     let seed = inp.seed()?;
-    let disable_parallelism = inp.bool("disable_parallelism")?;
     let verbose = inp.bool("verbose")?;
     inp.finish()?;
     let opts = Pls3ConfirmatoryTestOpts {
@@ -110,7 +107,6 @@ pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
         pre_standardized_x,
         pre_standardized_y,
         seed,
-        disable_parallelism,
         verbose,
         ..Pls3ConfirmatoryTestOpts::default()
     };
@@ -133,7 +129,7 @@ pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
 }
 
 /// `pls1_perm_null(X, y, k, *, n_perm=None, return_perm_matrix=False,
-/// pre_standardized=False, seed=None, disable_parallelism=False,
+/// pre_standardized=False, seed=None,
 /// verbose=False, weights=None)`.
 pub(crate) fn pls1_perm_null(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
@@ -143,7 +139,6 @@ pub(crate) fn pls1_perm_null(inp: &mut Inputs<'_>) -> Result<Outcome, BindError>
     let return_perm_matrix = inp.bool("return_perm_matrix")?;
     let pre_standardized = inp.bool("pre_standardized")?;
     let seed = inp.seed()?;
-    let disable_parallelism = inp.bool("disable_parallelism")?;
     let verbose = inp.bool("verbose")?;
     let w = inp.opt_vec("weights")?;
     inp.finish()?;
@@ -152,7 +147,6 @@ pub(crate) fn pls1_perm_null(inp: &mut Inputs<'_>) -> Result<Outcome, BindError>
         n_perm: n_perm.unwrap_or(d.n_perm),
         return_perm_matrix,
         pre_standardized,
-        disable_parallelism,
         verbose,
     };
     let out = engine(plskit::pls1_perm_null(
@@ -168,7 +162,7 @@ pub(crate) fn pls1_perm_null(inp: &mut Inputs<'_>) -> Result<Outcome, BindError>
 
 /// `pls1_rotation_stability(X, y, k, *, rotation_method="varimax",
 /// rotation_args=None, L=None, n_boot=None, m_rate=None, level=None,
-/// pre_standardized=False, seed=None, disable_parallelism=False,
+/// pre_standardized=False, seed=None,
 /// verbose=False, weights=None, max_skip_rate=None)`.
 pub(crate) fn pls1_rotation_stability(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
@@ -182,7 +176,6 @@ pub(crate) fn pls1_rotation_stability(inp: &mut Inputs<'_>) -> Result<Outcome, B
     let level = inp.opt_f64("level")?;
     let pre_standardized = inp.bool("pre_standardized")?;
     let seed = inp.seed()?;
-    let disable_parallelism = inp.bool("disable_parallelism")?;
     let verbose = inp.bool("verbose")?;
     let w = inp.opt_vec("weights")?;
     let max_skip_rate = inp.opt_f64("max_skip_rate")?;
@@ -201,7 +194,6 @@ pub(crate) fn pls1_rotation_stability(inp: &mut Inputs<'_>) -> Result<Outcome, B
         level: level.unwrap_or(d.level),
         pre_standardized,
         seed,
-        disable_parallelism,
         verbose,
         max_skip_rate: max_skip_rate.unwrap_or(d.max_skip_rate),
     };

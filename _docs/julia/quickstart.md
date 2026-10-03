@@ -42,7 +42,8 @@ component count from the data; see `pls1_find_k_optimal` and
 
 ## 2. Test for signal
 
-`test_method` has no default and must be passed. `args` takes a `NamedTuple`
+`test_method` defaults to `"auto"`, which picks `split_exact` or
+`split_nb` from `X` (see [`test_method="auto"`](../concepts/PLS1/inference.md#test_methodauto)). `args` takes a `NamedTuple`
 (or a `Dict`). The counts are kept small so the example runs in seconds.
 
 ```julia

@@ -7,9 +7,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use extendr_api::prelude::*;
-use plskit_bind::{
-    result_type, result_types, BindError, DefaultValue, Outcome, Record, Value, ERROR_CODES,
-};
+use plskit_bind::{result_type, result_types, BindError, Outcome, Record, Value};
 
 fn named_list(names: Vec<String>, values: Vec<Robj>) -> Robj {
     // Only fails when the lengths differ, which every caller rules out by
@@ -121,15 +119,6 @@ pub(crate) fn error(e: BindError) -> Robj {
     )
 }
 
-fn default_value(d: DefaultValue) -> Robj {
-    match d {
-        DefaultValue::Required | DefaultValue::Null => Robj::from(()),
-        DefaultValue::Bool(b) => Robj::from(b),
-        DefaultValue::Int(n) => int_or_double(n),
-        DefaultValue::Str(s) => Robj::from(s),
-    }
-}
-
 /// The registry as nested named lists.
 pub(crate) fn registry_list() -> Robj {
     let functions: Vec<Robj> = registry_fns();
@@ -159,13 +148,11 @@ pub(crate) fn registry_list() -> Robj {
     named_list(
         vec![
             "engine_version".into(),
-            "error_codes".into(),
             "functions".into(),
             "result_types".into(),
         ],
         vec![
             Robj::from(plskit_bind::engine_version()),
-            Robj::from(ERROR_CODES.to_vec()),
             List::from_values(functions).into(),
             List::from_values(types).into(),
         ],
@@ -181,18 +168,8 @@ fn registry_fns() -> Vec<Robj> {
                 .iter()
                 .map(|p| {
                     named_list(
-                        vec![
-                            "name".into(),
-                            "kind".into(),
-                            "required".into(),
-                            "default".into(),
-                        ],
-                        vec![
-                            Robj::from(p.name),
-                            Robj::from(p.kind.as_str()),
-                            Robj::from(p.required()),
-                            default_value(p.default),
-                        ],
+                        vec!["name".into(), "kind".into()],
+                        vec![Robj::from(p.name), Robj::from(p.kind.as_str())],
                     )
                 })
                 .collect();

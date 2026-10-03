@@ -104,7 +104,6 @@ fn assert_calibrated(
             ConfirmatoryTestOpts {
                 args: make_args(),
                 seed: Some(seed_base + rep as u64),
-                disable_parallelism: true,
                 keep,
                 ..Default::default()
             },
@@ -281,7 +280,6 @@ fn find_k_sequence_weighted_h0_fpr_within_band() {
                 // ALPHA the MC band is computed from.
                 alpha: ALPHA,
                 seed: Some(5000 + rep as u64),
-                disable_parallelism: true,
                 ..Default::default()
             },
         )
@@ -374,7 +372,6 @@ fn split_exact_concentrated_spectrum_h0_fpr_within_band() {
                     n_splits: 15,
                 },
                 seed: Some(9000 + rep as u64),
-                disable_parallelism: true,
                 ..Default::default()
             },
         )
@@ -418,7 +415,6 @@ fn spls1_find_k_sequence_sparse_h0_fpr_within_band() {
                 n_splits: 15,
                 alpha: ALPHA,
                 seed: Some(8000 + rep as u64),
-                disable_parallelism: true,
                 ..Default::default()
             },
         )

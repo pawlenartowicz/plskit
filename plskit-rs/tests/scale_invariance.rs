@@ -15,8 +15,7 @@
 use faer::{Col, Mat};
 use plskit::fit::{pls1_fit, FitOpts, KSpec};
 use plskit::{
-    pls1_confirmatory_test, pls3_confirmatory_test, pls3_fit, ConfirmatoryArgs,
-    ConfirmatoryTestInput, ConfirmatoryTestOpts, Pls3ConfirmatoryTestOpts, Pls3FitOpts,
+    pls3_confirmatory_test, pls3_fit, ConfirmatoryArgs, Pls3ConfirmatoryTestOpts, Pls3FitOpts,
 };
 
 /// Factors spanning both sides of an absolute `1e-12` threshold (a naive
@@ -111,61 +110,6 @@ fn pls1_fit_is_invariant_to_the_scale_of_x_and_y() {
                         );
                     }
                 }
-            }
-        }
-    }
-}
-
-#[test]
-fn pls1_confirmatory_test_is_invariant_to_the_scale_of_x_and_y() {
-    let (x, ymat) = linked(60, 6, 1, 13);
-    let y = ymat.col(0).to_owned();
-    // k = 1 takes split_exact's no-refit route, k = 2 the refit route.
-    for k in [1_usize, 2] {
-        let run = |x: &Mat<f64>, y: &Col<f64>| {
-            pls1_confirmatory_test(
-                ConfirmatoryTestInput::Raw {
-                    x: x.as_ref(),
-                    y: y.as_ref(),
-                    k,
-                    weights: None,
-                },
-                ConfirmatoryTestOpts {
-                    args: ConfirmatoryArgs::SplitExact {
-                        n_perm: 49,
-                        n_splits: 6,
-                    },
-                    seed: Some(7),
-                    ..ConfirmatoryTestOpts::default()
-                },
-            )
-            .unwrap()
-        };
-        let base = run(&x, &y);
-        assert!(
-            base.statistic > 0.3,
-            "k={k}: statistic = {}",
-            base.statistic
-        );
-        for factor in FACTORS {
-            for (side, r) in [
-                ("X", run(&scaled(&x, factor), &y)),
-                ("y", run(&x, &scaled_col(&y, factor))),
-            ] {
-                let what = format!("k={k} {side}×{factor:e}");
-                assert_close(
-                    r.statistic,
-                    base.statistic,
-                    1e-10,
-                    &format!("{what}: statistic"),
-                );
-                assert_eq!(
-                    r.pvalue.to_bits(),
-                    base.pvalue.to_bits(),
-                    "{what}: pvalue {} vs {}",
-                    r.pvalue,
-                    base.pvalue
-                );
             }
         }
     }

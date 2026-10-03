@@ -109,7 +109,7 @@ tryCatch(pls1_fit(X, y, weights = w),
   plskit_error = function(e) e$code)
 ```
 
-When the `split_nb` auto-gate reroutes a test, a warning of class
+When the `split_nb` auto-gate reroutes an explicit `split_nb` request, a warning of class
 `c("plskit_rerouted", "plskit_warning", "warning", "condition")` carries
 `requested`, `actual`, `n_perm`, `stable_rank` and `n_eff`; silence it with
 `suppressWarnings(..., classes = "plskit_rerouted")`.

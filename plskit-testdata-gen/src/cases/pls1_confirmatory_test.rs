@@ -44,7 +44,6 @@ struct ConfirmatoryCase {
     name: &'static str,
     args: ConfirmatoryArgs,
     ci: Option<CIOpts>,
-    disable_parallelism: bool,
     kwargs: serde_json::Value,
     /// Inputs file stem and synth seed; set to the weighted variants for weighted cases.
     inputs_name: &'static str,
@@ -133,7 +132,6 @@ fn confirmatory_call(c: &ConfirmatoryCase, data: &Xyw) -> Result<ConfirmatoryTes
             args: c.args,
             pre_standardized,
             seed: Some(CASE_SEED),
-            disable_parallelism: c.disable_parallelism,
             verbose: false,
             ci: c.ci,
             max_skip_rate: 0.01,
@@ -213,7 +211,6 @@ pub fn raw_perm(root: &Path) -> Result<Case> {
                 n_folds: 5,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
                 "test_method": "raw_perm",
@@ -245,7 +242,6 @@ pub fn split_nb(root: &Path) -> Result<Case> {
                 force: false,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
                 "test_method": "split_nb",
@@ -278,7 +274,6 @@ pub fn split_exact(root: &Path) -> Result<Case> {
                 n_splits: 30,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
                 "test_method": "split_exact",
@@ -313,7 +308,6 @@ pub fn split_exact_k1(root: &Path) -> Result<Case> {
                 n_splits: 30,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
                 "test_method": "split_exact",
@@ -344,7 +338,6 @@ pub fn score(root: &Path) -> Result<Case> {
             name: "pls1_confirmatory_score",
             args: ConfirmatoryArgs::Score,
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
                 "test_method": "score",
@@ -375,7 +368,6 @@ pub fn e(root: &Path) -> Result<Case> {
             name: "pls1_confirmatory_e",
             args: ConfirmatoryArgs::E,
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
                 "test_method": "e",
@@ -395,8 +387,7 @@ pub fn e(root: &Path) -> Result<Case> {
 
 /// Case: `pls1_confirmatory_test` with `test_method=split_nb` + CI bundle (`n_boot=300`), `seed=42`.
 ///
-/// Exercises the `ci = Some(CIOpts { ... })` path. Parallelism is disabled
-/// (`disable_parallelism: true`) for fully deterministic output across runs.
+/// Exercises the `ci = Some(CIOpts { ... })` path.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
@@ -452,7 +443,6 @@ fn split_nb_ci_case(name: &'static str, level: f64) -> ConfirmatoryCase {
             level,
             max_failure_rate: 0.0,
         }),
-        disable_parallelism: true,
         kwargs: serde_json::json!({
             "k": 2,
             "test_method": "split_nb",
@@ -462,7 +452,6 @@ fn split_nb_ci_case(name: &'static str, level: f64) -> ConfirmatoryCase {
             "m_rate": 0.7,
             "level": level,
             "seed": 42,
-            "disable_parallelism": true,
             "max_failure_rate": 0.0
         }),
         inputs_name: "pls1_confirmatory_inputs",
@@ -473,6 +462,72 @@ fn split_nb_ci_case(name: &'static str, level: f64) -> ConfirmatoryCase {
         weights: None,
         snr: SYNTH_SNR,
     }
+}
+
+/// Case: `pls1_confirmatory_test` with `test_method=auto` on n=60, p=20, `k=2`,
+/// `n_perm=200`, `n_splits=30`, `seed=42`. n is below the cutoff of 250, so the
+/// rule resolves to `split_exact`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn auto_split_exact(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_auto_split_exact",
+            args: ConfirmatoryArgs::Auto {
+                n_perm: 200,
+                n_splits: 30,
+            },
+            ci: None,
+            kwargs: serde_json::json!({
+                "k": 2,
+                "test_method": "auto",
+                "args": {"n_perm": 200, "n_splits": 30},
+                "seed": 42
+            }),
+            inputs_name: "pls1_confirmatory_auto_split_exact_inputs",
+            n: 60,
+            d: 20,
+            synth_seed: 42,
+            k: 2,
+            weights: None,
+            snr: SYNTH_SNR,
+        },
+    )
+}
+
+/// Case: `pls1_confirmatory_test` with `test_method=auto` on n=300, p=10, `k=2`,
+/// `n_perm=200`, `n_splits=30`, `seed=42`. n clears the cutoff of 250, p is in
+/// range and the stable rank is at least 3, so the rule resolves to `split_nb`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn auto_split_nb(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_auto_split_nb",
+            args: ConfirmatoryArgs::Auto {
+                n_perm: 200,
+                n_splits: 30,
+            },
+            ci: None,
+            kwargs: serde_json::json!({
+                "k": 2,
+                "test_method": "auto",
+                "args": {"n_perm": 200, "n_splits": 30},
+                "seed": 42
+            }),
+            inputs_name: "pls1_confirmatory_auto_split_nb_inputs",
+            n: 300,
+            d: 10,
+            synth_seed: 42,
+            k: 2,
+            weights: None,
+            snr: SYNTH_SNR,
+        },
+    )
 }
 
 /// Case: `pls1_confirmatory_test` with `test_method=raw_perm` on a wide design
@@ -500,7 +555,6 @@ pub fn raw_perm_wide(root: &Path) -> Result<Case> {
                 n_folds: 5,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
                 "test_method": "raw_perm",
@@ -538,7 +592,6 @@ pub fn raw_perm_wide_k2(root: &Path) -> Result<Case> {
                 n_folds: 5,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
                 "test_method": "raw_perm",
@@ -574,7 +627,6 @@ pub fn split_exact_wide_k2(root: &Path) -> Result<Case> {
                 n_splits: 20,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
                 "test_method": "split_exact",
@@ -611,7 +663,6 @@ pub fn weighted_raw_perm(root: &Path) -> Result<Case> {
                 n_folds: 5,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
                 "test_method": "raw_perm",
@@ -644,7 +695,6 @@ pub fn weighted_split_nb(root: &Path) -> Result<Case> {
                 force: false,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
                 "test_method": "split_nb",
@@ -679,7 +729,6 @@ pub fn weighted_split_exact(root: &Path) -> Result<Case> {
                 n_splits: 50,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
                 "test_method": "split_exact",
@@ -709,7 +758,6 @@ pub fn weighted_score(root: &Path) -> Result<Case> {
             name: "pls1_confirmatory_weighted_score",
             args: ConfirmatoryArgs::Score,
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
                 "test_method": "score",
@@ -739,7 +787,6 @@ pub fn weighted_e(root: &Path) -> Result<Case> {
             name: "pls1_confirmatory_weighted_e",
             args: ConfirmatoryArgs::E,
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
                 "test_method": "e",
@@ -766,7 +813,7 @@ pub fn weighted_e(root: &Path) -> Result<Case> {
 /// and `B = n_perm + 1 = 1001` columns, so the X backend's work per block is
 /// `B·(2k + 1)·n_tr·p = 4.004e8`, 4× the Gram backend's starting work floor,
 /// and the n-space Gram route cannot claim it (`n_tr > p`).
-/// `plskit-rs/src/fixture_route_pins.rs` pins its route and shape numbers.
+/// `plskit-rs/src/fixture_route_pins.rs` pins its route.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
@@ -780,7 +827,6 @@ pub fn raw_perm_tall_k2(root: &Path) -> Result<Case> {
                 n_folds: 5,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
                 "test_method": "raw_perm",
@@ -826,7 +872,6 @@ pub fn score_wide_pre_standardized(root: &Path) -> Result<Case> {
         name: "pls1_confirmatory_score_wide_pre_standardized",
         args: ConfirmatoryArgs::Score,
         ci: None,
-        disable_parallelism: false,
         kwargs: serde_json::json!({
             "k": 1,
             "test_method": "score",
@@ -892,7 +937,6 @@ pub fn weighted_score_wide_pre_standardized(root: &Path) -> Result<Case> {
             name,
             args: ConfirmatoryArgs::Score,
             ci: None,
-            disable_parallelism: false,
             kwargs,
             inputs_name: "pls1_confirmatory_weighted_score_wide_pre_standardized",
             n: 30,
@@ -946,7 +990,6 @@ pub fn weighted_split_exact_k2(root: &Path) -> Result<Case> {
                 n_splits: 50,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 2,
                 "test_method": "split_exact",
@@ -983,7 +1026,6 @@ pub fn split_exact_wide_k1(root: &Path) -> Result<Case> {
                 n_splits: 20,
             },
             ci: None,
-            disable_parallelism: false,
             kwargs: serde_json::json!({
                 "k": 1,
                 "test_method": "split_exact",
@@ -1020,7 +1062,6 @@ fn weighted_split_nb_ci_case(
         "m_rate": 0.7,
         "level": 0.95,
         "seed": 42,
-        "disable_parallelism": true,
         "max_failure_rate": 0.0,
         "weights": "nonuniform"
     });
@@ -1039,7 +1080,6 @@ fn weighted_split_nb_ci_case(
             level: 0.95,
             max_failure_rate: 0.0,
         }),
-        disable_parallelism: true,
         kwargs,
         inputs_name,
         n: SYNTH_N,

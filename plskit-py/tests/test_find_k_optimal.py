@@ -53,3 +53,13 @@ def test_optimal_selector_none_is_the_default():
     """None for an optional argument means its default, as in plskit-bind."""
     X, y = _data()
     assert plskit.pls1_find_k_optimal(X, y, 3, selector=None, seed=7).selector == "r2_se"
+
+
+@pytest.mark.parametrize("fn", ["pls1_find_k_optimal", "spls1_find_k_optimal"])
+def test_optimal_diagnostic_rejects_auto(fn):
+    X, y = _data()
+    extra = (3,) if fn.startswith("spls1") else ()
+    with pytest.raises(plskit.PlsKitError) as ei:
+        getattr(plskit, fn)(X, y, 4, *extra, diagnostic="auto", seed=7)
+    assert ei.value.code == "invalid_argument"
+    assert str(ei.value) == "invalid argument: diagnostic does not accept 'auto'"

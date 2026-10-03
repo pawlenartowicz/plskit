@@ -15,4 +15,5 @@ family. Argument-naming conventions and contributor docs live under
 - [Preprocessing](preprocessing.md): canonical standardize recipe, `pre_standardized` flag, chemometrics scalings
 - [Limitations](limitations.md): sample-size regimes, conditioning, open questions
 - [Effective sample size](effective-sample-size.md): `n_eff` definition, where the check fires, error taxonomy
+- [Threads](threads.md): capping the thread count with `PLSKIT_NUM_THREADS`
 - [Citation & reproducibility](citation.md): how to cite, how to pin

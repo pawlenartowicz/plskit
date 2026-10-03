@@ -88,8 +88,9 @@ observation weights are not implemented for this family.
 `pls3_confirmatory_test` returns the same `ConfirmatoryTestOutput` struct
 `pls1_confirmatory_test` does. For PLS3 `ci` is always `None` and `n_eff`
 equals `n`. `rho_hat` is populated for `split_nb` only, and only when the
-test half has at least 4 rows; `stable_rank` is populated whenever
-`split_nb` was requested.
+test half has at least 4 rows; `stable_rank` is `Some` on an explicit `split_nb`
+request, and on an `"auto"` request that reached the stable-rank check
+(p > 4, n_eff ≥ 250); `None` otherwise.
 
 ## `FindKOptimalOutput` — what `pls1_find_k_optimal` returns
 
@@ -131,7 +132,7 @@ diagnostic runs no step: `pvalues` is `Some` of a length-0 column and
 | `alpha` | `f64` | always |
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | always; equals `n_samples` for uniform/absent weights |
-| `stable_rank` | `Option<f64>` | `Some` when `test_method == SplitNb` — fired or not, including under `force` |
+| `stable_rank` | `Option<f64>` | `Some` on an explicit `split_nb` request, and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff ≥ 250, and p ≤ 100·n without `keep`); `None` otherwise |
 
 Closed testing on nested H is exact, so `pvalues[..k_star]` is an
 honest FWER-controlled sequence. The path-max p-value is
@@ -139,7 +140,7 @@ honest FWER-controlled sequence. The path-max p-value is
 
 On both result types `stable_rank` is what the auto-gate saw on the
 undeflated `X`, so when the reported method reads `"split_exact"`
-after a `split_nb` request, it and `n_eff` are the two numbers that
+after an explicit `split_nb` request, it and `n_eff` are the two numbers that
 explain why. `split_nb_gate` returns them without running a test.
 
 ## `FindKeepOptimalOutput` — what `spls1_find_keep_optimal` returns
@@ -165,21 +166,21 @@ field semantics are identical to the Python counterpart; see
 |---|---|---|
 | `pvalue` | `f64` | always |
 | `statistic` | `f64` | always |
-| `test_method` | `String` | one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`; `"split_exact"` when a `"split_nb"` request was rerouted by the auto-gate |
+| `test_method` | `String` | the method that ran: one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`, never `"auto"`; `"split_exact"` when an explicit `"split_nb"` request was rerouted by the auto-gate |
 | `k` | `usize` | the K tested (echoed from the input) |
 | `n_perm` | `Option<usize>` | `Some` for resampling-family methods, `None` for `score` / `e` |
 | `n_splits` | `Option<usize>` | `Some` for `split_*` methods, `None` for `raw_perm` / `score` / `e` |
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | always; Kish effective sample size, equals `n_samples` for uniform/absent weights |
 | `rho_hat` | `Option<f64>` | `Some` for `split_nb` only, and only when unweighted (no weights, or all-equal weights) with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
-| `stable_rank` | `Option<f64>` | stable rank of the standardized `X`, as seen by the `split_nb` auto-gate; `Some` whenever `split_nb` was requested (fired or not, including under `force`), `None` for every other requested method |
+| `stable_rank` | `Option<f64>` | stable rank of the standardized `X`, as seen by the `split_nb` auto-gate; `Some` on an explicit `split_nb` request (fired or not, including under `force`), and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff ≥ 250, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise |
 | `ci` | `Option<ConfirmatoryCI>` | `Some` when called with `ci=true`; carries the rotation-invariant subsample CIs |
 
 ## `SplitNbGateOutput` — what `split_nb_gate` returns
 
 | Field | Rust type | Notes |
 |---|---|---|
-| `fires` | `bool` | `true` → a `split_nb` request on this `X` reroutes to `split_exact` |
+| `fires` | `bool` | `true` → an explicit `split_nb` request on this `X` reroutes to `split_exact` |
 | `stable_rank` | `f64` | stable rank of the standardized `X` |
 | `n_eff` | `f64` | Kish effective sample size; equals `n_samples` for uniform/absent weights |
 

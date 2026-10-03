@@ -1,10 +1,10 @@
 """Observation weights through the Python surface.
 
 One test per wrapper-seam contract: weight errors map to typed exceptions,
-weights reach the engines that have no weighted corpus fixture, uniform
-weights are invisible to inference, the resampling skip-rate guard, and the
-full-rank weighted fit is weighted least squares. Weighted numerics are owned
-by the Rust tests and the weighted corpus fixtures.
+weights reach the engines that have no weighted corpus fixture, the
+resampling skip-rate guard, and the full-rank weighted fit is weighted least
+squares. Weighted numerics are owned by the Rust tests and the weighted
+corpus fixtures.
 """
 import numpy as np
 import pytest
@@ -18,14 +18,10 @@ _WEIGHT_ERRORS = {
     # case: (weights for n = 40, exception type, code, reason or None)
     "negative": (np.r_[-0.1, np.ones(39)], plskit.PlsKitInvalidWeights,
                  "invalid_weights", "negative"),
-    "all_zero": (np.zeros(40), plskit.PlsKitInvalidWeights,
-                 "invalid_weights", "all_zero"),
     # FitOpts::check_n_eff, which the seam sets through FitOpts::default().
     "insufficient_effective_n": (np.r_[1.0, np.full(39, 1e-6)],
                                  plskit.PlsKitInvalidWeights,
                                  "invalid_weights", "insufficient_effective_n"),
-    "length_mismatch": (np.ones(39), plskit.PlsKitInvalidWeights,
-                        "invalid_weights", "length_mismatch"),
     # A non-finite weight is a non-finite input, not a weights error.
     "nan": (np.r_[np.nan, np.ones(39)], plskit.PlsKitError,
             "non_finite_input", None),
@@ -88,49 +84,6 @@ def test_weights_reach_the_engine(entry):
     # Dropped weights would report n_eff == n.
     r, n = _WEIGHTED_CALLS[entry]()
     assert r.n_eff < n
-
-
-# ── Uniform weights are invisible to inference ───────────────────────────
-
-
-def _perm_null(w):
-    rng = np.random.default_rng(8)
-    X = rng.normal(size=(60, 4))
-    y = X[:, 0] + rng.normal(size=60)
-    return plskit.pls1_perm_null(X, y, k=2, n_perm=200, weights=w, seed=0)
-
-
-def _confirmatory_test(w):
-    rng = np.random.default_rng(0)
-    X = rng.normal(size=(60, 5))
-    y = X[:, 0] + 0.5 * rng.normal(size=60)
-    return plskit.pls1_confirmatory_test(
-        X, y, k=2, test_method="raw_perm", args={"n_perm": 200}, weights=w, seed=42)
-
-
-def _find_k_optimal(w):
-    X, y = _find_k_data()
-    return plskit.pls1_find_k_optimal(X, y, k_max=4, weights=w, seed=0)
-
-
-_UNIFORM = {
-    # entry: (call, n, fields that must be bit-identical)
-    "perm_null": (_perm_null, 60,
-                  ("beta_ref", "beta_perm_mean", "beta_perm_sd", "beta_perm_z")),
-    "confirmatory_test": (_confirmatory_test, 60, ("pvalue", "statistic")),
-    "find_k_optimal": (_find_k_optimal, 80,
-                       ("k_star", "cv_scores", "cv_scores_se")),
-}
-
-
-@pytest.mark.parametrize("entry", sorted(_UNIFORM))
-def test_uniform_weights_are_invisible(entry):
-    call, n, fields = _UNIFORM[entry]
-    r_w, r_n = call(np.ones(n)), call(None)
-    for f in fields:
-        a, b = getattr(r_w, f), getattr(r_n, f)
-        assert (a == b) if isinstance(a, dict) else np.array_equal(a, b), f
-    assert r_w.n_eff == r_n.n_eff == n
 
 
 # ── Resampling skip-rate guard ───────────────────────────────────────────

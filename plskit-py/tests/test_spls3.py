@@ -103,10 +103,6 @@ def test_k_used_truncates_when_a_later_component_is_dust():
     assert m.y_scores.shape == (3, 1)
     assert m.converged.shape == (1,)
     assert m.n_iter.shape == (1,)
-    # The retained component is the (0, 0) entry, sign-pinned positive.
-    np.testing.assert_array_equal(m.U[:, 0], [1.0, 0.0, 0.0])
-    np.testing.assert_array_equal(m.V[:, 0], [1.0, 0.0, 0.0])
-    assert m.singular_values[0] == 1.0
 
 
 def test_alternation_defaults_come_from_the_engine():

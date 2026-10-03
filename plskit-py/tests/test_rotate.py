@@ -34,19 +34,14 @@ def test_rotate_records_the_engine_defaults(args):
     assert type(r.spec.args["max_iter"]) is int
 
 
-def test_rotate_records_a_whole_float_count_as_an_int():
-    W = np.random.default_rng(5).normal(size=(30, 4))
-    r = plskit.rotate(W, method="varimax", args={"max_iter": 2.0})
-    assert r.spec.sweeps == 2
-    assert r.spec.args["max_iter"] == 2 and type(r.spec.args["max_iter"]) is int
-
-
-def test_rotate_array_max_iter_reaches_the_engine():
+@pytest.mark.parametrize("max_iter", [2, 2.0])
+def test_rotate_array_max_iter_reaches_the_engine(max_iter):
+    # A whole float is recorded as an int.
     W = np.random.default_rng(5).normal(size=(30, 4))
     assert plskit.rotate(W, method="varimax").spec.sweeps > 2
-    r = plskit.rotate(W, method="varimax", args={"max_iter": 2})
+    r = plskit.rotate(W, method="varimax", args={"max_iter": max_iter})
     assert r.spec.sweeps == 2
-    assert r.spec.args["max_iter"] == 2
+    assert r.spec.args["max_iter"] == 2 and type(r.spec.args["max_iter"]) is int
 
 
 def test_rotate_array_tol_reaches_the_engine():

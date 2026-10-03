@@ -380,6 +380,30 @@
       }
     },
     {
+      "name": "pls1_find_k_sequence_auto",
+      "function": "pls1_find_k_sequence",
+      "inputs": "inputs/pls1_find_k_sequence_inputs.npz",
+      "outputs": "outputs/pls1_find_k_sequence/pls1_find_k_sequence_auto.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 100,
+          "n_splits": 20
+        },
+        "k_max": 4,
+        "seed": 42,
+        "test_method": "auto"
+      },
+      "hashes": {
+        "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
+        "outputs_sha256": "9c7ee19c17fc59aaadb3ef6772c0c3d9f426e1a9c23165ddaba991b181235e50"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12,
+        "rtol": 1e-14
+      }
+    },
+    {
       "name": "pls1_confirmatory_raw_perm",
       "function": "pls1_confirmatory_test",
       "inputs": "inputs/pls1_confirmatory_inputs.npz",
@@ -517,6 +541,54 @@
       }
     },
     {
+      "name": "pls1_confirmatory_auto_split_exact",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_auto_split_exact_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_auto_split_exact.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 200,
+          "n_splits": 30
+        },
+        "k": 2,
+        "seed": 42,
+        "test_method": "auto"
+      },
+      "hashes": {
+        "inputs_sha256": "9be71cda33f829b64089b666aeb16ca1141367782de174efd72acb33fcb98726",
+        "outputs_sha256": "c5af1bb6b999d930522ee2ef9f7341c4f49c7d732e87f96d6cb98f12e1d104e8"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12,
+        "rtol": 1e-14
+      }
+    },
+    {
+      "name": "pls1_confirmatory_auto_split_nb",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_auto_split_nb_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_auto_split_nb.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 200,
+          "n_splits": 30
+        },
+        "k": 2,
+        "seed": 42,
+        "test_method": "auto"
+      },
+      "hashes": {
+        "inputs_sha256": "f745fd94efe269c7d9517dfc7b39d19f12398f25c1d763181475aeba8da43563",
+        "outputs_sha256": "ebfb30768179d585883757eca0140703d15920f6db4c65cd1e66e41a3e4d764d"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12,
+        "rtol": 1e-14
+      }
+    },
+    {
       "name": "pls1_confirmatory_split_nb_ci",
       "function": "pls1_confirmatory_test",
       "inputs": "inputs/pls1_confirmatory_inputs.npz",
@@ -526,7 +598,6 @@
           "n_splits": 30
         },
         "ci": true,
-        "disable_parallelism": true,
         "k": 2,
         "level": 0.95,
         "m_rate": 0.7,
@@ -555,7 +626,6 @@
           "n_splits": 30
         },
         "ci": true,
-        "disable_parallelism": true,
         "k": 2,
         "level": 0.8,
         "m_rate": 0.7,
@@ -869,7 +939,6 @@
           "n_splits": 30
         },
         "ci": true,
-        "disable_parallelism": true,
         "k": 2,
         "level": 0.95,
         "m_rate": 0.7,
@@ -899,7 +968,6 @@
           "n_splits": 30
         },
         "ci": true,
-        "disable_parallelism": true,
         "k": 2,
         "level": 0.95,
         "m_rate": 0.7,
@@ -1016,7 +1084,6 @@
       "outputs": "outputs/pls1_perm_null/pls1_perm_null_basic_n80_d6_k2.npz",
       "kwargs": {
         "d": 6,
-        "disable_parallelism": true,
         "k": 2,
         "n": 80,
         "n_perm": 200,
@@ -1039,7 +1106,6 @@
       "outputs": "outputs/pls1_perm_null/pls1_perm_null_weighted_n80_d6_k2.npz",
       "kwargs": {
         "d": 6,
-        "disable_parallelism": true,
         "k": 2,
         "n": 80,
         "n_perm": 200,
@@ -1063,7 +1129,6 @@
       "outputs": "outputs/pls1_perm_null/pls1_perm_null_wide_n60_d3000_k1.npz",
       "kwargs": {
         "d": 3000,
-        "disable_parallelism": true,
         "k": 1,
         "n": 60,
         "n_perm": 200,
@@ -1086,7 +1151,6 @@
       "outputs": "outputs/pls1_perm_null/pls1_perm_null_wide_n60_d3000_k2.npz",
       "kwargs": {
         "d": 3000,
-        "disable_parallelism": true,
         "k": 2,
         "n": 60,
         "n_perm": 200,
@@ -1109,7 +1173,6 @@
       "outputs": "outputs/pls1_perm_null/pls1_perm_null_tall_n2000_d50_k3.npz",
       "kwargs": {
         "d": 50,
-        "disable_parallelism": false,
         "k": 3,
         "n": 2000,
         "n_perm": 1000,
@@ -1132,7 +1195,6 @@
       "outputs": "outputs/pls1_perm_null/pls1_perm_null_tall_weighted_n2000_d50_k2.npz",
       "kwargs": {
         "d": 50,
-        "disable_parallelism": false,
         "k": 2,
         "n": 2000,
         "n_perm": 1000,
@@ -1156,7 +1218,6 @@
       "outputs": "outputs/pls1_perm_null/pls1_perm_null_pre_standardized_n80_d6_k2.npz",
       "kwargs": {
         "d": 6,
-        "disable_parallelism": true,
         "k": 2,
         "n": 80,
         "n_perm": 200,
@@ -1181,7 +1242,6 @@
       "outputs": "outputs/pls1_perm_null/pls1_perm_null_weighted_n40_d1_k1.npz",
       "kwargs": {
         "d": 1,
-        "disable_parallelism": true,
         "k": 1,
         "n": 40,
         "n_perm": 200,
@@ -1205,7 +1265,6 @@
       "outputs": "outputs/pls1_perm_null/pls1_perm_null_weighted_prestd_n80_d6_k2.npz",
       "kwargs": {
         "d": 6,
-        "disable_parallelism": true,
         "k": 2,
         "n": 80,
         "n_perm": 200,
@@ -1230,7 +1289,6 @@
       "outputs": "outputs/pls1_rotation_stability/pls1_rotation_stability_n80_d6_k2.npz",
       "kwargs": {
         "d": 6,
-        "disable_parallelism": true,
         "k": 2,
         "level": 0.95,
         "m_rate": 0.7,
@@ -1255,7 +1313,6 @@
       "outputs": "outputs/pls1_rotation_stability/pls1_rotation_stability_weighted_n80_d6_k2.npz",
       "kwargs": {
         "d": 6,
-        "disable_parallelism": true,
         "k": 2,
         "level": 0.95,
         "m_rate": 0.7,
@@ -1281,7 +1338,6 @@
       "outputs": "outputs/pls1_rotation_stability/pls1_rotation_stability_weighted_prestd_n80_d6_k2.npz",
       "kwargs": {
         "d": 6,
-        "disable_parallelism": true,
         "k": 2,
         "level": 0.95,
         "m_rate": 0.7,
@@ -1722,6 +1778,30 @@
       "hashes": {
         "inputs_sha256": "9d3c09faa47ea1d282a5cd7699a1ac439023721bcab3f59e2e8ca4b254ccc3cc",
         "outputs_sha256": "e1b4784b883e5e00ebeff81518f7525cf936cf9f1e5ffdc4ee1852be647e847b"
+      },
+      "tolerance": {
+        "atol_array": 1e-10,
+        "atol_scalar": 1e-12,
+        "rtol": 1e-14
+      }
+    },
+    {
+      "name": "pls3_confirmatory_auto_split_exact",
+      "function": "pls3_confirmatory_test",
+      "inputs": "inputs/pls3_confirmatory_auto_split_exact.npz",
+      "outputs": "outputs/pls3_confirmatory_test/pls3_confirmatory_auto_split_exact.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 200,
+          "n_splits": 30
+        },
+        "k": 1,
+        "seed": 42,
+        "test_method": "auto"
+      },
+      "hashes": {
+        "inputs_sha256": "9d3c09faa47ea1d282a5cd7699a1ac439023721bcab3f59e2e8ca4b254ccc3cc",
+        "outputs_sha256": "08df90d73b73bd90f192c066251ceddd20bdd9fc8a714a6292088c2772e80bda"
       },
       "tolerance": {
         "atol_array": 1e-10,

@@ -51,6 +51,14 @@ pub(crate) enum SequentialArgs {
     },
     /// Universal-inference split-LR e-value per component.
     E,
+    /// `split_exact` or `split_nb`, resolved once on the full X by
+    /// `run_incremental_sequence` (see `signal_test::resolve_auto`).
+    Auto {
+        /// Number of permutations if `split_exact` runs.
+        n_perm: usize,
+        /// Number of split-half repetitions.
+        n_splits: usize,
+    },
 }
 
 impl SequentialArgs {
@@ -62,6 +70,7 @@ impl SequentialArgs {
             SequentialArgs::SplitNb { .. } => ConfirmatoryMethod::SplitNb,
             SequentialArgs::SplitExact { .. } => ConfirmatoryMethod::SplitExact,
             SequentialArgs::E => ConfirmatoryMethod::E,
+            SequentialArgs::Auto { .. } => ConfirmatoryMethod::Auto,
         }
     }
 
@@ -81,6 +90,10 @@ impl SequentialArgs {
                 n_splits: 50,
             },
             ConfirmatoryMethod::E => SequentialArgs::E,
+            ConfirmatoryMethod::Auto => SequentialArgs::Auto {
+                n_perm: 1000,
+                n_splits: 50,
+            },
             ConfirmatoryMethod::Score => return None,
         })
     }
@@ -105,6 +118,11 @@ impl SequentialArgs {
                 ConfirmatoryArgs::SplitExact { n_perm, n_splits }
             }
             SequentialArgs::E => ConfirmatoryArgs::E,
+            // Never reaches a step: `run_incremental_sequence` resolves it
+            // first.
+            SequentialArgs::Auto { n_perm, n_splits } => {
+                ConfirmatoryArgs::Auto { n_perm, n_splits }
+            }
         }
     }
 }
@@ -125,8 +143,6 @@ pub(crate) struct IncrementalSequenceOpts {
     pub(crate) pre_standardized: bool,
     /// RNG seed; `None` draws from OS entropy.
     pub(crate) seed: Option<u64>,
-    /// Disable Rayon parallelism (forces serial execution; useful for deterministic debugging).
-    pub(crate) disable_parallelism: bool,
     /// Print progress to stderr (reserved for future verbose mode).
     pub(crate) verbose: bool,
     /// Sparse keep-count plumbing (spls1 family): threads into BOTH fit
@@ -149,10 +165,11 @@ pub(crate) struct IncrementalSequenceOutput {
     /// RNG seed actually used.
     pub(crate) seed: u64,
     /// Stable rank of the standardized X, as the hoisted gate saw it.
-    /// `Some` whenever `split_nb` was the REQUESTED method — whether the gate
-    /// fired or not, and also under `force` — matching the same field on
-    /// `ConfirmatoryTestOutput`. `None` for every other requested method,
-    /// which never evaluates the gate.
+    /// `Some` on an explicit `split_nb` request, and on an `"auto"` request
+    /// that reached the stable-rank check (p > 4, `n_eff` ≥ 250, and
+    /// p ≤ 100·n without `keep`); `None` otherwise. On a `split_nb` request it is set whether the gate
+    /// fired or not, and also under `force`, matching the same field on
+    /// `ConfirmatoryTestOutput`.
     pub(crate) stable_rank: Option<f64>,
 }
 
@@ -213,8 +230,23 @@ pub(crate) fn run_incremental_sequence(
     // `IncrementalSequenceOutput.method` is read off the resolved args below,
     // exactly as `result.test_method` is read off `args_resolved` in
     // `pls1_confirmatory_test`.
+    //
+    // `Auto` resolves here too, once on the full X, for the same two reasons.
     let mut stable_rank_out = None;
-    if let SequentialArgs::SplitNb { n_splits, force } = opts.args {
+    if let SequentialArgs::Auto { n_perm, n_splits } = opts.args {
+        // Every step tests at k = 1, so `keep` alone decides the route.
+        let no_refit = crate::signal_test::split_exact_no_refit_route(1, opts.keep);
+        let (method, sr) = crate::signal_test::resolve_auto(x, weights, n_eff, no_refit);
+        stable_rank_out = sr;
+        opts.args = if method == ConfirmatoryMethod::SplitNb {
+            SequentialArgs::SplitNb {
+                n_splits,
+                force: false,
+            }
+        } else {
+            SequentialArgs::SplitExact { n_perm, n_splits }
+        };
+    } else if let SequentialArgs::SplitNb { n_splits, force } = opts.args {
         // Evaluated even under `force`, whose only effect is to skip the
         // reroute below: `stable_rank` means the same thing on every result
         // type that carries it (what the gate saw on a `split_nb` request),
@@ -272,7 +304,7 @@ fn p_for_confirmatory_at_k(
         confirmatory_test_impl, ConfirmatoryTestInput, ConfirmatoryTestOpts, GateMode,
     };
     // One RNG draw is discarded per step: it is part of the fixed seed
-    // stream that the testdata/ fixtures and `tests/byte_parity.rs` pin. The
+    // stream that the testdata/ fixtures pin. The
     // test seed below is the next draw. Removing it changes every p-value;
     // regenerate testdata/ if you do.
     let _: u64 = {
@@ -288,7 +320,6 @@ fn p_for_confirmatory_at_k(
                 use rand::Rng;
                 rng.next_u64()
             }),
-            disable_parallelism: opts.disable_parallelism,
             verbose: opts.verbose,
             ci: None,
             // `IncrementalSequenceOpts` has no `max_skip_rate`; with
@@ -309,7 +340,7 @@ fn p_for_incremental(
     opts: &IncrementalSequenceOpts,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<f64> {
-    use crate::fit::{pls1_fit, FitOpts, KSpec};
+    use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
     use crate::linalg::{standardize, standardize1, standardize1_weighted, standardize_weighted};
 
     // Standardize the same way the per-step fit will: weighted moments when
@@ -346,7 +377,7 @@ fn p_for_incremental(
     } else {
         // Deflation components are fit with the same weights as the per-step
         // test so that the deflated residual matches the weighted model.
-        let prev = pls1_fit(
+        let prev = pls1_fit_impl(
             xs_full,
             ys_full.as_ref(),
             KSpec::Fixed(h - 1),
@@ -407,23 +438,7 @@ fn p_for_incremental(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn synth(
-        n: usize,
-        d: usize,
-        k_signal: usize,
-        snr: f64,
-        seed: u64,
-    ) -> (faer::Mat<f64>, Col<f64>) {
-        use rand::RngExt;
-        use rand::SeedableRng;
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-        let x = faer::Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0));
-        let beta = Col::<f64>::from_fn(d, |j| if j < k_signal { 1.0 } else { 0.0 });
-        let signal: Col<f64> = &x * &beta;
-        let y = Col::<f64>::from_fn(n, |i| signal[i] * snr + rng.random_range(-1.0..1.0));
-        (x, y)
-    }
+    use crate::test_support::synth;
 
     /// `test_method="raw_perm"` uses a fixed 5-fold CV at every step, so
     /// `n <= 5` must be rejected before the per-step call, with a message
@@ -445,7 +460,6 @@ mod tests {
                     stop_early_override: true,
                     pre_standardized: false,
                     seed: Some(99),
-                    disable_parallelism: false,
                     verbose: false,
                     keep: None,
                 },
@@ -486,7 +500,6 @@ mod tests {
                 stop_early_override: true,
                 pre_standardized: true,
                 seed: Some(99),
-                disable_parallelism: false,
                 verbose: false,
                 keep: None,
             },
@@ -530,32 +543,43 @@ mod tests {
         assert!(r.stable_rank.is_none(), "step evaluated the gate");
     }
 
+    /// With `stop_early_override` every step up to `k_max` gets a p-value;
+    /// without it the sequence stops at the first non-rejection and leaves
+    /// the later steps NaN.
     #[test]
     fn override_runs_all_k() {
         let (x, y) = synth(60, 5, 1, 4.0, 1);
-        let r = run_incremental_sequence(
-            x.as_ref(),
-            y.as_ref(),
-            3,
-            None,
-            x.nrows() as f64,
-            IncrementalSequenceOpts {
-                args: SequentialArgs::SplitNb {
-                    n_splits: 30,
-                    force: false,
+        let run = |stop_early_override: bool| {
+            run_incremental_sequence(
+                x.as_ref(),
+                y.as_ref(),
+                4,
+                None,
+                x.nrows() as f64,
+                IncrementalSequenceOpts {
+                    args: SequentialArgs::SplitNb {
+                        n_splits: 30,
+                        force: false,
+                    },
+                    alpha: 0.05,
+                    stop_early_override,
+                    pre_standardized: false,
+                    seed: Some(7),
+                    verbose: false,
+                    keep: None,
                 },
-                alpha: 0.05,
-                stop_early_override: true,
-                pre_standardized: false,
-                seed: Some(7),
-                disable_parallelism: false,
-                verbose: false,
-                keep: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(r.pvalues.nrows(), 3);
-        assert!((0..3).all(|i| !r.pvalues[i].is_nan()));
+            )
+            .unwrap()
+            .pvalues
+        };
+        let stopped = run(false);
+        assert!(
+            stopped.iter().any(|p| p.is_nan()),
+            "premise: the early stop fires without the override, got {stopped:?}"
+        );
+        let all = run(true);
+        assert_eq!(all.nrows(), 4);
+        assert!(all.iter().all(|p| !p.is_nan()), "{all:?}");
     }
 
     /// Layout invariance: every step reads X through `standardize` /
@@ -599,7 +623,6 @@ mod tests {
                                 stop_early_override: true,
                                 pre_standardized: c.pre,
                                 seed: Some(23),
-                                disable_parallelism: false,
                                 verbose: false,
                                 keep,
                             },

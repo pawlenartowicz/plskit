@@ -32,7 +32,10 @@ intervals on the saliences, which is one reason the family offers none
 
 ## Two methods
 
-`test_method` is keyword-only and required; there is no default.
+`test_method` is keyword-only and defaults to `"auto"`, which runs
+`split_exact` or `split_nb` by the rule in
+[`test_method="auto"`](../PLS1/inference.md#test_methodauto)
+(`n_eff` is `n` here). `result.test_method` reports the method that ran.
 
 | | `split_exact` (recommended) | `split_nb` |
 |---|---|---|
@@ -67,7 +70,7 @@ when `split_exact` is too slow; prefer `split_exact` otherwise.
 
 ## The `split_nb` auto-gate runs on X only
 
-A `split_nb` request first goes through the same auto-gate as
+An explicit `split_nb` request first goes through the same auto-gate as
 `pls1_confirmatory_test`, applied to the standardized X. The gate flags a
 design when any of these holds:
 
@@ -78,8 +81,9 @@ design when any of these holds:
 A flagged design runs `split_exact` instead, with `n_perm = 1000` and your
 `n_splits`. `result.test_method` then reports `"split_exact"`, and Python emits
 a `UserWarning`. `args={"force": True}` skips the reroute and runs `split_nb`
-anyway. `result.stable_rank` is filled whenever `split_nb` was requested,
-since it is what the gate saw.
+anyway. `result.stable_rank` is set on an explicit `split_nb`
+request, and on an `"auto"` request that reached the stable-rank check
+(p > 4, n_eff ≥ 250); `None` otherwise. It is what the gate saw.
 
 Y is deliberately never gated. In ordinary PLSC `q` is small (a handful of
 behavioural measures), so a stable-rank floor of 3 on Y would flag nearly

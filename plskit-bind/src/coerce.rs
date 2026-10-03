@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn bools_convert_to_zero_one_where_a_vector_is_expected() {
+    fn bools_convert_to_vectors_and_matrices_must_be_2d() {
         let v = to_vec(Value::BoolVec(vec![true, false, true])).unwrap();
         assert_eq!(v.as_slice(), &[1.0, 0.0, 1.0]);
         assert_eq!(to_vec(Value::Bool(true)).unwrap().as_slice(), &[1.0]);
@@ -209,10 +209,6 @@ mod tests {
             to_mat(Value::Bool(true)).unwrap_err(),
             "must be 2-D, got 0-D"
         );
-    }
-
-    #[test]
-    fn matrices_must_be_2d() {
         let v = Value::Vec(VecF64::Owned(vec![1.0]));
         assert_eq!(to_mat(v).unwrap_err(), "must be 2-D, got 1-D");
         assert_eq!(to_mat(Value::F64(1.0)).unwrap_err(), "must be 2-D, got 0-D");

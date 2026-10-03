@@ -416,6 +416,8 @@ impl Fixture {
 /// Python side uses. The exact `==` is what makes `inf` match `inf`, where
 /// the difference is NaN; the finiteness guard keeps `RTOL·|inf|` from
 /// accepting any `a` against an infinite `e`.
+/// `plskit-testdata-gen/src/settle.rs::close` mirrors this rule: change
+/// together.
 #[allow(clippy::float_cmp)]
 fn close(a: f64, e: f64, atol: f64) -> bool {
     a == e
@@ -528,6 +530,7 @@ fn method_from_str(s: &str) -> ConfirmatoryMethod {
         "split_exact" => ConfirmatoryMethod::SplitExact,
         "score" => ConfirmatoryMethod::Score,
         "e" => ConfirmatoryMethod::E,
+        "auto" => ConfirmatoryMethod::Auto,
         other => panic!("unknown method {other}"),
     }
 }
@@ -545,6 +548,10 @@ fn confirmatory_args(method: ConfirmatoryMethod, args: &Value) -> ConfirmatoryAr
             force: args.get("force").map_or(force, |v| v.as_bool().unwrap()),
         },
         ConfirmatoryArgs::SplitExact { n_perm, n_splits } => ConfirmatoryArgs::SplitExact {
+            n_perm: kw_opt_usize(args, "n_perm").unwrap_or(n_perm),
+            n_splits: kw_opt_usize(args, "n_splits").unwrap_or(n_splits),
+        },
+        ConfirmatoryArgs::Auto { n_perm, n_splits } => ConfirmatoryArgs::Auto {
             n_perm: kw_opt_usize(args, "n_perm").unwrap_or(n_perm),
             n_splits: kw_opt_usize(args, "n_splits").unwrap_or(n_splits),
         },
@@ -764,7 +771,6 @@ fn pls1_confirmatory_test_cases_match_corpus() {
         top: &[
             "args",
             "ci",
-            "disable_parallelism",
             "k",
             "level",
             "m_rate",
@@ -802,7 +808,6 @@ fn pls1_confirmatory_test_cases_match_corpus() {
                 args: confirmatory_args(method, &kw["args"]),
                 pre_standardized: kw_bool(kw, "pre_standardized"),
                 seed: kw_seed(kw),
-                disable_parallelism: kw_bool(kw, "disable_parallelism"),
                 ci,
                 ..ConfirmatoryTestOpts::default()
             },
@@ -925,7 +930,6 @@ fn preprocess_cases_match_corpus() {
 fn pls1_perm_null_cases_match_corpus() {
     let kwargs = Kwargs::top(&[
         "d",
-        "disable_parallelism",
         "k",
         "n",
         "n_perm",
@@ -946,7 +950,6 @@ fn pls1_perm_null_cases_match_corpus() {
                 n_perm: kw_usize(kw, "n_perm"),
                 return_perm_matrix: kw_bool(kw, "return_perm_matrix"),
                 pre_standardized: kw_bool(kw, "pre_standardized"),
-                disable_parallelism: kw_bool(kw, "disable_parallelism"),
                 verbose: false,
             },
             kw_seed(kw),
@@ -979,7 +982,6 @@ fn pls1_perm_null_cases_match_corpus() {
 fn pls1_rotation_stability_cases_match_corpus() {
     let kwargs = Kwargs::top(&[
         "d",
-        "disable_parallelism",
         "k",
         "level",
         "m_rate",
@@ -1006,7 +1008,6 @@ fn pls1_rotation_stability_cases_match_corpus() {
                 level: kw_opt_f64(kw, "level").unwrap_or(d.level),
                 pre_standardized: kw_bool(kw, "pre_standardized"),
                 seed: kw_seed(kw),
-                disable_parallelism: kw_bool(kw, "disable_parallelism"),
                 ..d
             },
         )
@@ -1204,7 +1205,7 @@ fn pls3_transform_cases_match_corpus() {
 #[test]
 fn pls3_confirmatory_test_cases_match_corpus() {
     let kwargs = Kwargs {
-        top: &["args", "disable_parallelism", "k", "seed", "test_method"],
+        top: &["args", "k", "seed", "test_method"],
         args: &["force", "n_folds", "n_perm", "n_splits"],
     };
     for_each_case("pls3_confirmatory_test", kwargs, |case, inputs, fx| {
@@ -1217,7 +1218,6 @@ fn pls3_confirmatory_test_cases_match_corpus() {
             Pls3ConfirmatoryTestOpts {
                 args: confirmatory_args(method, &kw["args"]),
                 seed: kw_seed(kw),
-                disable_parallelism: kw_bool(kw, "disable_parallelism"),
                 ..Pls3ConfirmatoryTestOpts::default()
             },
         )

@@ -128,7 +128,7 @@ class RotationStabilityResult:
 class ConfirmatoryTestResult:
     pvalue: float
     statistic: float
-    test_method: str          # what actually ran: "raw_perm" | "split_nb" | "split_exact" | "score" | "e"
+    test_method: str          # what actually ran, never "auto": "raw_perm" | "split_nb" | "split_exact" | "score" | "e"
     k: int                    # the K tested
     n_perm: int | None
     n_splits: int | None
@@ -141,10 +141,10 @@ class ConfirmatoryTestResult:
     # weights are non-uniform or the test half is too small.
     rho_hat: float | None = None
     # Stable rank of the standardized X, as seen by the split_nb auto-gate.
-    # Populated (non-None) whenever "split_nb" was the REQUESTED method —
-    # whether the gate fired or not, and also under args={"force": True} —
-    # so it shows what the gate saw. None for every other requested method,
-    # which never evaluates the gate.
+    # Not None on an explicit "split_nb" request — whether the gate fired or
+    # not, and also under args={"force": True} — and on an "auto" request
+    # that reached the stable-rank check (p > 4, n_eff >= 250, and, on a
+    # PLS1 request at k=1 without keep, p <= 100*n); None otherwise.
     stable_rank: float | None = None
     ci: ConfirmatoryCI | None = None
 
@@ -161,7 +161,7 @@ class FindKOptimalResult:
     seed: int
     n_eff: float = float("nan")
     # Stable rank of the standardized X, as the sequence-level auto-gate saw
-    # it. Same meaning as on ConfirmatoryTestResult: populated whenever
+    # it. Same meaning as on ConfirmatoryTestResult: not None whenever
     # "split_nb" was the REQUESTED diagnostic, fired or not, including under
     # args={"force": True}. None otherwise, and None when no diagnostic ran.
     stable_rank: float | None = None
@@ -171,19 +171,20 @@ class FindKOptimalResult:
 class FindKSequenceResult:
     k_star: int
     pvalues: np.ndarray
-    test_method: str          # which test actually ran; a flagged "split_nb" reads "split_exact"
+    test_method: str          # which test actually ran, never "auto"; a flagged explicit "split_nb" reads "split_exact"
     alpha: float
     seed: int
     n_eff: float = float("nan")
-    # As on FindKOptimalResult: what the gate saw, populated whenever
-    # "split_nb" was the requested test_method.
+    # As on ConfirmatoryTestResult: not None on an explicit "split_nb"
+    # request, and on an "auto" request that reached the stable-rank check
+    # (p > 4, n_eff >= 250, and p <= 100*n without keep); None otherwise.
     stable_rank: float | None = None
 
 
 @dataclass(frozen=True)
 class SplitNbGateResult:
     """Output of `split_nb_gate` — what the auto-gate sees on a design."""
-    fires: bool               # True → a "split_nb" request here reroutes to "split_exact"
+    fires: bool               # True → an explicit "split_nb" request here reroutes to "split_exact"
     stable_rank: float        # stable rank of the standardized X
     n_eff: float              # Kish's effective sample size; equals n for uniform/absent weights
 

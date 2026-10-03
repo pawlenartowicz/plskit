@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pytest
 
@@ -30,17 +32,17 @@ def test_fit_returns_PLS3Result_with_expected_shapes():
     assert m.pre_standardized_Y is False
     assert m.keep_X is None and m.keep_Y is None
     assert m.converged is None and m.n_iter is None
-    # PLS3 is symmetric — there is no predict and no coefficient vector.
-    assert not hasattr(m, "beta")
-    assert not hasattr(m, "coef")
 
 
-def test_plssvd_fit_alias_matches_pls3_fit():
+def test_plssvd_aliases_match_pls3():
     X, Y = _data()
     a = plskit.pls3_fit(X, Y, k=2)
     b = plskit.plssvd_fit(X, Y, k=2)
     assert np.array_equal(a.U, b.U)
     assert np.array_equal(a.singular_values, b.singular_values)
+    ta = plskit.pls3_transform(a, X, None, which="x_scores")
+    tb = plskit.plssvd_transform(a, X, None, which="x_scores")
+    assert np.array_equal(ta.x_scores, tb.x_scores)
 
 
 def test_fit_1d_Y_is_rejected_with_a_clear_message():
@@ -73,14 +75,6 @@ def test_transform_unknown_which_raises_invalid_args():
     with pytest.raises(plskit.PlsKitError) as ei:
         plskit.pls3_transform(m, X, Y, which="scores")
     assert ei.value.code == "invalid_args"
-
-
-def test_plssvd_transform_alias_matches():
-    X, Y = _data()
-    m = plskit.pls3_fit(X, Y, k=2)
-    a = plskit.pls3_transform(m, X, None, which="x_scores")
-    b = plskit.plssvd_transform(m, X, None, which="x_scores")
-    assert np.array_equal(a.x_scores, b.x_scores)
 
 
 @pytest.mark.parametrize(
@@ -148,11 +142,14 @@ def test_confirmatory_test_rejects_other_methods(method):
     assert ei.value.code == "invalid_args"
 
 
-def test_confirmatory_test_unknown_arg_key_is_rejected():
+@pytest.mark.parametrize(
+    "method, key", [("split_exact", "n_folds"), ("split_nb", "n_perm")]
+)
+def test_confirmatory_test_unknown_arg_key_is_rejected(method, key):
     X, Y = _data()
     with pytest.raises(plskit.PlsKitError) as ei:
         plskit.pls3_confirmatory_test(
-            X, Y, k=1, test_method="split_exact", args={"n_folds": 5}, seed=1
+            X, Y, k=1, test_method=method, args={key: 5}, seed=1
         )
     assert ei.value.code == "invalid_args"
 
@@ -183,15 +180,6 @@ def test_split_nb_gate_reroutes_and_warns():
     assert r.n_splits == 6
 
 
-def test_split_nb_unknown_arg_key_is_rejected():
-    X, Y = _data()
-    with pytest.raises(plskit.PlsKitError) as ei:
-        plskit.pls3_confirmatory_test(
-            X, Y, k=1, test_method="split_nb", args={"n_perm": 100}, seed=1
-        )
-    assert ei.value.code == "invalid_args"
-
-
 def _orthogonal_Y(n=60, p=6, q=3, seed=4):
     # Y residualized on [1, X]: orthogonal to the standardized columns of X
     # up to rounding, so X'Y is rounding noise, sigma_1 included.
@@ -203,10 +191,9 @@ def _orthogonal_Y(n=60, p=6, q=3, seed=4):
     return X, Y
 
 
-@pytest.mark.parametrize("k", [1, 3])
-def test_orthogonal_Y_keeps_no_component_like_pls1(k):
+def test_orthogonal_Y_keeps_no_component():
     X, Y = _orthogonal_Y()
-    m = plskit.pls3_fit(X, Y, k=k)
+    m = plskit.pls3_fit(X, Y, k=1)
     assert m.k_used == 0
     assert m.U.shape == (6, 0)
     assert m.V.shape == (3, 0)
@@ -214,8 +201,6 @@ def test_orthogonal_Y_keeps_no_component_like_pls1(k):
     assert m.x_scores.shape == (60, 0)
     # Same policy as PLS1 on each column of Y.
     assert plskit.pls1_fit(X, Y[:, 0], k=1).k_used == 0
-    # The sparse fit applies the same floor to its first component.
-    assert plskit.spls3_fit(X, Y, k=k, keep_X=3, keep_Y=2).k_used == 0
     # And the zero model still transforms, to empty score matrices.
     s = plskit.pls3_transform(m, X_new=X, Y_new=Y)
     assert s.x_scores.shape == (60, 0)
@@ -239,3 +224,34 @@ def test_pls3_family_rejects_unusable_top_level_values(call, message):
     with pytest.raises(plskit.PlsKitError, match=message) as ei:
         call(X, Y)
     assert ei.value.code == "invalid_argument"
+
+
+def test_auto_is_the_default_and_resolves_per_design():
+    X, Y = _data(n=80, p=6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        small = plskit.pls3_confirmatory_test(
+            X, Y, args={"n_perm": 49, "n_splits": 6}, seed=3
+        )
+    assert small.test_method == "split_exact"
+    assert small.n_perm == 49
+
+    X, Y = _data(n=300, p=10)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        large = plskit.pls3_confirmatory_test(
+            X, Y, args={"n_perm": 49, "n_splits": 6}, seed=3
+        )
+    assert large.test_method == "split_nb"
+    assert large.n_perm is None
+    assert large.n_splits == 6
+    assert large.stable_rank is not None
+
+
+def test_auto_args_take_n_perm_and_n_splits_only():
+    X, Y = _data()
+    with pytest.raises(plskit.PlsKitError, match="does not accept arg 'force'") as ei:
+        plskit.pls3_confirmatory_test(
+            X, Y, test_method="auto", args={"force": True}, seed=1
+        )
+    assert ei.value.code == "invalid_args"

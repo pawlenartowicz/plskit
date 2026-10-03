@@ -1,5 +1,5 @@
-//! Integration tests for `pls3_fit`, `plssvd_fit`, `pls3_transform`,
-//! `plssvd_transform` and `spls3_fit` through `call`.
+//! Integration tests for `pls3_fit`, `plssvd_fit`, `pls3_transform` and
+//! `plssvd_transform` through `call`.
 #![allow(clippy::many_single_char_names)]
 
 mod common;
@@ -40,32 +40,6 @@ fn a_one_column_y_matrix_is_2d_and_a_vector_is_not() {
     );
     assert_eq!(e.code, "invalid_argument");
     assert!(e.message.contains("use pls1_fit"), "{}", e.message);
-}
-
-#[test]
-fn spls3_at_full_keep_reproduces_the_dense_saliences() {
-    let (x, y) = blocks();
-    let dense = ok(
-        "pls3_fit",
-        vec![("X", x.clone()), ("Y", y.clone()), ("k", Value::I64(2))],
-    );
-    let sparse = ok(
-        "spls3_fit",
-        vec![
-            ("X", x),
-            ("Y", y),
-            ("k", Value::I64(2)),
-            ("keep_X", Value::I64(6)),
-            ("keep_Y", Value::I64(3)),
-        ],
-    );
-    let (d, s) = (record(&dense), record(&sparse));
-    check_record(s).unwrap();
-    assert!(same(field(d, "U"), field(s, "U")));
-    assert!(same(field(d, "V"), field(s, "V")));
-    assert!(matches!(field(s, "converged"), Value::BoolVec(v) if v.len() == 2));
-    assert!(matches!(field(s, "n_iter"), Value::IntVec(v) if v.len() == 2));
-    assert_eq!(i(s, "keep_X"), 6);
 }
 
 #[test]

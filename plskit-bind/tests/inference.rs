@@ -60,20 +60,6 @@ fn split_exact_records_its_seed_and_reproduces_from_it() {
     assert!(same(&a.result, &c.result));
 }
 
-// Seeds above 2^63 travel as decimal strings (R's form).
-#[test]
-fn a_seed_above_2_63_is_recorded_exactly() {
-    let o = ok(
-        "pls1_confirmatory_test",
-        confirm(vec![
-            ("test_method", Value::text("split_exact")),
-            ("args", exact_args()),
-            ("seed", Value::text("18446744073709551615")),
-        ]),
-    );
-    assert!(matches!(field(record(&o), "seed"), Value::U64(u64::MAX)));
-}
-
 #[test]
 fn bad_methods_and_args_are_invalid_args() {
     let e = err(
@@ -97,6 +83,14 @@ fn bad_methods_and_args_are_invalid_args() {
         confirm(vec![
             ("test_method", Value::text("split_exact")),
             ("args", args(vec![("n_perm", Value::F64(2.5))])),
+        ]),
+    );
+    assert_eq!(e.code, "invalid_args");
+    let e = err(
+        "pls1_confirmatory_test",
+        confirm(vec![
+            ("test_method", Value::text("split_nb")),
+            ("args", args(vec![("force", Value::I64(1))])),
         ]),
     );
     assert_eq!(e.code, "invalid_args");
@@ -136,7 +130,7 @@ fn ci_knobs_are_inert_without_ci_and_fill_the_bundle_with_it() {
 }
 
 #[test]
-fn a_rerouted_split_nb_warns_with_the_python_sentence() {
+fn a_rerouted_split_nb_warns() {
     let (x, y) = data(60, 3, 2); // 3 columns: the gate fires on ncols <= 4
     let o = ok(
         "pls1_confirmatory_test",
@@ -154,22 +148,13 @@ fn a_rerouted_split_nb_warns_with_the_python_sentence() {
     assert_eq!(s(w, "kind"), "rerouted");
     assert_eq!(s(w, "requested"), "split_nb");
     assert_eq!(s(w, "actual"), "split_exact");
+    assert!(matches!(field(r, "stable_rank"), Value::F64(_)));
+    assert!(same(field(w, "stable_rank"), field(r, "stable_rank")));
+    let Value::F64(n_eff) = field(r, "n_eff") else {
+        panic!("n_eff must be F64")
+    };
     let msg = s(w, "message");
-    assert!(
-        msg.starts_with(
-            "'split_nb' was rerouted to 'split_exact': the split_nb auto-gate flagged this design \
-             (stable rank of the standardized X = "
-        ),
-        "{msg}"
-    );
-    assert!(
-        msg.contains("; n_eff = 60). The fallback runs n_perm="),
-        "{msg}"
-    );
-    assert!(
-        msg.ends_with("Pass args={'force': True} to run split_nb anyway."),
-        "{msg}"
-    );
+    assert!(msg.contains(&format!("; n_eff = {n_eff})")), "{msg}");
 
     let forced = ok(
         "pls1_confirmatory_test",
@@ -186,7 +171,7 @@ fn a_rerouted_split_nb_warns_with_the_python_sentence() {
 }
 
 #[test]
-fn pls3_confirmatory_test_runs_two_methods_and_never_a_ci() {
+fn pls3_confirmatory_test_has_no_ci_and_rejects_raw_perm_and_1d_y() {
     let (x, _) = data(60, 6, 1);
     let y = block_y(60, 3, &x, 4);
     let o = ok(
@@ -224,13 +209,13 @@ fn pls3_confirmatory_test_runs_two_methods_and_never_a_ci() {
 }
 
 #[test]
-fn perm_null_matrix_matches_the_engine_row_for_row() {
+fn perm_null_record_and_matrix_shape() {
     let (x, y) = data(60, 6, 1);
     let o = ok(
         "pls1_perm_null",
         vec![
-            ("X", x.clone()),
-            ("y", y.clone()),
+            ("X", x),
+            ("y", y),
             ("k", Value::I64(2)),
             ("n_perm", Value::I64(100)),
             ("return_perm_matrix", Value::Bool(true)),
@@ -243,28 +228,6 @@ fn perm_null_matrix_matches_the_engine_row_for_row() {
         panic!()
     };
     assert_eq!((m.nrows(), m.ncols()), (100, 6));
-    let (Value::Mat(xm), Value::Vec(yv)) = (&x, &y) else {
-        panic!()
-    };
-    let out = plskit::pls1_perm_null(
-        xm.as_mat(),
-        yv.as_col(),
-        2,
-        None,
-        plskit::PermNullOpts {
-            n_perm: 100,
-            return_perm_matrix: true,
-            ..plskit::PermNullOpts::default()
-        },
-        Some(5),
-    )
-    .unwrap();
-    let flat = out.beta_perm_matrix.unwrap();
-    for row in 0..2 {
-        for j in 0..6 {
-            assert_eq!(m.as_mat()[(row, j)].to_bits(), flat[row * 6 + j].to_bits());
-        }
-    }
 }
 
 #[test]

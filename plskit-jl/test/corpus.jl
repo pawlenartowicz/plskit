@@ -4,7 +4,7 @@
 # come from the Python wheel, which passes the whole corpus in
 # plskit-py/tests/test_corpus.py, so this checks conversion.
 #
-# Key resolution follows plskit-bind/tests/corpus.rs: a fixture key maps
+# Key resolution: a fixture key maps
 # onto the result by name, exact, then ASCII case-insensitive (`y_std` is
 # `Y_std`), then into nested results, recursively. `{field}__keys` /
 # `{field}__values` encode an integer-keyed map; `{field}_{part}` and
@@ -45,6 +45,7 @@ const CORPUS_CASES = [
     "spls3_fit_small_n50_p10_q4_keep3_2_k2",
     "pls3_confirmatory_split_nb",
     "pls1_confirmatory_split_nb_ci",
+    "pls1_confirmatory_auto_split_exact",
     "pls1_perm_null_basic_n80_d6_k2",
     "pls1_rotation_stability_n80_d6_k2",
     "rotate_varimax_d6_k2",

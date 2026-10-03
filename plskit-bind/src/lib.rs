@@ -37,7 +37,7 @@ mod types;
 mod value;
 mod warn;
 
-pub use error::{BindError, ERROR_CODES};
+pub use error::BindError;
 pub use registry::{call, registry, registry_json, DefaultValue, FnSpec, Param, ParamKind};
 pub use types::{check_record, result_type, result_types, FieldSpec, ResultTypeSpec};
 pub use value::{MatF64, Outcome, Record, Value, VecF64};

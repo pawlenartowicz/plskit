@@ -16,14 +16,13 @@ pls1_rotation_stability(
   level = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  disable_parallelism = FALSE,
   verbose = FALSE,
   weights = NULL,
   max_skip_rate = NULL
 )
 }
 \arguments{
-\item{X, y, k, rotation_method, rotation_args, L, n_boot, m_rate, level, pre_standardized, seed, disable_parallelism, verbose, weights, max_skip_rate}{See the canonical reference.}
+\item{X, y, k, rotation_method, rotation_args, L, n_boot, m_rate, level, pre_standardized, seed, verbose, weights, max_skip_rate}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("rotation_stability_result", "plskit_result")}.

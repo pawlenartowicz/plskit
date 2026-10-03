@@ -478,17 +478,21 @@ fn btreemap_to_dict<'py>(
     d
 }
 
+/// Mirrors `parse_method` in `plskit-bind/src/methods.rs` — change together.
 fn parse_confirmatory_method(s: &str) -> PyResult<ConfirmatoryMethod> {
     match s {
         "raw_perm" => Ok(ConfirmatoryMethod::RawPerm),
         "split_nb" => Ok(ConfirmatoryMethod::SplitNb),
         "split_exact" => Ok(ConfirmatoryMethod::SplitExact),
+        "auto" => Ok(ConfirmatoryMethod::Auto),
         "score" => Ok(ConfirmatoryMethod::Score),
         "e" => Ok(ConfirmatoryMethod::E),
         _ => Err(invalid_args_err(&format!("unknown method: {s}"))),
     }
 }
 
+/// Mirrors `confirmatory_args` in `plskit-bind/src/methods.rs` — change
+/// together.
 fn parse_confirmatory_args(
     method: &str,
     args: Option<&Bound<'_, PyDict>>,
@@ -520,6 +524,15 @@ fn parse_confirmatory_args(
                 validate_keys(&label, a, &["n_perm", "n_splits"])?;
             }
             ConfirmatoryArgs::SplitExact {
+                n_perm: arg_usize(args, &label, "n_perm", n_perm)?,
+                n_splits: arg_usize(args, &label, "n_splits", n_splits)?,
+            }
+        }
+        ConfirmatoryArgs::Auto { n_perm, n_splits } => {
+            if let Some(a) = args {
+                validate_keys(&label, a, &["n_perm", "n_splits"])?;
+            }
+            ConfirmatoryArgs::Auto {
                 n_perm: arg_usize(args, &label, "n_perm", n_perm)?,
                 n_splits: arg_usize(args, &label, "n_splits", n_splits)?,
             }
@@ -832,18 +845,20 @@ fn parse_transform_which(s: &str) -> PyResult<TransformWhich> {
     }
 }
 
+/// Mirrors `pls3_confirmatory_args` in `plskit-bind/src/methods.rs` — change
+/// together.
 fn parse_pls3_confirmatory_args(
     method: &str,
     args: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<ConfirmatoryArgs> {
-    // PLS3 registers two of the five methods. Reject the other three by name
+    // PLS3 registers three of the six methods. Reject the other three by name
     // here rather than letting the core produce a less specific message. The
-    // two it accepts take the same keys, defaults and validation as their
+    // three it accepts take the same keys, defaults and validation as their
     // PLS1 counterparts, so they go through the same parser.
-    if method != "split_exact" && method != "split_nb" {
+    if method != "split_exact" && method != "split_nb" && method != "auto" {
         return Err(invalid_args_err(&format!(
             "test_method='{method}' is not available for pls3_confirmatory_test; \
-             allowed: [\"split_exact\", \"split_nb\"]"
+             allowed: [\"split_exact\", \"split_nb\", \"auto\"]"
         )));
     }
     parse_confirmatory_args(method, args)
@@ -959,7 +974,7 @@ fn pls3_transform<'py>(
 #[pyfunction]
 #[pyo3(signature = (x, y, k, *, test_method, args=None,
                     pre_standardized_X=false, pre_standardized_Y=false,
-                    seed=None, disable_parallelism=false, verbose=false))]
+                    seed=None, verbose=false))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::fn_params_excessive_bools)]
@@ -975,7 +990,6 @@ fn pls3_confirmatory_test_raw<'py>(
     pre_standardized_X: bool,
     pre_standardized_Y: bool,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let opts = Pls3ConfirmatoryTestOpts {
@@ -983,7 +997,6 @@ fn pls3_confirmatory_test_raw<'py>(
         pre_standardized_x: pre_standardized_X,
         pre_standardized_y: pre_standardized_Y,
         seed,
-        disable_parallelism,
         verbose,
         // Sparse selection (`keep_x` / `keep_y`) is not exposed on the Python
         // surface yet; the core defaults make this the dense test, with the
@@ -1057,7 +1070,7 @@ fn rotate<'py>(
                     ci=false, n_boot=None, m_rate=None, level=None,
                     max_failure_rate=None,
                     pre_standardized=false, seed=None,
-                    disable_parallelism=false, verbose=false,
+                    verbose=false,
                     weights=None, max_skip_rate=None))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
@@ -1077,7 +1090,6 @@ fn pls1_confirmatory_test_raw<'py>(
     max_failure_rate: Option<f64>,
     pre_standardized: bool,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
     max_skip_rate: Option<f64>,
@@ -1099,7 +1111,6 @@ fn pls1_confirmatory_test_raw<'py>(
         args: parse_confirmatory_args(test_method, args.as_ref())?,
         pre_standardized,
         seed,
-        disable_parallelism,
         verbose,
         ci: ci_opts,
         max_skip_rate: max_skip_rate.unwrap_or(opts_defaults.max_skip_rate),
@@ -1168,7 +1179,6 @@ fn split_nb_gate<'py>(
     n_boot = None, m_rate = None, level = None,
     pre_standardized = false,
     seed = None,
-    disable_parallelism = false,
     verbose = false,
     weights = None,
     max_skip_rate = None,
@@ -1188,7 +1198,6 @@ fn pls1_rotation_stability_raw<'py>(
     level: Option<f64>,
     pre_standardized: bool,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
     max_skip_rate: Option<f64>,
@@ -1218,7 +1227,6 @@ fn pls1_rotation_stability_raw<'py>(
         level: level.unwrap_or(defaults.level),
         pre_standardized,
         seed,
-        disable_parallelism,
         verbose,
         max_skip_rate: max_skip_rate.unwrap_or(defaults.max_skip_rate),
     };
@@ -1251,7 +1259,6 @@ fn run_find_k_optimal<'py>(
     args: Option<Bound<'_, PyDict>>,
     pre_standardized: bool,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
     for_fit: bool,
@@ -1339,7 +1346,6 @@ fn run_find_k_optimal<'py>(
         force,
         pre_standardized,
         seed,
-        disable_parallelism,
         verbose,
     };
     let x = aligned(x)?;
@@ -1399,7 +1405,7 @@ fn run_find_k_optimal<'py>(
 #[pyo3(signature = (x, y, k_max, *, selector="r2_se", diagnostic=None,
                     args=None,
                     pre_standardized=false, seed=None,
-                    disable_parallelism=false, verbose=false,
+                    verbose=false,
                     weights=None, for_fit=false))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
@@ -1414,7 +1420,6 @@ fn pls1_find_k_optimal<'py>(
     args: Option<Bound<'_, PyDict>>,
     pre_standardized: bool,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
     for_fit: bool,
@@ -1430,7 +1435,6 @@ fn pls1_find_k_optimal<'py>(
         args,
         pre_standardized,
         seed,
-        disable_parallelism,
         verbose,
         weights,
         for_fit,
@@ -1441,7 +1445,7 @@ fn pls1_find_k_optimal<'py>(
 #[pyo3(signature = (x, y, k_max, keep, *, selector="r2_se", diagnostic=None,
                     args=None,
                     pre_standardized=false, seed=None,
-                    disable_parallelism=false, verbose=false,
+                    verbose=false,
                     weights=None))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
@@ -1457,7 +1461,6 @@ fn spls1_find_k_optimal<'py>(
     args: Option<Bound<'_, PyDict>>,
     pre_standardized: bool,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -1472,7 +1475,6 @@ fn spls1_find_k_optimal<'py>(
         args,
         pre_standardized,
         seed,
-        disable_parallelism,
         verbose,
         weights,
         false,
@@ -1493,7 +1495,6 @@ fn run_find_k_sequence<'py>(
     args: Option<Bound<'_, PyDict>>,
     pre_standardized: bool,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
     for_fit: bool,
@@ -1502,10 +1503,12 @@ fn run_find_k_sequence<'py>(
     // it; absent `args` keys fall back the same way.
     let defaults = FindKSequenceOpts::default();
     let tm = parse_confirmatory_method(test_method)?;
+    // The `allowed` match mirrors `find_k_sequence_opts` in
+    // `plskit-bind/src/methods.rs` — change together.
     let allowed: &[&str] = match tm {
         ConfirmatoryMethod::RawPerm => &["n_perm"],
         ConfirmatoryMethod::SplitNb => &["n_splits", "force"],
-        ConfirmatoryMethod::SplitExact => &["n_perm", "n_splits"],
+        ConfirmatoryMethod::SplitExact | ConfirmatoryMethod::Auto => &["n_perm", "n_splits"],
         ConfirmatoryMethod::E => &[],
         // Score has no per-component reading, so it has no sequential
         // variant to dispatch to (mirrors SequentialArgs::defaults_for).
@@ -1532,7 +1535,6 @@ fn run_find_k_sequence<'py>(
         force,
         pre_standardized,
         seed,
-        disable_parallelism,
         verbose,
     };
     let x = aligned(x)?;
@@ -1578,10 +1580,10 @@ fn run_find_k_sequence<'py>(
 /// (through `FindKSequenceOutput::k_to_fit`) instead of returning
 /// `k_star = 0`.
 #[pyfunction]
-#[pyo3(signature = (x, y, k_max, *, test_method="split_nb", alpha=None,
+#[pyo3(signature = (x, y, k_max, *, test_method="auto", alpha=None,
                     args=None,
                     pre_standardized=false, seed=None,
-                    disable_parallelism=false, verbose=false,
+                    verbose=false,
                     weights=None, for_fit=false))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
@@ -1596,7 +1598,6 @@ fn pls1_find_k_sequence<'py>(
     args: Option<Bound<'_, PyDict>>,
     pre_standardized: bool,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
     for_fit: bool,
@@ -1612,7 +1613,6 @@ fn pls1_find_k_sequence<'py>(
         args,
         pre_standardized,
         seed,
-        disable_parallelism,
         verbose,
         weights,
         for_fit,
@@ -1620,10 +1620,10 @@ fn pls1_find_k_sequence<'py>(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, y, k_max, keep, *, test_method="split_nb", alpha=None,
+#[pyo3(signature = (x, y, k_max, keep, *, test_method="auto", alpha=None,
                     args=None,
                     pre_standardized=false, seed=None,
-                    disable_parallelism=false, verbose=false,
+                    verbose=false,
                     weights=None))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
@@ -1639,7 +1639,6 @@ fn spls1_find_k_sequence<'py>(
     args: Option<Bound<'_, PyDict>>,
     pre_standardized: bool,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -1654,7 +1653,6 @@ fn spls1_find_k_sequence<'py>(
         args,
         pre_standardized,
         seed,
-        disable_parallelism,
         verbose,
         weights,
         false,
@@ -1664,7 +1662,7 @@ fn spls1_find_k_sequence<'py>(
 #[pyfunction]
 #[pyo3(signature = (x, y, k, *, n_perm=None, return_perm_matrix=false,
                     pre_standardized=false, seed=None,
-                    disable_parallelism=false, verbose=false,
+                    verbose=false,
                     weights=None))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
@@ -1679,7 +1677,6 @@ fn pls1_perm_null_raw<'py>(
     return_perm_matrix: bool,
     pre_standardized: bool,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -1689,7 +1686,6 @@ fn pls1_perm_null_raw<'py>(
         n_perm: n_perm.unwrap_or(defaults.n_perm),
         return_perm_matrix,
         pre_standardized,
-        disable_parallelism,
         verbose,
     };
     let x = aligned(x)?;
@@ -1841,7 +1837,7 @@ fn preprocess<'py>(
 
 #[pyfunction]
 #[pyo3(signature = (x, y, k, *, args=None, seed=None,
-                    disable_parallelism=false, verbose=false, weights=None))]
+                    verbose=false, weights=None))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::many_single_char_names)]
@@ -1852,7 +1848,6 @@ fn spls1_find_keep_optimal<'py>(
     k: usize,
     args: Option<Bound<'_, PyDict>>,
     seed: Option<u64>,
-    disable_parallelism: bool,
     verbose: bool,
     weights: Option<PyReadonlyArray1<'_, f64>>,
 ) -> PyResult<Bound<'py, PyDict>> {
@@ -1869,7 +1864,6 @@ fn spls1_find_keep_optimal<'py>(
     let opts = FindKeepOptimalOpts {
         n_folds,
         seed,
-        disable_parallelism,
         verbose,
     };
     let x = aligned(x)?;

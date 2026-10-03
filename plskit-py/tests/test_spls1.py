@@ -29,20 +29,6 @@ def test_spls1_find_keep_optimal_rejects_unusable_args(args):
     assert ei.value.code == "invalid_args"
 
 
-def test_spls1_find_k_optimal_runs_sparse():
-    X, y = synth(80, 6, 2, 5.0, 10)
-    r = plskit.spls1_find_k_optimal(X, y, 4, 2, seed=7)
-    assert 1 <= r.k_star <= 4
-    assert r.selector == "r2_se"
-
-
-def test_spls1_find_k_sequence_runs_sparse():
-    X, y = synth(80, 6, 2, 5.0, 12)
-    r = plskit.spls1_find_k_sequence(X, y, 4, 2, seed=7, args={"n_splits": 30})
-    assert r.pvalues.shape == (4,)
-    assert r.test_method == "split_nb"
-
-
 @pytest.mark.parametrize(
     "call",
     [
