@@ -40,9 +40,9 @@ where Python sees `np.ndarray`, `Option<u64>` where Python sees
 
 `SPLIT_NB_REROUTE_N_PERM` is a public constant (`usize = 1000`): the
 permutation budget the `split_nb` -> `split_exact` auto-gate reroute spends.
-The Python wrapper reads this constant through its seam instead of keeping
-its own copy (R and Julia will do the same once they have a seam to read
-it through).
+`plskit-bind` reads it to word the reroute warning of the k-selection
+functions, whose results carry no `n_perm`, so no wrapper keeps its own
+copy.
 
 ## Sparse PLS1 signatures
 

@@ -35,7 +35,6 @@ def test_return_perm_matrix_shape():
     [
         ({"n_perm": -5}, "n_perm must be a non-negative whole number"),
         ({"return_perm_matrix": 1}, "return_perm_matrix must be a bool, got 1"),
-        ({"seed": "7"}, 'seed must be a whole number in \\[0, 2\\^64\\), got the string "7"'),
     ],
 )
 def test_unusable_top_level_values_raise_invalid_argument(kwargs, message):
@@ -43,3 +42,11 @@ def test_unusable_top_level_values_raise_invalid_argument(kwargs, message):
     with pytest.raises(PlsKitError, match=message) as excinfo:
         pls1_perm_null(x, y, 1, **kwargs)
     assert excinfo.value.code == "invalid_argument"
+
+
+def test_a_decimal_string_seed_is_that_seed():
+    x, y = _synth()
+    as_string = pls1_perm_null(x, y, 1, n_perm=100, seed="7")
+    as_int = pls1_perm_null(x, y, 1, n_perm=100, seed=7)
+    assert as_string.seed == 7
+    np.testing.assert_array_equal(as_string.beta_perm_z, as_int.beta_perm_z)

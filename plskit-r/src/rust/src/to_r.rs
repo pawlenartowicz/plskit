@@ -128,12 +128,7 @@ pub(crate) fn registry_list() -> Robj {
             let fields: Vec<Robj> = t
                 .fields
                 .iter()
-                .map(|f| {
-                    named_list(
-                        vec!["name".into(), "type".into(), "nullable".into()],
-                        vec![Robj::from(f.name), Robj::from(f.ty), Robj::from(f.nullable)],
-                    )
-                })
+                .map(|f| named_list(vec!["name".into()], vec![Robj::from(f.name)]))
                 .collect();
             named_list(
                 vec!["name".into(), "r_class".into(), "fields".into()],
@@ -146,13 +141,8 @@ pub(crate) fn registry_list() -> Robj {
         })
         .collect();
     named_list(
+        vec!["functions".into(), "result_types".into()],
         vec![
-            "engine_version".into(),
-            "functions".into(),
-            "result_types".into(),
-        ],
-        vec![
-            Robj::from(plskit_bind::engine_version()),
             List::from_values(functions).into(),
             List::from_values(types).into(),
         ],
@@ -174,12 +164,8 @@ fn registry_fns() -> Vec<Robj> {
                 })
                 .collect();
             named_list(
-                vec!["name".into(), "result_types".into(), "params".into()],
-                vec![
-                    Robj::from(f.name),
-                    Robj::from(f.result_types.to_vec()),
-                    List::from_values(params).into(),
-                ],
+                vec!["name".into(), "params".into()],
+                vec![Robj::from(f.name), List::from_values(params).into()],
             )
         })
         .collect()

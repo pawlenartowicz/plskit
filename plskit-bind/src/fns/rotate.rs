@@ -109,7 +109,7 @@ fn rotate_model(
     let p = product(model.p_loadings.as_ref(), rot.r.as_ref());
     let q = product(rot.r.transpose(), model.q_loadings.as_ref().as_mat());
     // Every field the rotation does not touch (keep, selection_result,
-    // weights, ...) is carried through, as Python's dataclasses.replace does.
+    // weights, ...) is carried through unchanged.
     let mut updated = rec.into_owned();
     updated.set_type_name("PLS1Result");
     updated.set("T", mat(&t));
@@ -120,9 +120,9 @@ fn rotate_model(
         Value::Vec(VecF64::Owned((0..q.nrows()).map(|i| q[(i, 0)]).collect())),
     );
     updated.set("rotation_spec", Value::Record(rot.spec));
-    // Rebuild strictly to the PLS1Result field list (Python's
-    // dataclasses.replace semantics), so an untagged or partial input
-    // record does not leave stray or missing fields in the output.
+    // Rebuild strictly to the PLS1Result field list, so an untagged or
+    // partial input record does not leave stray or missing fields in the
+    // output.
     let spec = types::result_type("PLS1Result").expect("PLS1Result is a declared result type");
     let mut out = Record::typed("PLS1Result");
     for f in spec.fields {

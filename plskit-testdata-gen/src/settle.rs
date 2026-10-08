@@ -14,12 +14,12 @@
 use anyhow::{anyhow, Result};
 use ndarray::{ArrayD, IxDyn, OwnedRepr};
 use ndarray_npy::{NpzReader, ReadableElement};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::path::Path;
 
-/// Tolerances for one case, as recorded in its manifest entry: an `f64`
-/// entry `a` matches the committed `e` when `|a − e| ≤ atol + rtol·|e|`.
+/// Tolerances for settling a fixture file: an `f64` entry `a` matches the
+/// committed `e` when `|a − e| ≤ atol + rtol·|e|`.
 #[derive(Debug, Clone, Copy)]
 pub struct Tolerance {
     /// Absolute tolerance for 0-D `f64` entries.
@@ -37,22 +37,6 @@ impl Tolerance {
         atol_array: 1e-10,
         rtol: 1e-14,
     };
-
-    /// Read `atol_scalar` / `atol_array` / `rtol` from a manifest `tolerance` value,
-    /// falling back to [`Tolerance::DEFAULT`] for a missing key.
-    #[must_use]
-    pub fn from_manifest(v: Option<&serde_json::Value>) -> Self {
-        let get = |key: &str, default: f64| {
-            v.and_then(|t| t.get(key))
-                .and_then(serde_json::Value::as_f64)
-                .unwrap_or(default)
-        };
-        Self {
-            atol_scalar: get("atol_scalar", Self::DEFAULT.atol_scalar),
-            atol_array: get("atol_array", Self::DEFAULT.atol_array),
-            rtol: get("rtol", Self::DEFAULT.rtol),
-        }
-    }
 }
 
 /// Whether the `.npz` files at `committed` and `staged` hold the same fixture
@@ -110,8 +94,15 @@ fn read<T: ReadableElement>(r: &mut NpzReader<Cursor<Vec<u8>>>, name: &str) -> O
 
 /// Staged `a` against committed `e`: `|a − e| ≤ atol + rtol·|e|` for a
 /// finite `e`, NaN equal to NaN, an infinity equal only to itself (without
-/// the finiteness guard `rtol·|inf|` would accept anything). The comparison
-/// `plskit-rs/tests/corpus.rs` and the wrappers apply.
+/// the finiteness guard `rtol·|inf|` would accept anything).
+///
+/// This function owns the corpus comparison rule. The same rule is applied
+/// by `close` and `RTOL` in `plskit-rs/tests/corpus.rs`, by `Agree::Corpus`
+/// in `assert_agree` (`plskit-rs/src/test_support.rs`), by `assert_close` in
+/// `plskit-py/tests/test_corpus.py`, by `compare` in
+/// `plskit-r/tests/testthat/test-corpus.R` and by `close_enough` in
+/// `plskit-jl/test/corpus.jl`: change them together. The numbers are in
+/// [`Tolerance::DEFAULT`] and `testdata/README.md` "Tolerance".
 #[allow(clippy::float_cmp)]
 fn close(a: f64, e: f64, atol: f64, rtol: f64) -> bool {
     a == e
@@ -168,15 +159,14 @@ fn install(staged_root: &Path, committed_root: &Path, rel: &str) -> Result<Outco
     Ok(outcome)
 }
 
-/// Settle every case's `(inputs, outputs, tolerance)` files onto
-/// `committed_root`. Outputs settle first, each under its case's tolerance.
-/// A case's input then settles with its output: when the output moved, the
-/// staged input goes in with it even if that input alone is within
-/// tolerance, so no committed output is paired with an input it was not
-/// computed from. Kept outputs are within tolerance of f(staged input), so an
-/// input replaced for one case stays valid for the others that read it. Any
-/// other input settles on its own, under the tightest tolerance of the cases
-/// that read it. Returns every file with its outcome.
+/// Settle every case's `(inputs, outputs)` files onto `committed_root`
+/// under `tol`. Outputs settle first. A case's input then settles with its
+/// output: when the output moved, the staged input goes in with it even if
+/// that input alone is within tolerance, so no committed output is paired
+/// with an input it was not computed from. Kept outputs are within tolerance
+/// of f(staged input), so an input replaced for one case stays valid for the
+/// others that read it. Any other input settles on its own. Returns every
+/// file with its outcome.
 ///
 /// # Errors
 /// Returns an error when an output belongs to more than one case or a path
@@ -184,37 +174,31 @@ fn install(staged_root: &Path, committed_root: &Path, rel: &str) -> Result<Outco
 pub fn settle_cases(
     staged_root: &Path,
     committed_root: &Path,
-    cases: &[(&str, &str, Tolerance)],
+    cases: &[(&str, &str)],
+    tol: Tolerance,
 ) -> Result<Vec<(String, Outcome)>> {
-    let mut inputs: BTreeMap<&str, Tolerance> = BTreeMap::new();
-    let mut outputs: BTreeMap<&str, Tolerance> = BTreeMap::new();
-    for &(input, output, tol) in cases {
-        if outputs.insert(output, tol).is_some() {
+    let mut inputs: BTreeSet<&str> = BTreeSet::new();
+    let mut outputs: BTreeSet<&str> = BTreeSet::new();
+    for &(input, output) in cases {
+        if !outputs.insert(output) {
             return Err(anyhow!("{output} is the output of more than one case"));
         }
-        inputs
-            .entry(input)
-            .and_modify(|t| {
-                t.atol_scalar = t.atol_scalar.min(tol.atol_scalar);
-                t.atol_array = t.atol_array.min(tol.atol_array);
-                t.rtol = t.rtol.min(tol.rtol);
-            })
-            .or_insert(tol);
+        inputs.insert(input);
     }
-    if let Some(rel) = inputs.keys().find(|rel| outputs.contains_key(*rel)) {
+    if let Some(rel) = inputs.iter().find(|rel| outputs.contains(*rel)) {
         return Err(anyhow!("{rel} is both an input and an output"));
     }
 
     let mut settled = Vec::with_capacity(outputs.len() + inputs.len());
     let mut moved_inputs: BTreeSet<&str> = BTreeSet::new();
-    for &(input, output, tol) in cases {
+    for &(input, output) in cases {
         let outcome = settle_file(staged_root, committed_root, output, tol)?;
         if outcome != Outcome::Kept {
             moved_inputs.insert(input);
         }
         settled.push((output.to_owned(), outcome));
     }
-    for (&rel, &tol) in &inputs {
+    for &rel in &inputs {
         let outcome = if moved_inputs.contains(rel) {
             install(staged_root, committed_root, rel)?
         } else {

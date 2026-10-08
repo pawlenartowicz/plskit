@@ -488,8 +488,9 @@ pub(crate) enum Agree {
     /// inference engines, which copy X column-major, so their output is layout-independent.
     Bits,
     /// `u == v` or `|u - v| <= atol + 1e-14 · |v|` per entry (`v` the owned
-    /// run's value), NaN matching NaN: the corpus rule (`tests/corpus.rs`,
-    /// `rtol = 1e-14`) at the given `atol`. For the entries that form their
+    /// run's value), NaN matching NaN: the corpus rule at the given `atol`,
+    /// owned by `plskit-testdata-gen/src/settle.rs::close` (its `rtol` is the
+    /// `1e-14` in `assert_agree`: change together). For the entries that form their
     /// products in X's own layout and so agree across layouts only to
     /// rounding (`pls1_fit` / `spls1_fit`, which form products in X's own
     /// layout, and what reads them: `pls1_predict`, `pls1_rotation_stability`). Lengths are
@@ -509,6 +510,8 @@ pub(crate) fn assert_agree(got: &[f64], want: &[f64], agree: Agree, what: &str) 
         } else {
             match agree {
                 Agree::Bits => u.to_bits() == v.to_bits(),
+                // `1e-14` is the corpus rtol; the rule is owned by
+                // `plskit-testdata-gen/src/settle.rs::close`: change together.
                 Agree::Corpus(atol) => u == v || (u - v).abs() <= atol + 1e-14 * v.abs(),
             }
         };

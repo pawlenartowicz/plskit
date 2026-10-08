@@ -33,7 +33,7 @@ pub(crate) fn with_warning(rec: Record<'static>, warning: Option<Record<'static>
     }
 }
 
-/// PLS3's `Y`: 2-D only, with `_api.py`'s hint when a vector arrives.
+/// PLS3's `Y`: 2-D only, with a hint when a vector arrives.
 pub(crate) fn pls3_y<'a>(inp: &mut Inputs<'a>) -> Result<MatF64<'a>, BindError> {
     match inp.take("Y") {
         Value::Vec(_) | Value::IntVec(_) => Err(BindError::invalid_argument(

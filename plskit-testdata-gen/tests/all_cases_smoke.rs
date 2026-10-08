@@ -1,7 +1,7 @@
 //! The generator reproduces the committed corpus index. `cases::all_cases`
 //! runs every case into a scratch directory, and its manifest entries must
 //! equal `testdata/manifest.json` case for case (name, function, inputs,
-//! outputs, kwargs, tolerance): a case added, removed or edited without
+//! outputs, kwargs): a case added, removed or edited without
 //! regenerating the corpus fails here. Content hashes are not compared with
 //! the committed ones (fixture bytes may differ across hosts within
 //! tolerance, `testdata/README.md` "Regenerating: settle mode");

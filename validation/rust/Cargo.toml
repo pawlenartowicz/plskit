@@ -1,0 +1,19 @@
+[package]
+name = "plskit-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+plskit = { path = "../../plskit-rs" }
+cpu-time = "1"
+
+# Standalone workspace, so plskit's workspace doesn't pick this crate up.
+[workspace]
+
+# Mirrors plskit's [profile.release] (the profile the Python wheel is built with).
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"
+panic = "unwind"

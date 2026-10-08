@@ -78,4 +78,5 @@ fixture exists to catch.
 Every wrapper's corpus test applies these numbers (`plskit-rs/tests/corpus.rs`,
 `plskit-py/tests/test_corpus.py`,
 `plskit-r/tests/testthat/test-corpus.R`, `plskit-jl/test/corpus.jl`), and the
-settle step reads them from each case's manifest `tolerance`.
+settle step takes them from `Tolerance::DEFAULT` in
+`plskit-testdata-gen/src/settle.rs`.

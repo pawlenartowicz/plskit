@@ -1,8 +1,8 @@
 //! `pls1_fit` fixture cases.
 
 use crate::cases::{
-    default_tolerance, faer_col_to_array, manifest_case, ndarray_to_faer_col, ndarray_to_faer_mat,
-    scalar_f64, scalar_i64, synth_data, CasePaths, Xyw,
+    faer_col_to_array, manifest_case, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64,
+    scalar_i64, synth_data, CasePaths, Xyw,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
@@ -65,7 +65,6 @@ fn fit_fixed_k(root: &Path, c: &FitFixedKCase<'_>) -> Result<Case> {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 
@@ -226,7 +225,6 @@ pub fn small_n50_d10_sequence(root: &Path) -> Result<Case> {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 
@@ -306,7 +304,6 @@ pub fn weighted_n50_d10_k2(root: &Path) -> Result<Case> {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 

@@ -1215,9 +1215,8 @@ name = "plskit-py"
 version = "0.7.0"
 dependencies = [
  "faer",
- "ndarray",
  "numpy",
- "plskit",
+ "plskit-bind",
  "pyo3",
 ]
 

@@ -1,10 +1,10 @@
 //! The value tree every wrapper marshals into and out of `plskit-bind`.
 //!
-//! Inputs borrow host memory (an R `REALSXP`, a Julia `Matrix{Float64}`);
-//! outputs are owned. Owned matrices are stored column-major and
-//! contiguous rather than as `faer::Mat`: faer pads an owned matrix's
+//! Inputs borrow host memory (a numpy array in Python, an R `REALSXP`);
+//! outputs are owned. Owned matrices are stored contiguously, column-major
+//! or row-major, rather than as `faer::Mat`: faer pads an owned matrix's
 //! column stride, and a wrapper copies each array out as one contiguous
-//! column-major slice.
+//! slice (or takes the buffer whole).
 
 use std::borrow::Cow;
 
@@ -86,6 +86,20 @@ pub enum MatF64<'a> {
         /// Column count.
         ncols: usize,
     },
+    /// Rust-owned elements, row-major and contiguous: element `(i, j)` is
+    /// `data[i * ncols + j]`. A wrapper that wants a C-ordered array can
+    /// take `data` whole by matching on this variant; `col_major()` still
+    /// returns column-major data.
+    ///
+    /// Same length invariant as `Owned`.
+    OwnedRowMajor {
+        /// The elements.
+        data: Vec<f64>,
+        /// Row count.
+        nrows: usize,
+        /// Column count.
+        ncols: usize,
+    },
 }
 
 impl<'a> MatF64<'a> {
@@ -109,7 +123,7 @@ impl MatF64<'_> {
     pub fn nrows(&self) -> usize {
         match self {
             Self::Borrowed(m) => m.nrows(),
-            Self::Owned { nrows, .. } => *nrows,
+            Self::Owned { nrows, .. } | Self::OwnedRowMajor { nrows, .. } => *nrows,
         }
     }
 
@@ -118,7 +132,7 @@ impl MatF64<'_> {
     pub fn ncols(&self) -> usize {
         match self {
             Self::Borrowed(m) => m.ncols(),
-            Self::Owned { ncols, .. } => *ncols,
+            Self::Owned { ncols, .. } | Self::OwnedRowMajor { ncols, .. } => *ncols,
         }
     }
 
@@ -130,6 +144,9 @@ impl MatF64<'_> {
             Self::Owned { data, nrows, ncols } => {
                 MatRef::from_column_major_slice(data, *nrows, *ncols)
             }
+            Self::OwnedRowMajor { data, nrows, ncols } => {
+                MatRef::from_row_major_slice(data, *nrows, *ncols)
+            }
         }
     }
 
@@ -138,7 +155,8 @@ impl MatF64<'_> {
     pub fn col_major(&self) -> Cow<'_, [f64]> {
         match self {
             Self::Owned { data, .. } => Cow::Borrowed(data),
-            Self::Borrowed(m) => {
+            Self::Borrowed(_) | Self::OwnedRowMajor { .. } => {
+                let m = self.as_mat();
                 let mut v = Vec::with_capacity(m.nrows() * m.ncols());
                 for j in 0..m.ncols() {
                     for i in 0..m.nrows() {
@@ -156,6 +174,7 @@ impl MatF64<'_> {
         let (nrows, ncols) = (self.nrows(), self.ncols());
         match self {
             Self::Owned { data, .. } => MatF64::Owned { data, nrows, ncols },
+            Self::OwnedRowMajor { data, .. } => MatF64::OwnedRowMajor { data, nrows, ncols },
             b @ Self::Borrowed(_) => MatF64::Owned {
                 data: b.col_major().into_owned(),
                 nrows,
@@ -426,5 +445,29 @@ mod tests {
     fn from_col_major_checks_the_length() {
         let e = MatF64::from_col_major(&[1.0, 2.0, 3.0], 2, 2).unwrap_err();
         assert_eq!(e.code, "invalid_argument");
+    }
+
+    #[test]
+    fn row_major_owned_reads_like_the_same_column_major_matrix() {
+        // [[1, 2, 3], [4, 5, 6]]
+        let rm = MatF64::OwnedRowMajor {
+            data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            nrows: 2,
+            ncols: 3,
+        };
+        let cm = MatF64::Owned {
+            data: vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0],
+            nrows: 2,
+            ncols: 3,
+        };
+        assert_eq!((rm.nrows(), rm.ncols()), (2, 3));
+        assert_eq!(rm.col_major(), cm.col_major());
+        for i in 0..2 {
+            for j in 0..3 {
+                assert_eq!(rm.as_mat()[(i, j)], cm.as_mat()[(i, j)]);
+            }
+        }
+        let owned = rm.into_owned();
+        assert_eq!(owned.col_major(), cm.col_major());
     }
 }

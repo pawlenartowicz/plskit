@@ -1,15 +1,23 @@
-//! Monte-Carlo H0 calibration of the weighted inference paths.
+//! Monte-Carlo H0 calibration of the inference paths.
 //!
-//! Covers: weighted H0 FPR for every confirmatory method (split_nb, split_exact,
-//! score, raw_perm, e) and the weighted sequential-deflation entry point
-//! (`pls1_find_k_sequence`), plus unweighted H0 FPR for e and for
-//! split_exact's no-refit route. The unweighted e-method test is a tripwire for
-//! gross e-value inflation; the weighted tests exercise non-uniform observation
-//! weights throughout.
+//! One cell per test; each draws data under H0 and checks the empirical
+//! false-positive rate (FPR):
 //!
-//! Under H0 (y ⟂ X) with NON-UNIFORM observation weights, a valid α-level test
-//! rejects at rate ≤ α. We assert the empirical FPR over `N_REPS` seeded
-//! replications stays within a one-sided binomial Monte-Carlo band of α.
+//! - Weighted PLS1 cells (non-uniform observation weights): every
+//!   confirmatory method (split_nb, split_exact, score, raw_perm, e),
+//!   split_exact on a concentrated spectrum, and the sequential-deflation
+//!   entry point (`pls1_find_k_sequence`).
+//! - Unweighted PLS1 cells: split_exact (its no-refit route) and e (a
+//!   tripwire for gross e-value inflation).
+//! - Sparse PLS1 cells (`keep = 2` of 4 columns, unweighted): split_nb,
+//!   split_exact (its refit route) and `spls1_find_k_sequence`.
+//! - PLS3 cells (two blocks; that family takes no weights): split_exact and
+//!   split_nb of `pls3_confirmatory_test`.
+//!
+//! Under H0 (y ⟂ X; Y ⟂ X for PLS3) a valid α-level test rejects at rate
+//! ≤ α. We assert the empirical FPR over `N_REPS` seeded replications (100
+//! for the two sequence cells) stays within a one-sided binomial Monte-Carlo
+//! band of α.
 //!
 //! MC slack: the per-rep reject indicator is Bernoulli(p) with p ≤ α under H0,
 //! so FPR_hat has SD ≤ √(α(1−α)/N_REPS). We allow a 3·SD upper band:
@@ -17,10 +25,10 @@
 //!     FPR_hat ≤ α + 3·√(α(1−α)/N_REPS).
 //!
 //! At α = 0.05, N_REPS = 200 this is 0.05 + 3·0.0154 ≈ 0.096. A correctly
-//! calibrated test clears it with margin; a broken weighted path (e.g. a
-//! convention mismatch inflating the statistic under permuted/split nulls)
-//! blows past it. The band is intentionally one-sided — conservative tests
-//! (FPR < α) are fine, only over-rejection is a failure.
+//! calibrated test clears it with margin; a broken path (e.g. a convention
+//! mismatch inflating the statistic under permuted/split nulls) blows past
+//! it. The band is intentionally one-sided: conservative tests (FPR < α) are
+//! fine, only over-rejection is a failure.
 
 #![allow(clippy::many_single_char_names)]
 #![allow(clippy::cast_precision_loss)]
@@ -30,8 +38,9 @@
 use faer::{Col, Mat};
 use plskit::{
     linalg::{stable_rank, standardize_weighted},
-    pls1_confirmatory_test, pls1_find_k_sequence, spls1_find_k_sequence, ConfirmatoryArgs,
-    ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts, FindKSequenceOpts,
+    pls1_confirmatory_test, pls1_find_k_sequence, pls3_confirmatory_test, spls1_find_k_sequence,
+    ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
+    FindKSequenceOpts, Pls3ConfirmatoryTestOpts,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -39,9 +48,15 @@ use rand_chacha::ChaCha8Rng;
 const ALPHA: f64 = 0.05;
 const N_REPS: usize = 200;
 
-/// 3·SD one-sided binomial Monte-Carlo upper band on the empirical FPR.
-fn fpr_upper_band(alpha: f64, n_reps: usize) -> f64 {
-    alpha + 3.0 * (alpha * (1.0 - alpha) / n_reps as f64).sqrt()
+/// Assert the empirical FPR `rejects / n_reps` is at most the 3·SD one-sided
+/// binomial Monte-Carlo upper band at `ALPHA`.
+fn assert_fpr_within_band(label: &str, rejects: usize, n_reps: usize) {
+    let fpr = rejects as f64 / n_reps as f64;
+    let band = ALPHA + 3.0 * (ALPHA * (1.0 - ALPHA) / n_reps as f64).sqrt();
+    assert!(
+        fpr <= band,
+        "{label}: empirical FPR={fpr} (rejects={rejects}/{n_reps}) exceeds MC band {band}"
+    );
 }
 
 /// One H0 replication: y drawn independently of X (pure noise), plus fixed
@@ -113,12 +128,45 @@ fn assert_calibrated(
             rejects += 1;
         }
     }
-    let fpr = rejects as f64 / N_REPS as f64;
-    let band = fpr_upper_band(ALPHA, N_REPS);
-    assert!(
-        fpr <= band,
-        "{label}: empirical FPR={fpr} (rejects={rejects}/{N_REPS}) exceeds MC band {band}"
-    );
+    assert_fpr_within_band(label, rejects, N_REPS);
+}
+
+/// One H0 replication for the PLS3 cells: X and a multi-column Y drawn
+/// independently of each other (pure noise on both sides). PLS3 takes no
+/// observation weights, so none are returned.
+fn pls3_null_data(n: usize, p: usize, q: usize, rep: usize) -> (Mat<f64>, Mat<f64>) {
+    let mut rng = ChaCha8Rng::seed_from_u64(0x3333_00C0_FFEE ^ rep as u64);
+    let x = Mat::<f64>::from_fn(n, p, |_, _| rng.random_range(-1.0..1.0));
+    // Y independent of X ⇒ H0 true.
+    let y = Mat::<f64>::from_fn(n, q, |_, _| rng.random_range(-1.0..1.0));
+    (x, y)
+}
+
+/// The FPR loop of `assert_calibrated` for `pls3_confirmatory_test`, which
+/// has its own entry point and takes two blocks: n = 40, p = 4, q = 3,
+/// `N_REPS` replications. `method` is the method the cell measures; every
+/// replication must report it.
+fn assert_pls3_calibrated(args: ConfirmatoryArgs, method: &str, seed_base: u64) {
+    let mut rejects = 0usize;
+    for rep in 0..N_REPS {
+        let (x, y) = pls3_null_data(40, 4, 3, rep);
+        let r = pls3_confirmatory_test(
+            x.as_ref(),
+            y.as_ref(),
+            1,
+            Pls3ConfirmatoryTestOpts {
+                args,
+                seed: Some(seed_base + rep as u64),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(r.test_method, method, "rep {rep} ran another method");
+        if r.pvalue <= ALPHA {
+            rejects += 1;
+        }
+    }
+    assert_fpr_within_band(&format!("pls3 {method}"), rejects, N_REPS);
 }
 
 #[test]
@@ -264,7 +312,6 @@ fn find_k_sequence_weighted_h0_fpr_within_band() {
     // of widening would have hidden the gate rather than satisfied it.
     // The per-rep `test_method` assertion below is what keeps that true.
     const REPS: usize = 100;
-    let band = fpr_upper_band(ALPHA, REPS);
     let mut rejects = 0usize;
     for rep in 0..REPS {
         let (x, y, w) = null_data(40, 8, rep);
@@ -292,11 +339,7 @@ fn find_k_sequence_weighted_h0_fpr_within_band() {
             rejects += 1;
         }
     }
-    let fpr = rejects as f64 / REPS as f64;
-    assert!(
-        fpr <= band,
-        "find_k_sequence: empirical FPR={fpr} (rejects={rejects}/{REPS}) exceeds MC band {band}"
-    );
+    assert_fpr_within_band("find_k_sequence", rejects, REPS);
 }
 
 #[test]
@@ -380,12 +423,7 @@ fn split_exact_concentrated_spectrum_h0_fpr_within_band() {
             rejects += 1;
         }
     }
-    let fpr = rejects as f64 / N_REPS as f64;
-    let band = fpr_upper_band(ALPHA, N_REPS);
-    assert!(
-        fpr <= band,
-        "split_exact_concentrated_spectrum: empirical FPR={fpr} (rejects={rejects}/{N_REPS}) exceeds MC band {band}"
-    );
+    assert_fpr_within_band("split_exact_concentrated_spectrum", rejects, N_REPS);
 }
 
 #[test]
@@ -400,7 +438,6 @@ fn spls1_find_k_sequence_sparse_h0_fpr_within_band() {
     // this one pins is that the sparse deflation chain holds its level whatever
     // method the gate hands it, which is the method-agnostic half of the claim.
     const REPS: usize = 100;
-    let band = fpr_upper_band(ALPHA, REPS);
     let mut rejects = 0usize;
     for rep in 0..REPS {
         let (x, y, _w) = null_data(40, 4, rep);
@@ -423,9 +460,36 @@ fn spls1_find_k_sequence_sparse_h0_fpr_within_band() {
             rejects += 1;
         }
     }
-    let fpr = rejects as f64 / REPS as f64;
-    assert!(
-        fpr <= band,
-        "spls1_find_k_sequence: FPR={fpr} exceeds MC band {band}"
+    assert_fpr_within_band("spls1_find_k_sequence", rejects, REPS);
+}
+
+#[test]
+fn pls3_split_exact_h0_fpr_within_band() {
+    // The PLS1 split_exact cells' sizes on the two-block null. At p = 4 and
+    // q = 3 every replication takes the per-column refit route, so a rep
+    // costs (n_perm + 1) × n_splits = 915 training-half fits, as in
+    // split_exact_sparse_h0_fpr_within_band.
+    assert_pls3_calibrated(
+        ConfirmatoryArgs::SplitExact {
+            n_perm: 60,
+            n_splits: 15,
+        },
+        "split_exact",
+        10_000,
+    );
+}
+
+#[test]
+fn pls3_split_nb_h0_fpr_within_band() {
+    assert_pls3_calibrated(
+        // `force`: the gate reroutes any X with 4 or fewer columns to
+        // split_exact whatever its stable rank, so at p = 4 no replication
+        // would run NB without it. The PLS3 gate reads X only.
+        ConfirmatoryArgs::SplitNb {
+            n_splits: 40,
+            force: true,
+        },
+        "split_nb",
+        11_000,
     );
 }

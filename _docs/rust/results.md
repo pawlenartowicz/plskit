@@ -47,11 +47,10 @@ long form below.
 There is no `k_was_auto` flag and no `find_k_certificate` field. The
 2026-04 confirmatory-vs-exploratory overhaul moved K-selection
 diagnostics onto the K-selection result structs themselves, where
-they originate. Rotation is stamped wrapper-side: the Python
+they originate. Rotation is stamped in `plskit-bind`: the wrappers'
 `PLS1Result` carries a `rotation_spec` field that `rotate(model, ...)`
 sets on a copy of the model, but there is no Rust `RotationSpec` type
-and no `rotation_spec` field on the Rust `Pls1Model` — it never
-crosses the FFI seam.
+and no `rotation_spec` field on the Rust `Pls1Model`.
 
 ## `Pls3Model` — what `pls3_fit` / `plssvd_fit` returns
 
@@ -281,10 +280,11 @@ at nominal 5%), does not grow with `n_boot`, and is not calibrated at
 | `n_boot_finite` | `usize` | number of resamples that produced finite per-axis squared residuals (≤ `n_boot`) |
 | `n_eff` | `f64` | effective sample size `(Σ wᵢ)² / Σ wᵢ²` from the full normalized weight vector; equals `n` for uniform weights |
 
-`RotationSpec` (the record of a `rotate(model, ...)` call — method,
-args, `R`, sweeps, convergence value) exists only on the Python
-`PLS1Result` dataclass. There is no Rust `RotationSpec` type and no
-Rust counterpart on `Pls1Model` or `RotationStabilityOutput`; the Rust
-`rotate` function returns `RotateOutput` (`w_rot, r, sweeps,
-v_converged`), and the Python wrapper assembles `RotationSpec` from
-that plus the caller's method/args.
+`RotationSpec` (the record of a `rotate` call — method, args, `R`,
+sweeps, convergence value) exists only in the wrappers, as
+`RotateResult.spec` and `PLS1Result.rotation_spec`. There is no Rust
+`RotationSpec` type and no Rust counterpart on `Pls1Model` or
+`RotationStabilityOutput`; the Rust `rotate` function returns
+`RotateOutput` (`w_rot, r, sweeps, v_converged`), and `plskit-bind`
+assembles `RotationSpec` from that plus the method and the resolved
+args.

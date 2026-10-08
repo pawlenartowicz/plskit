@@ -265,13 +265,12 @@ fn settle_cases_moves_an_input_with_its_output() {
         write(&c.join(rel), committed);
         write(&s.join(rel), staged);
     }
-    let tol = Tolerance::DEFAULT;
     let cases = [
-        ("inputs/shared.npz", "outputs/moved.npz", tol),
-        ("inputs/shared.npz", "outputs/kept.npz", tol),
-        ("inputs/quiet.npz", "outputs/quiet.npz", tol),
+        ("inputs/shared.npz", "outputs/moved.npz"),
+        ("inputs/shared.npz", "outputs/kept.npz"),
+        ("inputs/quiet.npz", "outputs/quiet.npz"),
     ];
-    let mut got = settle_cases(s, c, &cases).unwrap();
+    let mut got = settle_cases(s, c, &cases, Tolerance::DEFAULT).unwrap();
     got.sort_by(|a, b| a.0.cmp(&b.0));
     let want = [
         ("inputs/quiet.npz", Outcome::Kept),
@@ -293,14 +292,13 @@ fn settle_cases_moves_an_input_with_its_output() {
 #[test]
 fn settle_cases_refuses_overlapping_paths() {
     let root = tempdir().unwrap();
-    let tol = Tolerance::DEFAULT;
     let shared_output = [
-        ("inputs/a.npz", "outputs/x.npz", tol),
-        ("inputs/b.npz", "outputs/x.npz", tol),
+        ("inputs/a.npz", "outputs/x.npz"),
+        ("inputs/b.npz", "outputs/x.npz"),
     ];
     let input_is_output = [
-        ("inputs/a.npz", "outputs/x.npz", tol),
-        ("outputs/x.npz", "outputs/y.npz", tol),
+        ("inputs/a.npz", "outputs/x.npz"),
+        ("outputs/x.npz", "outputs/y.npz"),
     ];
     // Neither root holds a file, so settling any path fails with an I/O
     // error: the message tells the refusal apart from that.
@@ -308,7 +306,7 @@ fn settle_cases_refuses_overlapping_paths() {
         (&shared_output, "is the output of more than one case"),
         (&input_is_output, "is both an input and an output"),
     ] {
-        let err = settle_cases(root.path(), root.path(), cases)
+        let err = settle_cases(root.path(), root.path(), cases, Tolerance::DEFAULT)
             .unwrap_err()
             .to_string();
         assert!(err.contains(message), "{message}: got {err:?}");

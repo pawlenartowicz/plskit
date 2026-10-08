@@ -296,7 +296,7 @@ pub(crate) fn resolve_split_nb(
 /// the gate's own `n_eff` floor) and, when `no_refit`,
 /// `p > AUTO_MAX_P_PER_N · n` decide `split_exact` without standardizing X,
 /// and the stable rank stays `None`. Skipping the
-/// standardized copy and its SVD matters most on the widest designs, where
+/// standardized copy and its Gram matrix matters most on the widest designs, where
 /// that copy is as large as X. Every other design goes through
 /// `resolve_split_nb`, and a fired gate means `split_exact`. Draws no
 /// randomness.
@@ -660,6 +660,24 @@ pub(crate) fn confirmatory_test_impl(
         }
     }
 
+    // The CI knobs, and the subsample size they give on this data, are
+    // checked here, before the test runs, so a bad one costs no resampling.
+    let ci_sub_opts = opts
+        .ci
+        .as_ref()
+        .map(|ci_opts| crate::subsample::SubsampleOpts {
+            n_boot: ci_opts.n_boot,
+            m_rate: ci_opts.m_rate,
+            level: ci_opts.level,
+            pre_standardized: opts.pre_standardized,
+            max_failure_rate: ci_opts.max_failure_rate,
+            max_skip_rate: opts.max_skip_rate,
+        });
+    if let Some(sub_opts) = &ci_sub_opts {
+        sub_opts.validate()?;
+        crate::subsample::resolve_ci_m(n, k_resolved, sub_opts.m_rate)?;
+    }
+
     // ── `split_nb` auto-gate ────────────────────────────────────────────────
     // NB's Fisher-z correction is exact at ρ = ½ and drifts off level when the
     // sample is small or X's spectrum is concentrated on few directions. Those
@@ -673,7 +691,7 @@ pub(crate) fn confirmatory_test_impl(
     //
     // Under `GateMode::Decided` the whole block is skipped: the caller settled
     // the method already and would only be re-paying for a standardize plus a
-    // full SVD (`linalg::stable_rank`) whose answer it discards.
+    // Gram eigendecomposition (`linalg::stable_rank`) whose answer it discards.
     //
     // `Auto` resolves in the same place and for the same reason: the output
     // reports the method that ran, never `"auto"`.
@@ -806,17 +824,7 @@ pub(crate) fn confirmatory_test_impl(
         }
     };
 
-    let ci_payload = if let Some(ci_opts) = opts.ci {
-        let sub_opts = crate::subsample::SubsampleOpts {
-            n_boot: ci_opts.n_boot,
-            m_rate: ci_opts.m_rate,
-            level: ci_opts.level,
-            pre_standardized: opts.pre_standardized,
-            max_failure_rate: ci_opts.max_failure_rate,
-            max_skip_rate: opts.max_skip_rate,
-        };
-        sub_opts.validate()?;
-
+    let ci_payload = if let Some(sub_opts) = ci_sub_opts {
         // Independent child-seed branch — derive a second child RNG from the
         // post-test parent state. This guarantees stream non-interference
         // between test path and CI path while keeping a single user-facing seed.
@@ -846,7 +854,6 @@ pub(crate) fn confirmatory_test_impl(
             x_ref,
             y_ref,
             k_resolved,
-            fit_ref.w_star.as_ref(),
             fit_ref.beta.as_ref(),
             &leverage_ref,
             sub_opts,
@@ -913,8 +920,9 @@ pub(crate) fn split_exact_no_refit_route(k: usize, keep: Option<usize>) -> bool 
     k == 1 && keep.is_none()
 }
 
+#[cfg(test)]
 thread_local! {
-    /// Set by `with_gram_routes_disabled` (tests); read through `gram_routes_disabled`.
+    /// Set by `with_gram_routes_disabled`; read through `gram_routes_disabled`.
     static GRAM_ROUTES_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -930,8 +938,16 @@ thread_local! {
 /// public call runs on a plskit pool worker, which this thread-local does
 /// not reach, so `with_gram_routes_disabled` panics when the variable sets
 /// a cap.
+#[cfg(test)]
 pub(crate) fn gram_routes_disabled() -> bool {
     GRAM_ROUTES_DISABLED.with(std::cell::Cell::get)
+}
+
+/// Builds without unit tests have no override: the Gram routes are always
+/// in the choice.
+#[cfg(not(test))]
+pub(crate) const fn gram_routes_disabled() -> bool {
+    false
 }
 
 /// Run `f` with [`gram_routes_disabled`] true on this thread, restoring the
@@ -1102,7 +1118,7 @@ fn run_raw_perm(
                     y_mat[(i, c)] = yc[i];
                 }
             }
-            crate::dual_route::pls1_cv_r2_columns(x, y_mat.as_ref(), &folds)
+            crate::dual_route::pls1_cv_r2_columns(x, y_mat.as_ref(), &folds)?
         }
         // Folds outer, replicate columns inner: each fold's X side (gather,
         // standardize, √w) is built once instead of once per replicate.
@@ -2299,6 +2315,16 @@ const NR_RESOLVE_BAND: f64 = 8.0;
 /// requires of its lower bounds on `‖X̃_tr'z‖` and `t't`.
 const NR_ABS_BAND: f64 = 100.0;
 
+/// The association order of `split_perm_nr_zbars`' two GEMMs: `true` for
+/// route B, `(X̃_te·X̃_tr')·Y`, `false` for route A, `X̃_te·(X̃_tr'·Y)`.
+/// Route B wins when `n_test·n_train·(p + n_cols) < n·p·n_cols` (flop counts
+/// of the two GEMM association orders), `n_cols` being the `B + 1` outcome
+/// columns. No caller-facing knob: the cost model decides.
+fn no_refit_route_b(n: usize, n_train: usize, n_test: usize, p: usize, n_cols: usize) -> bool {
+    let b_f = n_cols as f64;
+    (n_test as f64) * (n_train as f64) * (p as f64 + b_f) < (n as f64) * (p as f64) * b_f
+}
+
 /// Per-column z̄ values for `split_perm_nr` (length `n_perm + 1`; column 0 is
 /// the observed y, columns `1..=n_perm` are permutation nulls). Factored out of
 /// `run_split_perm_nr` so the equivalence test (below) can compare every
@@ -2505,11 +2531,8 @@ fn split_perm_nr_zbars(
 
     // Choose the association order once, outside the per-split loop: all
     // splits share (n_train, n_test) since split_sizes depends only on
-    // (n, k). Route B wins when n_te·n_tr·(p+B) < n·p·B (flop counts of the
-    // two GEMM association orders). No caller-facing knob: the cost model decides.
-    let b_f = n_cols as f64;
-    let route_b = (n_test as f64) * (n_train as f64) * (p_features as f64 + b_f)
-        < (n as f64) * (p_features as f64) * b_f;
+    // (n, k). `no_refit_route_b` owns the rule.
+    let route_b = no_refit_route_b(n, n_train, n_test, p_features, n_cols);
 
     // Per-split z contribution (unsummed over J): standardize the half
     // (train moments only, matching split_half_correlations), then the
@@ -3140,6 +3163,23 @@ mod tests {
         }
     }
 
+    /// `nb_rho_hat` against its closed form on hand-made Fisher-z values:
+    /// z = (0.1, 0.3, 0.2) has ddof-1 variance 0.01.
+    #[test]
+    fn nb_rho_hat_matches_the_closed_form() {
+        let stats = Col::<f64>::from_fn(3, |i| [0.1_f64, 0.3, 0.2][i].tanh());
+        // n_test = 53: the ruler is 1/50 = 0.02, so ρ̂ = 1 − 0.01/0.02.
+        let rho = nb_rho_hat(&stats, 53).unwrap();
+        assert!((rho - 0.5).abs() < 1e-12, "{rho}");
+        // n_test = 203: the ruler 1/200 is below s², and ρ̂ clips to 0.
+        assert_eq!(nb_rho_hat(&stats, 203), Some(0.0));
+        // Identical statistics have no spread: ρ̂ = 1.
+        let flat = Col::<f64>::from_fn(3, |_| 0.2_f64.tanh());
+        assert_eq!(nb_rho_hat(&flat, 53), Some(1.0));
+        // Below four test rows the ruler is undefined.
+        assert_eq!(nb_rho_hat(&stats, 3), None);
+    }
+
     // ── raw_perm tests ───────────────────────────────────────────────────────
 
     #[test]
@@ -3177,7 +3217,89 @@ mod tests {
         }
     }
 
+    /// More than half the null fits failing is an error, not a p-value.
+    /// Rows 0 and 1 hold `±f64::MAX` under equal weights, so in every fold
+    /// that trains on both, the observed y has a weighted mean of exactly 0
+    /// and standardizes to finite values. Every other row has its own
+    /// weight, so a permutation puts the two extremes on rows of unequal
+    /// weight; a fold that trains on both (at least 3 of the 5) then has a
+    /// weighted mean near `f64::MAX / n`, `y − mean` overflows on the
+    /// extreme of the opposite sign, and that null's fit fails with
+    /// `NonFiniteInput`.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn raw_perm_errors_when_most_null_fits_fail() {
+        let n = 30;
+        let (x, _) = signal_data(n, 4, 61);
+        let mut y = Col::<f64>::zeros(n);
+        y[0] = f64::MAX;
+        y[1] = -f64::MAX;
+        let w = Col::<f64>::from_fn(n, |i| if i < 2 { 1.0 } else { i as f64 + 1.0 });
+        let n_perm = 19;
+        let r = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: 1,
+                weights: Some(w.as_ref()),
+            },
+            ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::RawPerm { n_perm, n_folds: 5 },
+                seed: Some(3),
+                ..Default::default()
+            },
+        );
+        let Err(PlsKitError::PermNullDegenerate { failed, total }) = r else {
+            panic!("expected PermNullDegenerate, got {r:?}");
+        };
+        assert_eq!(total, n_perm);
+        assert!(failed * 2 > total, "failed={failed}, total={total}");
+    }
+
     // ── raw_perm dual (Gram) route tests ────────────────────────────────
+
+    /// A finite y whose fold standardization overflows is non-finite input
+    /// on every `raw_perm` route. Rows 0 and 1 hold `f64::MAX` and row 2
+    /// `-f64::MAX`; a training fold that holds all three (at least two of
+    /// the five do) has a mean far above 0, and `y − mean` overflows on row
+    /// 2. The observed column fails, so the call is an error, not a p-value.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn raw_perm_rejects_y_whose_fold_standardization_overflows_on_every_route() {
+        // (n, p, n_perm, k, the route the shape takes)
+        let rows = [
+            (30, 5, 99, 1, ReplicateRoute::Primal),
+            (30, 200, 99, 1, ReplicateRoute::Special),
+            (30, 200, 99, 2, ReplicateRoute::Nspace),
+            (2500, 20, 999, 1, ReplicateRoute::GramP),
+        ];
+        for (n, p, n_perm, k, want) in rows {
+            let route = raw_perm_route(n, 5, p, n_perm, k, None, false);
+            assert_eq!(route, want, "n={n} p={p} k={k}");
+            let (x, _) = signal_data(n, p, 61);
+            let mut y = Col::<f64>::zeros(n);
+            y[0] = f64::MAX;
+            y[1] = f64::MAX;
+            y[2] = -f64::MAX;
+            let r = pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k,
+                    weights: None,
+                },
+                ConfirmatoryTestOpts {
+                    args: ConfirmatoryArgs::RawPerm { n_perm, n_folds: 5 },
+                    seed: Some(3),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                matches!(r, Err(PlsKitError::NonFiniteInput)),
+                "{route:?}: {r:?}"
+            );
+        }
+    }
 
     /// The equivalence test the dual route rests on. Route A is the shipped
     /// primal path — one honest `pls1_cv_r2` per replicate column. Route B
@@ -3289,7 +3411,7 @@ mod tests {
         );
 
         // Route B: the Gram path, all columns at once.
-        let b = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds);
+        let b = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds).unwrap();
 
         assert_eq!(a.len(), b.len());
         // Pure relative tolerance — no absolute escape hatch. Scale by the
@@ -3332,7 +3454,8 @@ mod tests {
         let (_, y) = synth(40, 8, 3, 4.0, 5);
         let folds = crate::linalg::fold_split(&(0..40).collect::<Vec<_>>(), 4);
         let y_mat = Mat::<f64>::from_fn(40, 3, |i, _| y[i]);
-        let dual = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds);
+        let dual =
+            crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds).unwrap();
         for (col, v) in dual.iter().enumerate() {
             assert!(v.is_finite(), "col {col} is not finite: {v}");
             let primal = {
@@ -3412,7 +3535,8 @@ mod tests {
             );
         }
 
-        let dual = crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds);
+        let dual =
+            crate::dual_route::pls1_cv_r2_columns(x.as_ref(), y_mat.as_ref(), &folds).unwrap();
         for (col, v) in dual.iter().enumerate() {
             let y_col = Col::<f64>::from_fn(n, |i| y_mat[(i, col)]);
             let primal = pls1_cv_r2(x.as_ref(), y_col.as_ref(), 1, &folds, None, None).unwrap();
@@ -3555,9 +3679,9 @@ mod tests {
     // from `split_perm_nr_zbars`' cost model are exercised: (n=60, p=5) takes
     // route A (route_b cost 30·30·55=49,500 > route A cost 60·5·50=15,000),
     // (n=60, p=40) takes route B (route_b cost 30·30·90=81,000 < route A cost
-    // 60·40·50=120,000). `expect_route_b` re-derives the same cost expression
-    // split_perm_nr_zbars uses internally and asserts which branch is live,
-    // so the coverage claim is enforced rather than assumed.
+    // 60·40·50=120,000). `expect_route_b` is checked against
+    // `no_refit_route_b`, the rule `split_perm_nr_zbars` routes by, so the
+    // coverage claim is enforced rather than assumed.
     #[allow(clippy::many_single_char_names)]
     #[allow(clippy::similar_names)]
     #[allow(clippy::items_after_statements)]
@@ -3592,14 +3716,12 @@ mod tests {
         let w_all: Option<Col<f64>> = weighted.then(|| degenerate_half_weights(n));
         let w_norm = w_all.as_ref().map(Col::as_ref);
 
-        // Cost-model check (mirrors split_perm_nr_zbars' own comparison):
-        // fails loudly if a future edit to the thresholds moves this
-        // configuration to the other branch, so the coverage claim below
-        // stays true rather than assumed.
+        // Cost-model check, on the rule `split_perm_nr_zbars` routes by:
+        // fails loudly if an edit to the rule moves this configuration to
+        // the other branch, so the coverage claim below stays true rather
+        // than assumed.
         let (n_train, n_test) = split_sizes(n, k);
-        let b_f = n_cols as f64;
-        let route_b =
-            (n_test as f64) * (n_train as f64) * (p as f64 + b_f) < (n as f64) * (p as f64) * b_f;
+        let route_b = no_refit_route_b(n, n_train, n_test, p, n_cols);
         assert_eq!(
             route_b, expect_route_b,
             "cost-model check: expected route_b={expect_route_b}, computed={route_b} \
@@ -3999,9 +4121,7 @@ mod tests {
             let (x, y) = design_with_orthogonal_train_half(n, p, &splits[0].tr, w_norm, 1e8, 17);
 
             let (n_train, n_test) = crate::resample::split_sizes(n, 1);
-            let b_f = (n_perm + 1) as f64;
-            let route_b = (n_test as f64) * (n_train as f64) * (p as f64 + b_f)
-                < (n as f64) * (p as f64) * b_f;
+            let route_b = no_refit_route_b(n, n_train, n_test, p, n_perm + 1);
             assert_eq!(route_b, expect_route_b, "cost-model premise at p={p}");
 
             let (_, z_re, r_obs) =
@@ -4518,7 +4638,7 @@ mod tests {
     }
 
     /// The reason the function repeats entry-point validation: without it a
-    /// NaN reaches `linalg::stable_rank`'s SVD instead of this error.
+    /// NaN reaches `linalg::stable_rank`'s eigendecomposition instead of this error.
     #[test]
     fn public_gate_rejects_non_finite_x() {
         let mut x = synth(60, 10, 0, 0.0, 7).0;
@@ -4788,6 +4908,117 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code(), "invalid_argument");
+    }
+
+    #[test]
+    fn ci_branch_rejects_m_below_k_plus_2() {
+        // n = 20, m_rate = 0.51: m = ceil(20^0.51) = 5 < k + 2 = 6.
+        let (x, y) = synth(20, 6, 0, 0.0, 3);
+        let err = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: 4,
+                weights: None,
+            },
+            ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::Score,
+                seed: Some(7),
+                ci: Some(CIOpts {
+                    n_boot: 200,
+                    m_rate: 0.51,
+                    level: 0.95,
+                    max_failure_rate: 0.01,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "invalid_argument");
+        assert!(err.to_string().contains("need m ≥ k+2"), "{err}");
+    }
+
+    /// The subsample size `m_rate` gives on this data is checked before the
+    /// test runs. The input is `raw_perm_errors_when_most_null_fits_fail`'s,
+    /// whose test run ends in `PermNullDegenerate`; n = 20 and `m_rate = 0.51`
+    /// give m = 5 < k + 2 = 6, and that error must win.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn ci_branch_rejects_m_below_k_plus_2_before_the_test_runs() {
+        let n = 20;
+        let (x, _) = signal_data(n, 4, 61);
+        let mut y = Col::<f64>::zeros(n);
+        y[0] = f64::MAX;
+        y[1] = -f64::MAX;
+        let w = Col::<f64>::from_fn(n, |i| if i < 2 { 1.0 } else { i as f64 + 1.0 });
+        let r = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: 4,
+                weights: Some(w.as_ref()),
+            },
+            ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::RawPerm {
+                    n_perm: 19,
+                    n_folds: 5,
+                },
+                seed: Some(3),
+                ci: Some(CIOpts {
+                    m_rate: 0.51,
+                    ..CIOpts::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let Err(err) = r else {
+            panic!("expected an error, got {r:?}");
+        };
+        assert_eq!(err.code(), "invalid_argument", "{err:?}");
+        assert!(err.to_string().contains("need m ≥ k+2"), "{err}");
+    }
+
+    /// Weight concentrated on five rows: most size-m subsamples have too
+    /// few effective rows for k = 3, so the confirmatory CI stops at the
+    /// skip-rate guard.
+    #[test]
+    fn ci_branch_skip_rate_guard_fires_under_concentrated_weights() {
+        let (x, y) = synth(60, 5, 1, 4.0, 13);
+        let w = Col::<f64>::from_fn(60, |i| if i < 5 { 1.0 } else { 1e-8 });
+        let err = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: 3,
+                weights: Some(w.as_ref()),
+            },
+            ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::Score,
+                seed: Some(0),
+                ci: Some(CIOpts {
+                    n_boot: 500,
+                    ..CIOpts::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        match err {
+            PlsKitError::ResamplingDegenerate {
+                skipped,
+                total,
+                skip_rate,
+                threshold,
+            } => {
+                assert_eq!(total, 500);
+                assert!((threshold - 0.01).abs() < 1e-15, "{threshold}");
+                assert!(
+                    skipped > 5 && skip_rate > threshold,
+                    "{skipped} {skip_rate}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     // ── internals without a public-surface proof ─────────────────────────────

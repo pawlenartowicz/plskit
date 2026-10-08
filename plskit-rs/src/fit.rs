@@ -1275,7 +1275,8 @@ impl ComponentBackend for XBackend<'_> {
 /// `log10(1 + |mean_j| / scale_j)` digits to cancellation: on Gaussian designs
 /// with a common offset the coefficients moved by about `ratio·1e-16`, at most
 /// `6·ratio·1e-16` at `k = 5`, so this bound keeps them within about `1e-12` of
-/// the copy's.
+/// the copy's. The PLS3 fits take the same bound for their own implicit
+/// products (`pls3::Prepared`).
 pub(crate) const IMPLICIT_MAX_MEAN_RATIO: f64 = 1e3;
 
 /// The X backend on `Xs = diag(sqw)·(X − 1·mean')·diag(1/scale)` formed from
@@ -2111,22 +2112,25 @@ mod tests {
 
     #[test]
     fn run_with_threads_concurrent_sizes_each_get_their_own_pool() {
-        let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        // Each thread calls from inside its own 4-thread pool, so every cap
+        // below is under the caller's pool size on any host, a one-core one
+        // included, and each call runs on a plskit pool of exactly that size.
         let handles: Vec<_> = [1usize, 3, 1, 3, 2, 2]
             .into_iter()
             .map(|n| {
                 std::thread::spawn(move || {
+                    let outer = rayon::ThreadPoolBuilder::new()
+                        .num_threads(4)
+                        .build()
+                        .unwrap();
                     (0..20)
                         .map(|_| {
-                            super::run_with_threads(Some(n), rayon::current_num_threads).unwrap()
+                            outer.install(|| {
+                                super::run_with_threads(Some(n), rayon::current_num_threads)
+                                    .unwrap()
+                            })
                         })
-                        .all(|got| {
-                            got == if n < cores {
-                                n
-                            } else {
-                                rayon::current_num_threads()
-                            }
-                        })
+                        .all(|got| got == n)
                 })
             })
             .collect();
@@ -2796,9 +2800,9 @@ mod boundary_tests {
         }
     }
 
-    /// The public entries that take X, besides the PLS1 fits and the
-    /// engines whose own tests pin layout bit-identity (the PLS3 family's
-    /// is `pls3::tests::pls3_family_is_bit_identical_across_layouts`). The
+    /// The public entries that take X, besides the PLS1 fits, the PLS3
+    /// family (`pls3::tests::pls3_family_agrees_across_layouts`) and the
+    /// engines whose own tests pin layout bit-identity. The
     /// Python wrapper hands each its X in place (C or F order).
     /// `preprocess` / `preprocess_block` and the `split_nb` gate give the
     /// same bits on every layout. `pls1_predict` and

@@ -7,8 +7,7 @@ use anyhow::Result;
 use plskit::{pls1_find_k_sequence, ConfirmatoryMethod, FindKSequenceOpts};
 
 use crate::cases::{
-    default_tolerance, faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64,
-    scalar_i64, synth_data,
+    faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
@@ -85,7 +84,6 @@ fn run_sequence_case(root: &Path, c: &SequenceCase) -> Result<Case> {
             inputs_sha256: sha256_of_file(&abs_inputs)?,
             outputs_sha256: sha256_of_file(&abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 

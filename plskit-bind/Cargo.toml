@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Language-neutral binding layer for plskit: one call() entry point, strict argument validation and result records shared by the R and Julia wrappers."
+description = "Language-neutral binding layer for plskit: one call() entry point, strict argument validation and result records, used by the Python and R wrappers."
 
 [dependencies]
 plskit = { workspace = true }

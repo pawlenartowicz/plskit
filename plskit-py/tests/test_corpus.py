@@ -14,7 +14,9 @@ ROOT = Path(__file__).resolve().parents[2] / "testdata"
 MANIFEST = ROOT / "manifest.json"
 
 # Corpus tolerances (testdata/README.md "Tolerance"), numpy's rule
-# |actual - expected| <= atol + rtol * |expected|, as in plskit-rs/tests/corpus.rs.
+# |actual - expected| <= atol + rtol * |expected|. The rule is owned by
+# plskit-testdata-gen/src/settle.rs::close; assert_close and the direct
+# assert_allclose calls below mirror it: change together.
 ATOL_SCALAR = 1e-12
 ATOL_ARRAY = 1e-10
 RTOL = 1e-14
@@ -67,6 +69,7 @@ def assert_close(actual, expected, name: str):
         exp_str = expected_val.decode() if isinstance(expected_val, bytes) else expected_val
         assert actual_str == exp_str, f"{name}: expected {exp_str!r}, got {actual_str!r}"
         return
+    # Mirrors plskit-testdata-gen/src/settle.rs::close: change together.
     if np.isscalar(expected) or (hasattr(expected, "shape") and expected.shape == ()):
         np.testing.assert_allclose(actual, float(expected), rtol=RTOL, atol=ATOL_SCALAR,
                                    err_msg=name)
@@ -152,7 +155,8 @@ def test_corpus_case(case):
                             f"{case['name']}.ci.{composite}.{sub}",
                         )
     elif fn == "pls1_find_k_optimal":
-        kw = dict(kwargs); k_max = kw.pop("k_max")
+        kw = _resolve_corpus_weights(case, dict(kwargs), inputs)
+        k_max = kw.pop("k_max")
         r = plskit.pls1_find_k_optimal(X, y, k_max, **kw)
         for field in ["k_star", "selector", "pvalues", "diagnostic", "seed"]:
             if field in expected:

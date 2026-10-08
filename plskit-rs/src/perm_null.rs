@@ -390,7 +390,7 @@ pub(crate) fn perm_null_route(
 /// Per-call state of a route, built once by `run_engine` and shared
 /// read-only by every permutation row. The primal route needs only
 /// `‖xs_fit‖_F`.
-pub(crate) enum PermBlock<'x> {
+enum PermBlock<'x> {
     /// `x_fro = ‖xs_fit‖_F` (`norm_l2` of the view), the norm the kernel's
     /// truncation floor reads. Taken once per call instead of once per row:
     /// the same call on the same view, so the same bits.
@@ -410,11 +410,7 @@ pub(crate) enum PermBlock<'x> {
 /// handed it, the builder returns the primal block. `Nspace` builds `G` and
 /// its norms once; `GramP` builds `C = X̃'X̃` and its norm estimate once;
 /// `Primal` takes `‖xs_fit‖_F` once.
-pub(crate) fn perm_block(
-    route: ReplicateRoute,
-    xs_fit: MatRef<'_, f64>,
-    par: faer::Par,
-) -> PermBlock<'_> {
+fn perm_block(route: ReplicateRoute, xs_fit: MatRef<'_, f64>, par: faer::Par) -> PermBlock<'_> {
     match route {
         ReplicateRoute::Nspace => {
             PermBlock::Nspace(crate::dual_route::NspaceGram::new(xs_fit, par))
@@ -438,7 +434,7 @@ pub(crate) fn perm_block(
 ///
 /// # Errors
 /// What the kernel returns; `run_engine` then writes a NaN row.
-pub(crate) fn perm_row(
+fn perm_row(
     block: &PermBlock<'_>,
     xs_fit: MatRef<'_, f64>,
     sqw: Option<ColRef<'_, f64>>,
@@ -517,7 +513,7 @@ pub(crate) fn perm_row(
 /// target fails the `tt` gate (every gate is an `a >= b` conjunction) and
 /// reaches that body too. `pre_standardized = true` inside the loop, so the
 /// row is `coef`.
-pub(crate) fn perm_row_coef(
+fn perm_row_coef(
     gram: &crate::gram_p::GramPBlock<'_>,
     sqw: Option<ColRef<'_, f64>>,
     ys_std: ColRef<'_, f64>,

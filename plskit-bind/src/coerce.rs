@@ -21,7 +21,15 @@ pub(crate) fn describe(v: &Value<'_>) -> String {
         Value::U64(n) => n.to_string(),
         Value::F64(x) => x.to_string(),
         Value::Str(s) => format!("the string {s:?}"),
-        other => format!("a {}", other.kind_name()),
+        other => {
+            let kind = other.kind_name();
+            let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+                "an"
+            } else {
+                "a"
+            };
+            format!("{article} {kind}")
+        }
     }
 }
 
@@ -34,7 +42,10 @@ pub(crate) fn to_usize(v: &Value<'_>) -> Result<usize, String> {
     let bad = || format!("must be a non-negative whole number, got {}", describe(v));
     match *v {
         Value::I64(n) => usize::try_from(n).map_err(|_| bad()),
-        Value::U64(n) => usize::try_from(n).map_err(|_| bad()),
+        Value::U64(n) => i64::try_from(n)
+            .ok()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(bad),
         Value::F64(x) if whole_f64(x) => Ok(x as usize),
         _ => Err(bad()),
     }
@@ -147,6 +158,7 @@ mod tests {
             Value::F64(3.5),
             Value::F64(-1.0),
             Value::I64(-1),
+            Value::U64(i64::MAX as u64 + 1),
             Value::F64(f64::NAN),
             Value::F64(1e300),
             Value::Bool(true),

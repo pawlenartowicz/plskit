@@ -95,8 +95,22 @@ def test_fit_find_k_args_rejects_disallowed_keys(mode, key):
     assert "allowed" in str(ei.value)
 
 
-# The seam reads an aligned C- or F-contiguous X in place, reads a misaligned
-# X through numpy's copy (C-ordered for a C-ordered input), and copies any
+@pytest.mark.parametrize(
+    "mode, find_k_args",
+    [
+        ("optimal", {"selector": 5}),
+        ("sequence", {"alpha": "x"}),
+        ("optimal", {"args": [1]}),
+    ],
+)
+def test_fit_find_k_args_wrong_typed_value_is_invalid_args(mode, find_k_args):
+    X, y = _data()
+    with pytest.raises(plskit.PlsKitError) as ei:
+        plskit.pls1_fit(X, y, k=mode, k_max=4, find_k_args=find_k_args)
+    assert ei.value.code == "invalid_args"
+
+
+# The seam reads an aligned C- or F-contiguous X in place and copies any
 # other layout column-major. X read row-major gives the bits of the C-ordered
 # reference, and other layouts agree to the corpus tolerance. The public API
 # hands X on in its own layout, so a public fit has the bits of the raw fit
@@ -160,18 +174,23 @@ def _close(got, ref, atol=1e-10, rtol=1e-14):
 
 
 def _read_row_major(Xl):
-    """The extension reads a C-contiguous array row-major, and any misaligned
-    array through numpy's aligned copy, which is C-ordered; both give the bits
-    of the C-ordered reference. Any other layout is read column-major and
-    agrees within tolerance."""
-    return Xl.flags.c_contiguous or not Xl.flags.aligned
+    """The extension reads a C-contiguous array row-major, which gives the
+    bits of the C-ordered reference. Any other layout is read column-major
+    and agrees within tolerance."""
+    return Xl.flags.c_contiguous
+
+
+def _fields(type_name, fields):
+    """`make_result` for a direct extension call: the record's own fields."""
+    return fields
 
 
 def _fitters(y, sparse, kw, k=3, keep=9):
     def raw(Xl):
+        arguments = {"X": Xl, "y": y, "k": k, **kw}
         if sparse:
-            return plskit._plskit.spls1_fit(Xl, y, k, keep, **kw)
-        return plskit._plskit.pls1_fit(Xl, y, k, **kw)
+            return plskit._plskit.call("spls1_fit", arguments | {"keep": keep}, _fields)[0]
+        return plskit._plskit.call("pls1_fit", arguments, _fields)[0]
 
     def public(Xl):
         if sparse:
@@ -236,9 +255,10 @@ def test_fit_non_finite_x_raises_in_both_orders(order, pre_standardized, weighte
         w = np.ones(30)
         w[7] = 0.0  # a zero weight does not hide the non-finite entry
     # The raw extension, in both orders it reads in place.
+    arguments = {"X": np.asarray(X, order=order), "y": y, "k": 2,
+                 "pre_standardized": pre_standardized, "weights": w}
     with pytest.raises(plskit._plskit.PlsKitException) as ei:
-        plskit._plskit.pls1_fit(np.asarray(X, order=order), y, 2,
-                                pre_standardized=pre_standardized, weights=w)
+        plskit._plskit.call("pls1_fit", arguments, _fields)
     assert ei.value.code == "non_finite_input"
 
 
@@ -258,12 +278,13 @@ def test_fit_rejects_a_non_count_k(bad_k):
     [
         ({"seed": -1}, "seed must be a whole number"),
         ({"pre_standardized": "no"}, "pre_standardized must be a bool"),
-        ({"k": "optimal", "k_max": 3, "find_k_args": [1]}, "find_k_args must be a dict"),
+        ({"k": "optimal", "k_max": 3, "find_k_args": [1]},
+         "find_k_args must be a record of named values"),
     ],
 )
 def test_fit_rejects_unusable_top_level_values(extra, message):
     """Checked on every call, not only on the branch that reads them: the
-    seed of an int-k fit is unused but still validated, as plskit-bind does."""
+    seed of an int-k fit is unused but still validated."""
     X, y = _data()
     kwargs = {"k": 2, **extra}
     with pytest.raises(plskit.PlsKitError, match=message) as ei:
@@ -315,9 +336,61 @@ def test_unreadable_array_is_invalid_argument(case):
     assert str(ei.value).startswith(message), str(ei.value)
 
 
+@pytest.mark.parametrize(
+    "call, message",
+    [
+        (lambda X, y: plskit.pls1_fit(np.zeros((4, 3, 2)), y, k=1),
+         "X must be 2-D, got 3-D"),
+        (lambda X, y: plskit.pls1_fit(X, np.array(3.0), k=1),
+         "y must be 1-D, got 0-D"),
+        (lambda X, y: plskit.preprocess(Y=np.array(3.0)),
+         "Y must be 1-D or 2-D, got 0-D"),
+        (lambda X, y: plskit.preprocess(Y=np.zeros((4, 3, 2))),
+         "Y must be 1-D or 2-D, got 3-D"),
+    ],
+)
+def test_array_of_the_wrong_dimension_is_invalid_argument(call, message):
+    """An array of three or more dimensions, or a 0-D value where a vector
+    is expected, raises `invalid_argument` naming the argument."""
+    X, y = _data()
+    with pytest.raises(plskit.PlsKitError) as ei:
+        call(X, y)
+    assert ei.value.code == "invalid_argument"
+    assert str(ei.value).startswith(message), str(ei.value)
+
+
+@pytest.mark.parametrize(
+    "call, code, message",
+    [
+        (lambda X, y: plskit.pls1_predict(np.arange(4), X),
+         "invalid_argument", "model must be a PLS1Result, got a vector"),
+        (lambda X, y: plskit.pls1_fit(X, y, k=np.array([2])),
+         "invalid_argument", "k must be a non-negative whole number, got a vector"),
+        (lambda X, y: plskit.pls1_fit(X, y, k=2, pre_standardized=np.ones((2, 2), dtype=bool)),
+         "invalid_argument", "pre_standardized must be a bool, got a matrix"),
+        (lambda X, y: plskit.pls1_confirmatory_test(
+            X, y, k=1, test_method="raw_perm", args={"n_perm": np.array([20])}, seed=1),
+         "invalid_args",
+         "args['n_perm'] for test_method='raw_perm' must be a non-negative whole number, "
+         "got a vector"),
+        (lambda X, y: plskit.pls1_fit(X, y, k=np.array(["a"])),
+         "invalid_argument", "k has unsupported array dtype <U1"),
+    ],
+)
+def test_array_where_no_array_fits_is_refused_by_what_the_parameter_takes(call, code, message):
+    """An integer or bool array passed where the parameter takes no array is
+    refused as a float64 one is: by what the parameter takes, not by its
+    dtype. An array of no real dtype is refused by its dtype alone."""
+    X, y = _data()
+    with pytest.raises(plskit.PlsKitError) as ei:
+        call(X, y)
+    assert ei.value.code == code
+    assert str(ei.value) == message
+
+
 def test_bool_arrays_are_read_as_zero_one():
-    """A bool data array is accepted and read as 1/0 (numpy's cast), the
-    same rule the R and Julia wrappers follow; a bool flag stays a flag."""
+    """A bool data array is accepted and read as 1/0 (numpy's cast); a bool
+    flag stays a flag."""
     X, y = _data()
     Xb, yb = X > 0, y > np.median(y)
     ref = plskit.pls1_fit(
@@ -331,6 +404,17 @@ def test_bool_arrays_are_read_as_zero_one():
     with pytest.raises(plskit.PlsKitError) as ei:
         plskit.pls1_fit(X, y, k=2, pre_standardized=np.array([True, False]))
     assert ei.value.code == "invalid_argument"
+
+
+def test_predict_reads_a_0d_array_model_field_as_its_item():
+    """A scalar model field held as a 0-D array, as `np.load` returns the
+    fields of a saved model, is read as its item."""
+    X, y = _data()
+    m = plskit.pls1_fit(X, y, k=2)
+    flagged = dataclasses.replace(m, pre_standardized=np.array(False))
+    np.testing.assert_array_equal(
+        plskit.pls1_predict(flagged, X), plskit.pls1_predict(m, X)
+    )
 
 
 @pytest.mark.parametrize("missing", ["None", "pd.NA"])

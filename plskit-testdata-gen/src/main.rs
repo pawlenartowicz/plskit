@@ -39,14 +39,11 @@ fn main() -> Result<()> {
 fn settle(staging: &std::path::Path, root: &std::path::Path) -> Result<()> {
     let mut cases = all_cases(staging)?;
 
-    let files: Vec<(&str, &str, Tolerance)> = cases
+    let files: Vec<(&str, &str)> = cases
         .iter()
-        .map(|c| {
-            let tol = Tolerance::from_manifest(c.tolerance.as_ref());
-            (c.inputs.as_str(), c.outputs.as_str(), tol)
-        })
+        .map(|c| (c.inputs.as_str(), c.outputs.as_str()))
         .collect();
-    let settled = settle_cases(staging, root, &files)?;
+    let settled = settle_cases(staging, root, &files, Tolerance::DEFAULT)?;
     let changed: Vec<String> = settled
         .iter()
         .filter(|(_, outcome)| *outcome != Outcome::Kept)

@@ -153,6 +153,25 @@ fn reduce_leverage(samples_b: &[f64], point: f64, level: f64) -> CIScalar {
     }
 }
 
+/// The confirmatory CI's subsample size on `n` rows, or `InvalidArgument`
+/// when it cannot serve a `k`-component CI: `m ≥ n` leaves no holdout, so
+/// every resample's holdout correlation is NaN, and `m < k + 2` is too small
+/// to fit `k` components and leave residual degrees of freedom.
+pub(crate) fn resolve_ci_m(n: usize, k: usize, m_rate: f64) -> PlsKitResult<usize> {
+    let m = resolve_m(n, m_rate);
+    if m >= n {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "resolved m = {m} (from n={n}, m_rate={m_rate}) leaves no holdout; need m < n"
+        )));
+    }
+    if m < k + 2 {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "resolved m = {m} (from n={n}, m_rate={m_rate}) is too small for k={k}; need m ≥ k+2"
+        )));
+    }
+    Ok(m)
+}
+
 /// Resolve `m` from `(n, m_rate)`: `m = ceil(n^m_rate)`.
 /// Caller has already validated `0.5 < m_rate < 0.95`.
 pub(crate) fn resolve_m(n: usize, m_rate: f64) -> usize {
@@ -316,12 +335,6 @@ fn fit_rows(
             ..FitOpts::default()
         },
     )?;
-    if fit.w_star.ncols() != k {
-        return Err(PlsKitError::Internal(format!(
-            "resample fit truncated to {} of {k} components",
-            fit.w_star.ncols()
-        )));
-    }
     Ok(RowFit {
         w: fit.w_star,
         beta: fit.beta,
@@ -342,7 +355,6 @@ fn fit_rows(
 /// variables, more so on fewer rows): a size-`m` fit measures the sampling
 /// distribution at the wrong size, while a size-`n` resample reproduces the
 /// spread of the full-data leverage. See `reduce_leverage`.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
 fn run_one_confirmatory(
@@ -350,7 +362,6 @@ fn run_one_confirmatory(
     y: ColRef<'_, f64>,
     k: usize,
     m: usize,
-    _w_ref: MatRef<'_, f64>, // unused: kept so the call site matches the other workers' signature
     pre_standardized_x: bool,
     weights: Option<ColRef<'_, f64>>,
     rng: &mut crate::rng::Rng,
@@ -461,7 +472,6 @@ mod tests_worker {
         let mut rng_data = rand_chacha::ChaCha8Rng::seed_from_u64(7);
         let x = Mat::<f64>::from_fn(n, d, |_, _| rng_data.random_range(-1.0..1.0));
         let y_tiny = Col::<f64>::from_fn(n, |_| rng_data.random_range(-1e-20..1e-20));
-        let w_ref = Mat::<f64>::from_fn(d, k, |i, j| if i == j { 1.0 } else { 0.0 });
 
         let (_, mut rng) = resolve_seed(Some(11)).unwrap();
         let res = run_one_confirmatory(
@@ -469,7 +479,6 @@ mod tests_worker {
             y_tiny.as_ref(),
             k,
             resolve_m(n, 0.7),
-            w_ref.as_ref(),
             true,
             None,
             &mut rng,
@@ -1597,7 +1606,6 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
     k: usize,
-    w_ref: MatRef<'_, f64>,
     beta_ref: ColRef<'_, f64>,
     leverage_ref: &[f64],
     opts: SubsampleOpts,
@@ -1606,26 +1614,12 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
 ) -> PlsKitResult<ConfirmatoryCI> {
     opts.validate()?;
     let n = x.nrows();
-    let m = resolve_m(n, opts.m_rate);
-    // Empty holdout (m == n) → NaN holdout_corr on every resample →
-    // ResampleFailureRateExceeded before any useful output. Reject early.
-    if m >= n {
-        return Err(PlsKitError::InvalidArgument(format!(
-            "resolved m = {m} (from n={n}, m_rate={}) leaves no holdout; need m < n",
-            opts.m_rate
-        )));
-    }
-    if m < k + 2 {
-        return Err(PlsKitError::InvalidArgument(format!(
-            "resolved m = {m} (from n={n}, m_rate={}) is too small for k={k}; need m ≥ k+2",
-            opts.m_rate
-        )));
-    }
+    let m = resolve_ci_m(n, k, opts.m_rate)?;
 
     let pre_std = opts.pre_standardized;
     let outcomes: Vec<WorkerOutcome> =
         crate::resample::parallel_for_each_seeded(rng, opts.n_boot, |_, child| {
-            match run_one_confirmatory(x, y, k, m, w_ref, pre_std, weights, child) {
+            match run_one_confirmatory(x, y, k, m, pre_std, weights, child) {
                 std::result::Result::Ok(row) => WorkerOutcome::Ok(row),
                 Err(PlsKitError::InvalidWeights {
                     reason: "insufficient_effective_n",
@@ -1762,7 +1756,6 @@ mod tests_engine {
             x.as_ref(),
             y.as_ref(),
             k,
-            fit.w_star.as_ref(),
             fit.beta.as_ref(),
             &leverage_ref,
             opts,
@@ -1953,7 +1946,6 @@ mod tests_engine {
                     c.x,
                     c.y,
                     k,
-                    fit.w_star.as_ref(),
                     fit.beta.as_ref(),
                     &lev,
                     SubsampleOpts {

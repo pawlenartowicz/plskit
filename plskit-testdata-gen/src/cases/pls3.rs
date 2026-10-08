@@ -10,8 +10,8 @@ use plskit::{
 };
 
 use crate::cases::{
-    default_tolerance, faer_col_to_array, faer_mat_to_array, ndarray_to_faer_mat, scalar_f64,
-    scalar_i64, synth_xy, CasePaths,
+    faer_col_to_array, faer_mat_to_array, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_xy,
+    CasePaths,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
@@ -69,7 +69,6 @@ fn fit_case(root: &Path, c: &Pls3FitCase<'_>) -> Result<Case> {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 
@@ -197,7 +196,6 @@ pub fn transform_basic_n80_p6_q3_k2(root: &Path) -> Result<Case> {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 
@@ -298,7 +296,6 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 
@@ -448,6 +445,5 @@ pub fn confirmatory_split_nb(root: &Path) -> Result<Case> {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }

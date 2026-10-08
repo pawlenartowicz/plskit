@@ -1,9 +1,9 @@
 //! `pls1_perm_null` fixture cases.
 
 use crate::cases::{
-    case_files, default_tolerance, ensure_moved, manifest_case, ndarray_to_faer_col,
-    ndarray_to_faer_mat, perm_null_weights, scalar_f64, scalar_i64, synth_data,
-    weighted_prestd_n80_d6, CasePaths, Xyw, WEIGHTED_PRESTD_N80_D6_INPUTS,
+    case_files, ensure_moved, manifest_case, ndarray_to_faer_col, ndarray_to_faer_mat,
+    perm_null_weights, scalar_f64, scalar_i64, synth_data, weighted_prestd_n80_d6, CasePaths, Xyw,
+    WEIGHTED_PRESTD_N80_D6_INPUTS,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
@@ -82,7 +82,6 @@ pub fn basic_n80_d6_k2(root: &Path) -> Result<Case> {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 
@@ -170,7 +169,6 @@ fn perm_null_case(
             inputs_sha256: sha256_of_file(&abs_inputs)?,
             outputs_sha256: sha256_of_file(&abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 
@@ -347,7 +345,6 @@ fn tall_case(
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 

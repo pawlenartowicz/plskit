@@ -79,6 +79,62 @@ fn x_y_shape_mismatch_errors() {
     );
 }
 
+/// The 1-D form rejects a bad weights vector: by reason for a negative, an
+/// all-zero or a wrong-length one, and as non-finite input for NaN or
+/// infinity.
+#[test]
+fn preprocess_rejects_invalid_weights() {
+    let (x, y, _) = small();
+    let cases: [(&str, Vec<f64>, &str, Option<&str>); 5] = [
+        (
+            "negative",
+            vec![1.0, -0.5, 1.0, 1.0, 1.0],
+            "invalid_weights",
+            Some("negative"),
+        ),
+        (
+            "all zero",
+            vec![0.0; 5],
+            "invalid_weights",
+            Some("all_zero"),
+        ),
+        (
+            "nan",
+            vec![1.0, f64::NAN, 1.0, 1.0, 1.0],
+            "non_finite_input",
+            None,
+        ),
+        (
+            "inf",
+            vec![1.0, f64::INFINITY, 1.0, 1.0, 1.0],
+            "non_finite_input",
+            None,
+        ),
+        (
+            "length",
+            vec![1.0; 4],
+            "invalid_weights",
+            Some("length_mismatch"),
+        ),
+    ];
+    for (what, w, code, reason) in cases {
+        let w = Col::<f64>::from_fn(w.len(), |i| w[i]);
+        let err = preprocess(PreprocessInput {
+            x: Some(x.as_ref()),
+            y: Some(y.as_ref()),
+            weights: Some(w.as_ref()),
+        })
+        .unwrap_err();
+        assert_eq!(err.code(), code, "{what}: {err:?}");
+        if let Some(reason) = reason {
+            assert!(
+                matches!(err, PlsKitError::InvalidWeights { reason: r } if r == reason),
+                "{what}: {err:?}"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Numeric value assertions — fixture: n=4, d=2 cols, w_raw=[2,1,1,1]
 //

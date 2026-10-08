@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
+from fractions import Fraction
+
 import numpy as np
 import pytest
 
@@ -69,17 +72,37 @@ _W = np.random.default_rng(7).normal(size=(10, 3))
         (_W, {"method": "varimax", "args": {"tol": "x"}}, "invalid_args"),
         (_W, {"method": 1}, "invalid_argument"),
         (_W, {"method": "varimax", "args": [1]}, "invalid_argument"),
+        (_W, {"method": "varimax", "args": {1: 2}}, "invalid_argument"),
+        (_W, {"method": "varimax", "args": {"tol": Fraction(1, 1000)}}, "invalid_argument"),
+        (_W, {"method": "varimax", "args": {"max_iter": object()}}, "invalid_argument"),
         (np.zeros((10, 0)), {"method": "varimax"}, "invalid_input"),
         (_W, {"method": "varimax",
               "L": np.random.default_rng(11).normal(size=(40, 2))}, "shape_mismatch"),
     ],
     ids=["unknown_method", "unknown_args_key", "args_wrong_type", "args_negative",
-         "args_tol_str", "method_not_str", "args_not_dict", "K0", "L_shape_mismatch"],
+         "args_tol_str", "method_not_str", "args_not_dict", "args_non_string_key",
+         "args_fraction", "args_object", "K0", "L_shape_mismatch"],
 )
 def test_rotate_rejects_bad_input(W, kwargs, code):
     with pytest.raises(plskit.PlsKitError) as ei:
         plskit.rotate(W, **kwargs)
     assert ei.value.code == code
+
+
+def test_rotate_rejects_a_list_that_contains_itself():
+    lst = []
+    lst.append(lst)
+    with pytest.raises(plskit.PlsKitError, match="is nested too deeply") as ei:
+        plskit.rotate(_W, args={"x": lst})
+    assert ei.value.code == "invalid_argument"
+
+
+def test_rotate_rejects_a_model_dict_that_contains_itself():
+    model = {}
+    model["a"] = model
+    with pytest.raises(plskit.PlsKitError, match="is nested too deeply") as ei:
+        plskit.rotate(model)
+    assert ei.value.code == "invalid_argument"
 
 
 # ── Spec immutability ────────────────────────────────────────
@@ -133,8 +156,29 @@ def test_rotate_optimal_k_model_keeps_selection_result():
     X, y = _data()
     m = plskit.pls1_fit(X, y, k="optimal", k_max=4)
     m2 = plskit.rotate(m, method="varimax")
-    assert m2.selection_result is m.selection_result
+    assert m2.selection_result == m.selection_result
     assert m2.selection_result is not None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda m: {"P": m.P[:-1]},
+        lambda m: {"coef": None},
+        lambda m: {"T": m.T.tolist()},
+        lambda m: {"T": m.T[:, :2]},
+        lambda m: {"P": m.P[:, :2]},
+        lambda m: {"Q": m.Q[:2]},
+    ],
+    ids=["P_rows", "unused_field_none", "nested_list_field", "T_columns", "P_columns",
+         "Q_length"],
+)
+def test_rotate_model_rejects_a_field_it_cannot_use(change):
+    X, y = _data()
+    m = plskit.pls1_fit(X, y, k=3)
+    with pytest.raises(plskit.PlsKitError) as ei:
+        plskit.rotate(dataclasses.replace(m, **change(m)), method="varimax")
+    assert ei.value.code == "invalid_argument"
 
 
 # ── Bad input ─────────────────────────────────────────────────
@@ -144,15 +188,16 @@ def test_rotate_optimal_k_model_keeps_selection_result():
     "first, message",
     [
         ("pls3", "rotate() first arg must be a PLS1Result, got a PLS3Result"),
-        (None, "rotate() first arg must be a PLS1Result or a matrix, got None"),
-        ("not a model or array", 'W must be a numeric matrix, got the string "not a model or array"'),
-        (np.ones(3), "W must be 2-D, got 1-D"),
+        (None, "rotate() missing required argument 'model_or_W'"),
+        ("not a model or array",
+         'model_or_W must be a numeric matrix, got the string "not a model or array"'),
+        (np.ones(3), "rotate() first arg must be a PLS1Result or a matrix, got a vector"),
     ],
     ids=["pls3_result", "none", "string", "vector"],
 )
 def test_rotate_wrong_first_arg_is_invalid_argument(first, message):
     """A first argument that is neither a PLS1Result nor a matrix raises
-    `invalid_argument`, as plskit-bind (R) does, not a bare TypeError."""
+    `invalid_argument`, not a bare TypeError."""
     if isinstance(first, str) and first == "pls3":
         X, _ = _data()
         first = plskit.pls3_fit(X, X[:, :3] + 1.0, k=1)

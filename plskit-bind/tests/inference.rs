@@ -78,6 +78,10 @@ fn bad_methods_and_args_are_invalid_args() {
         ]),
     );
     assert_eq!(e.code, "invalid_args");
+    assert_eq!(
+        e.message,
+        "test_method='raw_perm' does not accept arg 'n_splits'; allowed: ['n_perm', 'n_folds']"
+    );
     let e = err(
         "pls1_confirmatory_test",
         confirm(vec![

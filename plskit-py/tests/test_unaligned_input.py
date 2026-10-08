@@ -2,10 +2,9 @@
 
 A byte-offset view of a buffer (`buf[1:].view(np.float64)`) can be
 C-contiguous and still misaligned (`flags.aligned` is False). Rust may not
-read `f64` data through a reference to misaligned memory, so both the Python
-wrapper and the extension seam must copy such an array into an aligned one
-before reading it. Every result must be bit-identical to the same values
-passed aligned.
+read `f64` data through a reference to misaligned memory, so the extension
+refuses such an array and the Python wrapper copies it into an aligned one
+first. Every result must be bit-identical to the same values passed aligned.
 
 A C- or F-ordered float64 X is handed to the extension as it is, not copied.
 The block inputs (`Y`, `Y_new`, `W`, `L`) are read in place when F-ordered
@@ -58,51 +57,66 @@ def _data():
     return X, y, Y, w
 
 
-# Raw extension calls: the seam alone must cope, including arrays that
-# reach it inside a model dict and a 2-D `Y` given to `preprocess`.
-def _raw_cases():
-    X, y, Y, w = _data()
-    m1 = _plskit.pls1_fit(X, y, 2, weights=w)
-    m3 = _plskit.pls3_fit(X, Y, 2)
-    W = np.asarray(m1["W"])
+def _with_arrays(model, mk):
+    """`model` with every array field passed through `mk`."""
+    return dataclasses.replace(model, **{
+        f.name: mk(getattr(model, f.name))
+        for f in dataclasses.fields(model)
+        if isinstance(getattr(model, f.name), np.ndarray)
+    })
 
-    def mis_dict(d, mk):
-        return {k: (mk(v) if isinstance(v, np.ndarray) else v) for k, v in d.items()}
 
+def _fields(type_name, fields):
+    """`make_result` for a direct extension call: the record's own fields."""
+    return fields
+
+
+# Direct extension calls, one per place an array can sit in the arguments.
+def _direct_cases():
+    X, y, Y, _ = _data()
+    m1 = plskit.pls1_fit(X, y, k=2)
+    m3 = plskit.pls3_fit(X, Y, k=2)
     return {
-        "pls1_fit": lambda mk: _plskit.pls1_fit(mk(X), mk(y), 2, weights=mk(w)),
-        "pls1_fit_pre": lambda mk: _plskit.pls1_fit(
-            mk((X - X.mean(0)) / X.std(0)), mk((y - y.mean()) / y.std()), 2,
-            pre_standardized=True, weights=mk(w)),
-        "spls1_fit": lambda mk: _plskit.spls1_fit(mk(X), mk(y), 2, 3, weights=mk(w)),
-        "pls1_predict": lambda mk: _plskit.pls1_predict(mis_dict(m1, mk), mk(X)),
-        "pls3_fit": lambda mk: _plskit.pls3_fit(mk(X), mk(Y), 2),
-        "pls3_transform": lambda mk: _plskit.pls3_transform(mis_dict(m3, mk), mk(X), mk(Y)),
-        "rotate": lambda mk: _plskit.rotate(mk(W), method="varimax", l=mk(np.asarray(m1["P"]))),
-        "split_nb_gate": lambda mk: _plskit.split_nb_gate(mk(X), weights=mk(w)),
-        "preprocess_1d": lambda mk: _plskit.preprocess(x=mk(X), y=mk(y), weights=mk(w)),
-        "preprocess_2d": lambda mk: _plskit.preprocess(x=mk(X), y=mk(Y), weights=mk(w)),
+        "X": ("pls1_fit", lambda mk: {"X": mk(X), "y": y, "k": 2}),
+        "vector": ("pls1_fit", lambda mk: {"X": X, "y": mk(y), "k": 2}),
+        "block": ("pls3_fit", lambda mk: {"X": X, "Y": mk(Y), "k": 2}),
+        "model_field": ("pls1_predict", lambda mk: {
+            "model": dataclasses.replace(m1, T=mk(m1.T)), "X_new": X}),
+        "model_dict_entry": ("pls3_transform", lambda mk: {
+            "model": {**vars(m3), "U": mk(m3.U)}, "X_new": X, "which": "x_scores"}),
     }
 
 
-@pytest.mark.parametrize("name", list(_raw_cases()))
-def test_raw_extension_reads_misaligned_arrays(name):
-    call = _raw_cases()[name]
-    ref = _bits(call(np.ascontiguousarray))
-    got = _bits(call(_misaligned))
-    assert got == ref
+@pytest.mark.parametrize("name", list(_direct_cases()))
+def test_extension_refuses_a_misaligned_array(name):
+    function, arguments = _direct_cases()[name]
+    # The same call with the array aligned runs, so alignment alone is refused.
+    _plskit.call(function, arguments(np.ascontiguousarray), _fields)
+    with pytest.raises(_plskit.PlsKitException) as ei:
+        _plskit.call(function, arguments(_misaligned), _fields)
+    assert ei.value.code == "invalid_argument"
 
 
+# In every case the first array `mk` makes is X (`W`, or the model's `T`,
+# for `rotate`): `test_public_api_hands_the_extension_x_uncopied` looks for
+# that one.
 def _public_cases():
     X, y, Y, w = _data()
     m1 = plskit.pls1_fit(X, y, k=2)
+    m3 = plskit.pls3_fit(X, Y, k=2)
     return {
         "pls1_fit": lambda mk: plskit.pls1_fit(mk(X), mk(y), k=2, weights=mk(w)),
         "spls1_fit": lambda mk: plskit.spls1_fit(mk(X), mk(y), k=2, keep=3, weights=mk(w)),
-        "pls1_predict": lambda mk: plskit.pls1_predict(m1, mk(X)),
+        "pls1_predict": lambda mk: plskit.pls1_predict(
+            X_new=mk(X), model=_with_arrays(m1, mk)),
         "pls3_fit": lambda mk: plskit.pls3_fit(mk(X), mk(Y), k=2),
+        "pls3_transform": lambda mk: plskit.pls3_transform(
+            X_new=mk(X), Y_new=mk(Y), model=_with_arrays(m3, mk)),
         "preprocess": lambda mk: plskit.preprocess(mk(X), mk(Y), weights=mk(w)),
-        "rotate": lambda mk: plskit.rotate(mk(np.asarray(m1.W)), method="varimax"),
+        "rotate": lambda mk: plskit.rotate(
+            mk(np.asarray(m1.W)), method="varimax", L=mk(m1.P)),
+        "rotate_model": lambda mk: plskit.rotate(_with_arrays(m1, mk), method="varimax"),
+        "split_nb_gate": lambda mk: plskit.split_nb_gate(mk(X), weights=mk(w)),
         "pls1_perm_null": lambda mk: plskit.pls1_perm_null(
             mk(X), mk(y), k=1, n_perm=100, seed=4, weights=mk(w)),
         "pls1_find_k_optimal": lambda mk: plskit.pls1_find_k_optimal(
@@ -112,24 +126,45 @@ def _public_cases():
     }
 
 
+def _record_extension_arrays(monkeypatch):
+    """The list that collects every array the wrapper hands the extension
+    from here on, arrays inside a model included."""
+    seen = []
+
+    def collect(value):
+        if isinstance(value, np.ndarray):
+            seen.append(value)
+        elif isinstance(value, dict):
+            for v in value.values():
+                collect(v)
+        elif dataclasses.is_dataclass(value):
+            for f in dataclasses.fields(value):
+                collect(getattr(value, f.name))
+
+    real = _plskit.call
+
+    def call(name, arguments, make_result):
+        collect(arguments)
+        return real(name, arguments, make_result)
+
+    monkeypatch.setattr(_plskit, "call", call)
+    return seen
+
+
 @pytest.mark.parametrize("name", list(_public_cases()))
-def test_public_api_hands_the_seam_misaligned_arrays(name, monkeypatch):
-    """Every array the public API validates reaches the extension misaligned,
-    so each entry's seam path is exercised, not just the wrapper's copy."""
+def test_public_api_aligns_misaligned_input(name, monkeypatch):
+    """A misaligned input gives the bits of the same values aligned, and
+    every array that reaches the extension is aligned."""
     call = _public_cases()[name]
     ref = _bits(call(np.ascontiguousarray))
-    real = _api._ensure_array
-
-    def ensure_then_misalign(x, name, ndim):
-        return _misaligned(real(x, name, ndim))
-
-    monkeypatch.setattr(_api, "_ensure_array", ensure_then_misalign)
-    assert _bits(call(np.ascontiguousarray)) == ref
+    seen = _record_extension_arrays(monkeypatch)
+    assert _bits(call(_misaligned)) == ref
+    assert seen and all(v.flags.aligned for v in seen)
 
 
-def test_ensure_array_returns_aligned():
+def test_aligned_f64_returns_aligned():
     X = _misaligned(np.arange(6.0).reshape(2, 3))
-    out = _api._ensure_array(X, "X", 2)
+    out = _api._aligned_f64(X, "X")
     assert out.flags.aligned and out.flags.c_contiguous
     assert np.array_equal(out, X)
 
@@ -137,21 +172,11 @@ def test_ensure_array_returns_aligned():
 @pytest.mark.parametrize("order", ["C", "F"])
 @pytest.mark.parametrize("name", list(_public_cases()))
 def test_public_api_hands_the_extension_x_uncopied(name, order, monkeypatch):
-    """The wrapper passes a contiguous float64 X (or `W`, for `rotate`) on
-    in its own order: the array the extension receives is the caller's."""
+    """The wrapper passes a contiguous float64 X (`W`, or the model's `T`,
+    for `rotate`) on in its own order: the array in the extension's
+    arguments is the caller's."""
     call = _public_cases()[name]
-    seen = []
-
-    def record(fn):
-        def wrapped(*args, **kwargs):
-            seen.extend(v for v in (*args, *kwargs.values()) if isinstance(v, np.ndarray))
-            return fn(*args, **kwargs)
-        return wrapped
-
-    for attr in dir(_plskit):
-        fn = getattr(_plskit, attr)
-        if callable(fn) and not isinstance(fn, type):
-            monkeypatch.setattr(_plskit, attr, record(fn))
+    seen = _record_extension_arrays(monkeypatch)
     held = []
 
     def mk(a):

@@ -5,9 +5,8 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::cases::{
-    case_files, default_tolerance, ensure_moved, faer_col_to_array, ndarray_to_faer_col,
-    ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data, weighted_prestd_n80_d6, Xyw,
-    WEIGHTED_PRESTD_N80_D6_INPUTS,
+    case_files, ensure_moved, faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat,
+    scalar_f64, scalar_i64, synth_data, weighted_prestd_n80_d6, Xyw, WEIGHTED_PRESTD_N80_D6_INPUTS,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
@@ -160,7 +159,6 @@ fn sequence_case(
             inputs_sha256: sha256_of_file(&abs_inputs)?,
             outputs_sha256: sha256_of_file(&abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 
@@ -411,6 +409,5 @@ pub fn split_exact_tall_keep10(root: &Path) -> Result<Case> {
             inputs_sha256: sha256_of_file(&abs_inputs)?,
             outputs_sha256: sha256_of_file(&abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }

@@ -1,3 +1,4 @@
+import dataclasses
 import warnings
 
 import numpy as np
@@ -77,34 +78,67 @@ def test_transform_unknown_which_raises_invalid_args():
     assert ei.value.code == "invalid_args"
 
 
+@dataclasses.dataclass
+class _Foreign:
+    """A dataclass that is not a plskit result. `dataclasses.replace`
+    refuses it, because of the `init=False` field."""
+    a: int = 0
+    b: int = dataclasses.field(default=0, init=False)
+
+
 @pytest.mark.parametrize(
     "call, message",
     [
         (lambda m1, m3, X: plskit.pls1_predict(m3, X),
          "model must be a PLS1Result, got a PLS3Result"),
         (lambda m1, m3, X: plskit.pls1_predict(None, X),
-         "model must be a PLS1Result, got None"),
+         "pls1_predict() missing required argument 'model'"),
         (lambda m1, m3, X: plskit.pls3_transform(m1, X),
          "model must be a PLS3Result, got a PLS1Result"),
         (lambda m1, m3, X: plskit.plssvd_transform({"U": X}, X),
-         "model must be a PLS3Result, got a dict"),
+         "model is missing field 'V'"),
         (lambda m1, m3, X: plskit.pls1_predict(X, X),
-         "model must be a PLS1Result, got an ndarray"),
+         "model must be a PLS1Result, got a matrix"),
         (lambda m1, m3, X: plskit.pls1_predict(1, X),
-         "model must be a PLS1Result, got an int"),
+         "model must be a PLS1Result, got 1"),
+        (lambda m1, m3, X: plskit.pls1_predict(_Foreign(), X),
+         "model must be a PLS1Result, got a _Foreign"),
     ],
     ids=["predict_pls3", "predict_none", "transform_pls1", "plssvd_transform_dict",
-         "predict_ndarray", "predict_int"],
+         "predict_ndarray", "predict_int", "predict_foreign_dataclass"],
 )
 def test_a_model_of_the_wrong_type_is_invalid_argument(call, message):
-    """A model argument of the wrong type raises `invalid_argument` worded
-    as plskit-bind (R) words it, not the `AttributeError` its fields would."""
+    """A model argument of the wrong type raises `invalid_argument` naming
+    the argument, not the `AttributeError` its fields would."""
     X, Y = _data()
     m1, m3 = plskit.pls1_fit(X, Y[:, 0], k=1), plskit.pls3_fit(X, Y, k=1)
     with pytest.raises(plskit.PlsKitError) as ei:
         call(m1, m3, X)
     assert ei.value.code == "invalid_argument"
     assert str(ei.value) == message
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda m1, m3, X: plskit.pls1_predict(dataclasses.replace(m1, T=m1.T.tolist()), X),
+        lambda m1, m3, X: plskit.pls3_transform(dataclasses.replace(m3, U=m3.U.tolist()), X),
+    ],
+    ids=["pls1_predict", "pls3_transform"],
+)
+def test_a_model_array_field_given_as_a_nested_list_is_invalid_argument(call):
+    X, Y = _data()
+    m1, m3 = plskit.pls1_fit(X, Y[:, 0], k=1), plskit.pls3_fit(X, Y, k=1)
+    with pytest.raises(plskit.PlsKitError) as ei:
+        call(m1, m3, X)
+    assert ei.value.code == "invalid_argument"
+
+
+def test_a_plain_dict_of_a_models_fields_is_accepted_as_the_model():
+    X, Y = _data()
+    m = plskit.pls3_fit(X, Y, k=2)
+    from_dict = plskit.pls3_transform(vars(m), X, Y)
+    assert np.array_equal(from_dict.x_scores, plskit.pls3_transform(m, X, Y).x_scores)
 
 
 def test_confirmatory_test_split_exact_marshals_its_fields():
@@ -213,6 +247,8 @@ def test_orthogonal_Y_keeps_no_component():
         (lambda X, Y: plskit.pls3_fit(X, Y, k=-1), "k must be a non-negative whole number"),
         (lambda X, Y: plskit.pls3_fit(X, Y, pre_standardized_Y=1), "pre_standardized_Y must be a bool"),
         (lambda X, Y: plskit.spls3_fit(X, Y, 1, 2.5, 2), "keep_X must be a non-negative whole number"),
+        (lambda X, Y: plskit.spls3_fit(X, Y, 1, 2, 2, tol=2**64),
+         r"tol is outside the 64-bit integer range \[-2\^63, 2\^64\)"),
         (lambda X, Y: plskit.pls3_confirmatory_test(X, Y, test_method="split_exact", seed=-1),
          "seed must be a whole number"),
         (lambda X, Y: plskit.pls3_transform(plskit.pls3_fit(X, Y), X, which=1),
@@ -255,3 +291,21 @@ def test_auto_args_take_n_perm_and_n_splits_only():
             X, Y, test_method="auto", args={"force": True}, seed=1
         )
     assert ei.value.code == "invalid_args"
+
+
+def test_unknown_method_names_are_listed_as_a_python_list():
+    X, Y = _data()
+    m = plskit.pls3_fit(X, Y, k=2)
+    with pytest.raises(plskit.PlsKitError) as ei:
+        plskit.pls3_transform(m, X, None, which="bad")
+    assert ei.value.code == "invalid_args"
+    assert str(ei.value) == (
+        "unknown which: bad; allowed: ['x_scores', 'y_scores', 'both']"
+    )
+    with pytest.raises(plskit.PlsKitError) as ei:
+        plskit.pls3_confirmatory_test(X, Y, k=1, test_method="raw_perm", seed=7)
+    assert ei.value.code == "invalid_args"
+    assert str(ei.value) == (
+        "test_method='raw_perm' is not available for pls3_confirmatory_test; "
+        "allowed: ['split_exact', 'split_nb', 'auto']"
+    )

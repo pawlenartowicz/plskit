@@ -167,7 +167,10 @@ fn pls3_fit_is_invariant_to_the_scale_of_x_and_y() {
     };
     let base = fit(&x, &y);
     assert_eq!(base.k_used, 2);
-    for factor in FACTORS {
+    // 3e307 puts the entries of X near `f64::MAX`, where `X'Ỹ` formed from
+    // the raw X overflows although every standardized quantity is of order
+    // one.
+    for factor in FACTORS.into_iter().chain([3e307]) {
         for (side, m) in [
             ("X", fit(&scaled(&x, factor), &y)),
             ("Y", fit(&x, &scaled(&y, factor))),

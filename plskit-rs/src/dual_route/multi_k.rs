@@ -42,11 +42,11 @@ use crate::signal_test::{cv_fold_contribution, pearson_scaled, CvFold, PreparedS
 pub(crate) const K_DUAL_MAX: usize = 2;
 
 /// Iteration cap of [`gram_norm_bound`]'s power iteration.
-pub(crate) const POWER_MAX_ITERS: usize = 50;
+const POWER_MAX_ITERS: usize = 50;
 
 /// [`gram_norm_bound`] stops once its Rayleigh quotient moves by at most
 /// this fraction of itself.
-pub(crate) const POWER_REL_TOL: f64 = 1e-3;
+const POWER_REL_TOL: f64 = 1e-3;
 
 /// Should `pls1_perm_null` take the n-space route?
 ///
@@ -117,7 +117,7 @@ pub(crate) fn nspace_eligible_split_exact(
 /// which reads the global parallelism setting;
 /// `gram_products_are_thread_count_invariant_at_the_route_shapes` pins that
 /// the result does not depend on the pool size.
-pub(crate) fn gram_of(xs: MatRef<'_, f64>, par: Par) -> Mat<f64> {
+fn gram_of(xs: MatRef<'_, f64>, par: Par) -> Mat<f64> {
     let n = xs.nrows();
     let mut g = Mat::<f64>::zeros(n, n);
     matmul(g.as_mut(), Accum::Replace, xs, xs.transpose(), 1.0, par);
@@ -128,7 +128,7 @@ pub(crate) fn gram_of(xs: MatRef<'_, f64>, par: Par) -> Mat<f64> {
 /// training rows to scores (or predictions) on the held-out rows. `par` as
 /// for [`gram_of`].
 #[allow(clippy::similar_names)]
-pub(crate) fn cross_of(xs_te: MatRef<'_, f64>, xs_tr: MatRef<'_, f64>, par: Par) -> Mat<f64> {
+fn cross_of(xs_te: MatRef<'_, f64>, xs_tr: MatRef<'_, f64>, par: Par) -> Mat<f64> {
     let mut m = Mat::<f64>::zeros(xs_te.nrows(), xs_tr.nrows());
     matmul(
         m.as_mut(),
@@ -142,7 +142,7 @@ pub(crate) fn cross_of(xs_te: MatRef<'_, f64>, xs_tr: MatRef<'_, f64>, par: Par)
 }
 
 /// `m·v`, sequential. The per-replicate products of this route.
-pub(crate) fn seq_gemv(m: MatRef<'_, f64>, v: &Col<f64>) -> Col<f64> {
+fn seq_gemv(m: MatRef<'_, f64>, v: &Col<f64>) -> Col<f64> {
     let mut out = Col::<f64>::zeros(m.nrows());
     matmul(
         out.as_mut().as_mat_mut(),
@@ -171,7 +171,7 @@ pub(crate) fn seq_gemv(m: MatRef<'_, f64>, v: &Col<f64>) -> Col<f64> {
 /// proved. `scripts/gate_feasibility.py` transcribes this function (change
 /// together).
 #[allow(clippy::many_single_char_names, clippy::cast_precision_loss)]
-pub(crate) fn gram_norm_bound(g: MatRef<'_, f64>, x_fro: f64) -> f64 {
+fn gram_norm_bound(g: MatRef<'_, f64>, x_fro: f64) -> f64 {
     let n = g.nrows();
     let fro2 = x_fro * x_fro;
     if n == 0 {
@@ -223,10 +223,10 @@ pub(crate) enum NspaceOutcome {
 /// floor is evaluated on bit-identical inputs), `g2`, the block's
 /// [`gram_norm_bound`], and the feature count `p`.
 pub(crate) struct NspaceBlock<'a> {
-    pub(crate) g: MatRef<'a, f64>,
-    pub(crate) x_fro: f64,
-    pub(crate) g2: f64,
-    pub(crate) p: usize,
+    g: MatRef<'a, f64>,
+    x_fro: f64,
+    g2: f64,
+    p: usize,
 }
 
 /// The owned once-per-block products of the route for one standardized
@@ -305,7 +305,7 @@ const STEP_TT: usize = 10;
 /// both the deflation and the projection, each up to `2·ρ_i·‖z‖`. See
 /// "History term" on [`pls1_nspace_kernel`]. Mirrored in
 /// `scripts/gate_feasibility.py` (change together).
-pub(crate) const HISTORY_COEF: f64 = 8.0;
+const HISTORY_COEF: f64 = 8.0;
 
 /// Multiple of the rounding bounds that gates 1 and 2 of
 /// [`pls1_nspace_kernel`] require. `RESOLVE_BAND` protects the truncation

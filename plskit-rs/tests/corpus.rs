@@ -37,7 +37,8 @@ const ATOL_SCALAR: f64 = 1e-12;
 const ATOL_ARRAY: f64 = 1e-10;
 /// Corpus relative tolerance for every `f64` field (`testdata/README.md`
 /// "Tolerance"): about 45 ε, so cross-host drift in a large value (one ulp
-/// of the score statistic ≈ 6126 is 9.1e-13) stays inside.
+/// of the score statistic ≈ 6126 is 9.1e-13) stays inside. Part of the rule
+/// `plskit-testdata-gen/src/settle.rs::close` owns: change together.
 const RTOL: f64 = 1e-14;
 
 /// Function families with an arm in this file. Kept in step with the
@@ -416,8 +417,8 @@ impl Fixture {
 /// Python side uses. The exact `==` is what makes `inf` match `inf`, where
 /// the difference is NaN; the finiteness guard keeps `RTOL·|inf|` from
 /// accepting any `a` against an infinite `e`.
-/// `plskit-testdata-gen/src/settle.rs::close` mirrors this rule: change
-/// together.
+/// Mirrors `plskit-testdata-gen/src/settle.rs::close`, which owns the rule:
+/// change together.
 #[allow(clippy::float_cmp)]
 fn close(a: f64, e: f64, atol: f64) -> bool {
     a == e

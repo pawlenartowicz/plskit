@@ -22,8 +22,8 @@ use plskit::{
 };
 
 use crate::cases::{
-    case_files, default_tolerance, perm_null_weights, scalar_f64, scalar_i64, synth_data,
-    weighted_prestd_n80_d6, Xyw, WEIGHTED_PRESTD_N80_D6_INPUTS,
+    case_files, perm_null_weights, scalar_f64, scalar_i64, synth_data, weighted_prestd_n80_d6, Xyw,
+    WEIGHTED_PRESTD_N80_D6_INPUTS,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
@@ -193,7 +193,6 @@ fn run_confirmatory_on(
             inputs_sha256: sha256_of_file(&abs_inputs)?,
             outputs_sha256: sha256_of_file(&abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }
 

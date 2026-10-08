@@ -1,7 +1,5 @@
-//! Method strings and `args` records, with the same allowed keys, defaults
-//! and messages as `plskit-py/src/lib.rs`. Absent keys, and
-//! keys whose value is null, take the engine's own defaults; no wrapper
-//! keeps a copy of them.
+//! Method strings and `args` records. Absent keys, and keys whose value is
+//! null, take the engine's own defaults; no wrapper keeps a copy of them.
 
 use plskit::{
     ConfirmatoryArgs, ConfirmatoryMethod, FindKOptimalOpts, FindKSequenceOpts, FindKeepOptimalOpts,
@@ -10,10 +8,11 @@ use plskit::{
 
 use crate::coerce;
 use crate::error::BindError;
+use crate::fmt::py_list;
 use crate::value::{Record, Value};
 
-/// Reject keys outside `allowed`, with plskit-py's message. `label` names the
-/// argument and its value, e.g. `test_method='raw_perm'`.
+/// Reject keys outside `allowed`. `label` names the argument and its value,
+/// e.g. `test_method='raw_perm'`.
 pub(crate) fn validate_keys(
     label: &str,
     args: Option<&Record<'_>>,
@@ -23,7 +22,8 @@ pub(crate) fn validate_keys(
         for key in a.keys() {
             if !allowed.contains(&key) {
                 return Err(BindError::invalid_args(format!(
-                    "{label} does not accept arg '{key}'; allowed: {allowed:?}"
+                    "{label} does not accept arg '{key}'; allowed: {}",
+                    py_list(allowed)
                 )));
             }
         }
@@ -73,8 +73,7 @@ pub(crate) fn arg_bool(
     })
 }
 
-/// A confirmatory method name. Mirrors `parse_confirmatory_method` in
-/// `plskit-py/src/lib.rs` — change together.
+/// A confirmatory method name.
 pub(crate) fn parse_method(s: &str) -> Result<ConfirmatoryMethod, BindError> {
     match s {
         "raw_perm" => Ok(ConfirmatoryMethod::RawPerm),
@@ -87,8 +86,7 @@ pub(crate) fn parse_method(s: &str) -> Result<ConfirmatoryMethod, BindError> {
     }
 }
 
-/// `method` + `args` for `pls1_confirmatory_test`. Mirrors
-/// `parse_confirmatory_args` in `plskit-py/src/lib.rs` — change together.
+/// `method` + `args` for `pls1_confirmatory_test`.
 pub(crate) fn confirmatory_args(
     method: &str,
     args: Option<&Record<'_>>,
@@ -141,16 +139,16 @@ pub(crate) fn confirmatory_args(
 }
 
 /// `method` + `args` for `pls3_confirmatory_test`: three of the six methods.
-/// Mirrors `parse_pls3_confirmatory_args` in `plskit-py/src/lib.rs` — change
-/// together.
 pub(crate) fn pls3_confirmatory_args(
     method: &str,
     args: Option<&Record<'_>>,
 ) -> Result<ConfirmatoryArgs, BindError> {
-    if method != "split_exact" && method != "split_nb" && method != "auto" {
+    const ALLOWED: [&str; 3] = ["split_exact", "split_nb", "auto"];
+    if !ALLOWED.contains(&method) {
         return Err(BindError::invalid_args(format!(
             "test_method='{method}' is not available for pls3_confirmatory_test; \
-             allowed: [\"split_exact\", \"split_nb\", \"auto\"]"
+             allowed: {}",
+            py_list(&ALLOWED)
         )));
     }
     confirmatory_args(method, args)
@@ -186,8 +184,7 @@ pub(crate) fn selector(s: &str) -> Result<Selector, BindError> {
     }
 }
 
-/// `selector` / `diagnostic` / `args` for the `*_find_k_optimal` family,
-/// with plskit-py's cross-key rules.
+/// `selector` / `diagnostic` / `args` for the `*_find_k_optimal` family.
 pub(crate) fn find_k_optimal_opts(
     selector_name: &str,
     diagnostic: Option<&str>,
@@ -249,8 +246,6 @@ pub(crate) fn find_k_optimal_opts(
 }
 
 /// `test_method` / `alpha` / `args` for the `*_find_k_sequence` family.
-/// The `allowed` match mirrors `run_find_k_sequence` in `plskit-py/src/lib.rs`
-/// — change together.
 pub(crate) fn find_k_sequence_opts(
     test_method: &str,
     alpha: Option<f64>,
@@ -308,7 +303,7 @@ pub(crate) fn which(s: &str) -> Result<TransformWhich, BindError> {
         "y_scores" => Ok(TransformWhich::YScores),
         "both" => Ok(TransformWhich::Both),
         _ => Err(BindError::invalid_args(format!(
-            "unknown which: {s}; allowed: [\"x_scores\", \"y_scores\", \"both\"]"
+            "unknown which: {s}; allowed: ['x_scores', 'y_scores', 'both']"
         ))),
     }
 }
@@ -340,13 +335,29 @@ mod tests {
     }
 
     #[test]
-    fn unknown_key_message_matches_plskit_py() {
+    fn unknown_key_message_lists_allowed_keys() {
         let a = args(&[("n_splits", Value::I64(3))]);
         let e = confirmatory_args("raw_perm", Some(&a)).unwrap_err();
         assert_eq!(e.code, "invalid_args");
         assert_eq!(
             e.message,
-            "test_method='raw_perm' does not accept arg 'n_splits'; allowed: [\"n_perm\", \"n_folds\"]"
+            "test_method='raw_perm' does not accept arg 'n_splits'; allowed: ['n_perm', 'n_folds']"
+        );
+    }
+
+    // Method-name lists use the same Python list repr as the key lists.
+    #[test]
+    fn unknown_method_messages_list_allowed_names_as_a_python_list() {
+        assert_eq!(
+            which("bad").unwrap_err().message,
+            "unknown which: bad; allowed: ['x_scores', 'y_scores', 'both']"
+        );
+        assert_eq!(
+            pls3_confirmatory_args("raw_perm", None)
+                .unwrap_err()
+                .message,
+            "test_method='raw_perm' is not available for pls3_confirmatory_test; \
+             allowed: ['split_exact', 'split_nb', 'auto']"
         );
     }
 

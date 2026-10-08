@@ -1,8 +1,7 @@
 //! `preprocess` fixture cases.
 
 use crate::cases::{
-    default_tolerance, faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64,
-    synth_data, CasePaths,
+    faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, synth_data, CasePaths,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
@@ -82,6 +81,5 @@ pub fn n50_d10_with_weights(root: &Path) -> Result<Case> {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }

@@ -51,7 +51,7 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     let w = inp.opt_vec("weights")?;
     let max_skip_rate = inp.opt_f64("max_skip_rate")?;
     inp.finish()?;
-    // With ci = FALSE the four CI knobs are accepted and ignored, as in Python.
+    // With ci = FALSE the four CI knobs are accepted and ignored.
     let cd = CIOpts::default();
     let ci_opts = ci.then(|| CIOpts {
         n_boot: n_boot.unwrap_or(cd.n_boot),
@@ -124,7 +124,7 @@ pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
         Some(r.n_eff),
     );
     let mut rec = convert::confirmatory_test(r);
-    rec.set("ci", Value::Null); // this family has no CI, as in _api.py
+    rec.set("ci", Value::Null); // this family has no CI
     Ok(with_warning(rec, warning))
 }
 

@@ -2,9 +2,13 @@
 """Check the plskit-bind registry against the Python signatures.
 
 Every wrapper exposes the same functions with the same argument
-names. The plskit-bind registry drives R and Julia, so it must equal the
+names. The plskit-bind registry is read by R and by the Python wrapper
+(`_api.py` takes each parameter's kind from it), so it must equal the
 Python surface: the same functions, and per function the same parameters
 in the same order, with the same keyword-only boundary and defaults.
+Each public function must also forward every one of its parameters to
+`_call` under its own name: a keyword left out would take the registry
+default without an error.
 `_api.py` is read with `ast`, so no import (and no numpy) is needed.
 
 Usage:
@@ -21,8 +25,10 @@ ROOT = Path(__file__).resolve().parent.parent
 PKG = ROOT / "plskit-py" / "python" / "plskit"
 
 
-def python_signatures() -> dict[str, list[tuple]]:
-    """name -> [(param, keyword_only, required, default)] for public defs."""
+def python_signatures() -> dict[str, tuple[list[tuple], str | None]]:
+    """name -> ([(param, keyword_only, required, default)], returned) for
+    public defs; `returned` is the source of the expression the body's
+    last statement returns."""
     tree = ast.parse((PKG / "_api.py").read_text(encoding="utf-8"))
     sigs = {}
     for node in tree.body:
@@ -36,7 +42,13 @@ def python_signatures() -> dict[str, list[tuple]]:
             params.append((arg.arg, False, d is None, None if d is None else ast.literal_eval(d)))
         for arg, d in zip(a.kwonlyargs, a.kw_defaults):
             params.append((arg.arg, True, d is None, None if d is None else ast.literal_eval(d)))
-        sigs[node.name] = params
+        last = node.body[-1]
+        returned = (
+            ast.unparse(last.value)
+            if isinstance(last, ast.Return) and last.value
+            else None
+        )
+        sigs[node.name] = (params, returned)
     return sigs
 
 
@@ -65,13 +77,20 @@ def main() -> int:
     for name in sorted(set(registry) - python_fns):
         problems.append(f"{name}: in the registry, not exported by Python")
     for name in sorted(python_fns & set(registry)):
-        want = sigs[name]
+        want, returned = sigs[name]
         got = [
             (p["name"], p["keyword_only"], p["required"], None if p["required"] else p["default"])
             for p in registry[name]["params"]
         ]
         if got != want:
             problems.append(f"{name}:\n    python   {want}\n    registry {got}")
+        forward = (
+            f"_call({name!r}, " + ", ".join(f"{p[0]}={p[0]}" for p in want) + ")"
+        )
+        if returned != forward:
+            problems.append(
+                f"{name}:\n    must return {forward}\n    returns     {returned}"
+            )
 
     if problems:
         print("== plskit-bind registry drift ==")

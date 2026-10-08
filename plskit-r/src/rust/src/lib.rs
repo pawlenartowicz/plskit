@@ -1,5 +1,5 @@
 //! The R seam of plskit: `Robj` to `plskit_bind::Value` and back, plus the
-//! three `.Call` entry points the R package uses. Everything else (argument
+//! two `.Call` entry points the R package uses. Everything else (argument
 //! validation, method dispatch, result records, error codes) lives in
 //! `plskit-bind`.
 
@@ -47,15 +47,8 @@ fn plskit_registry_impl() -> Robj {
     to_r::registry_list()
 }
 
-/// Version of the Rust engine compiled into this package.
-#[extendr]
-fn plskit_engine_version_impl() -> &'static str {
-    plskit::version()
-}
-
 extendr_module! {
     mod plskit;
     fn plskit_call_impl;
     fn plskit_registry_impl;
-    fn plskit_engine_version_impl;
 }

@@ -62,8 +62,8 @@ impl CasePaths {
 }
 
 pub(crate) use synth_helpers::{
-    default_tolerance, faer_col_to_array, faer_mat_to_array, i64_vec, ndarray_to_faer_col,
-    ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data, synth_xy,
+    faer_col_to_array, faer_mat_to_array, i64_vec, ndarray_to_faer_col, ndarray_to_faer_mat,
+    scalar_f64, scalar_i64, synth_data, synth_xy,
 };
 
 /// A case's input arrays: `X`, `y` and, for weighted cases, `weights`.
@@ -185,8 +185,7 @@ pub(crate) fn ensure_moved(case: &str, field: &str, with: &[f64], without: &[f64
     Ok(())
 }
 
-/// The manifest entry of a case whose files are already written under `root`,
-/// at the default tolerance.
+/// The manifest entry of a case whose files are already written under `root`.
 ///
 /// # Errors
 /// Returns an error if either file cannot be hashed.
@@ -209,7 +208,6 @@ pub(crate) fn manifest_case(
         outputs: rel_outputs,
         kwargs,
         hashes,
-        tolerance: Some(default_tolerance()),
     })
 }
 
@@ -340,17 +338,6 @@ mod synth_helpers {
     pub fn scalar_i64(v: i64) -> ndarray::ArrayD<i64> {
         ndarray::arr0(v).into_dyn()
     }
-
-    /// Default numerical tolerances: atol_scalar=1e-12, atol_array=1e-10,
-    /// rtol=1e-14 (`|a − e| ≤ atol + rtol·|e|`; `testdata/README.md`
-    /// "Tolerance").
-    ///
-    /// The single shared version, recorded as each `Case`'s `tolerance`
-    /// field in `manifest.json` and read by the settle step. The wrappers'
-    /// corpus tests hard-code the same numbers. It never touches fixture bytes.
-    pub fn default_tolerance() -> serde_json::Value {
-        serde_json::json!({"atol_scalar": 1e-12, "atol_array": 1e-10, "rtol": 1e-14})
-    }
 }
 
 /// Materialize every fixture under `root` and return the manifest entries.
@@ -379,6 +366,7 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_find_k_optimal::r2_max(root)?);
     cases.push(pls1_find_k_optimal::bic(root)?);
     cases.push(pls1_find_k_optimal::r2_se_diagnostic(root)?);
+    cases.push(pls1_find_k_optimal::r2_se_weighted(root)?);
 
     cases.push(pls1_find_k_sequence::raw_perm(root)?);
     cases.push(pls1_find_k_sequence::split_nb(root)?);

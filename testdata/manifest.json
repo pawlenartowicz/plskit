@@ -14,11 +14,6 @@
       "hashes": {
         "inputs_sha256": "42ee224728483bbfb63f1d9c1d1d92d939b71298268b06e0bdba8b4660a3e948",
         "outputs_sha256": "e2a1bbd121545876bf6cb4271baf2be3d3516fbc44049cb342e41a0682302ac5"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -33,11 +28,6 @@
       "hashes": {
         "inputs_sha256": "42ee224728483bbfb63f1d9c1d1d92d939b71298268b06e0bdba8b4660a3e948",
         "outputs_sha256": "5664470ad09e3b882865c9ea475fb06a4e7f21f89ae5d1ad74e5a94153c49764"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -53,11 +43,6 @@
       "hashes": {
         "inputs_sha256": "42ee224728483bbfb63f1d9c1d1d92d939b71298268b06e0bdba8b4660a3e948",
         "outputs_sha256": "c13f4aa3c8b65b9e52ad99cb47661ecba7ad2531e867b4f4b52a87232ff754c3"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -72,11 +57,6 @@
       "hashes": {
         "inputs_sha256": "b2ea41452732cd5404968d89b03cb1473d32b9e50a901b769008138529252c2f",
         "outputs_sha256": "d226d8195308dc8c7e0a8a925ca82ba86c496bef36a9877c4504dead1857275e"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -91,11 +71,6 @@
       "hashes": {
         "inputs_sha256": "b2ea41452732cd5404968d89b03cb1473d32b9e50a901b769008138529252c2f",
         "outputs_sha256": "602b52ba816d4f6e4925b72f55d6c7400550764e13cf1f37e82df3d4eaa20521"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -110,11 +85,6 @@
       "hashes": {
         "inputs_sha256": "a6f29c05468a719845fd8a91503f9059d91f79022e1efd53fff67b4816227ee7",
         "outputs_sha256": "828e4d58e1a357876cb7c07cfda31833968d9f806731df64c13a77224826def8"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -130,11 +100,6 @@
       "hashes": {
         "inputs_sha256": "6792208dad2a31fa034711859616fc33b71db99af4a9ffdff65b784a1ad9e874",
         "outputs_sha256": "294592d813699c9687f4b66c4d46510c539ce9d7576ce604fd65339b00735fdb"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -151,11 +116,6 @@
       "hashes": {
         "inputs_sha256": "9b2fb23034257ee364426edefca30984b4ecfe19e6680e518b7658f069f83ae5",
         "outputs_sha256": "b1775a570d6cf0893c6c1568b954e113640eacece0baa26171ef0651255f9c7d"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -170,11 +130,6 @@
       "hashes": {
         "inputs_sha256": "215761ab973540d9b16ae04c25ccf4bd3aae832cb25c53b12843da114fa18d1c",
         "outputs_sha256": "86f9ce3768c98f06e91b60f004d5b9eaafe229641dc97ee342d83dd0006905e7"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -190,11 +145,6 @@
       "hashes": {
         "inputs_sha256": "5c226658dd564f887ec8e3482d82a2f3606bc89608bf27ea17d3fd57ee797da8",
         "outputs_sha256": "4dbe2d6586910b9e5692eb5851759c53acbf1f043be5c3a9636981b16c1a5cbc"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -213,11 +163,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "65f9e84ae508760c337d4563df4a4993e734b4ff2e793df476aa4787b414c36b"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -236,11 +181,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "462989236dfa9bdc6acd0b57e1942f76d161ed7d541efba1b89a9aa8f4887d3f"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -256,11 +196,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "4d43157ccd8c84d3be9a47e9b4fa14059afae0506ede036944af7c8bdf534013"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -281,11 +216,25 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "15126474fa00766e8c096f4123c702c7ea3bedea39799f5c8c434801249f3068"
+      }
+    },
+    {
+      "name": "pls1_find_k_optimal_r2_se_weighted",
+      "function": "pls1_find_k_optimal",
+      "inputs": "inputs/pls1_perm_null_weighted_n80_d6_k2.npz",
+      "outputs": "outputs/pls1_find_k_optimal/pls1_find_k_optimal_r2_se_weighted.npz",
+      "kwargs": {
+        "args": {
+          "n_folds": 5
+        },
+        "k_max": 4,
+        "seed": 42,
+        "selector": "r2_se",
+        "weights": "nonuniform"
       },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
+      "hashes": {
+        "inputs_sha256": "ea989dae238ca953503d2fe59d0ad6c5256d7ef985943245767f992e8eac3a7b",
+        "outputs_sha256": "903be79e61acfda176160ded5332fdd487d96cc471adb361396e7c227c379d66"
       }
     },
     {
@@ -304,11 +253,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "e5bc8da0541388734b3e7506fb3502a72698b637bc8f95fb3c0d8bb0f123d648"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -327,11 +271,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "319b9872c99e555c3a388ca38c7a62925c55d1bece87aca7ca758ff3627e7de6"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -351,11 +290,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "9c7ee19c17fc59aaadb3ef6772c0c3d9f426e1a9c23165ddaba991b181235e50"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -372,11 +306,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "01cfd4dad10026fefefe1a2bbf9b1f71ae196eb168dfb4ec498459c0da13d525"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -396,11 +325,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "9c7ee19c17fc59aaadb3ef6772c0c3d9f426e1a9c23165ddaba991b181235e50"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -420,11 +344,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "fa655a7e55d03d9d8a6097ea148c92e4de6b179d9d1269c917cc5c185f2757c7"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -443,11 +362,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "4d7fc974ed78fa743d447ca2c898f2a3a8d0684976e9553989925ee10eb4315d"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -467,11 +381,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "ed16f4b323290c81359beda0ced3356c0ef39150362eaba0bfe64333ac6db39a"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -491,11 +400,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "b856fce97ab61e827192a08ce4cefb374fe4b9fa528c078ab883f4e2a4a084cf"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -512,11 +416,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "7273f3fb463abfcd65bd11f9d30355475af102632995e4d8c5ed39c2d826c3cb"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -533,11 +432,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "5d8f42ab8b3bc8078ff33d6fbc8440927359ed294facca0376e986bdb6de8121"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -557,11 +451,6 @@
       "hashes": {
         "inputs_sha256": "9be71cda33f829b64089b666aeb16ca1141367782de174efd72acb33fcb98726",
         "outputs_sha256": "c5af1bb6b999d930522ee2ef9f7341c4f49c7d732e87f96d6cb98f12e1d104e8"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -581,11 +470,6 @@
       "hashes": {
         "inputs_sha256": "f745fd94efe269c7d9517dfc7b39d19f12398f25c1d763181475aeba8da43563",
         "outputs_sha256": "ebfb30768179d585883757eca0140703d15920f6db4c65cd1e66e41a3e4d764d"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -609,11 +493,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "45d060bbc30508bfb05a167bac4ae71c8b7e0db5f62d7b5d76fa8f23f13dce13"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -637,11 +516,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "de9b8efb9d46cba12a4e472ab07e5a2c9f6ae6d084bd598808c4e59a728348ea"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -662,11 +536,6 @@
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
         "outputs_sha256": "34be0846b66354b0ce83777e39c0ffe4dd3f99e16e55e61fef349f99e3daae54"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -686,11 +555,6 @@
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
         "outputs_sha256": "22b89b6fda620d04a405e66a8a26bb451fd9371dab3b985996fc5488ae6119c3"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -711,11 +575,6 @@
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
         "outputs_sha256": "f886c40e42e31be68be81633c7b9098a19ee0871f469f130ac030339077d08a0"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -733,11 +592,6 @@
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
         "outputs_sha256": "3e061758b99451614e79fccd56fd5766e6a031e8d506e9b97c6fad0187f3ea12"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -755,11 +609,6 @@
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
         "outputs_sha256": "41b7b9f1d4bf24b268fc3e1d13c98daff87dedb975c9489095ce7670a7e44e2f"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -779,11 +628,6 @@
       "hashes": {
         "inputs_sha256": "b2ea41452732cd5404968d89b03cb1473d32b9e50a901b769008138529252c2f",
         "outputs_sha256": "b5d83255313dd672471e05755fcd593ac9e847c4b7591debc8b59e1d1659655f"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -803,11 +647,6 @@
       "hashes": {
         "inputs_sha256": "c994d41ff7d13b342ab4ce2efd1246d502af50f66766baf48bed9795ccd1e864",
         "outputs_sha256": "24ab1e6a818d82abb38765fdca55e35bcdddfe8437a4c723e4167874591dc5ec"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -827,11 +666,6 @@
       "hashes": {
         "inputs_sha256": "c994d41ff7d13b342ab4ce2efd1246d502af50f66766baf48bed9795ccd1e864",
         "outputs_sha256": "2e32b95f99f976d92e2fd030855f528fe458b6ba5b042022c5496dc7a86f33d1"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -851,11 +685,6 @@
       "hashes": {
         "inputs_sha256": "3d17cadba8f5a1d23a01de0bc528ef61561b48948a2dec8733ee6cecac8fbb26",
         "outputs_sha256": "61cca8a7f37d990cb60e792026d052da6daeef8b748ebafe2b6e0f3b6ea9b117"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -873,11 +702,6 @@
       "hashes": {
         "inputs_sha256": "9626f02fa60d5b75e658b604b5308ba82235dbcbc7428ec0e769ad1bc0bcd52a",
         "outputs_sha256": "3f1192bdfdf4b138c19e93e2dcd5938cee77f5ff02e4f7b27ce4cf5c9f0682c1"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -898,11 +722,6 @@
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
         "outputs_sha256": "0416e6d7592781b7b81cbb9343fc1aa14eae6c41759a366512fa0260b117ea78"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -922,11 +741,6 @@
       "hashes": {
         "inputs_sha256": "c994d41ff7d13b342ab4ce2efd1246d502af50f66766baf48bed9795ccd1e864",
         "outputs_sha256": "a5d1c99dcff38bd4c3505910833cc801cf3aae84f044a645d080135d08e29d11"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -951,11 +765,6 @@
       "hashes": {
         "inputs_sha256": "334406b2d6be7bc8b90bfd5cad2d88c8df89532bf1214d49c1f26fb92ba8220b",
         "outputs_sha256": "fa57f3a18448ca1919e1e29fad70342a0fb828f7eb7ca83e008fbb698edde6c1"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -981,11 +790,6 @@
       "hashes": {
         "inputs_sha256": "f575aacb2cd08b2e40a751b65eff735abdcbd08d3c813d5cc66165170609438c",
         "outputs_sha256": "4f53b38153d957dc3da2fed59667232671a42eadc51b9f2730585d1ba1e36993"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1004,11 +808,6 @@
       "hashes": {
         "inputs_sha256": "c3bc018c2341a466942198148f20a67af91b11861c37a149c02443c5b510eeb0",
         "outputs_sha256": "663cd95b694af4e544bd288a4b1cab1ecda272de21aedf2f8aff11ab79f26146"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1027,11 +826,6 @@
       "hashes": {
         "inputs_sha256": "485136db97fe98099e89d3c9c858b7ec8c0661faa66ddc180b2cd265f4c2ea0d",
         "outputs_sha256": "7ee2c050b398a6ab6fead060e648942cde17440fc1f67dd585f5fa8347795d89"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1049,11 +843,6 @@
       "hashes": {
         "inputs_sha256": "c5d7e79ddee59cf21ec1c9afb9929f956eb06d3daa90dfe77811e6028b1141e6",
         "outputs_sha256": "1e50bce7b096174dc7cee55a1dd0dd318f3b3e1d48c9412980ec3f7cad71a73d"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1070,11 +859,6 @@
       "hashes": {
         "inputs_sha256": "1408b23ea7749ade2aaed3d7dc82b1d65f2bb91f97fa2b1aba6f2fc1af6a0584",
         "outputs_sha256": "214d7f4fc9b982c1a1c55c7f48d58a14334776c2dc7a399055bb7641a50434db"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1092,11 +876,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "0e41b6ae4adfca0d62057f0d5a6706688c83335995acdb735db014bc161bb323"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1115,11 +894,6 @@
       "hashes": {
         "inputs_sha256": "ea989dae238ca953503d2fe59d0ad6c5256d7ef985943245767f992e8eac3a7b",
         "outputs_sha256": "24d7867d6925f3a81726f5a5b9dd10b96c8352347fd9a0088223759ad9e3a813"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1137,11 +911,6 @@
       "hashes": {
         "inputs_sha256": "c994d41ff7d13b342ab4ce2efd1246d502af50f66766baf48bed9795ccd1e864",
         "outputs_sha256": "8970091d6271edec7f56b178725bb2c88027609bf99dce78cc9d1c67a14b4c5b"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1159,11 +928,6 @@
       "hashes": {
         "inputs_sha256": "c994d41ff7d13b342ab4ce2efd1246d502af50f66766baf48bed9795ccd1e864",
         "outputs_sha256": "f3b0a94ca3a62c395ad832caabfae8f1fde7db58c194bad775b64b678a1d190b"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1181,11 +945,6 @@
       "hashes": {
         "inputs_sha256": "45c823f12974e99448946c743f8c54bc07530f2be19905f065863deee41c40ae",
         "outputs_sha256": "ef85c2cca1a0ece7af92482f6009feacb0d5082cb2fe5beb68751b47c173ae5d"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1204,11 +963,6 @@
       "hashes": {
         "inputs_sha256": "33d14bbb5c16bee1aaab94cc276ae9eced09c9401b635a213998a3056b898e9f",
         "outputs_sha256": "8a828a65d3a84ecf02ff7ea17a98bd2efb25183d7ab48b862f40897b5ae8d8d7"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1228,11 +982,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "f479609126aa471a121e64f6ba187763e23a4867ac21c47b7fcf8f689472d007"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1251,11 +1000,6 @@
       "hashes": {
         "inputs_sha256": "505cff41656e75a88a527dcd0c60353f9313fe8e8a5a145c37d3c5b40a43a452",
         "outputs_sha256": "99f957cacac3ecb7c271eb17025c9e11897ea434ec1e6bb7fb63aac6784425ac"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1275,11 +1019,6 @@
       "hashes": {
         "inputs_sha256": "f575aacb2cd08b2e40a751b65eff735abdcbd08d3c813d5cc66165170609438c",
         "outputs_sha256": "f6193fa04e11abf0530f8c006f814287bf6d8660bdf71a1d64a514235dd7d5ae"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1299,11 +1038,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "8458614a39b1a83d4e4a324cc283e5d5a43d668e9a05b9fd466f5a8ed21505da"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1324,11 +1058,6 @@
       "hashes": {
         "inputs_sha256": "ea989dae238ca953503d2fe59d0ad6c5256d7ef985943245767f992e8eac3a7b",
         "outputs_sha256": "01c7cdaef1be0f39cbc79b7442d3c1c5c5b3e3351ef7044a4d06adfbb4d27520"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1350,11 +1079,6 @@
       "hashes": {
         "inputs_sha256": "f575aacb2cd08b2e40a751b65eff735abdcbd08d3c813d5cc66165170609438c",
         "outputs_sha256": "ac0c0d162d6a9548259b7690d02192c823541c5674bf1bd5f341dde849e7ed37"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1370,11 +1094,6 @@
       "hashes": {
         "inputs_sha256": "b2ea41452732cd5404968d89b03cb1473d32b9e50a901b769008138529252c2f",
         "outputs_sha256": "b1afa2595f6c2e4d1c29edc4f86ac8f0f785b2887d66b7f970256353d4401ed1"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1390,11 +1109,6 @@
       "hashes": {
         "inputs_sha256": "42ee224728483bbfb63f1d9c1d1d92d939b71298268b06e0bdba8b4660a3e948",
         "outputs_sha256": "8eb3a46efc4154baed314e6eaffe34efde940b20562ea7e805ce5fa0bba8e647"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1409,11 +1123,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "30b6c22c0e2d93bc6819dacd0076856ca058992d4e17a5f9698fd0ef59bbaa50"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1433,11 +1142,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "09f303aca58a289bf313e68245fc6c16fdfdcd7ac8b96208461b126854aa037d"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1458,11 +1162,6 @@
       "hashes": {
         "inputs_sha256": "ea989dae238ca953503d2fe59d0ad6c5256d7ef985943245767f992e8eac3a7b",
         "outputs_sha256": "82fd0125ea2609ab16880762caeb10c646b1f0ca200e7accf2deab0cc08f05ed"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1482,11 +1181,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "b6da361fc491d92885f77a33b9a0363bb0331b3ae02b36c299a23f8666a94ab4"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1506,11 +1200,6 @@
       "hashes": {
         "inputs_sha256": "c5d7e79ddee59cf21ec1c9afb9929f956eb06d3daa90dfe77811e6028b1141e6",
         "outputs_sha256": "3cdf683b32380a4bd4521fb832d66a7758c4c600f129f0e09c2840cdefa011e6"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1531,11 +1220,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "7c96e9ed30d9452cdaa22ca5424f869d58cd82bee02922becf14d8a471a043f9"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1556,11 +1240,6 @@
       "hashes": {
         "inputs_sha256": "ea48e68169348d88356b7aa5c2db919c393a98973fca11dae6b8f8ffbca4b5f2",
         "outputs_sha256": "3928acbc76dfb4ff08e84e78c163e9d755b696da0c327021a8243180d72a804e"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1580,11 +1259,6 @@
       "hashes": {
         "inputs_sha256": "8e9e3f070afe185a423f98e03af700b830a22aa58d79c6e92ac35864ff243b72",
         "outputs_sha256": "a4425a4a6ebb05c27fefcafc133cbdd1f427b94c2d8a447f98c05fc81842cefe"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1602,11 +1276,6 @@
       "hashes": {
         "inputs_sha256": "6c361d840834884e74147bfbd3c3b6ab42b43a170f67ba0aecddc3bbb77891a5",
         "outputs_sha256": "ad168fea161882e8ee2e37c72be56a730e2c30946bee8889bd777b8575f9cb0d"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1629,11 +1298,6 @@
       "hashes": {
         "inputs_sha256": "f575aacb2cd08b2e40a751b65eff735abdcbd08d3c813d5cc66165170609438c",
         "outputs_sha256": "3e40d11bbec1270b38fefbc49288f4ddcc65c3c534544b5bc6256179db4bd9f4"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1648,11 +1312,6 @@
       "hashes": {
         "inputs_sha256": "99dede1d961dd451f95852e640609525545e665725b4f40cc99bfd22333c3289",
         "outputs_sha256": "a18f412d05dba9ce65a3a57fe81b782112bce0aea1b1c8be442babc1c977983d"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1667,11 +1326,6 @@
       "hashes": {
         "inputs_sha256": "99dede1d961dd451f95852e640609525545e665725b4f40cc99bfd22333c3289",
         "outputs_sha256": "c387c32573d00f7b6e55225b38c5db63cc0723e752149476c326dd96c4382c7c"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1686,11 +1340,6 @@
       "hashes": {
         "inputs_sha256": "f486451d2a37ceea7d84ed59def2c7a6357ad00912c532151a7bee9564207a4f",
         "outputs_sha256": "9455a8996fb98f6352a2d2415c2792fa7dfcafb5ed3717883fdf446dca51db2c"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1707,11 +1356,6 @@
       "hashes": {
         "inputs_sha256": "16578e8aced0cfb2ebe85e035a71d13ada35b098bfbc51b695a5250af1311d53",
         "outputs_sha256": "d78eeaae7c26f8d2c544570dd83932dca0de85873e2a3c0e079d7e49de328296"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1731,11 +1375,6 @@
       "hashes": {
         "inputs_sha256": "9d3c09faa47ea1d282a5cd7699a1ac439023721bcab3f59e2e8ca4b254ccc3cc",
         "outputs_sha256": "08df90d73b73bd90f192c066251ceddd20bdd9fc8a714a6292088c2772e80bda"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1755,11 +1394,6 @@
       "hashes": {
         "inputs_sha256": "f486451d2a37ceea7d84ed59def2c7a6357ad00912c532151a7bee9564207a4f",
         "outputs_sha256": "42127e7eb2e4220be301706cfbcde60f046fe0b3a13bb7f99950dc35c3bd220d"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1778,11 +1412,6 @@
       "hashes": {
         "inputs_sha256": "9d3c09faa47ea1d282a5cd7699a1ac439023721bcab3f59e2e8ca4b254ccc3cc",
         "outputs_sha256": "e1b4784b883e5e00ebeff81518f7525cf936cf9f1e5ffdc4ee1852be647e847b"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1802,11 +1431,6 @@
       "hashes": {
         "inputs_sha256": "9d3c09faa47ea1d282a5cd7699a1ac439023721bcab3f59e2e8ca4b254ccc3cc",
         "outputs_sha256": "08df90d73b73bd90f192c066251ceddd20bdd9fc8a714a6292088c2772e80bda"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1824,11 +1448,6 @@
       "hashes": {
         "inputs_sha256": "99dede1d961dd451f95852e640609525545e665725b4f40cc99bfd22333c3289",
         "outputs_sha256": "2ad2b7ec730b688194800fd8ca1c1069da89aaab2f35bbc2590178c6652a9c9e"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1846,11 +1465,6 @@
       "hashes": {
         "inputs_sha256": "99dede1d961dd451f95852e640609525545e665725b4f40cc99bfd22333c3289",
         "outputs_sha256": "cffa92d2624ef090a162d4990c033bddedc779b480efe574d83ba15293544f7a"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     },
     {
@@ -1868,11 +1482,6 @@
       "hashes": {
         "inputs_sha256": "f486451d2a37ceea7d84ed59def2c7a6357ad00912c532151a7bee9564207a4f",
         "outputs_sha256": "bd3c116a3e5b5c66e6a058568adb517421659dc6f8df4a15d1e6800095946227"
-      },
-      "tolerance": {
-        "atol_array": 1e-10,
-        "atol_scalar": 1e-12,
-        "rtol": 1e-14
       }
     }
   ]

@@ -28,8 +28,9 @@ a function or read its result.
   corpus tolerance, `1e-10 + 1e-14·|value|`), not bit for bit, and a
   fit sitting on its truncation floor can stop at a different
   `k_used`. The last bits move with the layout in `pls1_fit`,
-  `spls1_fit`, `pls1_predict` and `pls1_rotation_stability`; the others
-  currently give C and F order the same bits. The same array in the
+  `spls1_fit`, `pls1_predict`, `pls1_rotation_stability` and, without
+  `pre_standardized_X`, in `pls3_fit`, `plssvd_fit` and `spls3_fit`; the
+  others currently give C and F order the same bits. The same array in the
   same layout gives byte-identical results on every run and at every
   thread count. An array numpy cannot read as real numbers (strings,
   numeric strings included, ragged nested lists, complex values,
@@ -633,8 +634,8 @@ confuse:
   missing key, or a value of the wrong type or sign (a count that is
   negative or not a whole number, a non-number `tol`, a non-bool
   `force`). Raised when the extension parses the dict for the chosen
-  `method`, and on the Python side for `find_k_args` on `pls1_fit`. A key
-  set to `None` takes the engine default, like an absent key.
+  `method`. A key set to `None` takes the engine default, like an absent
+  key.
 - `invalid_argument`: a top-level argument has a bad value (for example
   `k="optimal"` without `k_max`, a count such as `k`, `n_boot` or
   `n_perm` that is negative or not a whole number, `k = 0` or

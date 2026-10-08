@@ -568,7 +568,8 @@ fn first_support_split(new: &Parts, old: &Parts) -> Option<usize> {
 /// reference's keep-boundary gap at that component is within rounding
 /// (`max(n, d)·ε·‖Xs‖_F·‖ys‖`, the relative floor); a split at a wider gap
 /// fails. Otherwise the worst `diff / tol` of the factors, and the `coef`
-/// and `beta` drift.
+/// and `beta` drift. The public `pls1_fit` on the raw design is held to
+/// the kernel under the same tolerances and the same exclusion.
 fn compare_with_reference(ds: &Design) -> Option<[f64; 3]> {
     let inp = kernel_inputs(ds.x.as_ref(), ds.y.as_ref(), ds.w.as_ref().map(Col::as_ref));
     let new = pls1_kernel(
@@ -602,6 +603,51 @@ fn compare_with_reference(ds: &Design) -> Option<[f64; 3]> {
     let beta = coef_drift(&beta_of(&cn, &inp), &beta_of(&co, &inp));
     assert!(coef <= 1e-10, "{}: coef drift {coef:e}", ds.label);
     assert!(beta <= 1e-10, "{}: beta drift {beta:e}", ds.label);
+    // The public route on the raw design. Every design here has column
+    // means at most of the order of the column scales, far inside
+    // `IMPLICIT_MAX_MEAN_RATIO`, so `pls1_fit` forms the standardized
+    // products from the raw X. `check_n_eff` is off
+    // because a weighted design guarantees only `k + 2` positive rows, and
+    // `Seq` matches the kernel call above when the fit falls back to a copy.
+    let m = pls1_fit(
+        ds.x.as_ref(),
+        ds.y.as_ref(),
+        KSpec::Fixed(ds.k),
+        ds.w.as_ref().map(Col::as_ref),
+        FitOpts {
+            keep: ds.keep,
+            check_n_eff: false,
+            par: ParChoice::Seq,
+            ..FitOpts::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("{}: pls1_fit: {e}", ds.label));
+    let public: Parts = (
+        m.t_scores.clone(),
+        m.p_loadings.clone(),
+        m.w_star.clone(),
+        m.q_loadings.clone(),
+    );
+    // Same exclusion as above: a support split is allowed only where the
+    // keep-boundary gap is within rounding.
+    if let (Some(keep), Some(a)) = (ds.keep, first_support_split(&public, &new)) {
+        let (_, floor) = loop_inputs(&inp);
+        let gap = keep_gap(&s_sequence(&inp, &new)[a], keep);
+        assert!(
+            gap <= floor,
+            "{}: pls1_fit and the kernel select different supports at component {} although the keep-boundary gap {gap:e} is above the rounding scale {floor:e}",
+            ds.label,
+            a + 1
+        );
+        return Some([factors, coef, beta]);
+    }
+    assert_eq!(m.k_used, new.3.nrows(), "{}: pls1_fit k_used", ds.label);
+    assert_factors_close(&public, &new, &tols, &format!("{}: pls1_fit", ds.label));
+    assert!(
+        coef_drift(&m.coef, &cn) <= 1e-10,
+        "{}: pls1_fit coef",
+        ds.label
+    );
     Some([factors, coef, beta])
 }
 

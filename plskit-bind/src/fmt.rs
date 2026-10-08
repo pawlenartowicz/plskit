@@ -1,5 +1,4 @@
-//! Python-compatible renderings, so a message built here reads the same
-//! as the one the Python wrapper builds.
+//! Python-compatible renderings of numbers and strings for messages.
 
 /// Python's `format(x, '.4g')`.
 pub(crate) fn g4(x: f64) -> String {

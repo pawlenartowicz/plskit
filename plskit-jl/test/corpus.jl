@@ -205,6 +205,8 @@ function resolve(rec, key, expected)
     return ci isa PlsKitResult ? getproperty(ci, Symbol(part)) : nothing
 end
 
+# Mirrors plskit-testdata-gen/src/settle.rs::close, which owns the rule:
+# change together.
 # NaN on exactly one side is a mismatch, never a crash or a silent pass:
 # `a == e` is false, `isnan(a) && isnan(e)` is false, and `abs(a - e)` is
 # itself NaN so the `<=` comparison is false too. Named in the enclosing

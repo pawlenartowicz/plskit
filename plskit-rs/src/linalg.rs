@@ -87,36 +87,6 @@ pub(crate) fn thin_svd(
     })
 }
 
-/// Singular values of `a`, non-increasing, with an explicit `par`: faer's
-/// `singular_values`, minus the global read.
-pub(crate) fn singular_values(
-    a: MatRef<'_, f64>,
-    par: Par,
-) -> Result<Col<f64>, faer::linalg::svd::SvdError> {
-    use faer::dyn_stack::{MemBuffer, MemStack};
-    use faer::linalg::svd::{svd, svd_scratch, ComputeSvdVectors};
-    let (m, n) = a.shape();
-    let mut s = faer::diag::Diag::<f64>::zeros(m.min(n));
-    let mut mem = MemBuffer::new(svd_scratch::<f64>(
-        m,
-        n,
-        ComputeSvdVectors::No,
-        ComputeSvdVectors::No,
-        par,
-        faer::Spec::default(),
-    ));
-    svd(
-        a,
-        s.as_mut(),
-        None,
-        None,
-        par,
-        MemStack::new(&mut mem),
-        faer::Spec::default(),
-    )?;
-    Ok(s.column_vector().to_owned())
-}
-
 /// Eigendecomposition of the self-adjoint `a` with an explicit `par`:
 /// faer's `self_adjoint_eigen(Side::Lower)`, minus the global read.
 /// Returns `(λ, U)` with the eigenvalues ascending and `U`'s columns the
@@ -253,12 +223,24 @@ pub fn standardize(x: MatRef<'_, f64>) -> (Mat<f64>, Col<f64>, Col<f64>) {
 /// unchanged wherever the unscaled sums were in range).
 /// Caller must ensure weights are non-negative, finite, and Σw > 0
 /// (validation lives in `validate_and_normalize_weights` / `preprocess`).
+///
+/// # Panics
+/// When `weights` is `Some` and its length differs from `x.nrows()`.
 #[must_use]
 pub fn standardize_weighted(
     x: MatRef<'_, f64>,
     weights: Option<ColRef<'_, f64>>,
 ) -> (Mat<f64>, Col<f64>, Col<f64>) {
-    let w_prime: Option<Col<f64>> = weights.map(|w| renormalize_mean_one_n(w, x.nrows()));
+    if let Some(w) = weights {
+        assert_eq!(
+            w.nrows(),
+            x.nrows(),
+            "standardize_weighted: weights has {} rows, x has {}",
+            w.nrows(),
+            x.nrows()
+        );
+    }
+    let w_prime: Option<Col<f64>> = weights.map(renormalize_mean_one);
     let (xs, mean, scale, _) =
         standardize_columns(x, None, w_prime.as_ref().map(owned_col_slice), None, true);
     (xs, mean, scale)
@@ -305,7 +287,7 @@ pub(crate) fn standardize_rows(
     w: Option<ColRef<'_, f64>>,
     row_scale: Option<ColRef<'_, f64>>,
 ) -> (Mat<f64>, Col<f64>, Col<f64>) {
-    let w_prime: Option<Col<f64>> = w.map(|w| renormalize_mean_one_n(w, idx.len()));
+    let w_prime: Option<Col<f64>> = w.map(renormalize_mean_one);
     let row_scale: Option<Vec<f64>> = row_scale.map(|r| (0..r.nrows()).map(|i| r[i]).collect());
     let (xs, mean, scale, _) = standardize_columns(
         x,
@@ -346,21 +328,8 @@ fn weight_sum(w: ColRef<'_, f64>) -> f64 {
 /// `standardize1_weighted` and `normalize_weights` perform, factored out.
 /// Same expression, same summation order.
 pub(crate) fn renormalize_mean_one(w: ColRef<'_, f64>) -> Col<f64> {
-    renormalize_mean_one_n(w, w.nrows())
-}
-
-/// `w[0..n] · n / Σ w[0..n]`, in index order: the same mean-one
-/// renormalization as [`renormalize_mean_one`], but restricted to the
-/// first `n` entries of `w` and using `n` (not `w.nrows()`) as both the
-/// summation bound and the count. `standardize_weighted` and
-/// `standardize1_weighted` sum and rebuild only their own `n_rows` / `n`
-/// elements of `weights`, so a `weights` column longer than the rows being
-/// standardized (reachable from a Rust caller that passes a longer
-/// `weights` to the public `standardize_weighted`) gives the same bits as
-/// one cut to `n` rows, whereas [`renormalize_mean_one`] would read the
-/// rest of `w` and divide by a different count.
-fn renormalize_mean_one_n(w: ColRef<'_, f64>, n: usize) -> Col<f64> {
-    let s: f64 = (0..n).map(|i| w[i]).sum();
+    let n = w.nrows();
+    let s = weight_sum(w);
     let n_f = n as f64;
     Col::<f64>::from_fn(n, |i| w[i] * n_f / s)
 }
@@ -415,13 +384,24 @@ pub fn standardize1(y: ColRef<'_, f64>) -> (Col<f64>, f64, f64) {
 /// Weighted scalar-standardize for y. None ⇒ unweighted. Same moments and
 /// the same constant rule as one column of [`standardize_weighted`].
 /// Caller is responsible for weight validation; see `validate_and_normalize_weights`.
+///
+/// # Panics
+/// When `weights` is `Some` and its length differs from `y.nrows()`.
 #[must_use]
 pub fn standardize1_weighted(
     y: ColRef<'_, f64>,
     weights: Option<ColRef<'_, f64>>,
 ) -> (Col<f64>, f64, f64) {
     let n = y.nrows();
-    let w_prime: Option<Col<f64>> = weights.map(|w| renormalize_mean_one_n(w, n));
+    if let Some(w) = weights {
+        assert_eq!(
+            w.nrows(),
+            n,
+            "standardize1_weighted: weights has {} rows, y has {n}",
+            w.nrows()
+        );
+    }
+    let w_prime: Option<Col<f64>> = weights.map(renormalize_mean_one);
     let wpref = w_prime.as_ref().map(Col::as_ref);
     let (mean, scale) = mean_and_scale(n, |i| y[i], wpref);
     let z = Col::<f64>::from_fn(n, |i| (y[i] - mean) / scale);
@@ -759,7 +739,7 @@ impl FitX {
 /// two layouts, so a fit's last bits depend on the layout of `x`, within the
 /// crate's tolerance.
 pub(crate) fn fit_x_moments(x: MatRef<'_, f64>, weights: Option<ColRef<'_, f64>>) -> FitX {
-    let w_prime: Option<Col<f64>> = weights.map(|w| renormalize_mean_one_n(w, x.nrows()));
+    let w_prime: Option<Col<f64>> = weights.map(renormalize_mean_one);
     let w = w_prime.as_ref().map(owned_col_slice);
     if x.try_as_col_major().is_none() && x.try_as_row_major().is_some() {
         return row_major_moments(x, w);
@@ -1401,22 +1381,39 @@ pub fn compute_n_eff(w: ColRef<'_, f64>) -> f64 {
 /// NeuroImage 212:116614, doi:10.1016/j.neuroimage.2020.116614).
 /// Zero matrix (σ₁ = 0) returns 0.0.
 ///
-/// The SVD runs on the crate's fixed-degree Rayon split
-/// (`fit::par_fixed`), so the result does not depend on the size of the
-/// Rayon pool it is called from.
+/// Computed from the Gram matrix on `a`'s shorter side (`AA'` or `A'A`),
+/// whose trace is `‖A‖²_F` and whose largest eigenvalue is `σ₁²`: it takes
+/// `min(m, n)²` memory, where an SVD of `a` needs a working copy of `a`.
+/// The product and the eigendecomposition run on the crate's fixed-degree
+/// Rayon split (`fit::par_fixed`), so the result does not depend on the
+/// size of the Rayon pool it is called from.
 ///
 /// # Panics
-/// Panics if faer's SVD fails to converge (only expected on pathological input).
+/// Panics if faer's eigendecomposition fails to converge (only expected on
+/// pathological input).
 #[must_use]
 #[allow(clippy::doc_markdown)] // "NeuroImage"
 pub fn stable_rank(a: MatRef<'_, f64>) -> f64 {
-    let s = singular_values(a, crate::fit::par_fixed()).expect("SVD failed to converge");
-    let sigma1 = if s.nrows() == 0 { 0.0 } else { s[0] };
-    if sigma1 <= 0.0 {
+    let par = crate::fit::par_fixed();
+    let short = if a.nrows() <= a.ncols() {
+        a
+    } else {
+        a.transpose()
+    };
+    let d = short.nrows();
+    if d == 0 {
         return 0.0;
     }
-    let frob_sq: f64 = s.iter().map(|v| v * v).sum();
-    frob_sq / (sigma1 * sigma1)
+    let g = mat_mul(short, short.transpose(), par);
+    let (lam, _) =
+        self_adjoint_eigen(g.as_ref(), par).expect("eigendecomposition failed to converge");
+    // Ascending, so the last one is σ₁².
+    let sigma1_sq = lam[d - 1];
+    if sigma1_sq <= 0.0 {
+        return 0.0;
+    }
+    let frob_sq: f64 = (0..d).map(|i| g[(i, i)]).sum();
+    frob_sq / sigma1_sq
 }
 
 /// Normalize weights so Σw' = n (mean 1). Returns `None` if `Σw == 0`.
@@ -2054,6 +2051,24 @@ mod weighted_tests {
         }
     }
 
+    /// A `weights` column of another length than the data is a caller
+    /// bug: the public standardizers panic instead of reading a prefix.
+    #[test]
+    #[should_panic(expected = "standardize_weighted: weights has 5 rows, x has 4")]
+    fn standardize_weighted_rejects_weights_longer_than_the_rows() {
+        let x = small_x();
+        let w = Col::<f64>::from_fn(x.nrows() + 1, |i| 1.0 + i as f64);
+        let _ = standardize_weighted(x.as_ref(), Some(w.as_ref()));
+    }
+
+    #[test]
+    #[should_panic(expected = "standardize1_weighted: weights has 5 rows, y has 4")]
+    fn standardize1_weighted_rejects_weights_longer_than_the_rows() {
+        let x = small_x();
+        let w = Col::<f64>::from_fn(x.nrows() + 1, |i| 1.0 + i as f64);
+        let _ = standardize1_weighted(x.col(0), Some(w.as_ref()));
+    }
+
     #[test]
     fn n_eff_kish() {
         let w = Col::<f64>::from_fn(10, |_| 1.0);
@@ -2228,50 +2243,6 @@ mod row_standardize_tests {
             ),
             ("single row", vec![9]),
         ]
-    }
-
-    /// A `weights` column longer than the rows being standardized: only
-    /// its first `n` entries count, renormalized over `n` rows
-    /// (`renormalize_mean_one_n`). Reachable
-    /// from a Rust caller that passes a longer `weights` to the public
-    /// `standardize_weighted`; also through the row gather of
-    /// `standardize_rows`.
-    #[test]
-    fn weights_longer_than_rows_use_their_first_n_entries() {
-        let x = data();
-        let w = test_weights(30);
-        let w24 = w.subrows(0, 24).to_owned();
-        let (a, am, as_) = standardize_weighted(x.as_ref(), Some(w.as_ref()));
-        let (b, bm, bs) = standardize_weighted(x.as_ref(), Some(w24.as_ref()));
-        assert_eq!((a.nrows(), a.ncols()), (b.nrows(), b.ncols()), "xs shape");
-        assert_bits_eq(&mat_vals(a.as_ref()), &mat_vals(b.as_ref()), "xs");
-        assert_bits_eq(&col_vals(am.as_ref()), &col_vals(bm.as_ref()), "mean");
-        assert_bits_eq(&col_vals(as_.as_ref()), &col_vals(bs.as_ref()), "scale");
-        for j in 0..x.ncols() {
-            let col = x.col(j);
-            let (z, m, s) = standardize1_weighted(col, Some(w.as_ref()));
-            let (zr, mr, sr) = standardize1_weighted(col, Some(w24.as_ref()));
-            assert_bits_eq(&col_vals(z.as_ref()), &col_vals(zr.as_ref()), "z");
-            assert_bits_eq(&[m, s], &[mr, sr], "moments");
-        }
-        for (label, idx) in index_sets() {
-            if !matches!(label, "all" | "reversed" | "with repeats") {
-                continue;
-            }
-            let m = idx.len();
-            let w_long = test_weights(m + 6);
-            let w_m = w_long.subrows(0, m).to_owned();
-            let rs = Col::<f64>::from_fn(m, |i| 0.5 + (i % 3) as f64);
-            for rsref in [None, Some(rs.as_ref())] {
-                let (a, am, as_) = standardize_rows(x.as_ref(), &idx, Some(w_long.as_ref()), rsref);
-                let (b, bm, bs) = standardize_rows(x.as_ref(), &idx, Some(w_m.as_ref()), rsref);
-                let what = format!("{label} weights-longer-than-rows rs={}", rsref.is_some());
-                assert_eq!((a.nrows(), a.ncols()), (b.nrows(), b.ncols()), "xs shape");
-                assert_bits_eq(&mat_vals(a.as_ref()), &mat_vals(b.as_ref()), &what);
-                assert_bits_eq(&col_vals(am.as_ref()), &col_vals(bm.as_ref()), &what);
-                assert_bits_eq(&col_vals(as_.as_ref()), &col_vals(bs.as_ref()), &what);
-            }
-        }
     }
 
     #[test]
@@ -2568,7 +2539,7 @@ mod fast_standardize_tests {
                     let c = standardize_fit_x(xv, wref, None);
                     assert_eq!(mat_bits(c.xs()), mat_bits(b0.as_ref()), "{what}: no rs");
 
-                    let sw = wref.map(|w| sqrt_col(renormalize_mean_one_n(w, n).as_ref()));
+                    let sw = wref.map(|w| sqrt_col(renormalize_mean_one(w).as_ref()));
                     let f = standardize_fit_x(xv, wref, sw.as_ref().map(Col::as_ref));
                     let norm = f.xs().norm_l2();
                     assert!(

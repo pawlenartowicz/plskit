@@ -40,7 +40,10 @@ pub enum ParamKind {
 }
 
 impl ParamKind {
-    /// Snake-case name used in the registry dump.
+    /// Snake-case name used in the registry dump. The Python wrapper
+    /// (`_ARRAY_KINDS` and `_call` in `_api.py`) and the R wrapper
+    /// (`.plskit_numeric_array_kinds` in `call.R`) match on these strings —
+    /// change together.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -590,8 +593,7 @@ pub fn registry_json() -> String {
         })
         .collect();
     format!(
-        "{{\n  \"engine_version\": {},\n  \"functions\": [\n{}\n  ],\n  \"result_types\": [\n{}\n  ]\n}}\n",
-        json_str(plskit::version()),
+        "{{\n  \"functions\": [\n{}\n  ],\n  \"result_types\": [\n{}\n  ]\n}}\n",
         functions.join(",\n"),
         types.join(",\n")
     )
@@ -600,6 +602,7 @@ pub fn registry_json() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::{MatF64, VecF64};
 
     fn boom(_: &mut Inputs<'_>) -> Result<Outcome, BindError> {
         panic!("kaboom")
@@ -617,5 +620,43 @@ mod tests {
         let e = call_spec(&spec, Record::new()).unwrap_err();
         assert_eq!(e.code, "internal");
         assert!(e.message.contains("kaboom"), "{}", e.message);
+    }
+
+    /// A non-null value of `kind` that every read of that kind accepts.
+    fn dummy(kind: ParamKind) -> Value<'static> {
+        match kind {
+            ParamKind::Mat | ParamKind::VecOrMat | ParamKind::ModelOrMat => {
+                Value::Mat(MatF64::Owned {
+                    data: vec![1.0],
+                    nrows: 1,
+                    ncols: 1,
+                })
+            }
+            ParamKind::Vec => Value::Vec(VecF64::Owned(vec![1.0])),
+            ParamKind::Int | ParamKind::Seed | ParamKind::KOrMode => Value::I64(1),
+            ParamKind::Float => Value::F64(0.5),
+            ParamKind::Bool => Value::Bool(true),
+            ParamKind::Str => Value::text("x"),
+            ParamKind::Args | ParamKind::Model => Value::Record(Record::new()),
+        }
+    }
+
+    // With every declared parameter non-null, `finish` fails after `run`
+    // exactly when `run` skipped a read: it never reads the parameter, or an
+    // earlier read returned an error. The dummies are chosen so every read
+    // succeeds; the result of `run` (usually the engine rejecting the 1x1
+    // data or the string "x") is ignored.
+    #[test]
+    fn every_run_reads_every_declared_parameter() {
+        assert!(!registry().is_empty());
+        for f in registry() {
+            let mut rec = Record::new();
+            for p in f.params {
+                rec.push(p.name, dummy(p.kind)).unwrap();
+            }
+            let mut inp = Inputs::new(f.name, rec);
+            let _ = panic::catch_unwind(AssertUnwindSafe(|| (f.run)(&mut inp)));
+            inp.finish().unwrap_or_else(|e| panic!("{}", e.message));
+        }
     }
 }

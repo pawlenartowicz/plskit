@@ -14,11 +14,10 @@ name = "_plskit"
 crate-type = ["cdylib"]
 
 [dependencies]
-plskit = { workspace = true }
+plskit-bind = { workspace = true }
 pyo3 = { version = "0.28", features = ["extension-module", "abi3-py311"] }
 numpy = "0.28"
-ndarray = "0.17"                # short-lived views in the numpy↔faer bridge only; must match numpy crate
-faer = { workspace = true }     # for FromPyObject round-trip → faer::Mat / Col
+faer = { workspace = true }     # `MatRef`: the row-major view of a C-ordered X
 
 [lints]
 workspace = true

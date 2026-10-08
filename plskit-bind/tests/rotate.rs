@@ -218,7 +218,7 @@ fn rotate_rejects_a_model_with_mismatched_shapes() {
 
 // An untagged model record missing a nullable field and
 // carrying an extra field must still yield output that matches the
-// PLS1Result shape exactly (Python's dataclasses.replace semantics).
+// PLS1Result shape exactly.
 #[test]
 fn rotate_output_matches_pls1result_shape_for_an_untagged_partial_model() {
     let model = fit(2);

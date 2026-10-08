@@ -123,13 +123,21 @@ fn varimax_rotate(
     args: VarimaxArgs,
     k: usize,
 ) -> PlsKitResult<RotateOutput> {
-    // K=1 no-op short-circuit: rotation of a 1-D subspace is
-    // identity. v_converged uses the chosen target (L if provided, else W).
+    // Step 1: build T_simp (the simple-structure target): L if provided,
+    // else W, row-normalized under `kaiser_normalize`.
+    let basis = l.unwrap_or(w);
+    let mut t_simp: Mat<f64> = if args.kaiser_normalize {
+        row_normalize(basis)
+    } else {
+        basis.to_owned()
+    };
+
+    // K=1 no-op short-circuit: rotation of a 1-D subspace is identity, so
+    // v_converged is the criterion of the unrotated target.
     if k == 1 {
         let r = Mat::<f64>::identity(1, 1);
         let w_rot = w.to_owned();
-        let target = l.unwrap_or(w);
-        let v_converged = sum_var_squared_columns(target);
+        let v_converged = sum_var_squared_columns(t_simp.as_ref());
         return Ok(RotateOutput {
             w_rot,
             r,
@@ -137,14 +145,6 @@ fn varimax_rotate(
             v_converged,
         });
     }
-
-    // Step 1: build T_simp (the simple-structure target).
-    let basis = l.unwrap_or(w);
-    let mut t_simp: Mat<f64> = if args.kaiser_normalize {
-        row_normalize(basis)
-    } else {
-        basis.to_owned()
-    };
 
     // Step 2: R = I_k.
     let mut r = Mat::<f64>::identity(k, k);
@@ -383,6 +383,43 @@ mod tests {
         assert_eq!(out.r.ncols(), 1);
         assert!((out.r[(0, 0)] - 1.0).abs() < 1e-15);
         assert!(approx_eq_mat(out.w_rot.as_ref(), w.as_ref(), 1e-15));
+    }
+
+    /// At K = 1 `v_converged` is the criterion of the target the K >= 2
+    /// branch starts from: the raw loadings without Kaiser normalization,
+    /// the row-normalized ones with it.
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn rotate_k1_v_converged_follows_kaiser_normalize() {
+        let run = |w: &Mat<f64>, kaiser_normalize: bool| {
+            rotate(
+                w.as_ref(),
+                RotationMethod::Varimax(VarimaxArgs {
+                    kaiser_normalize,
+                    ..VarimaxArgs::default()
+                }),
+                None,
+            )
+            .unwrap()
+        };
+        let w = Mat::<f64>::from_fn(4, 1, |i, _| (i + 1) as f64);
+        // Squared loadings 1, 4, 9, 16: mean of their squares 88.5, squared
+        // mean 56.25.
+        let raw = run(&w, false).v_converged;
+        assert!((raw - 32.25).abs() < 1e-12, "{raw}");
+        // Every row normalizes to 1, so the squared loadings do not vary.
+        let unit = run(&w, true).v_converged;
+        assert!(unit.abs() < 1e-12, "{unit}");
+        // A zero row stays zero under normalization: squared loadings
+        // 1, 1, 0, 1 have variance 0.75 − 0.75² = 0.1875. `w_rot` is `w`.
+        let w0 = Mat::<f64>::from_fn(4, 1, |i, _| if i == 2 { 0.0 } else { (i + 1) as f64 });
+        let out = run(&w0, true);
+        assert!(
+            (out.v_converged - 0.1875).abs() < 1e-12,
+            "{}",
+            out.v_converged
+        );
+        assert!(approx_eq_mat(out.w_rot.as_ref(), w0.as_ref(), 0.0));
     }
 
     #[test]

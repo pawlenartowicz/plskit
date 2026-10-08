@@ -19,7 +19,10 @@ use faer::linalg::matmul::matmul;
 use faer::{Accum, Col, ColRef, Mat, MatRef, Par};
 
 use crate::error::{PlsKitError, PlsKitResult};
-use crate::fit::{check_finite_mat, resolve_par, select_and_normalize, ParChoice};
+use crate::fit::{
+    check_finite_mat, resolve_par, select_and_normalize, ParChoice, IMPLICIT_MAX_MEAN_RATIO,
+};
+use crate::linalg::owned_col_slice;
 
 /// Knobs for [`pls3_fit`].
 #[derive(Debug, Clone, Copy)]
@@ -211,16 +214,48 @@ pub(crate) fn sigma_rel_floor(n: usize, p: usize, q: usize, x_fro: f64, y_fro: f
 /// It exists so the sparse path need not obtain those by running a whole
 /// dense fit and discarding its SVD, its sign pinning and both of its
 /// score matmuls. Both the dense and the sparse fit go through `prepare`,
-/// so they standardize with the same element expression `(v - mean) / scale`
-/// in the same `(i, j)` order and produce the same bits.
+/// so they form `A` and the scores with the same expressions and produce
+/// the same bits.
+///
+/// # The implicit route
+/// A standardizing fit does not write `X̃ = (X − 1·mean')·diag(1/scale)`.
+/// It only needs `X̃'Ỹ` and `X̃U`, and forms both from the caller's `x`
+/// with a rank-one correction, the algebra of `fit::ImplicitXBackend`:
+///
+/// - `X̃'Ỹ = (X'Ỹ − mean·(1'Ỹ)) / scale`, row `j` divided by `scale_j`;
+/// - `X̃U  = X·Ū − 1·(mean'Ū)`, with `Ū` = `U`, row `j` divided by `scale_j`.
+///
+/// The corrections cost column `j` about `log10(1 + |mean_j| / scale_j)`
+/// digits, so the route is taken only up to [`IMPLICIT_MAX_MEAN_RATIO`],
+/// and the rounding it adds to `A` lifts the structurally zero `σ` that
+/// [`sigma_rel_floor`] is sized for on a written `X̃`. So the implicit `A`
+/// never decides a truncation: its components are tested against
+/// [`Prepared::stop_floor`], a band above the floor, and a fit that would
+/// keep fewer than `k` of them is refitted on the written copy
+/// ([`Prepared::materialize`]), whose `σ` the floor is sized for.
+/// An `A` that overflows (entries of `x` near `f64::MAX`) is formed from
+/// the written copy as well.
+/// With `n − 1 < k` the copy is written from the start: a dense fit there
+/// always truncates. A sparse fit takes the copy too, though it need not
+/// truncate.
+/// `x`'s layout is read as given, so the last bits of a fit on this route
+/// depend on it.
 struct Prepared {
-    /// Standardized X; under `pre_standardized_x`, a column-major copy of
-    /// the caller's X when `linalg::col_major_or_copy` makes one, else
-    /// `None` (the caller's matrix is used as-is). Resolve with
-    /// [`Prepared::blocks`].
+    /// The written `X̃`: the standardized copy off the implicit route, or
+    /// under `pre_standardized_x` a column-major copy of the caller's X
+    /// when `linalg::col_major_or_copy` makes one. `None` on the implicit
+    /// route, and under `pre_standardized_x` when the caller's matrix is
+    /// used as-is. Resolve with [`Prepared::xs`].
     xs_owned: Option<Mat<f64>>,
-    /// Standardized Y; same `None` convention as `xs_owned`.
+    /// Standardized Y; `None` under `pre_standardized_y` when the caller's
+    /// matrix is used as-is. Resolve with [`Prepared::ys`].
     ys_owned: Option<Mat<f64>>,
+    /// `Some(max_j |mean_j| / scale_j)` on the implicit route.
+    x_implicit: Option<f64>,
+    /// `‖X̃‖_F` from the standardization moments (`linalg::FitX::fro`);
+    /// `None` under `pre_standardized_x`, where it is the block's
+    /// `norm_l2`.
+    x_fro: Option<f64>,
     /// Resolved parallelism for every matmul downstream of here.
     par: Par,
     x_mean: Col<f64>,
@@ -230,28 +265,113 @@ struct Prepared {
 }
 
 impl Prepared {
-    /// The blocks `A` was formed from: the standardized copies, or under
-    /// `pre_standardized_*` the caller's `x` / `y` (as given when
-    /// column-major, else their column-major copies).
-    fn blocks<'a>(
-        &'a self,
-        x: MatRef<'a, f64>,
-        y: MatRef<'a, f64>,
-    ) -> (MatRef<'a, f64>, MatRef<'a, f64>) {
-        (
-            self.xs_owned.as_ref().map_or(x, faer::Mat::as_ref),
-            self.ys_owned.as_ref().map_or(y, faer::Mat::as_ref),
-        )
+    /// The written `X̃`: the copy, or under `pre_standardized_x` the
+    /// caller's `x` when it is column-major. Not for the implicit route,
+    /// where no `X̃` is written.
+    fn xs<'a>(&'a self, x: MatRef<'a, f64>) -> MatRef<'a, f64> {
+        debug_assert!(self.x_implicit.is_none());
+        self.xs_owned.as_ref().map_or(x, faer::Mat::as_ref)
     }
 
-    /// [`sigma_rel_floor`] on [`Self::blocks`].
+    /// `Ỹ`: the standardized copy, or under `pre_standardized_y` the
+    /// caller's `y` (as given when column-major, else its column-major
+    /// copy).
+    fn ys<'a>(&'a self, y: MatRef<'a, f64>) -> MatRef<'a, f64> {
+        self.ys_owned.as_ref().map_or(y, faer::Mat::as_ref)
+    }
+
+    /// The cross-covariance `A = X̃'Ỹ`, shape `(n_features, n_targets)`.
+    /// Never a `p × p` matrix. On the implicit route, the first identity of
+    /// "The implicit route" on [`Prepared`].
+    fn cross_cov(&self, x: MatRef<'_, f64>, y: MatRef<'_, f64>) -> Mat<f64> {
+        let ys = self.ys(y);
+        let mut a = Mat::<f64>::zeros(x.ncols(), ys.ncols());
+        if self.x_implicit.is_none() {
+            let xs = self.xs(x).transpose();
+            matmul(a.as_mut(), Accum::Replace, xs, ys, 1.0, self.par);
+            return a;
+        }
+        matmul(a.as_mut(), Accum::Replace, x.transpose(), ys, 1.0, self.par);
+        let (mean, scale) = (
+            owned_col_slice(&self.x_mean),
+            owned_col_slice(&self.x_scale),
+        );
+        for c in 0..ys.ncols() {
+            let sum_y: f64 = ys.col(c).iter().sum();
+            for ((v, &m), &s) in a.col_as_slice_mut(c).iter_mut().zip(mean).zip(scale) {
+                *v = (*v - m * sum_y) / s;
+            }
+        }
+        a
+    }
+
+    /// The X-side scores `X̃·U`, shape `(n_samples, k_used)`. On the
+    /// implicit route, the second identity of "The implicit route" on
+    /// [`Prepared`].
+    fn x_scores(&self, x: MatRef<'_, f64>, u: MatRef<'_, f64>) -> Mat<f64> {
+        let mut t = Mat::<f64>::zeros(x.nrows(), u.ncols());
+        if self.x_implicit.is_none() {
+            matmul(t.as_mut(), Accum::Replace, self.xs(x), u, 1.0, self.par);
+            return t;
+        }
+        let (mean, scale) = (
+            owned_col_slice(&self.x_mean),
+            owned_col_slice(&self.x_scale),
+        );
+        let mut u_bar = u.to_owned();
+        let mut offset = vec![0.0_f64; u.ncols()];
+        for (c, off) in offset.iter_mut().enumerate() {
+            for ((v, &m), &s) in u_bar.col_as_slice_mut(c).iter_mut().zip(mean).zip(scale) {
+                *v /= s;
+                *off += m * *v;
+            }
+        }
+        matmul(t.as_mut(), Accum::Replace, x, u_bar.as_ref(), 1.0, self.par);
+        for (c, &off) in offset.iter().enumerate() {
+            for v in t.col_as_slice_mut(c) {
+                *v -= off;
+            }
+        }
+        t
+    }
+
+    /// [`sigma_rel_floor`] on `X̃` and `Ỹ`. `‖X̃‖_F` is the one the
+    /// standardization moments give, or under `pre_standardized_x` the
+    /// block's `norm_l2`; it only gates truncation.
     fn rel_floor(&self, x: MatRef<'_, f64>, y: MatRef<'_, f64>) -> f64 {
-        let (xs, ys) = self.blocks(x, y);
-        sigma_rel_floor(x.nrows(), x.ncols(), y.ncols(), xs.norm_l2(), ys.norm_l2())
+        let x_fro = self.x_fro.unwrap_or_else(|| self.xs(x).norm_l2());
+        sigma_rel_floor(x.nrows(), x.ncols(), y.ncols(), x_fro, self.ys(y).norm_l2())
     }
 
-    /// The model both fits return: the scores `X̃U` and `ỸV` on
-    /// [`Self::blocks`], the recorded moments, and `opts`' flags echoed.
+    /// What the component stage tests every `σ` against: [`Self::rel_floor`],
+    /// or on the implicit route the band
+    /// `2·(1 + max_j |mean_j| / scale_j)·max(SIGMA_FLOOR, rel_floor)`, the
+    /// one `fit::ImplicitXBackend` gates its own stop decisions with.
+    fn stop_floor(&self, x: MatRef<'_, f64>, y: MatRef<'_, f64>) -> f64 {
+        let floor = self.rel_floor(x, y);
+        match self.x_implicit {
+            Some(ratio) => 2.0 * (1.0 + ratio) * floor.max(SIGMA_FLOOR),
+            None => floor,
+        }
+    }
+
+    /// Whether a component stage that kept `k_used` of `k` components has
+    /// to be rerun on the written copy: on the implicit route any
+    /// truncation is undecided (see "The implicit route" on [`Prepared`]).
+    fn unresolved(&self, k_used: usize, k: usize) -> bool {
+        self.x_implicit.is_some() && k_used < k
+    }
+
+    /// Leaves the implicit route: writes the standardized copy a fit off
+    /// the route has from the start, and returns `A` formed from it.
+    fn materialize(&mut self, x: MatRef<'_, f64>, y: MatRef<'_, f64>) -> Mat<f64> {
+        self.xs_owned = Some(crate::linalg::standardize(x).0);
+        self.x_implicit = None;
+        self.cross_cov(x, y)
+    }
+
+    /// The model both fits return: the scores `X̃U` and `ỸV`, the recorded
+    /// moments, and `opts`' flags echoed.
     /// `sparse` carries `spls3_fit`'s `(keep_x, keep_y, converged,
     /// n_iter)`; `pls3_fit` passes `None`.
     #[allow(clippy::many_single_char_names)]
@@ -265,21 +385,12 @@ impl Prepared {
     ) -> Pls3Model {
         let n_samples = x.nrows();
         let k_used = u.ncols();
-        let (xs, ys) = self.blocks(x, y);
-        let mut x_scores = Mat::<f64>::zeros(n_samples, k_used);
-        matmul(
-            x_scores.as_mut(),
-            Accum::Replace,
-            xs,
-            u.as_ref(),
-            1.0,
-            self.par,
-        );
+        let x_scores = self.x_scores(x, u.as_ref());
         let mut y_scores = Mat::<f64>::zeros(n_samples, k_used);
         matmul(
             y_scores.as_mut(),
             Accum::Replace,
-            ys,
+            self.ys(y),
             v.as_ref(),
             1.0,
             self.par,
@@ -375,16 +486,31 @@ fn prepare(
     // scores, `‖·‖_F` for the relative floor) sum in the operand's layout
     // order, so reading it as given would move the last bits of the scores
     // and could move `k_used` on the floor. A column-major block is read as
-    // given, so its bits are unchanged.
-    let (xs_owned, x_mean, x_scale) = if opts.pre_standardized_x {
+    // given, so its bits are unchanged. A standardized X is written only
+    // off the implicit route (see "The implicit route" on `Prepared`); its
+    // moments are `linalg::standardize`'s bit for bit.
+    let (xs_owned, x_mean, x_scale, x_implicit, x_fro) = if opts.pre_standardized_x {
         (
             crate::linalg::col_major_or_copy(x),
             Col::<f64>::zeros(n_features),
             Col::<f64>::from_fn(n_features, |_| 1.0),
+            None,
+            None,
         )
     } else {
-        let (xs, m, s) = crate::linalg::standardize(x);
-        (Some(xs), m, s)
+        let fx = crate::linalg::fit_x_moments(x, None);
+        let ratio = fx.max_mean_ratio();
+        // Written so that a NaN ratio takes the copy. So does `n - 1 < k`:
+        // the dense fit then always truncates, and would be refitted on
+        // the copy.
+        let implicit = ratio <= IMPLICIT_MAX_MEAN_RATIO && n_samples > k;
+        (
+            (!implicit).then(|| crate::linalg::standardize(x).0),
+            fx.mean,
+            fx.scale,
+            implicit.then_some(ratio),
+            Some(fx.fro),
+        )
     };
     let (ys_owned, y_mean, y_scale) = if opts.pre_standardized_y {
         (
@@ -396,29 +522,29 @@ fn prepare(
         let (ys, m, s) = crate::linalg::standardize(y);
         (Some(ys), m, s)
     };
-    let xs: MatRef<'_, f64> = xs_owned.as_ref().map_or(x, faer::Mat::as_ref);
-    let ys: MatRef<'_, f64> = ys_owned.as_ref().map_or(y, faer::Mat::as_ref);
 
-    // The SVD cost is min(p,q)·p·q; the matmuls below are n·p·q. Size the
-    // par decision on the matmul term, which dominates whenever n ≥ min(p,q).
+    // The SVD cost is min(p,q)·p·q; the matmuls are n·p·q. Size the par
+    // decision on the matmul term, which dominates whenever n ≥ min(p,q).
     let par = resolve_par(opts.par, n_samples, n_features, n_targets);
 
-    // A = X̃'Ỹ, (p × q). Never a p × p matrix — that is the whole point.
-    let mut a = Mat::<f64>::zeros(n_features, n_targets);
-    matmul(a.as_mut(), Accum::Replace, xs.transpose(), ys, 1.0, par);
-
-    Ok((
-        Prepared {
-            xs_owned,
-            ys_owned,
-            par,
-            x_mean,
-            x_scale,
-            y_mean,
-            y_scale,
-        },
-        a,
-    ))
+    let mut prepared = Prepared {
+        xs_owned,
+        ys_owned,
+        x_implicit,
+        x_fro,
+        par,
+        x_mean,
+        x_scale,
+        y_mean,
+        y_scale,
+    };
+    let mut a = prepared.cross_cov(x, y);
+    // Entries of `x` near `f64::MAX` overflow the implicit route's raw
+    // `X'Ỹ`; the written copy's products stay finite.
+    if prepared.x_implicit.is_some() && !a.is_all_finite() {
+        a = prepared.materialize(x, y);
+    }
+    Ok((prepared, a))
 }
 
 /// The leading `k` components of the dense `a`: one thin SVD, truncated at
@@ -572,8 +698,13 @@ pub(crate) fn pls3_fit_impl(
     weights: Option<ColRef<'_, f64>>,
     opts: Pls3FitOpts,
 ) -> PlsKitResult<Pls3Model> {
-    let (prepared, a) = prepare(x, y, k, weights, opts)?;
-    let components = dense_components(a.as_ref(), k, prepared.par, || prepared.rel_floor(x, y))?;
+    let (mut prepared, a) = prepare(x, y, k, weights, opts)?;
+    let mut components =
+        dense_components(a.as_ref(), k, prepared.par, || prepared.stop_floor(x, y))?;
+    if prepared.unresolved(components.0.ncols(), k) {
+        let a = prepared.materialize(x, y);
+        components = dense_components(a.as_ref(), k, prepared.par, || prepared.stop_floor(x, y))?;
+    }
     Ok(prepared.into_model(x, y, opts, components, None))
 }
 
@@ -871,17 +1002,25 @@ pub(crate) fn spls3_fit_impl(
     // `pls3_transform`, the `par` choice and `A`. Everything a dense fit
     // does past that point (the thin SVD, the sign pinning) would be
     // discarded here, so this path never runs it.
-    let (prepared, a) = prepare(x, y, k, weights, opts)?;
-    let (u, v, sigma, (converged, n_iter)) = sparse_components(
-        a,
-        k,
-        keep_x,
-        keep_y,
-        opts.max_iter,
-        opts.tol,
-        prepared.par,
-        || prepared.rel_floor(x, y),
-    )?;
+    let (mut prepared, a) = prepare(x, y, k, weights, opts)?;
+    let stage = |prepared: &Prepared, a: Mat<f64>| {
+        sparse_components(
+            a,
+            k,
+            keep_x,
+            keep_y,
+            opts.max_iter,
+            opts.tol,
+            prepared.par,
+            || prepared.stop_floor(x, y),
+        )
+    };
+    let mut out = stage(&prepared, a)?;
+    if prepared.unresolved(out.0.ncols(), k) {
+        let a = prepared.materialize(x, y);
+        out = stage(&prepared, a)?;
+    }
+    let (u, v, sigma, (converged, n_iter)) = out;
     let meta = SparseMeta {
         keep_x,
         keep_y,
@@ -891,19 +1030,18 @@ pub(crate) fn spls3_fit_impl(
     Ok(prepared.into_model(x, y, opts, (u, v, sigma), Some(meta)))
 }
 
-/// The leading `k` sparse components of `a`, deflating it in place: one
-/// [`spls3_component`] per component, truncated at the first `σ` under the
-/// floors, signs pinned. Returns `(U, V, σ, (converged, n_iter))` with
-/// `k_used` columns / entries.
+/// The component loop of [`sparse_components`]: one [`spls3_component`] per
+/// component on `a`, deflating it in place, truncated at the first `σ`
+/// under the floors. Returns the retained components with the signs
+/// [`spls3_component`] gave them (not pinned), and `a` deflated by all of
+/// them.
 ///
 /// `rel_floor()` is called at most once, when the first component that
 /// clears `SIGMA_FLOOR` is tested; it applies to every component, the first
 /// included (see [`sigma_rel_floor`] for why the first sparse `σ` is no
 /// reference).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::type_complexity)]
-#[allow(clippy::many_single_char_names)]
-fn sparse_components(
+fn sparse_component_loop(
     mut a: Mat<f64>,
     k: usize,
     keep_x: usize,
@@ -912,11 +1050,10 @@ fn sparse_components(
     tol: f64,
     par: Par,
     rel_floor: impl Fn() -> f64,
-) -> PlsKitResult<(Mat<f64>, Mat<f64>, Col<f64>, (Vec<bool>, Vec<usize>))> {
-    let (p, q) = (a.nrows(), a.ncols());
+) -> PlsKitResult<(Vec<SparseComponent>, Mat<f64>)> {
     // One Vec, not five in lockstep: `SparseComponent` already bundles the
     // five per-component outputs, and unpacking them here only to re-pair
-    // them below is how the five can drift out of step.
+    // them in `sparse_components` is how the five can drift out of step.
     let mut components: Vec<SparseComponent> = Vec::with_capacity(k);
     let mut floor: Option<f64> = None;
 
@@ -953,6 +1090,29 @@ fn sparse_components(
         );
         components.push(c);
     }
+    Ok((components, a))
+}
+
+/// The leading `k` sparse components of `a`: [`sparse_component_loop`]'s
+/// components packed into matrices, signs pinned. Returns
+/// `(U, V, σ, (converged, n_iter))` with `k_used` columns / entries.
+/// `rel_floor` is passed on to the loop, which calls it at most once.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+#[allow(clippy::many_single_char_names)]
+fn sparse_components(
+    a: Mat<f64>,
+    k: usize,
+    keep_x: usize,
+    keep_y: usize,
+    max_iter: usize,
+    tol: f64,
+    par: Par,
+    rel_floor: impl Fn() -> f64,
+) -> PlsKitResult<(Mat<f64>, Mat<f64>, Col<f64>, (Vec<bool>, Vec<usize>))> {
+    let (p, q) = (a.nrows(), a.ncols());
+    let (components, _) =
+        sparse_component_loop(a, k, keep_x, keep_y, max_iter, tol, par, rel_floor)?;
 
     let k_used = components.len();
     let mut u = Mat::<f64>::zeros(p, k_used);
@@ -1478,10 +1638,31 @@ mod tests {
         let r = pls3_transform(&bad, Some(x.as_ref()), None, TransformWhich::XScores);
         assert!(matches!(r, Err(PlsKitError::ShapeMismatch(_))));
 
-        let mut bad = m;
+        let mut bad = m.clone();
         bad.k_used = 5;
         let r = pls3_transform(&bad, Some(x.as_ref()), None, TransformWhich::XScores);
         assert!(matches!(r, Err(PlsKitError::ShapeMismatch(_))));
+
+        // The Y side has its own guard. `y` has 3 columns and the fit 2
+        // components.
+        let y_err = |bad: &Pls3Model| match pls3_transform(
+            bad,
+            None,
+            Some(y.as_ref()),
+            TransformWhich::YScores,
+        ) {
+            Err(PlsKitError::ShapeMismatch(msg)) => msg,
+            other => panic!("{other:?}"),
+        };
+        let mut bad = m.clone();
+        bad.v_saliences = Mat::<f64>::zeros(3, 1);
+        assert!(y_err(&bad).contains("v_saliences"), "{}", y_err(&bad));
+        let mut bad = m.clone();
+        bad.y_mean = Col::<f64>::zeros(2);
+        assert!(y_err(&bad).contains("y_mean/y_scale"), "{}", y_err(&bad));
+        let mut bad = m;
+        bad.y_scale = Col::<f64>::zeros(2);
+        assert!(y_err(&bad).contains("y_mean/y_scale"), "{}", y_err(&bad));
     }
 
     #[test]
@@ -1796,9 +1977,7 @@ mod tests {
     /// `spls3_component` produced them (raw signs) and `A` deflated by all
     /// of them, so a test can (i) read the unpinned sign of each component
     /// and (ii) call `spls3_component` once more on the returned `A` to see
-    /// which of the two truncation exits stopped the loop. Mirrors the
-    /// production loop step for step; the tests that use it also check the
-    /// fitted model against it, so drift between the two fails loudly.
+    /// which of the two truncation exits stopped the loop.
     #[allow(clippy::many_single_char_names)]
     fn spls3_unpinned(
         x: MatRef<'_, f64>,
@@ -1808,39 +1987,37 @@ mod tests {
         keep_y: usize,
         opts: Pls3FitOpts,
     ) -> (Vec<SparseComponent>, Mat<f64>, Par) {
-        let rel = prepared_rel_floor(x, y, opts);
-        let (Prepared { par, .. }, mut a) = prepare(x, y, k, None, opts).unwrap();
-        let mut comps: Vec<SparseComponent> = Vec::new();
-        for _ in 0..k {
-            let Some(c) =
-                spls3_component(a.as_ref(), keep_x, keep_y, opts.max_iter, opts.tol, par).unwrap()
-            else {
-                break;
-            };
-            if c.sigma < SIGMA_FLOOR {
-                break;
-            }
-            if c.sigma < rel {
-                break;
-            }
-            matmul(
-                a.as_mut(),
-                Accum::Add,
-                c.u.as_ref().as_mat(),
-                c.v.as_ref().as_mat().transpose(),
-                -c.sigma,
-                par,
-            );
-            comps.push(c);
+        let (mut prepared, a) = prepare(x, y, k, None, opts).unwrap();
+        let par = prepared.par;
+        let stage = |prepared: &Prepared, a: Mat<f64>| {
+            sparse_component_loop(a, k, keep_x, keep_y, opts.max_iter, opts.tol, par, || {
+                prepared.stop_floor(x, y)
+            })
+            .unwrap()
+        };
+        let mut out = stage(&prepared, a);
+        if prepared.unresolved(out.0.len(), k) {
+            let a = prepared.materialize(x, y);
+            out = stage(&prepared, a);
         }
-        (comps, a, par)
+        (out.0, out.1, par)
     }
 
-    /// `sigma_rel_floor` exactly as `pls3_fit` / `spls3_fit` evaluate it:
-    /// from the blocks `prepare` forms `A` from.
+    /// `sigma_rel_floor` exactly as `pls3_fit` / `spls3_fit` evaluate it.
     fn prepared_rel_floor(x: MatRef<'_, f64>, y: MatRef<'_, f64>, opts: Pls3FitOpts) -> f64 {
         let (prepared, _) = prepare(x, y, 1, None, opts).unwrap();
         prepared.rel_floor(x, y)
+    }
+
+    /// `A = X̃'Ỹ` from the written `X̃`, which is the `A` a truncating fit
+    /// decides on (see "The implicit route" on `Prepared`).
+    fn written_cross_cov(x: MatRef<'_, f64>, y: MatRef<'_, f64>, opts: Pls3FitOpts) -> Mat<f64> {
+        let (mut prepared, a) = prepare(x, y, 1, None, opts).unwrap();
+        if prepared.x_implicit.is_some() {
+            prepared.materialize(x, y)
+        } else {
+            a
+        }
     }
 
     /// Row index `pin_component_signs` pivots on: largest `|u_i|`, ties to
@@ -2112,7 +2289,7 @@ mod tests {
         let b = gaussian_mat(&mut rng, p, k - 1);
         let y = weak_signal_y(&x, &b, 1e-8, true, 22);
         let opts = Pls3FitOpts::default();
-        let (_, a) = prepare(x.as_ref(), y.as_ref(), k, None, opts).unwrap();
+        let a = written_cross_cov(x.as_ref(), y.as_ref(), opts);
         let sigma = a
             .as_ref()
             .thin_svd()
@@ -2148,7 +2325,7 @@ mod tests {
         let x = gaussian_mat(&mut rng, n, p);
         let y = weak_signal_y(&x, &Mat::<f64>::zeros(p, q), 0.0, false, 32);
         let opts = Pls3FitOpts::default();
-        let (_, a) = prepare(x.as_ref(), y.as_ref(), q, None, opts).unwrap();
+        let a = written_cross_cov(x.as_ref(), y.as_ref(), opts);
         let sigma = a
             .as_ref()
             .thin_svd()
@@ -2246,6 +2423,182 @@ mod tests {
         assert_eq!(comps.len(), 1);
     }
 
+    /// Saliences, `σ` and both score blocks, flattened: what a fit of
+    /// manually standardized blocks shares with the fit that standardizes.
+    fn components_flat(m: &Pls3Model) -> Vec<f64> {
+        use crate::test_support::{col_vals, mat_vals};
+        let mut v = mat_vals(m.u_saliences.as_ref());
+        v.extend(mat_vals(m.v_saliences.as_ref()));
+        v.extend(col_vals(m.singular_values.as_ref()));
+        v.extend(mat_vals(m.x_scores.as_ref()));
+        v.extend(mat_vals(m.y_scores.as_ref()));
+        v
+    }
+
+    fn pre_both() -> Pls3FitOpts {
+        Pls3FitOpts {
+            pre_standardized_x: true,
+            pre_standardized_y: true,
+            ..Pls3FitOpts::default()
+        }
+    }
+
+    /// Offset X on both sides of `IMPLICIT_MAX_MEAN_RATIO`: `+100` stays on
+    /// the implicit route, `+1e6` takes the written copy from the start.
+    /// On either, the dense and the sparse fit agree with the fit of the
+    /// manually standardized X to the corpus tolerance and record
+    /// `linalg::standardize`'s moments to the bit. Y is standardized by the
+    /// fit, or passed under `pre_standardized_y` with its columns off
+    /// center (`+0.5`), where the mean correction of `X̃'Ỹ` does not vanish.
+    #[test]
+    fn offset_x_agrees_with_the_written_copy_on_both_routes() {
+        use crate::test_support::{assert_agree, col_vals, Agree};
+        let (x0, y) = shared_factor_data(60, 40, 5, 51);
+        let (ys, _, _) = crate::linalg::standardize(y.as_ref());
+        let y_off = Mat::<f64>::from_fn(60, 5, |i, j| y[(i, j)] + 0.5);
+        for (c, implicit) in [(100.0, true), (1e6, false)] {
+            let x = Mat::<f64>::from_fn(60, 40, |i, j| x0[(i, j)] + c);
+            let (xs, x_mean, x_scale) = crate::linalg::standardize(x.as_ref());
+            for pre_y in [false, true] {
+                let opts = Pls3FitOpts {
+                    pre_standardized_y: pre_y,
+                    ..Pls3FitOpts::default()
+                };
+                let (y_fit, y_copy) = if pre_y { (&y_off, &y_off) } else { (&y, &ys) };
+                let (prepared, _) = prepare(x.as_ref(), y_fit.as_ref(), 3, None, opts).unwrap();
+                let what = format!(
+                    "offset {c:e} (ratio {:?}) pre_y={pre_y}",
+                    prepared.x_implicit
+                );
+                assert_eq!(
+                    prepared.x_implicit.is_some(),
+                    implicit,
+                    "{what}: left its route"
+                );
+                assert!(
+                    prepared.x_implicit.is_none_or(|r| r > 100.0),
+                    "{what}: not mean-heavy"
+                );
+                for keeps in [None, Some((10, 3))] {
+                    let fit = |x: MatRef<'_, f64>, y: MatRef<'_, f64>, opts| match keeps {
+                        None => pls3_fit(x, y, 3, None, opts).unwrap(),
+                        Some((kx, ky)) => spls3_fit(x, y, 3, kx, ky, None, opts).unwrap(),
+                    };
+                    let m = fit(x.as_ref(), y_fit.as_ref(), opts);
+                    let copy = fit(xs.as_ref(), y_copy.as_ref(), pre_both());
+                    let what = format!("{what} keeps={keeps:?}");
+                    assert_eq!(m.k_used, 3, "{what}");
+                    assert_agree(
+                        &components_flat(&m),
+                        &components_flat(&copy),
+                        Agree::Corpus(X_LAYOUT_TOL),
+                        &what,
+                    );
+                    for (got, want) in [(&m.x_mean, &x_mean), (&m.x_scale, &x_scale)] {
+                        assert_agree(
+                            &col_vals(got.as_ref()),
+                            &col_vals(want.as_ref()),
+                            Agree::Bits,
+                            &what,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A truncating fit is the written copy's to the bit. A Y block with a
+    /// total-score column has rank `q − 1`, so `k = q` truncates; on an X
+    /// offset by `+100` (the implicit route) the fit is rerun on the copy
+    /// and returns the components of the fit of the manually standardized
+    /// blocks.
+    #[test]
+    fn truncating_fit_on_offset_x_is_the_written_copys() {
+        use crate::test_support::{assert_agree, Agree};
+        let (x0, mut y) = shared_factor_data(200, 30, 5, 52);
+        for i in 0..200 {
+            y[(i, 4)] = (0..4).map(|j| y[(i, j)]).sum();
+        }
+        let x = Mat::<f64>::from_fn(200, 30, |i, j| x0[(i, j)] + 100.0);
+        let opts = Pls3FitOpts::default();
+        let (prepared, _) = prepare(x.as_ref(), y.as_ref(), 5, None, opts).unwrap();
+        assert!(prepared.x_implicit.is_some(), "premise: the implicit route");
+        let (xs, _, _) = crate::linalg::standardize(x.as_ref());
+        let (ys, _, _) = crate::linalg::standardize(y.as_ref());
+
+        let m = pls3_fit(x.as_ref(), y.as_ref(), 5, None, opts).unwrap();
+        let copy = pls3_fit(xs.as_ref(), ys.as_ref(), 5, None, pre_both()).unwrap();
+        assert_eq!(
+            (m.k_used, copy.k_used),
+            (4, 4),
+            "sigma = {:?}",
+            m.singular_values
+        );
+        assert_agree(
+            &components_flat(&m),
+            &components_flat(&copy),
+            Agree::Bits,
+            "dense",
+        );
+    }
+
+    /// Y orthogonal to an offset X, below `IMPLICIT_MAX_MEAN_RATIO`: the
+    /// designs of `fit::tests::orthogonal_y_on_offset_x_keeps_no_component`
+    /// with a two-column Y. On some of them the implicit `A` puts `σ₁`
+    /// above the relative floor, where the written copy puts it below; the
+    /// band of `Prepared::stop_floor` sends every one to the copy, and
+    /// nothing is kept.
+    #[test]
+    fn orthogonal_y_on_offset_x_keeps_no_component() {
+        use rand::{RngExt, SeedableRng};
+        let designs = [[0.37, 99.7, -1.3, 89.73], [0.37, 0.0, 1.0, 999.3]];
+        let mut above_floor = 0_usize;
+        for (c, n) in designs
+            .iter()
+            .flat_map(|c| [8_usize, 12, 16].map(|n| (c, n)))
+        {
+            // Column j is `c[2j]·a + c[2j + 1]`, `a = ±1` alternating.
+            let x = Mat::<f64>::from_fn(n, 2, |i, j| {
+                let a = if i % 2 == 0 { 1.0 } else { -1.0 };
+                c[2 * j] * a + c[2 * j + 1]
+            });
+            let ones = Col::<f64>::from_fn(n, |_| 1.0);
+            let basis = crate::test_support::orthonormal_basis(ones.as_ref(), x.as_ref(), 1e-12);
+            for seed in 0..20_u64 {
+                let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+                let mut y = Mat::<f64>::zeros(n, 2);
+                for j in 0..2 {
+                    let mut col = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
+                    project_off(&basis, &mut col);
+                    y.col_mut(j).copy_from(&col);
+                }
+                let what = format!("{c:?} n={n} seed={seed}");
+                let opts = Pls3FitOpts::default();
+                let (prepared, a) = prepare(x.as_ref(), y.as_ref(), 1, None, opts).unwrap();
+                assert!(
+                    prepared.x_implicit.is_some(),
+                    "{what}: premise: the implicit route"
+                );
+                let sigma = a
+                    .as_ref()
+                    .thin_svd()
+                    .unwrap()
+                    .S()
+                    .column_vector()
+                    .to_owned();
+                above_floor += usize::from(sigma[0] >= prepared.rel_floor(x.as_ref(), y.as_ref()));
+                let m = pls3_fit(x.as_ref(), y.as_ref(), 1, None, opts).unwrap();
+                assert_eq!(m.k_used, 0, "{what}: sigma = {:?}", m.singular_values);
+                let ms = spls3_fit(x.as_ref(), y.as_ref(), 1, 1, 1, None, opts).unwrap();
+                assert_eq!(ms.k_used, 0, "{what}: sigma = {:?}", ms.singular_values);
+            }
+        }
+        assert!(
+            above_floor > 0,
+            "premise: no implicit sigma_1 cleared the floor"
+        );
+    }
+
     /// `pls3_fit` / `spls3_fit` / `pls3_transform` output flattened for the
     /// layout tests: saliences, `σ`, both score blocks and the four moment
     /// vectors.
@@ -2299,14 +2652,23 @@ mod tests {
         out
     }
 
+    /// Layouts of a standardized X agree to rounding, not bit for bit: the
+    /// fits form their products from X in X's own layout ("The implicit
+    /// route" on `Prepared`). `Agree::Corpus(1e-10)` is the corpus array
+    /// tolerance, `1e-10 + 1e-14 · |value|`, which `_docs/python/api.md`
+    /// (Conventions) promises across layouts.
+    const X_LAYOUT_TOL: f64 = 1e-10;
+
     /// Layout invariance in both blocks: a padded submatrix, a row-major
     /// view and a negative-column-stride view of X, or of Y, give the
-    /// owned column-major block's output to the bit, for the dense fit at
+    /// owned column-major block's output, for the dense fit at
     /// `k = 1, 2`, the sparse fit (selecting, and at its dense endpoint)
     /// and `pls3_transform`, with and without `pre_standardized_*` on
-    /// either block. The other block stays owned.
+    /// either block. The other block stays owned. The fits agree to
+    /// `X_LAYOUT_TOL` across layouts of a standardized X; everything else
+    /// agrees to the bit.
     #[test]
-    fn pls3_family_is_bit_identical_across_layouts() {
+    fn pls3_family_agrees_across_layouts() {
         use crate::test_support::{assert_layout_agree, mat_vals, Agree};
         /// The fit inputs `(x, y)` with the varied side replaced by `v`.
         fn blocks<'a>(
@@ -2326,9 +2688,14 @@ mod tests {
             let m = pls3_fit(x.as_ref(), y.as_ref(), 2, None, opts).unwrap();
             for side in ["X", "Y"] {
                 let varied = if side == "X" { &x } else { &y };
+                let fit_agree = if side == "X" && !opts.pre_standardized_x {
+                    Agree::Corpus(X_LAYOUT_TOL)
+                } else {
+                    Agree::Bits
+                };
                 for k in [1, 2] {
                     let what = format!("{side} layout: pls3_fit k={k} {label}");
-                    assert_layout_agree(varied, &what, Agree::Bits, |v| {
+                    assert_layout_agree(varied, &what, fit_agree, |v| {
                         let (xv, yv) = blocks(side, v, &x, &y);
                         Ok(layout_flat(&pls3_fit(xv, yv, k, None, opts)?))
                     })
@@ -2337,7 +2704,7 @@ mod tests {
                 for (keep_x, keep_y) in [(3, 2), (p, 3)] {
                     let what =
                         format!("{side} layout: spls3_fit keep=({keep_x}, {keep_y}) {label}");
-                    assert_layout_agree(varied, &what, Agree::Bits, |v| {
+                    assert_layout_agree(varied, &what, fit_agree, |v| {
                         let (xv, yv) = blocks(side, v, &x, &y);
                         Ok(layout_flat(&spls3_fit(
                             xv, yv, 2, keep_x, keep_y, None, opts,

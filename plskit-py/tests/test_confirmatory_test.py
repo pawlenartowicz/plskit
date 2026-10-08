@@ -117,6 +117,36 @@ def test_gate_reroutes_split_nb_and_warns():
     assert f"{r.stable_rank:.4g}" in msg
 
 
+_NB = _SMALL_ARGS_BY_METHOD["split_nb"]
+
+
+@pytest.mark.parametrize(
+    "function, args, kwargs",
+    [
+        ("pls1_confirmatory_test", (1,), {"test_method": "split_nb", "args": _NB}),
+        ("pls3_confirmatory_test", (1,), {"test_method": "split_nb", "args": _NB}),
+        ("pls1_find_k_optimal", (2,), {"diagnostic": "split_nb", "args": _NB}),
+        ("pls1_find_k_sequence", (2,), {"test_method": "split_nb", "args": _NB}),
+        ("spls1_find_k_optimal", (2, 3), {"diagnostic": "split_nb", "args": _NB}),
+        ("spls1_find_k_sequence", (2, 3), {"test_method": "split_nb", "args": _NB}),
+        ("pls1_fit", ("optimal",),
+         {"k_max": 2, "find_k_args": {"diagnostic": "split_nb", "args": _NB}}),
+        ("pls1_fit", ("sequence",),
+         {"k_max": 2, "find_k_args": {"test_method": "split_nb", "args": _NB}}),
+    ],
+    ids=["pls1_confirmatory_test", "pls3_confirmatory_test", "pls1_find_k_optimal",
+         "pls1_find_k_sequence", "spls1_find_k_optimal", "spls1_find_k_sequence",
+         "pls1_fit_optimal", "pls1_fit_sequence"],
+)
+def test_reroute_warning_points_at_the_callers_line(function, args, kwargs):
+    X, y = _flagged_data()
+    second = np.column_stack([y, X[:, 1]]) if function.startswith("pls3") else y
+    with pytest.warns(UserWarning, match="rerouted") as rec:
+        # Called from this function directly: one frame further out is pytest.
+        getattr(plskit, function)(X, second, *args, seed=7, **kwargs)
+    assert rec[0].filename == __file__
+
+
 def test_force_suppresses_the_reroute_and_the_warning():
     X, y = _flagged_data()
     with _no_warning():
@@ -144,6 +174,19 @@ def test_force_is_a_split_nb_only_arg():
             X, y, k=1, test_method="split_exact", args={"n_perm": 100, "force": True}, seed=7,
         )
     assert ei.value.code == "invalid_args"
+
+
+def test_unknown_args_key_message_lists_allowed_keys_as_a_python_list():
+    X, y = _data()
+    with pytest.raises(plskit.PlsKitError) as ei:
+        plskit.pls1_confirmatory_test(
+            X, y, k=1, test_method="raw_perm", args={"n_splits": 3}, seed=7,
+        )
+    assert ei.value.code == "invalid_args"
+    assert str(ei.value) == (
+        "test_method='raw_perm' does not accept arg 'n_splits'; "
+        "allowed: ['n_perm', 'n_folds']"
+    )
 
 
 def test_force_must_be_a_bool():
@@ -284,8 +327,8 @@ def test_split_nb_gate_validates_its_input():
 #
 # A value the seam cannot use raises a coded PlsKitError, never a raw
 # TypeError / OverflowError: `invalid_args` inside the `args` dict,
-# `invalid_argument` for a top-level argument (plskit-bind's split, so R and
-# Julia raise the same codes). Each case fails before any engine work runs.
+# `invalid_argument` for a top-level argument (the split plskit-bind makes).
+# Each case fails before any engine work runs.
 # Equivalent rows for other entry points live in their own test files
 # (test_pls1_fit.py, test_rotate.py, test_spls1.py, test_spls3.py, ...).
 
@@ -300,7 +343,7 @@ _X, _Y = _data()
         ({"test_method": "split_exact", "args": {"n_splits": 2.5}}, "invalid_args",
          "must be a non-negative whole number, got 2.5"),
         ({"test_method": "raw_perm", "args": {"n_folds": True}}, "invalid_args",
-         "must be a non-negative whole number, got True"),
+         "must be a non-negative whole number, got true"),
         ({"test_method": "raw_perm", "args": {"n_perm": "7"}}, "invalid_args",
          'got the string "7"'),
         ({"test_method": "split_exact", "ci": True, "n_boot": -5}, "invalid_argument",
@@ -310,11 +353,13 @@ _X, _Y = _data()
         ({"test_method": "split_exact", "ci": True, "level": "x"}, "invalid_argument",
          'level must be a number, got the string "x"'),
         ({"test_method": "split_exact", "ci": True, "level": 10**400}, "invalid_argument",
-         "level must be a number"),
+         r"level is outside the 64-bit integer range \[-2\^63, 2\^64\), got an integer of 1329 bits$"),
+        ({"test_method": "split_exact", "ci": True, "level": 10**5000}, "invalid_argument",
+         r"level is outside the 64-bit integer range \[-2\^63, 2\^64\), got an integer of 16610 bits$"),
         ({"test_method": "score", "seed": -1}, "invalid_argument",
          "seed must be a whole number"),
         ({"test_method": "score", "seed": 2**64}, "invalid_argument",
-         "seed must be a whole number"),
+         r"seed is outside the 64-bit integer range \[-2\^63, 2\^64\)"),
         ({"test_method": "score", "ci": "yes"}, "invalid_argument",
          'ci must be a bool, got the string "yes"'),
         ({"test_method": "score", "pre_standardized": 1}, "invalid_argument",
@@ -323,11 +368,11 @@ _X, _Y = _data()
          "verbose must be a bool"),
         ({"test_method": 1}, "invalid_argument", "test_method must be a string, got 1"),
         ({"test_method": "raw_perm", "args": [1]}, "invalid_argument",
-         r"args must be a dict of named values, got \[1\]"),
+         r"args must be a record of named values \(a dict / named list\), got"),
     ],
     ids=[
         "args_negative", "args_fractional", "args_bool", "args_str",
-        "n_boot", "k", "level_str", "level_overflow", "seed_negative",
+        "n_boot", "k", "level_str", "level_overflow", "level_overflow_huge", "seed_negative",
         "seed_too_big", "ci_str", "pre_standardized_int",
         "verbose_str", "method_int", "args_list",
     ],

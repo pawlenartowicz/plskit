@@ -116,4 +116,26 @@ mod tests {
         let r = pls1_predict(&m, bad.as_ref());
         assert!(matches!(r, Err(PlsKitError::DimensionMismatch { .. })));
     }
+
+    #[test]
+    fn predict_rejects_non_finite_x_new() {
+        let (x, y) = linear_data(30, 5, 2, 1);
+        let m = pls1_fit(
+            x.as_ref(),
+            y.as_ref(),
+            KSpec::Fixed(2),
+            None,
+            FitOpts::default(),
+        )
+        .unwrap();
+        for bad_value in [f64::NAN, f64::INFINITY] {
+            let mut bad = x.clone();
+            bad[(3, 2)] = bad_value;
+            let r = pls1_predict(&m, bad.as_ref());
+            assert!(
+                matches!(r, Err(PlsKitError::NonFiniteInput)),
+                "{bad_value}: {r:?}"
+            );
+        }
+    }
 }

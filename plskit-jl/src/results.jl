@@ -72,7 +72,7 @@ function _array(x::Py, name::Symbol)
     ndim = pyconvert(Int, x.ndim)
     ndim == 0 && return _to_julia(x.item(), name)
     kind = pyconvert(String, x.dtype.kind)
-    T = kind == "f" ? Float64 : kind == "b" ? Bool : kind in ("i", "u") ? Int :
+    T = kind == "f" ? Float64 : kind == "b" ? Bool : kind == "i" ? Int :
         error("PLSKit: unsupported ndarray dtype $(x.dtype) in field `$(name)`")
     dtype = T === Float64 ? _np.float64 : T === Bool ? _np.bool_ : _np.int64
     # A single Julia-owned copy, laid out F-order (Julia's own column-major

@@ -144,6 +144,8 @@ compare <- function(got, want) {
   } else if (is.matrix(got) || length(got) != length(want)) {
     return(sprintf("shape %s vs length %d", toString(dim(got)), length(want)))
   }
+  # Mirrors plskit-testdata-gen/src/settle.rs::close, which owns the rule:
+  # change together.
   atol <- if (length(shape) == 0L) ATOL_SCALAR else ATOL_ARRAY
   got <- as.vector(got)
   want <- as.vector(want)

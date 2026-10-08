@@ -5,9 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::cases::pls1_find_k_optimal::write_btreemap;
-use crate::cases::{
-    default_tolerance, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_i64, synth_data, CasePaths,
-};
+use crate::cases::{ndarray_to_faer_col, ndarray_to_faer_mat, scalar_i64, synth_data, CasePaths};
 use crate::manifest::{Case, Hashes};
 use crate::npz::{sha256_of_file, NpzWriter};
 use plskit::{spls1_find_keep_optimal, FindKeepOptimalOpts};
@@ -73,6 +71,5 @@ pub fn k1(root: &Path) -> Result<Case> {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }

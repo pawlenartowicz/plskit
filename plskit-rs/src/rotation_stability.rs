@@ -781,10 +781,10 @@ mod tests {
     /// loadings, the diagnostic produces a finite ratio in a reasonable
     /// range without flagging `degenerate_baseline`.
     ///
-    /// The bound (`upper < 1.5`) only rules out a blow-up: PLS1, unlike
-    /// PCA, pins both components through y-driven deflation, so the
-    /// unrotated axes do not drift on this design and the ratio stays near
-    /// 1 rather than below it.
+    /// The bound (`upper < 1.1`) holds the ratio near 1: PLS1, unlike PCA,
+    /// pins both components through y-driven deflation, so the unrotated
+    /// axes do not drift on this design and the ratio stays near 1 rather
+    /// than below it.
     #[test]
     fn variance_ratio_is_bounded_on_factor_model() {
         let (x, y) = synth_factor_model(300, 17);
@@ -799,7 +799,7 @@ mod tests {
             r.variance_ratio.point
         );
         assert!(
-            r.variance_ratio.upper < 1.5,
+            r.variance_ratio.upper < 1.1,
             "rotation should not blow up the variance ratio on a factor-model \
              design, got upper={} (point={})",
             r.variance_ratio.upper,
@@ -1022,6 +1022,28 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code(), "invalid_argument");
         assert!(format!("{err}").contains("k>7") || format!("{err}").contains("k > 7"));
+    }
+
+    #[test]
+    fn rotation_stability_rejects_m_below_k_plus_2() {
+        // n = 20, m_rate = 0.51: m = ceil(20^0.51) = 5 < k + 2 = 6.
+        let (x, y) = synth(20, 6, 2, 3.0, 1);
+        let err = pls1_rotation_stability(
+            x.as_ref(),
+            y.as_ref(),
+            4,
+            RotationStabilityMethod::Varimax(VarimaxArgs::default()),
+            None,
+            None,
+            RotationStabilityOpts {
+                n_boot: 200,
+                m_rate: 0.51,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "invalid_argument");
+        assert!(format!("{err}").contains("need m ≥ k+2"), "{err}");
     }
 
     #[test]

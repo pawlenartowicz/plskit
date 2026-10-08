@@ -24,7 +24,7 @@ def _data(n=80, d=6, k_signal=2, snr=4.0, seed=1):
     ],
 )
 def test_optimal_seam_rejects_args_the_selection_cannot_use(kwargs, message):
-    # Seam-only validators in run_find_k_optimal.
+    # The checks and their messages come from plskit-bind.
     X, y = _data()
     with pytest.raises(plskit.PlsKitError, match=message) as ei:
         plskit.pls1_find_k_optimal(X, y, k_max=4, seed=7, **kwargs)
@@ -37,7 +37,7 @@ def test_optimal_seam_rejects_args_the_selection_cannot_use(kwargs, message):
         ({"k_max": -1}, "k_max must be a non-negative whole number"),
         ({"selector": 1}, "selector must be a string, got 1"),
         ({"diagnostic": 2}, "diagnostic must be a string"),
-        ({"args": [1]}, "args must be a dict"),
+        ({"args": [1]}, "args must be a record of named values"),
         ({"verbose": 1}, "verbose must be a bool"),
     ],
 )

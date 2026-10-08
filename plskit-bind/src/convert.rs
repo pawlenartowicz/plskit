@@ -96,8 +96,14 @@ fn bad(key: &str, why: &str) -> BindError {
 }
 
 pub(crate) fn need_mat(r: &Record<'_>, key: &str) -> Result<Mat<f64>, BindError> {
-    let m = coerce::to_mat(need(r, key)?.clone()).map_err(|w| bad(key, &w))?;
-    Ok(m.as_mat().to_owned())
+    match need(r, key)? {
+        // Read through the reference: `to_mat` takes its value whole, and
+        // cloning an owned matrix to hand it over would copy it twice.
+        Value::Mat(m) => Ok(m.as_mat().to_owned()),
+        other => coerce::to_mat(other.clone())
+            .map(|m| m.as_mat().to_owned())
+            .map_err(|w| bad(key, &w)),
+    }
 }
 
 pub(crate) fn need_col(r: &Record<'_>, key: &str) -> Result<Col<f64>, BindError> {
@@ -211,7 +217,7 @@ pub(crate) fn confirmatory_test(r: ConfirmatoryTestOutput) -> Record<'static> {
 }
 
 /// `PermNullResult`. The engine's permutation matrix is row-major
-/// `(n_perm, d)`, as plskit-py reads it.
+/// `(n_perm, d)`, and is moved into the result without a copy.
 pub(crate) fn perm_null(out: PermNullOutput) -> Record<'static> {
     let PermNullOutput {
         n_perm,
@@ -226,7 +232,11 @@ pub(crate) fn perm_null(out: PermNullOutput) -> Record<'static> {
     } = out;
     let matrix = opt(beta_perm_matrix, |flat| {
         let d = flat.len() / n_perm.max(1);
-        Value::Mat(MatF64::from_row_major(&flat, n_perm, d))
+        Value::Mat(MatF64::OwnedRowMajor {
+            data: flat,
+            nrows: n_perm,
+            ncols: d,
+        })
     });
     Record::typed("PermNullResult")
         .field("n_perm", count(n_perm))

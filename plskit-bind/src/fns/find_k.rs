@@ -255,9 +255,9 @@ fn fk_args<'r, 'a>(fk: &'r Record<'a>) -> Result<Option<&'r Record<'a>>, BindErr
     }
 }
 
-/// `pls1_fit`'s string `k`: `find_k_args` validated as `_api.py` does,
-/// the selection run with `for_fit`, and the K to fit returned with the
-/// selection record and any reroute warning.
+/// `pls1_fit`'s string `k`: `find_k_args` validated, the selection run with
+/// `for_fit`, and the K to fit returned with the selection record and any
+/// reroute warning.
 pub(crate) fn select_k(
     d: Data<'_>,
     mode: &str,

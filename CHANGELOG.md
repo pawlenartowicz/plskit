@@ -4,6 +4,27 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+- Changed (performance): the `split_nb` auto-gate takes the stable rank
+  from the Gram matrix on the shorter side of the standardized `X`, not
+  from an SVD of it, so the gate holds one copy of `X` where it held two.
+  `stable_rank` differs from the previous release in the last bits. The
+  testdata corpus is unchanged.
+- Changed (performance): `pls3_fit`, `plssvd_fit` and `spls3_fit` no longer
+  write a standardized copy of `X`: `X'Y` and the X scores are formed from
+  the raw `X`, read in its own memory layout (a C-ordered NumPy array in
+  place), with the centering and scaling applied inline, as `pls1_fit` /
+  `spls1_fit` do. When a column's |mean| exceeds 1000 times its scale, `X`
+  is standardized into a copy as before. A fit in which one of the `k`
+  requested components has its `σ` below `2·(1 + max |mean| / scale)` times
+  the truncation floor is refitted on a standardized copy, which costs
+  about two fits and the copy's memory. The truncation floor takes `‖X‖_F`
+  from the standardization moments. `Y` is standardized into a copy as
+  before, and a `pre_standardized_X=True` fit is unchanged to the bit.
+- Changed (numerics): `pls3_fit`, `plssvd_fit` and `spls3_fit` without
+  `pre_standardized_X` are no longer bit-identical across memory layouts of
+  `X`; row- and column-major inputs agree to rounding (the corpus
+  tolerance). Their results also differ from the previous release in the
+  last bits. The testdata corpus is unchanged.
 - Added: `test_method="auto"`, now the default of `pls1_confirmatory_test`,
   `pls3_confirmatory_test`, `pls1_find_k_sequence` and
   `spls1_find_k_sequence`, in Rust, Python, R and Julia. It runs
@@ -35,6 +56,10 @@ All notable changes to this project will be documented here.
   messages that name the argument say `test_method=` too. The testdata
   corpus renames the `method` output entry and manifest kwargs key of the
   confirmatory cases to `test_method`; numerical outputs are unchanged.
+- Changed (breaking, Rust): `linalg::standardize_weighted` and
+  `linalg::standardize1_weighted` panic when `weights` is `Some` and its
+  length differs from the row count. They used to read the first `n`
+  entries of a longer `weights`.
 - Added: the `plskit-bind` workspace crate, a language-neutral binding
   layer over the plskit engine. It exposes the whole Python surface
   through one `call(fn_name, Record)` entry point. The R wrapper calls the
@@ -54,6 +79,40 @@ All notable changes to this project will be documented here.
   checked this way, not `k_max`. All of this matches the rules the R
   wrapper applies through `plskit-bind`; the Julia wrapper inherits them
   from the Python package.
+- Changed (Python): the extension calls the engine through `plskit-bind`.
+  Newly accepted: a plain `dict` holding a model's fields as `model` (a
+  dict missing a field raises `invalid_argument`); a decimal
+  string as `seed` (`seed="7"` is seed 7); a 0-D array where a scalar is
+  expected (`pre_standardized=np.array(False)`,
+  `test_method=np.array("score")`), also inside `args` / `rotation_args`.
+  Newly rejected, with
+  `PlsKitError(code="invalid_argument")`: a number type with no plain
+  int / float form (`Decimal`, `Fraction`) inside `args` / `rotation_args`;
+  `rotate(model)` with a `P` whose row count differs from `W`'s, or with a
+  `None` or mistyped field the rotation does not use (`coef=None`);
+  `pls1_predict` and `pls3_transform` on a model with a mistyped field
+  (`pre_standardized=1`, `intercept="3.5"`) or an unconvertible value in a
+  field they do not use (`selection_result=object()`); a subclass of a
+  result class as `model`; a model field that is a nested list
+  (`T=m.T.tolist()`) or a flat list holding a float (`Q=m.Q.tolist()`) in
+  `rotate`, `pls1_predict` and `pls3_transform`; an int of `2**64` or
+  more, or below `-2**63`, as a float argument (`tol=2**64`,
+  `tol=-2**63 - 1`). Error codes: a wrong-typed value inside
+  `find_k_args` is `invalid_args` (was `invalid_argument`); non-string keys
+  in `args` / `rotation_args` / `find_k_args`, and any other value in
+  `args` / `rotation_args` that cannot be converted (`object()`,
+  `{'n_perm': 2**64}`), are `invalid_argument` (was `invalid_args`);
+  `rotate(model)` with `T`, `P` or `Q` not matching `W`'s column count
+  raises `PlsKitError` with `invalid_argument` (was numpy's `ValueError`);
+  a Rust panic raises `PlsKitError` with `internal` (was `PanicException`).
+  Several error messages are now worded as `plskit-bind` words them.
+  `rotate(model)` forms `T·R`, `P·R` and `Rᵀ·Q` in faer instead of numpy,
+  so results agree to rounding, not bit for bit. `rotate(model)` returns
+  new, equal objects for the fields it does not rotate
+  (`selection_result`, `coef`, `beta`) instead of the caller's objects.
+  The reroute warning from `pls1_find_k_optimal`, `pls1_find_k_sequence`
+  and `pls1_fit(k="optimal" | "sequence")` now points at the caller's
+  line.
 - Added (R): the R package `plskit` (`plskit-r/`) with the whole Python
   surface: the same 20 functions, argument names and result fields,
   through the `plskit-bind` layer. Results are classed named lists
@@ -166,7 +225,9 @@ All notable changes to this project will be documented here.
   fixtures (AS241 fix) and added `pls1_confirmatory_split_nb_ci_level80`,
   the first CI fixture off the default level, which pins the level-0.8
   critical value and fails a wrapper that drops `level`.
-  `producing_version` is 0.7.0 and the manifest tolerances record `rtol`.
+  `producing_version` is 0.7.0. The manifest drops the per-case `tolerance`
+  field, which no corpus reader used; the tolerances are in
+  `testdata/README.md` ("Tolerance").
 - Docs: `length_mismatch` is listed as an `invalid_weights` reason; the
   `split_nb` docstrings state the actual auto-gate rule (at most 4 columns,
   `n_eff < 25`, or stable rank < 3);
@@ -183,6 +244,11 @@ All notable changes to this project will be documented here.
 - Fixed: `preprocess` reports `n_eff` exactly `n` for all-equal weights, as
   every fit does (Kish's ratio could round an ulp below `n`).
   `weights_normalized` is still returned.
+- Fixed: `rotate` on a one-column `W` (K = 1) reports `V_converged` for the
+  target the K >= 2 path starts from: `L` if given, else `W`, row-normalized
+  under `kaiser_normalize`. It used to skip the row normalization, so with
+  the default `kaiser_normalize=True` it reported the criterion of the raw
+  column. `W_rot`, `R` and `sweeps` are unchanged.
 - Fixed (Python): an array argument numpy cannot read as real numbers
   (strings, including numeric strings, ragged nested lists, non-numeric
   objects, complex, datetime or structured dtypes) raises
@@ -197,7 +263,8 @@ All notable changes to this project will be documented here.
   order: an F-ordered `X` no longer pays a full copy (about 25 to 40 ms per
   fit at 1e7 entries), and results for different memory layouts of the same
   values agree to rounding (corpus tolerance) rather than bit for bit.
-  `pls1_fit`, `spls1_fit`, `pls1_predict` and `pls1_rotation_stability` can
+  `pls1_fit`, `spls1_fit`, `pls1_predict`, `pls1_rotation_stability` and,
+  without `pre_standardized_X`, `pls3_fit`, `plssvd_fit` and `spls3_fit` can
   differ in the last bits between C and F order; the same array in the same
   layout still gives byte-identical results across runs and thread counts.
   Julia arrays are column-major and now read in place, so Julia
@@ -220,12 +287,12 @@ All notable changes to this project will be documented here.
   still not an error for the PLS3 family: its `k` is not bounded by `n`, so
   the fit truncates.
 - Fixed (numerics): `pls3_fit`, `plssvd_fit` and `spls3_fit` give
-  bit-identical results for every memory layout of `X` and `Y`, also with
-  `pre_standardized_X` / `pre_standardized_Y`. A pre-standardized
-  row-major or negative-stride block used to move the scores in the last
-  bits (up to about 4e-14 for a reversed row order) and could move `k_used`
-  on the truncation floor; such a block is now copied column-major, no
-  more than the copy the standardizing path always makes. Column-major
+  bit-identical results for every memory layout of `Y`, and of an `X`
+  passed with `pre_standardized_X`, also with `pre_standardized_Y`. A
+  pre-standardized row-major or negative-stride block used to move the
+  scores in the last bits (up to about 4e-14 for a reversed row order) and
+  could move `k_used` on the truncation floor; such a block is now copied
+  column-major. Column-major pre-standardized
   results are unchanged to the bit. In Python, a default C-ordered `X` with
   `pre_standardized_X=True` now gives the same bits as its F-ordered copy.
 - Changed (R, plskit-bind): bool data is read as 1/0 in every numeric

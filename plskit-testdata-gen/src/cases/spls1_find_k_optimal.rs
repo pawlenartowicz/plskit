@@ -4,13 +4,12 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::cases::pls1_find_k_optimal::write_btreemap;
+use crate::cases::pls1_find_k_optimal::write_find_k_optimal;
 use crate::cases::{
-    case_files, default_tolerance, ensure_moved, faer_col_to_array, scalar_i64, synth_data,
-    weighted_n80_d6, Xyw, WEIGHTED_N80_D6_INPUTS,
+    case_files, ensure_moved, synth_data, weighted_n80_d6, Xyw, WEIGHTED_N80_D6_INPUTS,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
+use crate::npz::sha256_of_file;
 use plskit::{spls1_find_k_optimal, FindKOptimalOpts, FindKOptimalOutput, Selector};
 
 /// Shared synth parameters (mirrors dense `pls1_find_k_optimal` cases).
@@ -105,28 +104,7 @@ fn optimal_on(
     let r = r2_se_keep3_call(data)?;
     check(&r)?;
 
-    {
-        let mut w = NpzWriter::create(&abs_outputs)?;
-        w.add_i64("k_star", &scalar_i64(i64::try_from(r.k_star)?))?;
-        w.add_string("selector", &r.selector)?;
-        if let Some(m) = &r.cv_scores {
-            write_btreemap(&mut w, "cv_scores__keys", "cv_scores__values", m)?;
-        }
-        if let Some(m) = &r.cv_scores_se {
-            write_btreemap(&mut w, "cv_scores_se__keys", "cv_scores_se__values", m)?;
-        }
-        if let Some(m) = &r.bic_scores {
-            write_btreemap(&mut w, "bic_scores__keys", "bic_scores__values", m)?;
-        }
-        if let Some(ref col) = r.pvalues {
-            w.add_f64("pvalues", &faer_col_to_array(col))?;
-        }
-        if let Some(ref s) = r.diagnostic {
-            w.add_string("diagnostic", s)?;
-        }
-        w.add_i64("seed", &scalar_i64(i64::try_from(r.seed)?))?;
-        w.finish()?;
-    }
+    write_find_k_optimal(&abs_outputs, &r)?;
 
     let mut kwargs = serde_json::json!({
         "k_max": K_MAX,
@@ -148,6 +126,5 @@ fn optimal_on(
             inputs_sha256: sha256_of_file(&abs_inputs)?,
             outputs_sha256: sha256_of_file(&abs_outputs)?,
         },
-        tolerance: Some(default_tolerance()),
     })
 }

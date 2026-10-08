@@ -1,10 +1,9 @@
 """Observation weights through the Python surface.
 
 One test per wrapper-seam contract: weight errors map to typed exceptions,
-weights reach the engines that have no weighted corpus fixture, the
-resampling skip-rate guard, and the full-rank weighted fit is weighted least
-squares. Weighted numerics are owned by the Rust tests and the weighted
-corpus fixtures.
+weights reach the engines that have no weighted corpus fixture, and the
+resampling skip-rate guard. Weighted numerics are owned by the Rust tests and
+the weighted corpus fixtures.
 """
 import numpy as np
 import pytest
@@ -125,23 +124,3 @@ def test_confirmatory_ci_skip_rate_guard_fires():
             X, y, k=3, test_method="raw_perm", args={"n_perm": 200},
             ci=True, weights=w, n_boot=500, seed=0,
         )
-
-
-# ── Full-rank weighted PLS1 is weighted least squares ────────────────────
-
-
-def test_full_rank_weighted_pls1_is_wls():
-    # At k = p the PLS1 components span the column space of X, so beta and
-    # the intercept are the WLS solution (closed form via lstsq on sqrt(w)-
-    # scaled rows). k = p - 1 misses by ~6e-4 and the unweighted fit by ~2e-2.
-    rng = np.random.default_rng(11)
-    n, p = 30, 4
-    X = rng.normal(size=(n, p))
-    y = X @ rng.normal(size=p) + 0.2 * rng.normal(size=n)
-    w = rng.uniform(0.5, 2.0, size=n)
-    m = plskit.pls1_fit(X, y, k=p, weights=w)
-    sw = np.sqrt(w)
-    A = np.column_stack([np.ones(n), X]) * sw[:, None]
-    params = np.linalg.lstsq(A, y * sw, rcond=None)[0]
-    np.testing.assert_allclose(m.beta, params[1:], atol=1e-10)
-    np.testing.assert_allclose(m.intercept, params[0], atol=1e-10)

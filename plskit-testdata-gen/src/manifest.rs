@@ -32,9 +32,6 @@ pub struct Case {
     pub kwargs: serde_json::Value,
     /// SHA-256 content hashes of the input and output files.
     pub hashes: Hashes,
-    /// Optional per-case numerical tolerances (absolute/relative).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tolerance: Option<serde_json::Value>,
 }
 
 /// SHA-256 content hashes for a case's input and output files.

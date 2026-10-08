@@ -1,5 +1,5 @@
 //! The `split_nb` reroute warning, rendered once so every language
-//! prints the sentence `_api.py`'s `_warn_if_rerouted` prints.
+//! prints the same sentence.
 
 use crate::convert::{count, opt};
 use crate::fmt::g4;
@@ -79,8 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn sentence_matches_the_python_warning() {
-        // Rendered by the f-string in `_warn_if_rerouted` (_api.py).
+    fn reroute_message_text() {
         let w = rerouted(
             Some("split_nb"),
             Some("split_exact"),

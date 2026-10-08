@@ -91,10 +91,9 @@ pub(crate) const DUAL_ROUTE_MAX_N_TR: usize = 4000;
 /// tuned threshold.
 #[allow(clippy::many_single_char_names)]
 pub(crate) fn use_dual_route(n_tr: usize, p: usize, n_replicates: usize, q: usize) -> bool {
-    if n_tr == 0 || p == 0 || n_replicates == 0 || q == 0 {
-        return false;
-    }
-    if n_tr > DUAL_ROUTE_MAX_N_TR {
+    // `n_tr = 0` would satisfy the rule below for any positive `p` and
+    // `B·q`. A zero `p`, `n_replicates` or `q` fails it on its own.
+    if n_tr == 0 || n_tr > DUAL_ROUTE_MAX_N_TR {
         return false;
     }
     let bq = n_replicates.saturating_mul(q);
@@ -247,20 +246,28 @@ pub(crate) const SCORE_BAND: f64 = 1e-3;
 /// - `y_mat`: `(n, n_cols)` raw outcomes; column 0 is the observed `y`
 /// - returns: `(n_cols,)` pooled CV R², one per column
 ///
+/// # Errors
+/// `NonFiniteInput` when a fold's standardized training y of column 0 is
+/// not finite (a finite y near `±f64::MAX` can overflow in `y − mean`). A
+/// null column that fails the same way is NaN instead, as in
+/// `signal_test::pooled_cv_r2_columns` (change together).
+///
 /// # Panics
 /// Never (all indexing is over caller-supplied fold index vectors).
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
+#[allow(clippy::too_many_lines)]
 pub(crate) fn pls1_cv_r2_columns(
     x: MatRef<'_, f64>,
     y_mat: MatRef<'_, f64>,
     folds: &[Vec<usize>],
-) -> Vec<f64> {
+) -> crate::error::PlsKitResult<Vec<f64>> {
     use crate::linalg::{standardize1, standardize_apply_rows, standardize_rows};
 
     let n_cols = y_mat.ncols();
     let mut ss_res = vec![0.0_f64; n_cols];
     let mut ss_tot = vec![0.0_f64; n_cols];
+    let mut failed = vec![false; n_cols];
 
     for (fi, val_idx) in folds.iter().enumerate() {
         let train_idx: Vec<usize> = folds
@@ -297,9 +304,17 @@ pub(crate) fn pls1_cv_r2_columns(
             ((2 * p + 3 * n_tr) as f64) * f64::EPSILON * fro2 * fro2,
         );
 
-        let per_col = |col: usize| -> (f64, f64) {
+        let per_col = |col: usize| -> Option<crate::error::PlsKitResult<(f64, f64)>> {
+            if failed[col] {
+                return None;
+            }
             let y_tr = Col::<f64>::from_fn(n_tr, |i| y_mat[(train_idx[i], col)]);
             let (z, y_mean, y_scale) = standardize1(y_tr.as_ref());
+            // The primal fold fit's y-side check (`check_fit_y_and_k` in
+            // `signal_test::cv_fold_contribution`; change together).
+            if let Err(e) = crate::fit::check_finite_col(z.as_ref()) {
+                return Some(Err(e));
+            }
             let z_norm = z.norm_l2();
 
             // Seq inside the per-column worker: outer Rayon owns the pool.
@@ -357,33 +372,42 @@ pub(crate) fn pls1_cv_r2_columns(
             let mean_val: f64 = (0..n_val).map(|i| ys_val[i]).sum::<f64>() / n_val as f64;
             let res: f64 = (0..n_val).map(|i| (y_pred[i] - ys_val[i]).powi(2)).sum();
             let tot: f64 = (0..n_val).map(|i| (ys_val[i] - mean_val).powi(2)).sum();
-            (res, tot)
+            Some(Ok((res, tot)))
         };
 
         // `collect` preserves column order, so the result does not depend
         // on which worker runs which column (same shape as
         // split_perm_nr_zbars' per-split dispatch).
-        let contrib: Vec<(f64, f64)> = {
+        let contrib: Vec<Option<crate::error::PlsKitResult<(f64, f64)>>> = {
             use rayon::prelude::*;
             (0..n_cols).into_par_iter().map(per_col).collect()
         };
-        for (col, (res, tot)) in contrib.into_iter().enumerate() {
-            ss_res[col] += res;
-            ss_tot[col] += tot;
+        for (col, r) in contrib.into_iter().enumerate() {
+            match r {
+                None => {}
+                Some(Ok((res, tot))) => {
+                    ss_res[col] += res;
+                    ss_tot[col] += tot;
+                }
+                Some(Err(e)) if col == 0 => return Err(e),
+                Some(Err(_)) => failed[col] = true,
+            }
         }
     }
 
     // Pooled ratio, matching signal_test::pooled_cv_r2_columns's final
     // expression exactly.
-    (0..n_cols)
+    Ok((0..n_cols)
         .map(|col| {
-            if ss_tot[col] > 0.0 {
+            if failed[col] {
+                f64::NAN
+            } else if ss_tot[col] > 0.0 {
                 1.0 - ss_res[col] / ss_tot[col]
             } else {
                 0.0
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Per-column z̄ for the PLS3 `split_exact` statistic through the Gram

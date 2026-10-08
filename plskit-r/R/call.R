@@ -27,7 +27,8 @@
 # double before conversion, the same way numpy casts bool to float; a
 # scalar flag (kind "bool", e.g. `pre_standardized`, `ci`) is never
 # touched, because R has no way to tell a length-1 data vector from a
-# scalar flag except by looking up the declared kind.
+# scalar flag except by looking up the declared kind. The strings mirror
+# `ParamKind::as_str` in plskit-bind's registry — change together.
 .plskit_numeric_array_kinds <- c("mat", "vec", "vec_or_mat")
 
 # Raise invalid_argument (through the same condition path as every other

@@ -53,15 +53,16 @@ def test_L_and_rotation_args_reach_the_engine():
         ({"rotation_args": {"max_iter": "x"}}, "invalid_args",
          r"args\['max_iter'\] for method='varimax'"),
         ({"rotation_args": {"tol": "x"}}, "invalid_args", "must be a number"),
-        ({"rotation_args": [1]}, "invalid_argument", "rotation_args must be a dict"),
+        ({"rotation_args": [1]}, "invalid_argument",
+         "rotation_args must be a record of named values"),
         ({"n_boot": "x"}, "invalid_argument", "n_boot must be a non-negative whole number"),
         ({"k": -1}, "invalid_argument", "k must be a non-negative whole number"),
         ({"m_rate": "x"}, "invalid_argument", "m_rate must be a number"),
     ],
 )
 def test_unusable_values_raise_coded_errors(kwargs, code, message):
-    """`rotation_args` goes through `rotate()`'s own parser; top-level
-    values through the shared validators. Nothing runs before the error."""
+    """Unusable `rotation_args` and top-level values raise coded errors
+    before anything runs."""
     x, y = _synth()
     kwargs = {"k": 2, **kwargs}
     with pytest.raises(PlsKitError, match=message) as excinfo:

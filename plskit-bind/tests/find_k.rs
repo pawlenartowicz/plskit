@@ -42,7 +42,7 @@ fn r2_se_scores_cover_one_to_k_max() {
 }
 
 #[test]
-fn optimal_args_rules_match_plskit_py() {
+fn optimal_args_rules_reject_with_their_messages() {
     let cases: Vec<(Vec<(&'static str, Value<'static>)>, &str)> = vec![
         (
             vec![

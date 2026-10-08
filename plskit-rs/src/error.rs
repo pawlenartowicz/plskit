@@ -340,4 +340,35 @@ mod tests {
             .into();
         assert!(matches!(pe, PlsKitError::Internal(_)));
     }
+
+    #[test]
+    fn procrustes_non_finite_converts_to_non_finite_input() {
+        let mut a = faer::Mat::<f64>::from_fn(6, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        a[(3, 1)] = f64::NAN;
+        let r = faer::Mat::<f64>::from_fn(6, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let pe: PlsKitError = procrustes::orthogonal(a.as_ref(), r.as_ref(), true)
+            .unwrap_err()
+            .into();
+        assert!(matches!(pe, PlsKitError::NonFiniteInput), "{pe:?}");
+    }
+
+    /// The message is all a wrapper's exception carries of this variant's
+    /// fields: both rates with their counts, and the threshold, three
+    /// decimals each.
+    #[test]
+    fn resample_failure_rate_message_reports_both_rates() {
+        let e = PlsKitError::ResampleFailureRateExceeded {
+            max_failure_rate: 0.01,
+            observed_worker: 0.0,
+            observed_holdout_corr: 0.5,
+            n_worker_failed: 0,
+            n_holdout_corr_failed: 50,
+            n_boot: 100,
+        };
+        assert_eq!(
+            e.to_string(),
+            "resample failure rate exceeded: observed_holdout_corr=0.500 (= 50/100), \
+             observed_worker=0.000 (= 0/100), max_failure_rate=0.010"
+        );
+    }
 }

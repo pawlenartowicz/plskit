@@ -13,11 +13,9 @@ from typing import Literal
 
 import numpy as np
 
-from plskit import _plskit
+from plskit import _plskit, _results
 from plskit._errors import PlsKitError, PlsKitInvalidWeights, PlsKitResamplingDegenerate
 from plskit._results import (
-    CIScalar,
-    ConfirmatoryCI,
     ConfirmatoryTestResult,
     FindKOptimalResult,
     FindKeepOptimalResult,
@@ -27,35 +25,9 @@ from plskit._results import (
     PLS3Result,
     PLS3Scores,
     PreprocessResult,
-    RotateResult,
-    RotationSpec,
     RotationStabilityResult,
     SplitNbGateResult,
 )
-
-
-def _ciscalar_from_dict(d: dict) -> CIScalar:
-    return CIScalar(
-        point=d["point"], lower=d["lower"], upper=d["upper"], sd=d["sd"],
-    )
-
-
-def _confirmatory_ci_from_dict(d: dict) -> ConfirmatoryCI:
-    return ConfirmatoryCI(
-        n_boot=d["n_boot"], m=d["m"],
-        m_rate=d["m_rate"], level=d["level"],
-        beta_sign_z=np.asarray(d["beta_sign_z"], dtype=np.float64),
-        beta_sign_z_signed=np.asarray(d["beta_sign_z_signed"], dtype=np.float64),
-        leverage_ci_lower=np.asarray(d["leverage_ci_lower"], dtype=np.float64),
-        leverage_ci_upper=np.asarray(d["leverage_ci_upper"], dtype=np.float64),
-        leverage_se=np.asarray(d["leverage_se"], dtype=np.float64),
-        beta_ci_lower=np.asarray(d["beta_ci_lower"], dtype=np.float64),
-        beta_ci_upper=np.asarray(d["beta_ci_upper"], dtype=np.float64),
-        beta_se=np.asarray(d["beta_se"], dtype=np.float64),
-        holdout_corr=_ciscalar_from_dict(d["holdout_corr"]),
-        n_boot_finite=int(d["n_boot_finite"]),
-        n_boot_finite_holdout_corr=int(d["n_boot_finite_holdout_corr"]),
-    )
 
 
 def _convert_errors(fn):
@@ -82,6 +54,7 @@ def _convert_errors(fn):
 
 
 # numpy dtype kinds read as real numbers: bool, signed and unsigned int, float.
+# Mirrors `REAL_KINDS` in the extension's `lib.rs` — change together.
 _REAL_KINDS = "biuf"
 
 
@@ -142,16 +115,6 @@ def _object_to_f64(a: np.ndarray, name: str, what: str) -> np.ndarray:
     return a.astype(np.float64)
 
 
-def _ensure_array(x: np.ndarray, name: str, ndim: int) -> np.ndarray:
-    a = _aligned_f64(x, name, {1: "vector", 2: "matrix"}[ndim])
-    if a.ndim != ndim:
-        raise PlsKitError(
-            f"{name} must be {ndim}-D, got {a.ndim}-D",
-            code="invalid_argument",
-        )
-    return a
-
-
 def _describe(value) -> str:
     """How an error message quotes a rejected value (plskit-bind's
     `describe`): a string as `the string "x"`, so `"7"` and `7` read
@@ -161,208 +124,121 @@ def _describe(value) -> str:
     return repr(value)
 
 
-def _type_phrase(value) -> str:
-    """How a wrong-type error names what it got: `None`, or the type name
-    with its article ("a PLS3Result", "an int", and "an ndarray", which is
-    read letter by letter)."""
-    if value is None:
-        return "None"
-    t = type(value).__name__
-    an = t[:1].lower() in "aeiou" or t == "ndarray"
-    return f"{'an' if an else 'a'} {t}"
+# Parameter kinds by function name, then parameter name, as plskit-bind's
+# registry declares them.
+_KINDS = {
+    f["name"]: {p["name"]: p["kind"] for p in f["params"]}
+    for f in json.loads(_plskit.registry_json())["functions"]
+}
 
-
-def _require_result(value, cls: type, name: str = "model") -> None:
-    """Refuse a `model` argument that is not a `cls` result (a
-    `PLS3Result` passed to `pls1_predict`, say) with
-    `PlsKitError(code="invalid_argument")`, worded as plskit-bind words it,
-    instead of the `AttributeError` reading its fields would raise."""
-    if not isinstance(value, cls):
-        raise PlsKitError(
-            f"{name} must be a {cls.__name__}, got {_type_phrase(value)}",
-            code="invalid_argument",
-        )
-
-
-_INT_MAX = 2**63 - 1  # bind receives an int as i64
-_FLOAT_MAX = 2**53  # F64_EXACT_MAX: largest float exactly representable as an int
-
-
-def _whole(value, name: str) -> int:
-    """`value` as an int. A `bool`, a negative value, a float with a
-    fractional part (this also excludes NaN/inf, whose `is_integer()` is
-    False), or a magnitude outside what plskit-bind accepts is rejected;
-    this mirrors the rule plskit-bind applies for R and Julia. `int()`
-    would truncate 2.7 and accept `True` and `-1`. A 0-d NumPy array
-    (`np.array(3)`) is unwrapped with `.item()` first, then checked by the
-    same rules."""
-    if isinstance(value, np.ndarray) and value.ndim == 0:
-        value = value.item()
-    if isinstance(value, bool):
-        pass
-    elif isinstance(value, (int, np.integer)) and 0 <= value <= _INT_MAX:
-        return int(value)
-    elif (
-        isinstance(value, (float, np.floating))
-        and float(value).is_integer()
-        and 0 <= value <= _FLOAT_MAX
-    ):
-        return int(value)
-    raise PlsKitError(
-        f"{name} must be a non-negative whole number, got {_describe(value)}",
-        code="invalid_argument",
-    )
-
-
-def _whole_or_none(value, name: str) -> int | None:
-    """`_whole` for an optional count (`None` passes through)."""
-    return None if value is None else _whole(value, name)
-
-
-_SEED_MAX = 2**64 - 1  # the engine takes a u64 seed
-
-
-def _seed(value) -> int | None:
-    """`seed` as an int in ``[0, 2^64)``, or None. The same rules as
-    `_whole` otherwise (no bool; a float must be whole and at most 2^53),
-    mirroring plskit-bind's seed rule for R and Julia."""
-    if value is None:
-        return None
-    if isinstance(value, np.ndarray) and value.ndim == 0:
-        value = value.item()
-    if isinstance(value, bool):
-        pass
-    elif isinstance(value, (int, np.integer)) and 0 <= value <= _SEED_MAX:
-        return int(value)
-    elif (
-        isinstance(value, (float, np.floating))
-        and float(value).is_integer()
-        and 0 <= value <= _FLOAT_MAX
-    ):
-        return int(value)
-    raise PlsKitError(
-        f"seed must be a whole number in [0, 2^64), got {_describe(value)}",
-        code="invalid_argument",
-    )
-
-
-def _number_or_none(value, name: str) -> float | None:
-    """An optional float argument: an int or a float (not a bool), or None."""
-    if value is None:
-        return None
-    if isinstance(value, np.ndarray) and value.ndim == 0:
-        value = value.item()
-    if not isinstance(value, bool) and isinstance(
-        value, (int, float, np.integer, np.floating)
-    ):
-        try:
-            return float(value)
-        except OverflowError:  # an int beyond the float range, e.g. 10**400
-            pass
-    raise PlsKitError(
-        f"{name} must be a number, got {_describe(value)}",
-        code="invalid_argument",
-    )
-
-
-def _flag(value, name: str, default: bool = False) -> bool:
-    """A bool argument (Python or NumPy bool; nothing converts). `None`
-    means the default, as a null does in plskit-bind."""
-    if value is None:
-        return default
-    if isinstance(value, (bool, np.bool_)):
-        return bool(value)
-    raise PlsKitError(
-        f"{name} must be a bool, got {_describe(value)}",
-        code="invalid_argument",
-    )
-
-
-def _string(value, name: str, default: str | None = None) -> str:
-    """A string argument such as a method name. `None` means `default`;
-    with no default the argument is required."""
-    if value is None and default is not None:
-        return default
-    if isinstance(value, str):
-        return value
-    raise PlsKitError(
-        f"{name} must be a string, got {_describe(value)}",
-        code="invalid_argument",
-    )
-
-
-def _args_dict(value, name: str) -> dict | None:
-    """A method-args mapping (`args`, `rotation_args`, `find_k_args`) as a
-    plain dict, or None. Its keys and values are checked where the method
-    is known (the extension, or `_validate_find_k_args`)."""
-    if value is None:
-        return None
-    if isinstance(value, Mapping):
-        return dict(value)
-    raise PlsKitError(
-        f"{name} must be a dict of named values, got {_describe(value)}",
-        code="invalid_argument",
-    )
-
-
-_FIND_K_ALLOWED: dict[str, tuple[str, ...]] = {
-    "optimal": ("selector", "diagnostic", "args"),
-    "sequence": ("test_method", "alpha", "args"),
+# Per array parameter kind: what a message calls the value, and the
+# dimensions it may have. The keys, and the `"model"` / `"model_or_mat"`
+# kinds `_call` tests, mirror `ParamKind::as_str` in plskit-bind's registry
+# — change together.
+_ARRAY_KINDS = {
+    "mat": ("matrix", "2-D"),
+    "vec": ("vector", "1-D"),
+    "vec_or_mat": ("array", "1-D or 2-D"),
 }
 
 
-def _validate_find_k_args(fk_args: dict, allowed: tuple[str, ...]) -> None:
-    for key in fk_args:
-        if key not in allowed:
-            raise PlsKitError(
-                f"find_k_args does not accept arg {key!r}; "
-                f"allowed: {list(allowed)}",
-                code="invalid_args",
-            )
+def _array_argument(value, name: str, kind: str) -> np.ndarray:
+    """An array argument of `kind` (a key of `_ARRAY_KINDS`) as the
+    extension takes it: aligned float64, at most 2-D. A 0-D value is refused
+    where a vector fits, because plskit-bind would widen it to a one-element
+    vector."""
+    what, dims = _ARRAY_KINDS[kind]
+    a = _aligned_f64(value, name, what)
+    if a.ndim > 2 or (a.ndim == 0 and kind != "mat"):
+        raise PlsKitError(
+            f"{name} must be {dims}, got {a.ndim}-D", code="invalid_argument"
+        )
+    return a
 
 
-# Permutation budget the split_nb → split_exact reroute spends when the result
-# object carries no n_perm of its own (neither FindKSequenceResult nor
-# FindKOptimalResult has such a field). Read straight off the engine constant
-# (SPLIT_NB_REROUTE_N_PERM in plskit-rs/src/signal_test.rs, which every Rust
-# reroute site reads) instead of keeping a copy here that could drift.
-_REROUTE_FALLBACK_N_PERM = _plskit.SPLIT_NB_REROUTE_N_PERM
-
-
-def _warn_if_rerouted(
-    requested, actual, *, n_perm, stable_rank=None, n_eff=None,
-):
-    """Tell the caller when the split_nb auto-gate sent the run elsewhere.
-
-    Only an explicit ``split_nb`` request warns; ``"auto"`` choosing
-    ``split_exact`` is the ordinary outcome of that request. Mirrors
-    ``rerouted`` in ``plskit-bind/src/warn.rs`` — change together.
-
-    The gate rule lives in Rust and only there — this reports the values the
-    engine already returned (which condition fired is read off them), never
-    the thresholds and never a recomputed stable rank.
-
-    ``stacklevel=4`` lands on user code: warn → this helper → the public API
-    function → its ``_convert_errors`` wrapper → the caller.
-    """
-    # A caller that requested nothing (`diagnostic=None`) gets nothing back
-    # (`result.diagnostic is None`), so the equality test covers that case too.
-    if requested == actual or requested == "auto":
-        return
-    saw = []
-    if stable_rank is not None:
-        saw.append(f"stable rank of the standardized X = {stable_rank:.4g}")
-    if n_eff is not None:
-        saw.append(f"n_eff = {n_eff:.4g}")
-    seen = f" ({'; '.join(saw)})" if saw else ""
-    override = f" Pass args={{'force': True}} to run {requested} anyway."
-    warnings.warn(
-        f"{requested!r} was rerouted to {actual!r}: the {requested} auto-gate "
-        f"flagged this design{seen}. The fallback runs n_perm={n_perm} "
-        f"permutations, so it costs more than {requested}.{override}",
-        UserWarning,
-        stacklevel=4,
+def _is_record(value) -> bool:
+    """Whether `value` is a model in one of its two forms: a result
+    dataclass instance, or a mapping of a result's fields."""
+    return isinstance(value, Mapping) or (
+        dataclasses.is_dataclass(value) and not isinstance(value, type)
     )
+
+
+# How deep `_aligned_model` converts; anything deeper goes to the extension
+# as it is. Mirrors `MAX_DEPTH` in the extension's `lib.rs`, which refuses
+# anything deeper — change together.
+_MAX_DEPTH = 32
+
+
+def _aligned_model(value, path: str = "model", depth: int = 0):
+    """A model argument with every array of one or more dimensions in it,
+    nested results included, passed through `_aligned_f64`. The caller's
+    object is left as it is: a result dataclass is rebuilt with
+    `dataclasses.replace`, which keeps its class (the extension tags the
+    record with the class name), and a mapping becomes a new dict. Anything
+    else is returned as it is, for the extension to read or refuse: a 0-D
+    array (a scalar field, read as its item), a dataclass that is not one of
+    plskit's result classes, and anything nested deeper than `_MAX_DEPTH`."""
+    if isinstance(value, np.ndarray):
+        return _aligned_f64(value, path) if value.ndim else value
+    if depth > _MAX_DEPTH:
+        return value
+    if isinstance(value, Mapping):
+        return {
+            k: _aligned_model(v, f"{path}.{k}", depth + 1)
+            for k, v in value.items()
+        }
+    if getattr(_results, type(value).__name__, None) is type(value):
+        return dataclasses.replace(value, **{
+            f.name: _aligned_model(
+                getattr(value, f.name), f"{path}.{f.name}", depth + 1
+            )
+            for f in dataclasses.fields(value)
+        })
+    return value
+
+
+def _make_result(type_name: str, fields: dict):
+    """The result class `type_name` built from the fields the extension
+    returns. The extension hands over `PLS3Result.converged` and `n_iter` as
+    lists and `RotationSpec.args` as a dict; they become a bool array, an
+    int64 array and a read-only mapping."""
+    if type_name == "PLS3Result":
+        if fields["converged"] is not None:
+            fields["converged"] = np.asarray(fields["converged"], dtype=bool)
+        if fields["n_iter"] is not None:
+            fields["n_iter"] = np.asarray(fields["n_iter"], dtype=np.int64)
+    elif type_name == "RotationSpec":
+        fields["args"] = MappingProxyType(fields["args"])
+    return getattr(_results, type_name)(**fields)
+
+
+def _call(name: str, **arguments):
+    """Run the public function `name` in plskit-bind and return its result.
+
+    `arguments` are the function's parameters by name. plskit-bind
+    validates them; here array-likes are read with numpy first, because the
+    extension takes only aligned arrays of a real dtype and at most two
+    dimensions.
+
+    `stacklevel=4` lands a warning on user code: warn, this helper, the
+    public function, its `_convert_errors` wrapper, the caller.
+    """
+    kinds = _KINDS[name]
+    for key, value in arguments.items():
+        kind = kinds[key]
+        if value is None:
+            continue
+        if kind in ("model", "model_or_mat") and _is_record(value):
+            arguments[key] = _aligned_model(value)
+        elif kind == "model_or_mat":
+            arguments[key] = _array_argument(value, key, "mat")
+        elif kind in _ARRAY_KINDS:
+            arguments[key] = _array_argument(value, key, kind)
+    result, emitted = _plskit.call(name, arguments, _make_result)
+    for warning in emitted:
+        warnings.warn(warning["message"], UserWarning, stacklevel=4)
+    return result
 
 
 @_convert_errors
@@ -376,25 +252,7 @@ def preprocess(
     All arguments optional; only the fields matching passed inputs are populated.
     See _docs/concepts/preprocessing.md for the recipe and the cache pattern.
     """
-    if X is not None:
-        X = _ensure_array(X, "X", 2)
-    if Y is not None:
-        Y = _aligned_f64(Y, "Y")
-        if Y.ndim not in (1, 2):
-            raise PlsKitError("Y must be 1-D or 2-D", code="invalid_argument")
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    raw = _plskit.preprocess(x=X, y=Y, weights=weights)
-    return PreprocessResult(
-        X_std=raw["X_std"],
-        X_mean=raw["X_mean"],
-        X_scale=raw["X_scale"],
-        Y_std=raw["Y_std"],
-        Y_mean=raw["Y_mean"],
-        Y_scale=raw["Y_scale"],
-        weights_normalized=raw["weights_normalized"],
-        n_eff=raw["n_eff"],
-    )
+    return _call("preprocess", X=X, Y=Y, weights=weights)
 
 
 @_convert_errors
@@ -448,105 +306,13 @@ def pls1_fit(
     -------
     PLS1Result
     """
-    seed = _seed(seed)
-    pre_standardized = _flag(pre_standardized, "pre_standardized")
-    find_k_args = _args_dict(find_k_args, "find_k_args")
-    X = _ensure_array(X, "X", 2)
-    y = _ensure_array(y, "y", 1)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    _sel = None
-    if isinstance(k, str):
-        if k_max is None:
-            raise PlsKitError(
-                f"k={k!r} requires k_max",
-                code="invalid_argument",
-            )
-        fk_args = dict(find_k_args or {})
-        # `for_fit=True` hands the "no K to fit" decision to the engine
-        # (`k_to_fit` on the selection result), which raises
-        # `optimal_no_component` / `sequence_no_rejection` itself.
-        if k == "optimal":
-            _validate_find_k_args(fk_args, _FIND_K_ALLOWED["optimal"])
-            _sel = _pls1_find_k_optimal(
-                X, y, k_max,
-                pre_standardized=pre_standardized,
-                seed=seed,
-                weights=weights,
-                for_fit=True,
-                **fk_args,
-            )
-            k_int = _sel.k_star
-        elif k == "sequence":
-            _validate_find_k_args(fk_args, _FIND_K_ALLOWED["sequence"])
-            _sel = _pls1_find_k_sequence(
-                X, y, k_max,
-                pre_standardized=pre_standardized,
-                seed=seed,
-                weights=weights,
-                for_fit=True,
-                **fk_args,
-            )
-            k_int = _sel.k_star
-        else:
-            raise PlsKitError(
-                f"unknown k mode {k!r}; use int, 'optimal', or 'sequence'",
-                code="invalid_argument",
-            )
-    else:
-        if k_max is not None or find_k_args is not None:
-            raise PlsKitError(
-                "k_max and find_k_args apply only when k is 'optimal' or 'sequence'",
-                code="invalid_argument",
-            )
-        k_int = _whole(1 if k is None else k, "k")
-    raw = _plskit.pls1_fit(
-        X, y, k_int,
-        pre_standardized=pre_standardized,
-        weights=weights,
-    )
-    return PLS1Result(**raw, selection_result=_sel)
+    return _call("pls1_fit", X=X, y=y, k=k, k_max=k_max, find_k_args=find_k_args,
+                 pre_standardized=pre_standardized, seed=seed, weights=weights)
 
 
 @_convert_errors
 def pls1_predict(model: PLS1Result, X_new: np.ndarray) -> np.ndarray:
-    _require_result(model, PLS1Result)
-    X_new = _ensure_array(X_new, "X_new", 2)
-    model_dict = {
-        "T": _aligned_f64(model.T, "model.T"),
-        "P": _aligned_f64(model.P, "model.P"),
-        "W": _aligned_f64(model.W, "model.W"),
-        "Q": _aligned_f64(model.Q, "model.Q"),
-        "coef": _aligned_f64(model.coef, "model.coef"),
-        "beta": _aligned_f64(model.beta, "model.beta"),
-        "intercept": float(model.intercept),
-        "k_used": int(model.k_used),
-        "keep": (int(model.keep) if model.keep is not None else None),
-        "pre_standardized": bool(model.pre_standardized),
-        "weights": (_aligned_f64(model.weights, "model.weights") if model.weights is not None else None),
-        "n_eff": float(model.n_eff),
-    }
-    return _plskit.pls1_predict(model_dict, X_new)
-
-
-def _ensure_2d_Y(Y: np.ndarray) -> np.ndarray:
-    """PLS3 takes a Y matrix. A 1-D Y is a PLS1 problem, so say that.
-
-    Thin wrapper over `_ensure_array` — the shape check and the error code
-    are already there; the only thing added is the pls1_fit hint, worth a
-    sentence because a 1-D Y is the mistake this family invites. Scoped to
-    genuinely 1-D input: a 3-D array isn't a PLS1 problem either, and the
-    hint is nonsense there.
-    """
-    try:
-        return _ensure_array(Y, "Y", 2)
-    except PlsKitError as exc:
-        if np.ndim(Y) == 1:
-            raise PlsKitError(
-                f"{exc}. A single-column outcome is a PLS1 problem — use pls1_fit.",
-                code="invalid_argument",
-            ) from exc
-        raise
+    return _call("pls1_predict", model=model, X_new=X_new)
 
 
 @_convert_errors
@@ -586,19 +352,8 @@ def pls3_fit(
     -------
     PLS3Result
     """
-    pre_standardized_X = _flag(pre_standardized_X, "pre_standardized_X")
-    pre_standardized_Y = _flag(pre_standardized_Y, "pre_standardized_Y")
-    X = _ensure_array(X, "X", 2)
-    Y = _ensure_2d_Y(Y)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    raw = _plskit.pls3_fit(
-        X, Y, _whole(1 if k is None else k, "k"),
-        pre_standardized_X=pre_standardized_X,
-        pre_standardized_Y=pre_standardized_Y,
-        weights=weights,
-    )
-    return PLS3Result(**raw)
+    return _call("pls3_fit", X=X, Y=Y, k=k, pre_standardized_X=pre_standardized_X,
+                 pre_standardized_Y=pre_standardized_Y, weights=weights)
 
 
 @_convert_errors
@@ -612,12 +367,8 @@ def plssvd_fit(
     weights: np.ndarray | None = None,
 ) -> PLS3Result:
     """Alias for :func:`pls3_fit` under the SVD-PLS name. Same function."""
-    return pls3_fit(
-        X, Y, k,
-        pre_standardized_X=pre_standardized_X,
-        pre_standardized_Y=pre_standardized_Y,
-        weights=weights,
-    )
+    return _call("plssvd_fit", X=X, Y=Y, k=k, pre_standardized_X=pre_standardized_X,
+                 pre_standardized_Y=pre_standardized_Y, weights=weights)
 
 
 @_convert_errors
@@ -686,21 +437,10 @@ def spls3_fit(
     refuses a ``PLS3Result`` outright (it takes a ``PLS1Result`` or an
     ``np.ndarray``), so there is no model overload to guard.
     """
-    pre_standardized_X = _flag(pre_standardized_X, "pre_standardized_X")
-    pre_standardized_Y = _flag(pre_standardized_Y, "pre_standardized_Y")
-    X = _ensure_array(X, "X", 2)
-    Y = _ensure_2d_Y(Y)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    raw = _plskit.spls3_fit(
-        X, Y, _whole(k, "k"), _whole(keep_X, "keep_X"), _whole(keep_Y, "keep_Y"),
-        pre_standardized_X=pre_standardized_X,
-        pre_standardized_Y=pre_standardized_Y,
-        max_iter=_whole_or_none(max_iter, "max_iter"),
-        tol=_number_or_none(tol, "tol"),
-        weights=weights,
-    )
-    return PLS3Result(**raw)
+    return _call("spls3_fit", X=X, Y=Y, k=k, keep_X=keep_X, keep_Y=keep_Y,
+                 pre_standardized_X=pre_standardized_X,
+                 pre_standardized_Y=pre_standardized_Y, max_iter=max_iter, tol=tol,
+                 weights=weights)
 
 
 @_convert_errors
@@ -729,28 +469,7 @@ def pls3_transform(
     -------
     PLS3Scores
     """
-    _require_result(model, PLS3Result)
-    model_dict = {
-        "U": _aligned_f64(model.U, "model.U"),
-        "V": _aligned_f64(model.V, "model.V"),
-        "singular_values": _aligned_f64(model.singular_values, "model.singular_values"),
-        "x_scores": _aligned_f64(model.x_scores, "model.x_scores"),
-        "y_scores": _aligned_f64(model.y_scores, "model.y_scores"),
-        "X_mean": _aligned_f64(model.X_mean, "model.X_mean"),
-        "X_scale": _aligned_f64(model.X_scale, "model.X_scale"),
-        "Y_mean": _aligned_f64(model.Y_mean, "model.Y_mean"),
-        "Y_scale": _aligned_f64(model.Y_scale, "model.Y_scale"),
-        "k_used": int(model.k_used),
-        "pre_standardized_X": bool(model.pre_standardized_X),
-        "pre_standardized_Y": bool(model.pre_standardized_Y),
-    }
-    if X_new is not None:
-        X_new = _ensure_array(X_new, "X_new", 2)
-    if Y_new is not None:
-        Y_new = _ensure_array(Y_new, "Y_new", 2)
-    which = _string(which, "which", "both")
-    raw = _plskit.pls3_transform(model_dict, X_new, Y_new, which=which)
-    return PLS3Scores(x_scores=raw["x_scores"], y_scores=raw["y_scores"])
+    return _call("pls3_transform", model=model, X_new=X_new, Y_new=Y_new, which=which)
 
 
 @_convert_errors
@@ -762,7 +481,7 @@ def plssvd_transform(
     which: Literal["x_scores", "y_scores", "both"] = "both",
 ) -> PLS3Scores:
     """Alias for :func:`pls3_transform` under the SVD-PLS name."""
-    return pls3_transform(model, X_new, Y_new, which=which)
+    return _call("plssvd_transform", model=model, X_new=X_new, Y_new=Y_new, which=which)
 
 
 @_convert_errors
@@ -870,30 +589,9 @@ def pls3_confirmatory_test(
         check (p > 4, n_eff ≥ 250); ``None`` otherwise. ``n_perm``
         is ``None`` for ``'split_nb'``, which runs no permutations.
     """
-    test_method = _string(test_method, "test_method", "auto")
-    args = _args_dict(args, "args")
-    pre_standardized_X = _flag(pre_standardized_X, "pre_standardized_X")
-    pre_standardized_Y = _flag(pre_standardized_Y, "pre_standardized_Y")
-    verbose = _flag(verbose, "verbose")
-    X = _ensure_array(X, "X", 2)
-    Y = _ensure_2d_Y(Y)
-    raw = _plskit.pls3_confirmatory_test_raw(
-        X, Y, _whole(1 if k is None else k, "k"),
-        test_method=test_method, args=args,
-        pre_standardized_X=pre_standardized_X,
-        pre_standardized_Y=pre_standardized_Y,
-        seed=_seed(seed),
-        verbose=verbose,
-    )
-    raw.pop("ci", None)
-    result = ConfirmatoryTestResult(ci=None, **raw)
-    _warn_if_rerouted(
-        test_method, result.test_method,
-        n_perm=result.n_perm,
-        stable_rank=result.stable_rank,
-        n_eff=result.n_eff,
-    )
-    return result
+    return _call("pls3_confirmatory_test", X=X, Y=Y, k=k, test_method=test_method,
+                 args=args, pre_standardized_X=pre_standardized_X,
+                 pre_standardized_Y=pre_standardized_Y, seed=seed, verbose=verbose)
 
 
 @_convert_errors
@@ -997,39 +695,11 @@ def pls1_confirmatory_test(
     seed : int | None
         RNG seed.
     """
-    test_method = _string(test_method, "test_method", "auto")
-    args = _args_dict(args, "args")
-    ci = _flag(ci, "ci")
-    pre_standardized = _flag(pre_standardized, "pre_standardized")
-    verbose = _flag(verbose, "verbose")
-    X = _ensure_array(X, "X", 2)
-    y = _ensure_array(y, "y", 1)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    raw = _plskit.pls1_confirmatory_test_raw(
-        X, y, _whole(1 if k is None else k, "k"),
-        test_method=test_method, args=args,
-        ci=ci,
-        n_boot=_whole_or_none(n_boot, "n_boot"),
-        m_rate=_number_or_none(m_rate, "m_rate"),
-        level=_number_or_none(level, "level"),
-        max_failure_rate=_number_or_none(max_failure_rate, "max_failure_rate"),
-        pre_standardized=pre_standardized,
-        seed=_seed(seed),
-        verbose=verbose,
-        weights=weights,
-        max_skip_rate=_number_or_none(max_skip_rate, "max_skip_rate"),
-    )
-    ci_dict = raw.pop("ci", None)
-    ci_obj = _confirmatory_ci_from_dict(ci_dict) if ci_dict is not None else None
-    result = ConfirmatoryTestResult(ci=ci_obj, **raw)
-    _warn_if_rerouted(
-        test_method, result.test_method,
-        n_perm=result.n_perm,
-        stable_rank=result.stable_rank,
-        n_eff=result.n_eff,
-    )
-    return result
+    return _call("pls1_confirmatory_test", X=X, y=y, k=k, test_method=test_method,
+                 args=args, ci=ci, n_boot=n_boot, m_rate=m_rate, level=level,
+                 max_failure_rate=max_failure_rate, pre_standardized=pre_standardized,
+                 seed=seed, verbose=verbose, weights=weights,
+                 max_skip_rate=max_skip_rate)
 
 
 @_convert_errors
@@ -1059,10 +729,7 @@ def split_nb_gate(
     -------
     SplitNbGateResult
     """
-    X = _ensure_array(X, "X", 2)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    return SplitNbGateResult(**_plskit.split_nb_gate(X, weights=weights))
+    return _call("split_nb_gate", X=X, weights=weights)
 
 
 @_convert_errors
@@ -1118,55 +785,9 @@ def pls1_find_k_optimal(
     -------
     FindKOptimalResult
     """
-    return _pls1_find_k_optimal(
-        X, y, k_max,
-        selector=selector,
-        diagnostic=diagnostic,
-        args=args,
-        pre_standardized=pre_standardized,
-        seed=seed,
-        verbose=verbose,
-        weights=weights,
-        for_fit=False,
-    )
-
-
-def _pls1_find_k_optimal(
-    X, y, k_max, *, selector="r2_se", diagnostic=None, args=None,
-    pre_standardized=False, seed=None,
-    verbose=False, weights=None, for_fit,
-) -> FindKOptimalResult:
-    """Body of `pls1_find_k_optimal`; `for_fit=True` is `pls1_fit(k="optimal")`."""
-    selector = _string(selector, "selector", "r2_se")
-    diagnostic = None if diagnostic is None else _string(diagnostic, "diagnostic")
-    args = _args_dict(args, "args")
-    pre_standardized = _flag(pre_standardized, "pre_standardized")
-    verbose = _flag(verbose, "verbose")
-    X = _ensure_array(X, "X", 2)
-    y = _ensure_array(y, "y", 1)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    raw = _plskit.pls1_find_k_optimal(
-        X, y, _whole(k_max, "k_max"),
-        selector=selector,
-        diagnostic=diagnostic,
-        args=args,
-        pre_standardized=pre_standardized,
-        seed=_seed(seed),
-        verbose=verbose,
-        weights=weights,
-        for_fit=for_fit,
-    )
-    result = FindKOptimalResult(**raw)
-    # The diagnostic runs through the same hoisted sequence gate, so it can be
-    # rerouted the same way.
-    _warn_if_rerouted(
-        diagnostic, result.diagnostic,
-        n_perm=_REROUTE_FALLBACK_N_PERM,
-        stable_rank=result.stable_rank,
-        n_eff=result.n_eff,
-    )
-    return result
+    return _call("pls1_find_k_optimal", X=X, y=y, k_max=k_max, selector=selector,
+                 diagnostic=diagnostic, args=args, pre_standardized=pre_standardized,
+                 seed=seed, verbose=verbose, weights=weights)
 
 
 @_convert_errors
@@ -1233,52 +854,9 @@ def pls1_find_k_sequence(
     -------
     FindKSequenceResult
     """
-    return _pls1_find_k_sequence(
-        X, y, k_max,
-        test_method=test_method,
-        alpha=alpha,
-        args=args,
-        pre_standardized=pre_standardized,
-        seed=seed,
-        verbose=verbose,
-        weights=weights,
-        for_fit=False,
-    )
-
-
-def _pls1_find_k_sequence(
-    X, y, k_max, *, test_method="auto", alpha=None, args=None,
-    pre_standardized=False, seed=None,
-    verbose=False, weights=None, for_fit,
-) -> FindKSequenceResult:
-    """Body of `pls1_find_k_sequence`; `for_fit=True` is `pls1_fit(k="sequence")`."""
-    test_method = _string(test_method, "test_method", "auto")
-    args = _args_dict(args, "args")
-    pre_standardized = _flag(pre_standardized, "pre_standardized")
-    verbose = _flag(verbose, "verbose")
-    X = _ensure_array(X, "X", 2)
-    y = _ensure_array(y, "y", 1)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    raw = _plskit.pls1_find_k_sequence(
-        X, y, _whole(k_max, "k_max"),
-        test_method=test_method,
-        alpha=_number_or_none(alpha, "alpha"),
-        args=args,
-        pre_standardized=pre_standardized,
-        seed=_seed(seed),
-        verbose=verbose,
-        weights=weights,
-        for_fit=for_fit,
-    )
-    result = FindKSequenceResult(**raw)
-    _warn_if_rerouted(
-        test_method, result.test_method,
-        n_perm=_REROUTE_FALLBACK_N_PERM,
-        stable_rank=result.stable_rank,
-        n_eff=result.n_eff,
-    )
-    return result
+    return _call("pls1_find_k_sequence", X=X, y=y, k_max=k_max, test_method=test_method,
+                 alpha=alpha, args=args, pre_standardized=pre_standardized, seed=seed,
+                 verbose=verbose, weights=weights)
 
 
 @_convert_errors
@@ -1322,17 +900,8 @@ def spls1_fit(
         selected rows. Per-coordinate β CIs are NOT offered under selection
         (post-selection inference); see ``_docs/concepts/sPLS1/keep-and-selection.md``.
     """
-    pre_standardized = _flag(pre_standardized, "pre_standardized")
-    X = _ensure_array(X, "X", 2)
-    y = _ensure_array(y, "y", 1)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    raw = _plskit.spls1_fit(
-        X, y, _whole(k, "k"), _whole(keep, "keep"),
-        pre_standardized=pre_standardized,
-        weights=weights,
-    )
-    return PLS1Result(**raw)
+    return _call("spls1_fit", X=X, y=y, k=k, keep=keep,
+                 pre_standardized=pre_standardized, weights=weights)
 
 
 @_convert_errors
@@ -1369,20 +938,8 @@ def spls1_find_keep_optimal(
     -------
     FindKeepOptimalResult
     """
-    args = _args_dict(args, "args")
-    verbose = _flag(verbose, "verbose")
-    X = _ensure_array(X, "X", 2)
-    y = _ensure_array(y, "y", 1)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    raw = _plskit.spls1_find_keep_optimal(
-        X, y, _whole(k, "k"),
-        args=args,
-        seed=_seed(seed),
-        verbose=verbose,
-        weights=weights,
-    )
-    return FindKeepOptimalResult(**raw)
+    return _call("spls1_find_keep_optimal", X=X, y=y, k=k, args=args, seed=seed,
+                 verbose=verbose, weights=weights)
 
 
 @_convert_errors
@@ -1405,34 +962,10 @@ def spls1_find_k_optimal(
     keep-aware sparse BIC) — it under-penalizes added components and biases
     the selected k upward under sparsity. Deliberate v1 simplification.
     """
-    selector = _string(selector, "selector", "r2_se")
-    diagnostic = None if diagnostic is None else _string(diagnostic, "diagnostic")
-    args = _args_dict(args, "args")
-    pre_standardized = _flag(pre_standardized, "pre_standardized")
-    verbose = _flag(verbose, "verbose")
-    X = _ensure_array(X, "X", 2)
-    y = _ensure_array(y, "y", 1)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    raw = _plskit.spls1_find_k_optimal(
-        X, y, _whole(k_max, "k_max"), _whole(keep, "keep"),
-        selector=selector,
-        diagnostic=diagnostic,
-        args=args,
-        pre_standardized=pre_standardized,
-        seed=_seed(seed),
-        verbose=verbose,
-        weights=weights,
-    )
-    result = FindKOptimalResult(**raw)
-    # Same reroute as pls1_find_k_optimal.
-    _warn_if_rerouted(
-        diagnostic, result.diagnostic,
-        n_perm=_REROUTE_FALLBACK_N_PERM,
-        stable_rank=result.stable_rank,
-        n_eff=result.n_eff,
-    )
-    return result
+    return _call("spls1_find_k_optimal", X=X, y=y, k_max=k_max, keep=keep,
+                 selector=selector, diagnostic=diagnostic, args=args,
+                 pre_standardized=pre_standardized, seed=seed, verbose=verbose,
+                 weights=weights)
 
 
 @_convert_errors
@@ -1452,32 +985,10 @@ def spls1_find_k_sequence(
     AND tests the sparse marginal component (coherent sequential test).
     ``keep = n_features`` reproduces the dense function exactly.
     """
-    test_method = _string(test_method, "test_method", "auto")
-    args = _args_dict(args, "args")
-    pre_standardized = _flag(pre_standardized, "pre_standardized")
-    verbose = _flag(verbose, "verbose")
-    X = _ensure_array(X, "X", 2)
-    y = _ensure_array(y, "y", 1)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    raw = _plskit.spls1_find_k_sequence(
-        X, y, _whole(k_max, "k_max"), _whole(keep, "keep"),
-        test_method=test_method,
-        alpha=_number_or_none(alpha, "alpha"),
-        args=args,
-        pre_standardized=pre_standardized,
-        seed=_seed(seed),
-        verbose=verbose,
-        weights=weights,
-    )
-    result = FindKSequenceResult(**raw)
-    _warn_if_rerouted(
-        test_method, result.test_method,
-        n_perm=_REROUTE_FALLBACK_N_PERM,
-        stable_rank=result.stable_rank,
-        n_eff=result.n_eff,
-    )
-    return result
+    return _call("spls1_find_k_sequence", X=X, y=y, k_max=k_max, keep=keep,
+                 test_method=test_method, alpha=alpha, args=args,
+                 pre_standardized=pre_standardized, seed=seed, verbose=verbose,
+                 weights=weights)
 
 
 @_convert_errors
@@ -1488,60 +999,7 @@ def rotate(
     L: np.ndarray | None = None,
     args: dict | None = None,
 ):
-    method = _string(method, "method", "varimax")
-    args = _args_dict(args, "args")
-
-    if isinstance(model_or_W, PLS1Result):
-        if model_or_W.rotation_spec is not None:
-            raise PlsKitError(
-                "model already has a rotation_spec; re-rotation is not supported",
-                code="already_rotated",
-            )
-        return _rotate_model(model_or_W, method, L, args)
-    # Another result (a PLS3Result, say) or None is refused in plskit-bind's
-    # words; anything else is W, read like every other array argument (an
-    # ndarray, a nested list, ...), so a non-array fails as `W` does there.
-    if dataclasses.is_dataclass(model_or_W) and not isinstance(model_or_W, type):
-        _require_result(model_or_W, PLS1Result, "rotate() first arg")
-    if model_or_W is None:
-        raise PlsKitError(
-            "rotate() first arg must be a PLS1Result or a matrix, got None",
-            code="invalid_argument",
-        )
-    return _rotate_array(model_or_W, method, L, args)
-
-
-def _rotate_array(W, method, L, args) -> RotateResult:
-    W = _ensure_array(W, "W", 2)
-    L_was_provided = L is not None
-    L_arr = _ensure_array(L, "L", 2) if L_was_provided else None
-    raw = _plskit.rotate(W, method=method, args=args, l=L_arr)
-    spec = RotationSpec(
-        method=method,
-        # The args the engine resolved (defaults filled, values typed), not
-        # the caller's dict: `{"max_iter": None}` records 50, `30.0` records 30.
-        args=MappingProxyType(raw["args"]),
-        R=raw["r"],
-        sweeps=raw["sweeps"],
-        V_converged=raw["v_converged"],
-        L_was_provided=L_was_provided,
-    )
-    return RotateResult(W_rot=raw["w_rot"], spec=spec)
-
-
-def _rotate_model(model: PLS1Result, method, L, args) -> PLS1Result:
-    rot = _rotate_array(model.W, method, L, args)
-    R = rot.spec.R
-    # replace() carries every field rotation doesn't touch (e.g. keep,
-    # selection_result) so sparse/optimal-k models don't silently lose them
-    return dataclasses.replace(
-        model,
-        T=model.T @ R,
-        P=model.P @ R,
-        W=rot.W_rot,
-        Q=R.T @ model.Q,
-        rotation_spec=rot.spec,
-    )
+    return _call("rotate", model_or_W=model_or_W, method=method, L=L, args=args)
 
 
 @_convert_errors
@@ -1595,45 +1053,11 @@ def pls1_rotation_stability(
         degeneracy) before raising ``PlsKitResamplingDegenerate``. ``None``
         uses the engine default, 0.01.
     """
-    rotation_method = _string(rotation_method, "rotation_method", "varimax")
-    rotation_args = _args_dict(rotation_args, "rotation_args")
-    pre_standardized = _flag(pre_standardized, "pre_standardized")
-    verbose = _flag(verbose, "verbose")
-    X = _ensure_array(X, "X", 2)
-    y = _ensure_array(y, "y", 1)
-    L_arr = _ensure_array(L, "L", 2) if L is not None else None
-    w_arr = _ensure_array(weights, "weights", 1) if weights is not None else None
-    raw = _plskit.pls1_rotation_stability_raw(
-        X, y, _whole(k, "k"),
-        rotation_method=rotation_method,
-        rotation_args=rotation_args,
-        l=L_arr,
-        n_boot=_whole_or_none(n_boot, "n_boot"),
-        m_rate=_number_or_none(m_rate, "m_rate"),
-        level=_number_or_none(level, "level"),
-        pre_standardized=pre_standardized,
-        seed=_seed(seed),
-        verbose=verbose,
-        weights=w_arr,
-        max_skip_rate=_number_or_none(max_skip_rate, "max_skip_rate"),
-    )
-    return RotationStabilityResult(
-        method=raw["method"],
-        n_boot=raw["n_boot"], m=raw["m"],
-        m_rate=raw["m_rate"], level=raw["level"],
-        seed=raw["seed"],
-        variance_ratio=_ciscalar_from_dict(raw["variance_ratio"]),
-        variance_ratio_per_axis=[
-            _ciscalar_from_dict(d) for d in raw["variance_ratio_per_axis"]
-        ],
-        variance_unrot=raw["variance_unrot"],
-        variance_rot=raw["variance_rot"],
-        variance_unrot_per_axis=raw["variance_unrot_per_axis"],
-        variance_rot_per_axis=raw["variance_rot_per_axis"],
-        degenerate_baseline=raw["degenerate_baseline"],
-        n_boot_finite=raw["n_boot_finite"],
-        n_eff=raw["n_eff"],
-    )
+    return _call("pls1_rotation_stability", X=X, y=y, k=k,
+                 rotation_method=rotation_method, rotation_args=rotation_args, L=L,
+                 n_boot=n_boot, m_rate=m_rate, level=level,
+                 pre_standardized=pre_standardized, seed=seed, verbose=verbose,
+                 weights=weights, max_skip_rate=max_skip_rate)
 
 
 @_convert_errors
@@ -1678,36 +1102,10 @@ def pls1_perm_null(
         Weights are NOT permuted — `w[i]` stays tied to row `i` regardless
         of which `y` value lands there under the permutation.
     """
-    return_perm_matrix = _flag(return_perm_matrix, "return_perm_matrix")
-    pre_standardized = _flag(pre_standardized, "pre_standardized")
-    verbose = _flag(verbose, "verbose")
-    X = _ensure_array(X, "X", 2)
-    y = _ensure_array(y, "y", 1)
-    if weights is not None:
-        weights = _ensure_array(weights, "weights", 1)
-    raw = _plskit.pls1_perm_null_raw(
-        X, y, _whole(k, "k"),
-        n_perm=_whole_or_none(n_perm, "n_perm"),
-        return_perm_matrix=return_perm_matrix,
-        pre_standardized=pre_standardized,
-        seed=_seed(seed),
-        verbose=verbose,
-        weights=weights,
-    )
-    matrix = raw["beta_perm_matrix"]
-    return PermNullResult(
-        n_perm=raw["n_perm"],
-        k=raw["k"],
-        seed=raw["seed"],
-        beta_ref=np.asarray(raw["beta_ref"], dtype=np.float64),
-        beta_perm_mean=np.asarray(raw["beta_perm_mean"], dtype=np.float64),
-        beta_perm_sd=np.asarray(raw["beta_perm_sd"], dtype=np.float64),
-        beta_perm_z=np.asarray(raw["beta_perm_z"], dtype=np.float64),
-        beta_perm_matrix=(
-            np.asarray(matrix, dtype=np.float64) if matrix is not None else None
-        ),
-        n_eff=float(raw["n_eff"]),
-    )
+    return _call("pls1_perm_null", X=X, y=y, k=k, n_perm=n_perm,
+                 return_perm_matrix=return_perm_matrix,
+                 pre_standardized=pre_standardized, seed=seed, verbose=verbose,
+                 weights=weights)
 
 
 __all__ = [
