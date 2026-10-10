@@ -233,7 +233,7 @@ pub(crate) fn rotation_stability_impl(
     )?;
     let w_rot_ref = rot_ref.w_rot;
 
-    // ── Resolve m and parallel-loop ──
+    // ── Resolve m and run the resamples ──
     let m = crate::subsample::resolve_m(n, opts.m_rate);
     // m == n collapses every subsample to the full sample → zero between-resample
     // variance, degenerate baseline flag, and no stability signal. Reject early.
@@ -251,8 +251,17 @@ pub(crate) fn rotation_stability_impl(
     }
 
     let pre_std = opts.pre_standardized;
+    // The resamples run in batches by the memory budget. One resample holds
+    // the m standardized (or gathered) rows of X its fit takes and, when
+    // weighted, their √w-scaled copy written inside the fit.
+    let sub_copy = crate::resample::copy_bytes(m, d);
+    let unit = if w_norm.is_some() {
+        sub_copy.saturating_mul(2)
+    } else {
+        sub_copy
+    };
     let rows: Vec<RotationStabilityWorkerRow> =
-        crate::resample::parallel_for_each_seeded(&mut rng, opts.n_boot, |_, child| {
+        crate::resample::map_units_seeded(&mut rng, opts.n_boot, unit, |_, child| {
             run_one_rotation_stability(
                 x,
                 y,
@@ -375,8 +384,9 @@ fn fit_subsample(
         w_sub_norm.as_ref().map(Col::as_ref),
         FitOpts {
             pre_standardized: true,
-            // Seq inside the per-resample worker — outer Rayon owns the threadpool.
-            par: crate::fit::ParChoice::Seq,
+            // Auto: the fit picks its arm from its shape (`fit::resolve_par`),
+            // so the bits do not depend on the batch or the pool.
+            par: crate::fit::ParChoice::Auto,
             ..FitOpts::default()
         },
     )?;
@@ -1061,5 +1071,44 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code(), "shape_mismatch");
+    }
+
+    /// The diagnostic gives the same bits with its resamples one at a time
+    /// (budget 0) and all in one batch (no limit), unweighted and weighted.
+    /// The paired bootstrap seed comes from the parent generator after the
+    /// loop, so the output also pins the parent's state.
+    #[test]
+    fn rotation_stability_does_not_depend_on_the_budget() {
+        let (x, y) = synth_factor_model(120, 17);
+        let w = crate::test_support::test_weights(120);
+        for weights in [None, Some(w.as_ref())] {
+            let run = |b| {
+                let (r, log) = crate::resample::with_batch_log(|| {
+                    crate::fit::with_budget(b, || {
+                        rotation_stability_impl(
+                            x.as_ref(),
+                            y.as_ref(),
+                            2,
+                            RotationStabilityMethod::Varimax(VarimaxArgs::default()),
+                            None,
+                            weights,
+                            RotationStabilityOpts {
+                                n_boot: 100,
+                                m_rate: 0.7,
+                                seed: Some(23),
+                                max_skip_rate: 1.0,
+                                ..Default::default()
+                            },
+                        )
+                        .unwrap()
+                    })
+                });
+                (format!("{r:?}"), log)
+            };
+            let ((one, log_one), (all, log_all)) = (run(0), run(u64::MAX));
+            assert_eq!(one, all, "weighted={}", weights.is_some());
+            crate::resample::assert_batches(&log_one, 100, 1, 1);
+            crate::resample::assert_batches(&log_all, 100, 100, 1);
+        }
     }
 }

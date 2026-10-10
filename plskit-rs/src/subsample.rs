@@ -330,8 +330,9 @@ fn fit_rows(
         w_sub_norm.as_ref().map(faer::Col::as_ref),
         FitOpts {
             pre_standardized: true,
-            // Seq inside the per-resample worker: outer Rayon owns the threadpool.
-            par: crate::fit::ParChoice::Seq,
+            // Auto: the fit picks its arm from its shape (`fit::resolve_par`),
+            // so the bits do not depend on the batch or the pool.
+            par: crate::fit::ParChoice::Auto,
             ..FitOpts::default()
         },
     )?;
@@ -1617,8 +1618,15 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
     let m = resolve_ci_m(n, k, opts.m_rate)?;
 
     let pre_std = opts.pre_standardized;
+    // The replicates run in batches by the memory budget. One replicate
+    // holds at most two n-row copies of X at once: the bootstrap fit's
+    // standardized rows and, when weighted, their √w-scaled copy (the
+    // subsample fit's copies, of m rows, and the n - m hold-out rows are
+    // smaller and not alive at the same time). The unit counts the two
+    // copies whether weighted or not.
+    let unit = crate::resample::copy_bytes(n, x.ncols()).saturating_mul(2);
     let outcomes: Vec<WorkerOutcome> =
-        crate::resample::parallel_for_each_seeded(rng, opts.n_boot, |_, child| {
+        crate::resample::map_units_seeded(rng, opts.n_boot, unit, |_, child| {
             match run_one_confirmatory(x, y, k, m, pre_std, weights, child) {
                 std::result::Result::Ok(row) => WorkerOutcome::Ok(row),
                 Err(PlsKitError::InvalidWeights {
@@ -1984,5 +1992,60 @@ mod tests_engine {
                 v
             },
         );
+    }
+
+    /// The confirmatory CI gives the same bits with its replicates one at a
+    /// time (budget 0) and all in one batch (no limit), unweighted and
+    /// weighted, and leaves the parent generator in the same state.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn confirmatory_ci_does_not_depend_on_the_budget() {
+        use rand::Rng as _;
+        let (n, k) = (60_usize, 2_usize);
+        let (x, y) = synth(n, 6, 2, 2.0, 11);
+        let w = crate::test_support::test_weights(n);
+        for weights in [None, Some(w.as_ref())] {
+            let (w_norm, _) = crate::fit::validate_and_normalize_weights(weights, n, k).unwrap();
+            let wr = w_norm.as_ref().map(Col::as_ref);
+            let fit = pls1_fit(
+                x.as_ref(),
+                y.as_ref(),
+                KSpec::Fixed(k),
+                wr,
+                FitOpts::default(),
+            )
+            .unwrap();
+            let lev = crate::linalg::leverage_diag(fit.w_star.as_ref());
+            let run = |b| {
+                let (_, mut rng) = resolve_seed(Some(5)).unwrap();
+                let (ci, log) = crate::resample::with_batch_log(|| {
+                    crate::fit::with_budget(b, || {
+                        pls1_subsample_inference_confirmatory(
+                            x.as_ref(),
+                            y.as_ref(),
+                            k,
+                            fit.beta.as_ref(),
+                            &lev,
+                            SubsampleOpts {
+                                n_boot: 100,
+                                m_rate: 0.7,
+                                level: 0.95,
+                                pre_standardized: false,
+                                max_failure_rate: 0.0,
+                                max_skip_rate: 1.0,
+                            },
+                            wr,
+                            &mut rng,
+                        )
+                        .unwrap()
+                    })
+                });
+                ((format!("{ci:?}"), rng.next_u64()), log)
+            };
+            let ((one, log_one), (all, log_all)) = (run(0), run(u64::MAX));
+            assert_eq!(one, all, "weighted={}", weights.is_some());
+            crate::resample::assert_batches(&log_one, 100, 1, 1);
+            crate::resample::assert_batches(&log_all, 100, 100, 1);
+        }
     }
 }

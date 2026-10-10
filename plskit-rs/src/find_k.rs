@@ -813,8 +813,13 @@ fn reject_cv_leave_one_out(n: usize, requested: usize, effective: usize) -> PlsK
 /// full-data fit returns as the `k_used = 0` zero model. The check draws
 /// nothing from `rng`.
 ///
-/// Each fold is independent and RNG-free (the only RNG use is the shuffle),
-/// so the result does not depend on which worker runs which fold.
+/// Each fold is independent and RNG-free (the only RNG use is the shuffle).
+/// The folds run in batches of `resample::map_units` by the memory budget,
+/// one unit being the fold's standardized slices of X (`n × p` in all) plus,
+/// when weighted, the √w-scaled copy of the training slice that the
+/// weighted fit inside `fold_work` writes. The result does not depend on
+/// the batch size or on which worker runs which fold, and an error is the
+/// first in fold order.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 fn cv_select<F>(
@@ -841,14 +846,18 @@ where
     let run = |fi: usize, val_idx: &Vec<usize>| {
         fold_work(&prep_fold(x, y, weights, &folds, fi, val_idx.as_slice()))
     };
-    let r2_matrix: Vec<Vec<f64>> = {
-        use rayon::prelude::*;
-        folds
-            .par_iter()
-            .enumerate()
-            .map(|(fi, val_idx)| run(fi, val_idx))
-            .collect::<PlsKitResult<Vec<_>>>()?
+    let p = x.ncols();
+    let n_tr = n - folds.iter().map(Vec::len).min().unwrap_or(0);
+    let fit_copy = if weights.is_some() {
+        crate::resample::copy_bytes(n_tr, p)
+    } else {
+        0
     };
+    let unit = crate::resample::copy_bytes(n, p).saturating_add(fit_copy);
+    let r2_matrix: Vec<Vec<f64>> =
+        crate::resample::map_units(folds.len(), unit, |fi| run(fi, &folds[fi]))
+            .into_iter()
+            .collect::<PlsKitResult<Vec<_>>>()?;
     Ok(aggregate_and_pick(&r2_matrix, candidates, use_1se))
 }
 
@@ -941,8 +950,9 @@ fn select_cv(
                 // check_n_eff: false — per-fold slice may have low n_eff; let the math degrade
                 // and rely on the parent statistic to absorb noise.
                 check_n_eff: false,
-                // Seq inside the per-fold worker — outer Rayon owns the threadpool.
-                par: crate::fit::ParChoice::Seq,
+                // Auto: the fit picks its arm from its shape (`fit::resolve_par`),
+                // so the bits do not depend on the batch or the pool.
+                par: crate::fit::ParChoice::Auto,
                 keep,
             },
         )?;
@@ -1214,7 +1224,9 @@ pub(crate) fn find_keep_optimal_impl(
                 FitOpts {
                     pre_standardized: true,
                     check_n_eff: false,
-                    par: crate::fit::ParChoice::Seq,
+                    // Auto: the fit picks its arm from its shape (`fit::resolve_par`),
+                    // so the bits do not depend on the batch or the pool.
+                    par: crate::fit::ParChoice::Auto,
                     keep: Some(kp),
                 },
             )?;
@@ -2194,5 +2206,76 @@ mod tests {
             },
             Vec::clone,
         );
+    }
+
+    /// The `r2_se` selection gives the same bits with its folds one at a
+    /// time (budget 0) and all in one batch (no limit), unweighted and
+    /// weighted.
+    #[test]
+    fn cv_selection_does_not_depend_on_the_budget() {
+        let (x, y) = crate::test_support::signal_data(48, 7, 101);
+        let w = crate::test_support::test_weights(48);
+        for weights in [None, Some(w.as_ref())] {
+            let run = |b| {
+                let r = crate::fit::with_budget(b, || {
+                    find_k_optimal_impl(
+                        x.as_ref(),
+                        y.as_ref(),
+                        4,
+                        None,
+                        weights,
+                        FindKOptimalOpts {
+                            selector: Selector::R2Se,
+                            seed: Some(7),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap()
+                });
+                format!("{r:?}")
+            };
+            assert_eq!(run(0), run(u64::MAX), "weighted={}", weights.is_some());
+        }
+    }
+
+    /// At budget 0 the folds of `cv_select` run one at a time, even on a
+    /// pool with several threads; with no limit they overlap.
+    #[test]
+    fn cv_select_runs_one_fold_at_a_time_at_budget_zero() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let (x, y) = crate::test_support::signal_data(48, 7, 101);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let peak_at = |budget| {
+            let (live, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+            let (_, mut rng) = crate::rng::resolve_seed(Some(7)).unwrap();
+            pool.install(|| {
+                crate::fit::with_budget(budget, || {
+                    cv_select(
+                        x.as_ref(),
+                        y.as_ref(),
+                        None,
+                        None,
+                        5,
+                        &[1],
+                        false,
+                        &mut rng,
+                        |_| {
+                            peak.fetch_max(live.fetch_add(1, SeqCst) + 1, SeqCst);
+                            // Hold the fold open so that folds run together overlap.
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                            live.fetch_sub(1, SeqCst);
+                            Ok(vec![0.0])
+                        },
+                    )
+                })
+            })
+            .unwrap();
+            peak.load(SeqCst)
+        };
+        assert_eq!(peak_at(0), 1);
+        assert!(peak_at(u64::MAX) >= 2);
     }
 }

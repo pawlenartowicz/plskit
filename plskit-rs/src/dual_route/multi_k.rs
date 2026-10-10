@@ -232,7 +232,8 @@ pub(crate) struct NspaceBlock<'a> {
 /// The owned once-per-block products of the route for one standardized
 /// block `X̃`: `G`, `‖X̃‖_F`, the `‖G‖₂` bound and `p`. Built by the drivers'
 /// block constructors (one per `perm_null` call, `raw_perm` fold or
-/// `split_exact` split) on the calling thread.
+/// `split_exact` split), each on the thread that runs its call, fold or
+/// split.
 pub(crate) struct NspaceGram {
     g: Mat<f64>,
     x_fro: f64,
@@ -281,8 +282,10 @@ thread_local! {
 }
 
 /// How many [`NspaceGram`]s this thread has built (test builds). The
-/// drivers build blocks on the calling thread, so a test can assert that a
-/// public call ran the n-space route. With `PLSKIT_NUM_THREADS` set to a
+/// drivers build a block inside each fold or split unit, which runs on the
+/// calling thread when the units run one at a time (`fit::with_budget(0,
+/// ..)`), so a test can then assert that a public call ran the n-space
+/// route; units run in a batch build their blocks on Rayon workers. With `PLSKIT_NUM_THREADS` set to a
 /// cap, a public call runs on a plskit pool worker, which this thread-local
 /// does not reach, so this panics when the variable sets a cap.
 #[cfg(test)]
@@ -790,8 +793,8 @@ pub(crate) fn nspace_perm_row(
 }
 
 /// The n-space block of one prepared `raw_perm` fold: [`NspaceGram`] of
-/// `X̃_tr` and `M = X̃_val X̃_tr'`, built once per fold on the calling thread
-/// with `par` (`fit::par_fixed()`). Unweighted folds only, so `xs_tr` is
+/// `X̃_tr` and `M = X̃_val X̃_tr'`, built once per fold by the thread that
+/// runs the fold, with `par` (`fit::par_fixed()`). Unweighted folds only, so `xs_tr` is
 /// the matrix the primal fold fit is handed.
 pub(crate) struct NspaceFold {
     gram: NspaceGram,
@@ -845,8 +848,8 @@ pub(crate) fn fold_column_nspace(
 }
 
 /// The n-space block of one prepared `split_exact` split: [`NspaceGram`] of
-/// `X̃_tr` and `M = X̃_te X̃_tr'`, built once per split on the calling
-/// thread with `par` (`fit::par_fixed()`). Unweighted splits only.
+/// `X̃_tr` and `M = X̃_te X̃_tr'`, built once per split by the thread that
+/// runs the split, with `par` (`fit::par_fixed()`). Unweighted splits only.
 pub(crate) struct NspaceSplit {
     gram: NspaceGram,
     m: Mat<f64>,

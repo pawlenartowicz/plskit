@@ -251,7 +251,8 @@ pub(crate) fn run_incremental_sequence(
         // reroute below: `stable_rank` means the same thing on every result
         // type that carries it (what the gate saw on a `split_nb` request),
         // and `pls1_confirmatory_test` populates it under `force` too. The
-        // price is one SVD on a forced run.
+        // price on a forced run is one pass over X and the
+        // eigendecomposition of its short-side Gram matrix.
         //
         // The helper restandardizes with the run's weights unconditionally,
         // ignoring `pre_standardized`, exactly as `pls1_confirmatory_test`

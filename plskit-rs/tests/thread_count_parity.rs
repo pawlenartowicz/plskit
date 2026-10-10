@@ -484,6 +484,31 @@ fn other_pls1_confirmatory_methods_are_pool_size_invariant() {
             3032,
         )
     });
+    // Guard only (not shown to be pool-sensitive): `raw_perm`'s K = 1 Gram
+    // closed form, `G` and `M` summed over several column blocks (32-row
+    // training folds, 8,192-column blocks, three of them). Shape pinned in
+    // `fixture_route_pins::thread_count_parity_shapes_take_their_routes`.
+    let (xb, yb) = synth(40, 20_000, 1.0, 41);
+    c.check("raw_perm gram k=1 40x20000", || {
+        confirmatory(
+            &xb,
+            &yb,
+            1,
+            None,
+            ConfirmatoryArgs::RawPerm {
+                n_perm: 50,
+                n_folds: 5,
+            },
+            None,
+            23,
+        )
+    });
+    // Guard only (not shown to be pool-sensitive): the gate's Gram matrix
+    // summed over several column blocks (40 rows, 6,552-column blocks,
+    // four of them).
+    c.check("split_nb_gate 40x20000", || {
+        split_nb_gate(xb.as_ref(), None).unwrap()
+    });
     c.finish();
 }
 
@@ -728,6 +753,21 @@ fn pls3_confirmatory_is_pool_size_invariant() {
         pls3_test(
             &x,
             &y,
+            ConfirmatoryArgs::SplitExact {
+                n_perm: 20,
+                n_splits: 4,
+            },
+            20,
+        )
+    });
+    // Guard only (not shown to be pool-sensitive): the Gram route's `G`
+    // and `M` summed over several column blocks (30-row halves,
+    // 8,736-column blocks, three of them).
+    let (xb, yb) = two_block(60, 20_000, 3, 43);
+    c.check("pls3 split_exact 60x20000x3", || {
+        pls3_test(
+            &xb,
+            &yb,
             ConfirmatoryArgs::SplitExact {
                 n_perm: 20,
                 n_splits: 4,

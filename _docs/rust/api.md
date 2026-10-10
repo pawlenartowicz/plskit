@@ -12,7 +12,9 @@ authoritative signatures and trait bounds. The role of this page is
 orientation and side-by-side examples for users moving between languages.
 
 To cap the thread count, set `PLSKIT_NUM_THREADS`; see
-[Threads](../concepts/threads.md).
+[Threads](../concepts/threads.md). To bound the memory of the resampling
+loops (default 2 GiB), set `PLSKIT_MEMORY_BUDGET`; see
+[Memory budget](../concepts/threads.md#memory-budget).
 
 ## Surface at a glance
 

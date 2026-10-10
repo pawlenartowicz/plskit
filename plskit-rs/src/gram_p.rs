@@ -6,11 +6,10 @@
 //! `√w`-scaled when weighted) while only the outcome changes. This module
 //! builds `C = Xs'Xs` (`p × p`) once per block and runs the shared PLS1
 //! component loop (`fit::pls1_component_loop`) on it, so a replicate costs
-//! one sequential GEMV `s = Xs'ys` plus `O(k·p²)`, against the X backend's
-//! `(2k + 1)·n·p`.
+//! one GEMV `s = Xs'ys` (under the `Par` of the site's Primal fit) plus
+//! `O(k·p²)`, against the X backend's `(2k + 1)·n·p`.
 //!
-//! **The X backend stays primary.**
-//! [`use_gram_p_route`](crate::gram_p::use_gram_p_route) admits an input
+//! **The X backend stays primary.** `use_gram_p_route` admits an input
 //! only when its cost rule favours this route and the loop does enough
 //! work to matter; everything else never builds `C`. The route is one arm
 //! (`GramP`) of the replicate drivers in `signal_test.rs` and
@@ -28,8 +27,8 @@ use faer::{Accum, Col, ColRef, Mat, MatRef, Par};
 
 use crate::dual_route::{ABS_BAND, RESOLVE_BAND};
 use crate::fit::{
-    pls1_coef_at_k, pls1_component_loop, w_rel_floor, ComponentBackend, Gate, LoopOutcome, Scored,
-    NIPALS_ABS_FLOOR,
+    pls1_coef_at_k, pls1_component_loop, resolve_par, w_rel_floor, ComponentBackend, Gate,
+    LoopOutcome, ParChoice, Scored, NIPALS_ABS_FLOOR,
 };
 
 /// Unit roundoff of f64, `2⁻⁵³`: the `u` of the rounding bounds in this
@@ -270,14 +269,20 @@ pub(crate) struct GramPBlock<'a> {
     x_fro: f64,
     /// [`c2_norm_estimate`] of `Ĉ`: the `‖C‖₂` of the first-order bounds.
     c2_norm: f64,
+    /// The `ParChoice` of the site's Primal fit on this block (the fit a
+    /// replicate the gates refuse runs). `ŝ₁ = Xs'ys` is formed with
+    /// `resolve_par(primal_par, n, p, k)`, the `Par` that fit resolves.
+    primal_par: ParChoice,
 }
 
 impl<'a> GramPBlock<'a> {
     /// Build `C` for the block `xs` with `par` (the driver passes
     /// `fit::par_fixed()`), and its `‖C‖₂`
     /// estimate (sequential). `tests_block::c_build_is_thread_count_invariant_at_the_route_shapes`
-    /// pins that every `par` gives the same bits.
-    pub(crate) fn new(xs: MatRef<'a, f64>, par: Par) -> Self {
+    /// pins that every `par` gives the same bits. `primal_par` is the
+    /// `ParChoice` the site's Primal fit runs with (see
+    /// [`Self::fit_replicate_diag`]).
+    pub(crate) fn new(xs: MatRef<'a, f64>, par: Par, primal_par: ParChoice) -> Self {
         let p = xs.ncols();
         let mut c = Mat::<f64>::zeros(p, p);
         matmul(c.as_mut(), Accum::Replace, xs.transpose(), xs, 1.0, par);
@@ -288,6 +293,7 @@ impl<'a> GramPBlock<'a> {
             c,
             x_fro,
             c2_norm,
+            primal_par,
         }
     }
 
@@ -388,8 +394,9 @@ impl GramPBlock<'_> {
     ///
     /// # Reference and notation
     /// `u = 2⁻⁵³`, `F = ‖Xs‖_F`, `Xs` is `n × p`. Both backends start from
-    /// the same bits: `ŝ₁ = Xs'ys` is the same sequential GEMV on the same
-    /// view, `w_floor` the same function of the same `‖Xs‖_F` and `‖ys‖`,
+    /// the same bits: `ŝ₁ = Xs'ys` is the same GEMV on the same view under
+    /// the same `Par` (the one the site's Primal fit resolves from
+    /// `primal_par`), `w_floor` the same function of the same `‖Xs‖_F` and `‖ys‖`,
     /// and `ŵ₁ = r̂₁` the same `select_and_normalize` of `ŝ₁`. The reference
     /// is exact arithmetic continued from those shared bits. Every bound
     /// below is a first-order estimate of one backend's distance from that
@@ -460,8 +467,9 @@ impl GramPBlock<'_> {
     /// - Every `a`, after `tt`: `tt ≥ RESOLVE_BAND·2δtt` and
     ///   `tt ≥ ABS_BAND·NIPALS_ABS_FLOOR` (the `tt` floor decision), then
     ///   the ratio gate `tt ≥ RATIO_MIN·F²·‖r‖²` (conditioning).
-    /// - `a = 1`: the `‖ŝ₁‖` floor test is the X backend's on the same bits,
-    ///   so no band; a stop there is `Resolved` with `k_used = 0`.
+    /// - `a = 1`: the `‖ŝ₁‖` floor test and the selection are the X
+    ///   backend's on the same bits (`ŝ₁` under the Primal fit's `Par`), so
+    ///   no band; a stop there is `Resolved` with `k_used = 0`.
     ///
     /// This backend never decides a stop at `a ≥ 2`: at a noise component
     /// its `‖ŝ_a‖` lies within its own bound, so any component inside or
@@ -500,7 +508,10 @@ impl GramPBlock<'_> {
         let n = self.xs.nrows();
         let p = self.xs.ncols();
         // s₁ = Xs'ys, the call `fit::pls1_kernel` makes for its first `s`
-        // under `ParChoice::Seq`, on the same view: the same bits.
+        // when the site's Primal fit (`fit::pls1_fit_prepared_fro` with
+        // `primal_par`, `k`) runs on the same view: the same `Par`, the same
+        // bits.
+        let s1_par = resolve_par(self.primal_par, n, p, k);
         let mut s0 = Col::<f64>::zeros(p);
         matmul(
             s0.as_mut().as_mat_mut(),
@@ -508,7 +519,7 @@ impl GramPBlock<'_> {
             self.xs.transpose(),
             ys.as_mat(),
             1.0,
-            Par::Seq,
+            s1_par,
         );
         let ys_norm = ys.norm_l2();
         let w_floor = w_rel_floor(n, p, self.x_fro, ys_norm);
@@ -676,7 +687,8 @@ impl ComponentBackend for GramBackend<'_> {
         let (sel_norm, gap) = selected_norm_and_gap(s, keep);
         self.s_norm = s.norm_l2();
         if a == 1 {
-            // ŝ₁, w_floor and the selection are the X backend's own bits.
+            // ŝ₁ (formed under the Primal fit's `Par`), w_floor and the
+            // selection are the X backend's own bits.
             self.s1_norm = self.s_norm;
             self.d_w = 0.0;
             return Gate::Continue;
@@ -904,13 +916,15 @@ mod tests_block {
         ] {
             let x = unif(n, p, 31);
             let (xs, _) = prepared(&x, &linear_y(&x, 1.0, 32), None);
-            let seq = GramPBlock::new(xs.as_ref(), Par::Seq);
+            let seq = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
             for threads in [2usize, 7] {
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
                     .build()
                     .expect("pool");
-                let par = pool.install(|| GramPBlock::new(xs.as_ref(), crate::fit::par_fixed()));
+                let par = pool.install(|| {
+                    GramPBlock::new(xs.as_ref(), crate::fit::par_fixed(), ParChoice::Seq)
+                });
                 for j in 0..p {
                     for i in 0..p {
                         assert_eq!(
@@ -962,7 +976,7 @@ mod tests_block {
             crate::test_support::conditioned(400, 20, 1e6, 42),
         ));
         for (label, xs) in &designs {
-            let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+            let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
             let fro2 = block.x_fro * block.x_fro;
             let lam = lambda_max(&block.c);
             assert!(block.c2_norm <= fro2, "{label}: capped by tr C");
@@ -1018,7 +1032,7 @@ mod tests_kernel {
             ("weighted", Some(&w), None),
         ] {
             let (xs, ys) = prepared(&x, &y, wopt);
-            let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+            let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
             let g = block
                 .fit_replicate_diag(ys.as_ref(), 2, keep)
                 .expect("resolves");
@@ -1047,7 +1061,7 @@ mod tests_kernel {
         // arm (which reports it), never a Gram fit or a zero model.
         let x = unif(300, 12, 23);
         let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 24), None);
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let mut yb = ys.clone();
             yb[7] = bad;
@@ -1079,7 +1093,7 @@ mod tests_kernel {
         });
         let y = Col::<f64>::from_fn(1000, |i| x1[(i, 0)] + 10.0 * e[i]);
         let (xs, ys) = prepared(&x, &y, None);
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
         assert!(
             block.fit_replicate_diag(ys.as_ref(), 1, None).is_ok(),
             "k = 1 resolves"
@@ -1096,7 +1110,7 @@ mod tests_kernel {
         let x0 = unif(400, 15, 7);
         let x = Mat::<f64>::from_fn(400, 30, |i, j| x0[(i, j % 15)]);
         let (xs, ys) = prepared(&x, &linear_y(&x0, 1.0, 8), None);
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
         let r = block.fit_replicate_diag(ys.as_ref(), 3, Some(3));
         assert!(matches!(r, Err(GateFail::KeepGap)), "{:?}", r.err());
     }
@@ -1107,7 +1121,7 @@ mod tests_kernel {
         // p = 1.
         let x = unif(3000, 1, 9);
         let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 10), None);
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
         let xf = pls1_fit_prepared_fro(
             xs.as_ref(),
             ys.as_ref(),
@@ -1130,7 +1144,7 @@ mod tests_kernel {
         }
         let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 12), None);
         assert!((0..400).all(|i| xs[(i, 3)] == 0.0), "premise");
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
         for k in 1..=K_GRAM_MAX {
             let xf = pls1_fit_prepared_fro(
                 xs.as_ref(),
@@ -1194,7 +1208,7 @@ mod tests_kernel {
         let y = Col::<f64>::from_fn(n, |i| (0.9 * i as f64 + 0.3).cos() + 0.5 * xs[(i, 0)]);
         let (ys, _, _) = crate::linalg::standardize1(y.as_ref());
         let rel = |a: f64, b: f64| (a - b).abs() / b.abs();
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
         assert!(
             rel(block.c2_norm, SCRIPT_C2_NORM) <= 1e-12,
             "c2_norm {:e} vs script {SCRIPT_C2_NORM:e}",
@@ -1307,7 +1321,7 @@ mod tests_sweep {
         k_max: usize,
         keep: Option<usize>,
     ) {
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
         for k in 1..=k_max.min(K_GRAM_MAX).min(xs.ncols()) {
             check_one(t, label, &block, xs.as_ref(), ys.as_ref(), k, keep);
         }
@@ -1606,7 +1620,7 @@ mod tests_sweep {
                 let n = ratio * p;
                 let x = unif(n, p, 500 + p as u64);
                 let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 600 + p as u64), None);
-                let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+                let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
                 for &k in &[3usize, 2] {
                     let label = format!("p{p}_ratio{ratio}_k{k}");
                     let t = tallies
@@ -1677,7 +1691,7 @@ mod tests_sweep {
         ] {
             let x = unif(n, p, 190);
             let (xs, ys) = prepared(&x, &linear_y(&x, 2.0, 290), None);
-            let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+            let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
             let t = tallies.entry(tag).or_default();
             for b in 0..reps {
                 let perm = crate::resample::permutation_from_seed(n, 1000 + b as u64);
@@ -1882,7 +1896,7 @@ mod bench_work_floor {
             }
             let x_ms = t0.elapsed().as_secs_f64() * 1e3;
             let t1 = Instant::now();
-            let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+            let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
             let mut fallbacks = 0usize;
             for yb in &perms {
                 if black_box(block.fit_replicate(yb.as_ref(), k, None)).is_none() {
@@ -1996,7 +2010,7 @@ mod bench_work_floor {
             let mut fallbacks = 0usize;
             let g_ms = median_ms(3, || {
                 fallbacks = 0;
-                let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+                let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
                 for yb in &perms {
                     if black_box(block.fit_replicate(yb.as_ref(), k, None)).is_none() {
                         fallbacks += 1;

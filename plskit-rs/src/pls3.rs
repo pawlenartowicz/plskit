@@ -568,7 +568,8 @@ fn dense_components(
         .map_err(|_| PlsKitError::Internal("SVD of X'Y failed to converge in pls3_fit".into()))?;
     let sigma = svd.s.as_ref();
     // `1 <= k <= min(p, q)` (checked in `prepare`, or by
-    // `pls3_lv1_prestd`'s caller), so `sigma[0]` exists.
+    // `pls3_lv1_prestd`'s caller or `pls3_lv1_from_cross_cov`'s caller),
+    // so `sigma[0]` exists.
     let mut k_used = 0;
     if sigma[0] >= SIGMA_FLOOR {
         let rel_floor = rel_floor();
@@ -650,6 +651,26 @@ pub(crate) fn pls3_lv1_prestd(
         return Ok(None);
     }
     Ok(Some((u.col(0).to_owned(), v.col(0).to_owned())))
+}
+
+/// LV1 of a dense cross-product `a = X̃'Ỹ` the caller formed: `(v₁, σ₁)`,
+/// or `None` when no first component clears [`SIGMA_FLOOR`] and
+/// `rel_floor`. The component stage [`pls3_lv1_prestd`] runs on a dense
+/// request (`dense_components`, `Par::Seq`, signs pinned), for a caller
+/// that accumulates `a` without holding `X̃`. `a` must be finite and have
+/// at least one row and one column.
+///
+/// # Errors
+/// `Internal` when the SVD fails to converge.
+pub(crate) fn pls3_lv1_from_cross_cov(
+    a: MatRef<'_, f64>,
+    rel_floor: f64,
+) -> PlsKitResult<Option<(Col<f64>, f64)>> {
+    let (_, v, sigma) = dense_components(a, 1, Par::Seq, || rel_floor)?;
+    if v.ncols() == 0 {
+        return Ok(None);
+    }
+    Ok(Some((v.col(0).to_owned(), sigma[0])))
 }
 
 /// Fit PLS3 / PLSSVD: SVD of the standardized cross-covariance `X̃'Ỹ`.

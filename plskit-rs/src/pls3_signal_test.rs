@@ -76,15 +76,14 @@ pub struct Pls3ConfirmatoryTestOpts {
     pub args: ConfirmatoryArgs,
     /// Caller asserts X is already standardized.
     ///
-    /// **No effect on either method** — `pls3_split_lv_correlations`
-    /// re-standardizes every training half with that half's own moments by
-    /// design, so there is nothing for the flag to skip. The `split_nb`
-    /// auto-gate likewise standardizes its own copy regardless. It is kept on the
-    /// struct so the signature does not change when a method that reads it
-    /// lands. PLS1's split path does the same —
-    /// `signal_test::split_half_correlations` standardizes each half and
-    /// passes `pre_standardized: true` inward regardless of the caller's
-    /// flag.
+    /// **No effect on either method** — every split standardizes its
+    /// training half with that half's own moments by design (into a copy,
+    /// or block by block on the routes that write none), so there is
+    /// nothing for the flag to skip. The `split_nb` auto-gate likewise
+    /// standardizes X itself regardless. It is kept on the struct so the
+    /// signature does not change when a method that reads it lands. PLS1's
+    /// `split_nb` and `split_exact` do the same: every split standardizes
+    /// its training half whatever the caller's `pre_standardized` says.
     pub pre_standardized_x: bool,
     /// Caller asserts Y is already standardized. **No effect on either
     /// method** — see `pre_standardized_x`.
@@ -324,11 +323,18 @@ pub(crate) fn pls3_confirmatory_test_impl(
         // No permutation loop: the J held-out correlations go straight to the
         // NB t-reference. The statistic is the one split_exact reports —
         // `tanh(z̄)` over the same fixed splits — so only the reference
-        // changes. At a shared seed the two methods agree on it bit-for-bit
-        // when split_exact takes the primal route; on the dual route (p ≫ n)
-        // its z̄_obs comes from the Gram computation, so they agree only to
-        // the route tolerance (~1e-10 relative).
-        let r_obs = pls3_split_lv_correlations(x, y, &splits, &opts);
+        // changes. Dense blocks are read from X block by block; a sparse
+        // side refits on materialized halves. At a shared seed the two
+        // methods agree on the statistic to the route tolerance (~1e-10
+        // relative), and bit for bit when both fit materialized halves (a
+        // sparse side on split_exact's primal route).
+        let dense = opts.keep_x.is_none_or(|kx| kx >= x.ncols())
+            && opts.keep_y.is_none_or(|ky| ky >= y.ncols());
+        let r_obs = if dense {
+            pls3_split_lv_correlations_streamed(x, y, &splits, &opts)
+        } else {
+            pls3_split_lv_correlations(x, y, &splits, &opts)
+        };
         let (p, statistic, _t, _df) = nb_test(&r_obs, n_tr, n_te);
         return Ok(ConfirmatoryTestOutput {
             pvalue: p,
@@ -423,9 +429,11 @@ pub(crate) fn pls3_confirmatory_test_impl(
 ///
 /// Takes the splits rather than drawing them so the permutation loop can
 /// hold one set fixed across all B replicates. Nothing here consumes
-/// randomness — given `(x, y, split)` the fit and the r are deterministic —
-/// so the J splits map in parallel directly rather than through
-/// `parallel_for_each_seeded`, exactly as `split_half_correlations` does.
+/// randomness: given `(x, y, split)` the fit and the r are deterministic.
+/// The J splits run in batches of `resample::map_units` by the memory
+/// budget, one unit being the split's standardized halves of X (the halves
+/// of Y are counted as small), as in `split_half_correlations`; the result
+/// does not depend on the batch size.
 ///
 /// Both halves of both blocks are standardized with **training-half**
 /// moments: `Ỹ_te v₁` mixes Y columns, so the test half must sit on the
@@ -462,11 +470,193 @@ fn pls3_split_lv_correlations(
         )
     };
 
-    let r_vec: Vec<f64> = {
-        use rayon::prelude::*;
-        splits.par_iter().map(per_split).collect()
-    };
+    // The splits run in batches by the memory budget, collected in split order.
+    let unit = crate::resample::copy_bytes(x.nrows(), x.ncols());
+    let r_vec = crate::resample::map_units(splits.len(), unit, |j| per_split(&splits[j]));
     Col::<f64>::from_fn(r_vec.len(), |i| r_vec[i])
+}
+
+/// Held-out LV1 correlation of one split on dense blocks, read from `X`
+/// one block of columns at a time, or `None` when this route cannot decide
+/// the split and the caller must run the materialized fit.
+///
+/// # What it computes
+/// With `a` and `c` the standardized training and held-out blocks of a
+/// column range, one pass forms `A = X̃_tr'Ỹ_tr` (`p × q`, a block of rows
+/// at a time) and sums `T = X̃_te A` (`n_te × q`) over the blocks. The
+/// component stage of `pls3::pls3_lv1_prestd` gives `v₁` and `σ₁` from `A`,
+/// and since `A v₁ = σ₁ u₁` with `σ₁ > 0`, `T v₁` is `X̃_te u₁` times `σ₁`:
+/// the correlation with `Ỹ_te v₁` does not see the factor, and `u₁` is
+/// never applied to `X̃_te`.
+///
+/// # Gates (decision gates)
+/// Each row block of `A` is one product of the columns the materialized
+/// fit multiplies, so it can differ from that fit's one-call `X̃_tr'Ỹ_tr`
+/// only where faer evaluates a product of another shape differently. `T`
+/// is summed over blocks, where the materialized fit applies `u₁` to
+/// `X̃_te` in one product, and `‖X̃_tr‖_F` comes from the column moments,
+/// not from `norm_l2`. So the floor and, apart from its factor `σ₁`, the
+/// X score can differ from the materialized fit's in the last bits, and
+/// where `A` differs so can `σ₁`, `v₁` and the Y score. The split keeps
+/// its `r` only when `σ₁` is at least `dual_route::FLOOR_BAND` times the
+/// relative floor and `dual_route::ABS_BAND` times `pls3::SIGMA_FLOOR`,
+/// so the materialized fit keeps the component too, and when neither
+/// score is constant to rounding and each has a centered norm of at least
+/// `dual_route::SCORE_BAND` times its norm, clear of `guarded_pearson`'s
+/// constant test. `a >= b` conjunctions, so a NaN anywhere fails. A
+/// near-tie `σ₁ ≈ σ₂` is not gated, as on the dense arm of
+/// `dual_route::pls3_split_zbars_columns`.
+#[allow(clippy::many_single_char_names)]
+#[allow(clippy::similar_names)]
+fn pls3_split_r_streamed(x: MatRef<'_, f64>, y: MatRef<'_, f64>, sp: &SplitIdx) -> Option<f64> {
+    use crate::dual_route::{ABS_BAND, FLOOR_BAND, SCORE_BAND};
+    use crate::linalg::{scaled_moments, standardize_apply_rows, standardize_rows, ScaledMoments};
+    use faer::linalg::matmul::matmul;
+    use faer::Accum;
+
+    let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
+    let (p, q) = (x.ncols(), y.ncols());
+    let (n_tr, n_te) = (tr.len(), te.len());
+    let (ys_tr, y_mean, y_scale) = standardize_rows(y, tr, None, None);
+    let ys_te = standardize_apply_rows(y, te, y_mean.as_ref(), y_scale.as_ref(), None);
+
+    // Seq inside the per-split worker: outer Rayon owns the pool.
+    let seq = faer::Par::Seq;
+    let mut a_mat = Mat::<f64>::zeros(p, q);
+    let mut t_mat = Mat::<f64>::zeros(n_te, q);
+    let x_fro = crate::linalg::standardized_blocks(
+        x,
+        tr,
+        te,
+        None,
+        None,
+        None,
+        crate::linalg::stream_block_width(n_tr.max(n_te)),
+        |j0, a, c| {
+            let mut a_blk = a_mat.as_mut().subrows_mut(j0, a.ncols());
+            matmul(
+                a_blk.as_mut(),
+                Accum::Replace,
+                a.transpose(),
+                ys_tr.as_ref(),
+                1.0,
+                seq,
+            );
+            matmul(t_mat.as_mut(), Accum::Add, c, a_blk.as_ref(), 1.0, seq);
+        },
+    );
+    // A non-finite product is the materialized fit's to answer.
+    if !(a_mat.is_all_finite() && t_mat.is_all_finite() && ys_te.is_all_finite()) {
+        return None;
+    }
+
+    let rel_floor = crate::pls3::sigma_rel_floor(n_tr, p, q, x_fro, ys_tr.norm_l2());
+    let Ok(Some((v, sigma))) = crate::pls3::pls3_lv1_from_cross_cov(a_mat.as_ref(), rel_floor)
+    else {
+        return None;
+    };
+    if !(sigma >= FLOOR_BAND * rel_floor && sigma >= ABS_BAND * crate::pls3::SIGMA_FLOOR) {
+        return None;
+    }
+
+    let s = crate::linalg::mat_vec(t_mat.as_ref(), v.as_ref(), seq);
+    let t = crate::linalg::mat_vec(ys_te.as_ref(), v.as_ref(), seq);
+    // `ss` and `sq` are the centered and raw sums of squares on one scale.
+    let clear = |m: &ScaledMoments| !m.is_constant(n_te) && m.ss.sqrt() >= SCORE_BAND * m.sq.sqrt();
+    if !(clear(&scaled_moments(n_te, |i| s[i], None))
+        && clear(&scaled_moments(n_te, |i| t[i], None)))
+    {
+        return None;
+    }
+    Some(pearson_r_guarded(&s, &t))
+}
+
+/// [`pls3_split_lv_correlations`] for dense X and dense Y: each split is
+/// [`pls3_split_r_streamed`], and a split that route cannot decide is the
+/// materialized fit's to the bit. Both passes run the splits in batches of
+/// `resample::map_units`.
+fn pls3_split_lv_correlations_streamed(
+    x: MatRef<'_, f64>,
+    y: MatRef<'_, f64>,
+    splits: &[SplitIdx],
+    opts: &Pls3ConfirmatoryTestOpts,
+) -> Col<f64> {
+    // Pass 1: every split the streamed body decides. A split holds two
+    // stream blocks, `A` and the `U` of its SVD (p × q each).
+    let unit = crate::resample::copy_bytes(x.ncols(), y.ncols())
+        .saturating_mul(2)
+        .saturating_add(2 * crate::linalg::STREAM_BLOCK_BYTES);
+    let decided: Vec<Option<f64>> = crate::resample::map_units(splits.len(), unit, |j| {
+        pls3_split_r_streamed(x, y, &splits[j])
+    });
+    // Pass 2: the undecided splits run in batches of `resample::map_units`,
+    // one standardized copy of X counted per split. An undecided split is
+    // the materialized fit's, which standardizes both halves of X.
+    let rows: Vec<Vec<Option<f64>>> = decided.into_iter().map(|r| vec![r]).collect();
+    let rows = crate::resample::fill_pending(
+        rows,
+        crate::resample::copy_bytes(x.nrows(), x.ncols()),
+        |j, _| vec![pls3_split_lv_correlations(x, y, std::slice::from_ref(&splits[j]), opts)[0]],
+    );
+    Col::<f64>::from_fn(rows.len(), |j| rows[j][0])
+}
+
+/// The clamped Fisher z of the columns `cols` of one split on the primal
+/// route, in the order of `cols`: [`pls3_split_column_r_primal`] per column
+/// on halves of X standardized once for the split. Column 0 is the
+/// identity row map and column `c > 0` applies `perms[c − 1]`. The columns
+/// are independent refits sharing only the read-only X side, so they map in
+/// parallel; `map_indexed`'s `collect` keeps their order, and each value
+/// does not depend on which worker computes it.
+#[allow(clippy::many_single_char_names)]
+#[allow(clippy::similar_names)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pls3_split_columns_z_primal(
+    x: MatRef<'_, f64>,
+    y: MatRef<'_, f64>,
+    sp: &SplitIdx,
+    perms: &[Vec<usize>],
+    keep_x: Option<usize>,
+    keep_y: Option<usize>,
+    max_iter: usize,
+    tol: f64,
+    cols: &[usize],
+) -> Vec<f64> {
+    use crate::linalg::{standardize, standardize_apply, standardize_apply_rows, standardize_rows};
+
+    let q = y.ncols();
+    let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
+
+    // Built once per split: invariant across replicates, because only Y
+    // is permuted.
+    let (xs_tr, x_mean, x_scale) = standardize_rows(x, tr, None, None);
+    let xs_te = standardize_apply_rows(x, te, x_mean.as_ref(), x_scale.as_ref(), None);
+    // The X-side input of the relative floor, likewise per split.
+    let xs_tr_fro = xs_tr.norm_l2();
+
+    crate::resample::map_indexed(cols.len(), |u| {
+        let col = cols[u];
+        let row_of = |i: usize| if col == 0 { i } else { perms[col - 1][i] };
+        let y_tr = Mat::<f64>::from_fn(tr.len(), q, |i, j| y[(row_of(tr[i]), j)]);
+        let y_te = Mat::<f64>::from_fn(te.len(), q, |i, j| y[(row_of(te[i]), j)]);
+        let (ys_tr, y_mean, y_scale) = standardize(y_tr.as_ref());
+        let ys_te = standardize_apply(y_te.as_ref(), y_mean.as_ref(), y_scale.as_ref());
+
+        let r = pls3_split_column_r_primal(
+            xs_tr.as_ref(),
+            xs_tr_fro,
+            xs_te.as_ref(),
+            ys_tr.as_ref(),
+            ys_te.as_ref(),
+            keep_x,
+            keep_y,
+            max_iter,
+            tol,
+        );
+        // ±0.9999 pre-atanh clamp applied per (split, column), exactly
+        // where `mean_fisher_z` applies it before summing.
+        r.clamp(-0.9999, 0.9999).atanh()
+    })
 }
 
 /// Per-column z̄ over the J splits on the primal route: `perms.len() + 1`
@@ -490,16 +680,19 @@ fn pls3_split_lv_correlations(
 /// - The permutations are materialized by the caller above the route branch,
 ///   so nothing about parent-seed consumption moves, and replicate `b`'s
 ///   permutation stays a pure function of `seeds[b]`.
-/// - The per-`(split, column)` body is [`pls3_split_column_r_primal`], the
-///   one `pls3_split_lv_correlations` calls, on bit-identical inputs: the
+/// - The per-`(split, column)` body is [`pls3_split_column_r_primal`],
+///   the one `pls3_split_lv_correlations` calls, here reached through
+///   [`pls3_split_columns_z_primal`], on bit-identical inputs: the
 ///   hoisted X quantities were already recomputed to the same bits every
 ///   replicate, and `y[(perm[tr[i]], j)]` is the same load
 ///   `standardize_rows(y_perm, tr, ..)` makes.
-/// - The splits run one at a time and the replicate columns of a split map
-///   in parallel, so one prepared split is alive at a time. Each column's
-///   value is a pure function of its inputs (the inner fit runs with
-///   `ParChoice::Seq`), and `collect` keeps column order, so which worker
-///   computes it cannot move a bit.
+/// - The splits run in batches of `resample::map_units` and the replicate
+///   columns of a split map in parallel, so at most
+///   `resample::units_at_once` prepared splits are alive at a time. Each
+///   column's value is a pure function of its inputs (the inner fit runs
+///   with `ParChoice::Seq`), and `collect` keeps split and column order, so
+///   neither the batch size nor which worker computes a value can move a
+///   bit.
 /// - The accumulation is `signal_test::zbars_over_splits`: splits
 ///   **ascending**, one divide by J at the end, `mean_fisher_z`'s own
 ///   left-to-right sum-then-divide.
@@ -522,71 +715,42 @@ fn pls3_split_zbars_columns_primal(
     perms: &[Vec<usize>],
     opts: &Pls3ConfirmatoryTestOpts,
 ) -> Vec<f64> {
-    use crate::linalg::{standardize, standardize_apply, standardize_apply_rows, standardize_rows};
-
-    let q = y.ncols();
     let n_cols = perms.len() + 1;
-
+    let cols: Vec<usize> = (0..n_cols).collect();
     let per_split = |sp: &SplitIdx| -> Vec<f64> {
-        let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
-
-        // Built once per split: invariant across replicates, because only Y
-        // is permuted.
-        let (xs_tr, x_mean, x_scale) = standardize_rows(x, tr, None, None);
-        let xs_te = standardize_apply_rows(x, te, x_mean.as_ref(), x_scale.as_ref(), None);
-        // The X-side input of the relative floor, likewise per split.
-        let xs_tr_fro = xs_tr.norm_l2();
-
-        let column_z = |col: usize| -> f64 {
-            // Column 0 is the identity row map; column c > 0 applies
-            // permutation c−1, the same convention the Gram route uses.
-            let row_of = |i: usize| if col == 0 { i } else { perms[col - 1][i] };
-            let y_tr = Mat::<f64>::from_fn(tr.len(), q, |i, j| y[(row_of(tr[i]), j)]);
-            let y_te = Mat::<f64>::from_fn(te.len(), q, |i, j| y[(row_of(te[i]), j)]);
-            let (ys_tr, y_mean, y_scale) = standardize(y_tr.as_ref());
-            let ys_te = standardize_apply(y_te.as_ref(), y_mean.as_ref(), y_scale.as_ref());
-
-            let r = pls3_split_column_r_primal(
-                xs_tr.as_ref(),
-                xs_tr_fro,
-                xs_te.as_ref(),
-                ys_tr.as_ref(),
-                ys_te.as_ref(),
-                opts.keep_x,
-                opts.keep_y,
-                opts.max_iter,
-                opts.tol,
-            );
-            // ±0.9999 pre-atanh clamp applied per (split, column),
-            // exactly where `mean_fisher_z` applies it before summing.
-            r.clamp(-0.9999, 0.9999).atanh()
-        };
-        // The replicate columns are independent refits sharing only the
-        // read-only X side above, so they map in parallel: splits are not a
-        // parallel axis on this path (they run one at a time below), so the
-        // replicate columns carry all of it; a B below the core count would
-        // leave cores idle. `map_indexed`'s `collect` keeps column order,
-        // and each column's value does not depend on which worker computes
-        // it.
-        crate::resample::map_indexed(n_cols, column_z)
+        pls3_split_columns_z_primal(
+            x,
+            y,
+            sp,
+            perms,
+            opts.keep_x,
+            opts.keep_y,
+            opts.max_iter,
+            opts.tol,
+            &cols,
+        )
     };
 
-    // Splits run one at a time (`false`), so one prepared split is alive;
-    // the columns of each split carry the parallelism.
-    crate::signal_test::zbars_over_splits(splits, n_cols, false, per_split)
+    // Splits in batches of `resample::map_units`, one standardized copy of
+    // X (both halves) counted per split; the columns of a split map in
+    // parallel.
+    let unit_bytes = crate::resample::copy_bytes(x.nrows(), x.ncols());
+    crate::signal_test::zbars_over_splits(splits, n_cols, unit_bytes, per_split)
 }
 
 /// Held-out LV1 correlation for one `(split, replicate column)` on the
 /// primal route: an honest `pls3_fit` / `spls3_fit` refit on the
 /// standardized training half, scored on the standardized test half.
 ///
-/// The one per-column body of every PLS3 split statistic: the `split_nb`
-/// and observed-statistic path (`pls3_split_lv_correlations`), the
-/// `split_exact` primal route (`pls3_split_zbars_columns_primal`), and the
-/// fallback `dual_route::pls3_split_zbars_columns` takes on a column whose
-/// sparse alternation comes within a guard band of a discontinuity (see
-/// the "Near-ties" section there). Keeping one body is what keeps those
-/// paths bit-equal. Returns `r` before the `atanh` clamp.
+/// The one per-column body of every PLS3 split statistic computed on
+/// materialized halves: `pls3_split_lv_correlations` (`split_nb` with a
+/// sparse side, and each dense `split_nb` split `pls3_split_r_streamed`
+/// does not decide), the `split_exact` primal route
+/// (`pls3_split_zbars_columns_primal`), and the second pass of
+/// `dual_route::pls3_split_zbars_columns` on a column its truncation gates
+/// cannot decide or whose sparse alternation comes within a guard band of
+/// a discontinuity (see "Truncation" and "Near-ties" there). Keeping one
+/// body is what keeps those paths bit-equal. Returns `r` before the `atanh` clamp.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::similar_names)]
 pub(crate) fn pls3_split_column_r_primal(
@@ -638,7 +802,7 @@ pub(crate) fn pls3_split_column_r_primal(
 ///
 /// It is PLS1's split-half correlation (`signal_test::guarded_pearson`,
 /// which `signal_test::split_half_r` reports and
-/// `signal_test::split_perm_nr_zbars` rebuilds from the same helpers), so
+/// `signal_test::nr_split_r` rebuilds from the same helpers), so
 /// PLS1 and PLS3 share one degeneracy guard; `linalg::constant_to_rounding`
 /// owns the explanation. The guard is relative to each vector's own
 /// magnitude, and the sums behind it are formed on each vector divided by a
@@ -742,11 +906,13 @@ mod tests {
         assert!(r.pvalue >= grid_step - 1e-12);
     }
 
-    /// Both split routes read X and Y only through row-subset
-    /// standardization into owned matrices, so a padded submatrix, a
-    /// row-major view and a negative-stride view of X, or of Y, give the
-    /// owned matrix's result to the bit, on the primal route (dense 48x7,
-    /// or any `keep_x`) and the Gram route (wide 30x400, `keep_x` None).
+    /// Every split route reads X and Y only through row-subset
+    /// standardization into owned matrices or column blocks, so a padded
+    /// submatrix, a row-major view and a negative-stride view of X, or of
+    /// Y, give the owned matrix's result to the bit: on `split_exact`'s
+    /// primal route (dense 48x7, or any `keep_x`) and Gram route (wide
+    /// 30x400, `keep_x` None), on `split_nb`'s streamed route (no keep) and
+    /// on its materialized refit (any keep).
     #[test]
     fn confirmatory_output_is_bit_identical_across_x_and_y_layouts() {
         use crate::test_support::{assert_layout_invariant, copy_free_families};
@@ -924,15 +1090,40 @@ mod tests {
     #[test]
     fn split_nb_statistic_matches_split_exact_at_the_same_seed() {
         // Both methods report tanh(z̄) over the splits `draw_splits` produces
-        // from the seed, so only the reference differs. Bit equality holds
-        // because `nb_test` and `mean_fisher_z` sum the same clamped atanh
-        // values in the same order.
+        // from the seed, so only the reference differs. Dense `split_nb`
+        // reads X block by block and `split_exact` fits materialized halves
+        // here, so the two agree to rounding.
         let (x, y) = linked_blocks(60, 6, 3, 2.0, 5);
         let nb = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(8, false, 42)).unwrap();
         let ex = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, opts(99, 8, 42)).unwrap();
         assert_eq!(nb.test_method, "split_nb");
         assert_eq!(ex.test_method, "split_exact");
-        assert_eq!(nb.statistic.to_bits(), ex.statistic.to_bits());
+        assert!(
+            (nb.statistic - ex.statistic).abs() <= 1e-10,
+            "{} vs {}",
+            nb.statistic,
+            ex.statistic
+        );
+
+        // With a sparse X side both methods fit materialized halves
+        // (`split_exact` on its primal route), so the two agree to the bit.
+        let sparse = |o: Pls3ConfirmatoryTestOpts| Pls3ConfirmatoryTestOpts {
+            keep_x: Some(3),
+            ..o
+        };
+        let nb = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, sparse(nb_opts(8, false, 42)))
+            .unwrap();
+        let ex =
+            pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, sparse(opts(99, 8, 42))).unwrap();
+        assert_eq!(nb.test_method, "split_nb");
+        assert_eq!(ex.test_method, "split_exact");
+        assert_eq!(
+            nb.statistic.to_bits(),
+            ex.statistic.to_bits(),
+            "keep_x=3: {} vs {}",
+            nb.statistic,
+            ex.statistic
+        );
     }
 
     #[test]
@@ -953,6 +1144,191 @@ mod tests {
         let r = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(4, true, 7)).unwrap();
         assert_eq!(r.test_method, "split_nb");
         assert!(r.n_perm.is_none());
+    }
+
+    /// Dense `split_nb` reads X block by block; each split's `r` agrees
+    /// with the materialized fit on a one-block shape, a three-block wide
+    /// shape (20-row halves, 13,104-column blocks) and a tall shape.
+    #[test]
+    fn pls3_split_nb_streamed_matches_the_materialized_correlations() {
+        use crate::signal_test::draw_splits;
+        assert_eq!(crate::linalg::stream_block_width(20), 13_104);
+        for (n, p, q) in [(60_usize, 6_usize, 3_usize), (40, 30_000, 3), (200, 12, 4)] {
+            let (x, y) = linked_blocks(n, p, q, 2.0, 5);
+            let (_, mut rng) = crate::rng::resolve_seed(Some(7)).unwrap();
+            let splits = draw_splits(n, 1, 6, &mut rng).unwrap();
+            let o = nb_opts(6, false, 7);
+            let got = pls3_split_lv_correlations_streamed(x.as_ref(), y.as_ref(), &splits, &o);
+            let want = pls3_split_lv_correlations(x.as_ref(), y.as_ref(), &splits, &o);
+            for j in 0..splits.len() {
+                assert!(
+                    pls3_split_r_streamed(x.as_ref(), y.as_ref(), &splits[j]).is_some(),
+                    "n={n} p={p}: split {j} should be decided without a copy"
+                );
+                assert!(
+                    (got[j] - want[j]).abs() <= 1e-10,
+                    "n={n} p={p} split {j}: {} vs {}",
+                    got[j],
+                    want[j]
+                );
+            }
+        }
+    }
+
+    /// A split the streamed body cannot decide is the materialized fit's to
+    /// the bit: a constant X has no first component.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn pls3_split_nb_streamed_hands_a_degenerate_split_to_the_materialized_fit() {
+        use crate::signal_test::draw_splits;
+        let (n, p, q) = (40_usize, 9_usize, 3_usize);
+        let x = Mat::<f64>::from_fn(n, p, |_, j| (j + 1) as f64);
+        let (_, y) = linked_blocks(n, p, q, 2.0, 5);
+        let (_, mut rng) = crate::rng::resolve_seed(Some(3)).unwrap();
+        let splits = draw_splits(n, 1, 4, &mut rng).unwrap();
+        let o = nb_opts(4, true, 3);
+        let got = pls3_split_lv_correlations_streamed(x.as_ref(), y.as_ref(), &splits, &o);
+        let want = pls3_split_lv_correlations(x.as_ref(), y.as_ref(), &splits, &o);
+        for j in 0..splits.len() {
+            assert!(pls3_split_r_streamed(x.as_ref(), y.as_ref(), &splits[j]).is_none());
+            assert_eq!(got[j].to_bits(), want[j].to_bits(), "split {j}");
+        }
+    }
+
+    /// A constant X leaves every split undecided, so the second pass of
+    /// `pls3_split_lv_correlations_streamed` fills all of them. Both passes
+    /// run one split at a time at budget 0 and all in one batch with no
+    /// limit, and both give the materialized correlations to the bit.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn pls3_split_nb_streamed_fills_several_undecided_splits_in_one_batch() {
+        use crate::resample::{copy_bytes, units_at_once};
+        use crate::signal_test::draw_splits;
+        let (n, p, q) = (40_usize, 9_usize, 3_usize);
+        let x = Mat::<f64>::from_fn(n, p, |_, j| (j + 1) as f64);
+        let (_, y) = linked_blocks(n, p, q, 2.0, 5);
+        let (_, mut rng) = crate::rng::resolve_seed(Some(3)).unwrap();
+        let splits = draw_splits(n, 1, 4, &mut rng).unwrap();
+        let o = nb_opts(4, true, 3);
+        let unit = copy_bytes(n, p);
+        assert_eq!(crate::fit::with_budget(0, || units_at_once(4, unit)), 1);
+        assert_eq!(
+            crate::fit::with_budget(u64::MAX, || units_at_once(4, unit)),
+            4
+        );
+        for sp in &splits {
+            assert!(pls3_split_r_streamed(x.as_ref(), y.as_ref(), sp).is_none());
+        }
+        let run = |b| {
+            crate::resample::with_batch_log(|| {
+                crate::fit::with_budget(b, || {
+                    pls3_split_lv_correlations_streamed(x.as_ref(), y.as_ref(), &splits, &o)
+                })
+            })
+        };
+        let ((one, log_one), (all, log_all)) = (run(0), run(u64::MAX));
+        crate::resample::assert_batches(&log_one, 4, 1, 2);
+        crate::resample::assert_batches(&log_all, 4, 4, 2);
+        let want = pls3_split_lv_correlations(x.as_ref(), y.as_ref(), &splits, &o);
+        for j in 0..splits.len() {
+            assert_eq!(one[j].to_bits(), all[j].to_bits(), "split {j}");
+            assert_eq!(one[j].to_bits(), want[j].to_bits(), "split {j}");
+        }
+    }
+
+    /// `pls3_split_lv_correlations` with a sparse X side gives the same bits
+    /// with its splits one at a time (budget 0) and all in one batch (no
+    /// limit).
+    #[test]
+    fn pls3_split_lv_correlations_do_not_depend_on_the_budget() {
+        use crate::signal_test::draw_splits;
+        let (x, y) = linked_blocks(60, 6, 3, 2.0, 5);
+        let (_, mut rng) = crate::rng::resolve_seed(Some(42)).unwrap();
+        let splits = draw_splits(60, 1, 8, &mut rng).unwrap();
+        let o = Pls3ConfirmatoryTestOpts {
+            keep_x: Some(3),
+            ..nb_opts(8, false, 42)
+        };
+        let run = |b| {
+            crate::resample::with_batch_log(|| {
+                crate::fit::with_budget(b, || {
+                    pls3_split_lv_correlations(x.as_ref(), y.as_ref(), &splits, &o)
+                })
+            })
+        };
+        let ((one, log_one), (all, log_all)) = (run(0), run(u64::MAX));
+        crate::resample::assert_batches(&log_one, 8, 1, 1);
+        crate::resample::assert_batches(&log_all, 8, 8, 1);
+        assert!(
+            (0..one.nrows()).any(|j| one[j] != 0.0),
+            "premise: nonzero r"
+        );
+        for j in 0..splits.len() {
+            assert_eq!(one[j].to_bits(), all[j].to_bits(), "split {j}");
+        }
+    }
+
+    /// A split the score gate of `pls3_split_r_streamed` rejects is the
+    /// materialized fit's to the bit, on an `r` that is not zero. Column 0
+    /// of X carries the shared factor and is shifted by 1e6 on the held-out
+    /// rows only, so the training half is ordinary and `σ₁` clears its
+    /// floors, while the held-out X score is about 5e5 on every row plus
+    /// variation of order one. Its centered norm is about 2e-6 of its
+    /// norm: below `dual_route::SCORE_BAND`, so the gate rejects the split,
+    /// yet far above the constant-to-rounding test, so the materialized fit
+    /// correlates it.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    #[allow(clippy::similar_names)]
+    fn pls3_split_nb_streamed_hands_a_score_gated_split_to_the_materialized_fit() {
+        use crate::linalg::{scaled_moments, standardize_apply_rows, standardize_rows};
+        let (n, p, q) = (60_usize, 6_usize, 3_usize);
+        let (base, y) = linked_blocks(n, p, q, 2.0, 5);
+        let x = Mat::<f64>::from_fn(n, p, |i, j| {
+            if i >= 30 && j == 0 {
+                base[(i, j)] + 1e6
+            } else {
+                base[(i, j)]
+            }
+        });
+        let sp = SplitIdx {
+            tr: (0..30).collect(),
+            te: (30..60).collect(),
+        };
+        let o = nb_opts(2, true, 3);
+
+        let (xs_tr, x_mean, x_scale) = standardize_rows(x.as_ref(), &sp.tr, None, None);
+        let xs_te =
+            standardize_apply_rows(x.as_ref(), &sp.te, x_mean.as_ref(), x_scale.as_ref(), None);
+        let (ys_tr, _, _) = standardize_rows(y.as_ref(), &sp.tr, None, None);
+        let (u, _) = crate::pls3::pls3_lv1_prestd(
+            xs_tr.as_ref(),
+            xs_tr.norm_l2(),
+            ys_tr.as_ref(),
+            None,
+            None,
+            o.max_iter,
+            o.tol,
+        )
+        .unwrap()
+        .expect("premise: the training half keeps LV1");
+        let s = crate::linalg::mat_vec(xs_te.as_ref(), u.as_ref(), faer::Par::Seq);
+        let ms = scaled_moments(30, |i| s[i], None);
+        assert!(
+            !ms.is_constant(30) && ms.ss.sqrt() < crate::dual_route::SCORE_BAND * ms.sq.sqrt(),
+            "premise: the held-out X score is below the score band but not constant"
+        );
+
+        let one = std::slice::from_ref(&sp);
+        let want = pls3_split_lv_correlations(x.as_ref(), y.as_ref(), one, &o);
+        assert!(
+            want[0].is_finite() && want[0] != 0.0,
+            "premise: the materialized fit reports a nonzero r, got {}",
+            want[0]
+        );
+        assert!(pls3_split_r_streamed(x.as_ref(), y.as_ref(), &sp).is_none());
+        let got = pls3_split_lv_correlations_streamed(x.as_ref(), y.as_ref(), one, &o);
+        assert_eq!(got[0].to_bits(), want[0].to_bits());
     }
 
     // ── `test_method = "auto"` ──────────────────────────────────────────
@@ -1050,12 +1426,13 @@ mod tests {
     /// `dual_route::pls3_split_zbars_columns`. Both get the same splits and
     /// the same permutations, so every one of the B+1 z̄ columns must agree.
     #[allow(clippy::many_single_char_names)]
-    fn assert_pls3_split_exact_dual_route_matches_honest_refit(keep_y: Option<usize>) {
+    fn assert_pls3_split_exact_dual_route_matches_honest_refit(p: usize, keep_y: Option<usize>) {
         use crate::signal_test::{draw_splits, mean_fisher_z};
 
-        // n=60 ⇒ n_tr=30; p=100, q=3, B+1=50 ⇒ Bq=150:
-        // 30·(150+100) = 7,500 < 100·150 = 15,000 ⇒ dual is live.
-        let (n, p, q) = (60_usize, 100_usize, 3_usize);
+        // n=60 ⇒ n_tr=30; q=3, B+1=50 ⇒ Bq=150. Dual is live when
+        // 30·(150+p) < p·150, which the `dual_route_eligible` assert
+        // below checks.
+        let (n, q) = (60_usize, 3_usize);
         let (n_perm, n_splits, seed) = (49_usize, 6_usize, 11_u64);
         let (x, y) = linked_blocks(n, p, q, 3.0, 7);
         let n_cols = n_perm + 1;
@@ -1101,15 +1478,30 @@ mod tests {
             )));
         }
 
-        // Route B: the Gram path.
-        let b = crate::dual_route::pls3_split_zbars_columns(
-            x.as_ref(),
-            y.as_ref(),
-            &splits,
-            &perms,
-            keep_y,
-            o.max_iter,
-            o.tol,
+        // Route B: the Gram path, its splits one at a time (budget 0) and
+        // all in one batch (no limit): the same bits.
+        let run = |budget| {
+            crate::resample::with_batch_log(|| {
+                crate::fit::with_budget(budget, || {
+                    crate::dual_route::pls3_split_zbars_columns(
+                        x.as_ref(),
+                        y.as_ref(),
+                        &splits,
+                        &perms,
+                        keep_y,
+                        o.max_iter,
+                        o.tol,
+                    )
+                })
+            })
+        };
+        let ((b, log_one), (b_all, log_all)) = (run(0), run(u64::MAX));
+        crate::resample::assert_batches(&log_one, n_splits, 1, 1);
+        crate::resample::assert_batches(&log_all, n_splits, n_splits, 1);
+        assert_eq!(
+            b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            b_all.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "keep_y={keep_y:?}: the Gram route's bits depend on the budget"
         );
 
         assert_eq!(a.len(), b.len());
@@ -1148,8 +1540,16 @@ mod tests {
             // `ky == q` takes the dual route's dense arm.
             Some(3),
         ] {
-            assert_pls3_split_exact_dual_route_matches_honest_refit(keep_y);
+            assert_pls3_split_exact_dual_route_matches_honest_refit(100, keep_y);
         }
+    }
+
+    #[test]
+    fn pls3_split_exact_dual_route_matches_honest_refit_over_several_blocks() {
+        // 30-row halves give a block of 8,736 columns: p=20,000 is three.
+        assert_eq!(crate::linalg::stream_block_width(30), 8736);
+        assert_pls3_split_exact_dual_route_matches_honest_refit(20_000, None);
+        assert_pls3_split_exact_dual_route_matches_honest_refit(20_000, Some(2));
     }
 
     /// A sparse X side removes the Gram route from the menu, and the
@@ -1231,6 +1631,54 @@ mod tests {
         let out = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, o).unwrap();
         assert_eq!(out.pvalue, expected_p);
         assert_eq!(out.statistic.to_bits(), z_obs.tanh().to_bits());
+    }
+
+    /// The primal route's split driver on the inputs of
+    /// `sparse_x_side_forces_the_primal_route_in_the_runner` (six splits, a
+    /// sparse X side), its splits one at a time (budget 0) and all in one
+    /// batch (no limit): the same bits, column 0 being the observed z̄ of the
+    /// split-by-split reference.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn primal_split_driver_gives_the_same_bits_at_every_budget() {
+        use crate::signal_test::{draw_splits, mean_fisher_z};
+        let (n, p, q) = (60_usize, 100_usize, 3_usize);
+        let (n_perm, n_splits, seed) = (49_usize, 6_usize, 11_u64);
+        let (x, y) = linked_blocks(n, p, q, 3.0, 7);
+        let o = Pls3ConfirmatoryTestOpts {
+            args: ConfirmatoryArgs::SplitExact { n_perm, n_splits },
+            seed: Some(seed),
+            keep_x: Some(10),
+            keep_y: Some(2),
+            ..Pls3ConfirmatoryTestOpts::default()
+        };
+        let (_, mut rng) = crate::rng::resolve_seed(Some(seed)).unwrap();
+        let splits = draw_splits(n, 1, n_splits, &mut rng).unwrap();
+        let perms: Vec<Vec<usize>> = crate::rng::child_seeds(&mut rng, n_perm)
+            .into_iter()
+            .map(|s| crate::resample::permutation_from_seed(n, s))
+            .collect();
+        let run = |b| {
+            crate::resample::with_batch_log(|| {
+                crate::fit::with_budget(b, || {
+                    pls3_split_zbars_columns_primal(x.as_ref(), y.as_ref(), &splits, &perms, &o)
+                })
+            })
+        };
+        let ((one, log_one), (all, log_all)) = (run(0), run(u64::MAX));
+        crate::resample::assert_batches(&log_one, n_splits, 1, 1);
+        crate::resample::assert_batches(&log_all, n_splits, n_splits, 1);
+        assert_eq!(
+            one.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            all.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        let z_obs = mean_fisher_z(&pls3_split_lv_correlations(
+            x.as_ref(),
+            y.as_ref(),
+            &splits,
+            &o,
+        ));
+        assert_eq!(one[0].to_bits(), z_obs.to_bits());
     }
 
     /// A training half whose `Ỹ_tr` is orthogonal to `X̃_tr` up to rounding
@@ -1325,70 +1773,104 @@ mod tests {
     /// side through its own `k_used == 0` branch. The comparison against
     /// the honest per-split refit below checks that route agreement.
     ///
-    /// This test is insensitive to the Gram route's truncation gate: `M` is
-    /// exactly zero here, so the dual formula and the primal fallback the
-    /// gate sends this `λ_max = 0` column to both give `r = 0`.
+    /// This test does not pin the primal fallback of the Gram route's
+    /// truncation gate: with `‖X̃_tr‖_F = 0` every comparison of the gate
+    /// reads `0 >= 0`, so this `λ_max = 0` column passes the gate and stays
+    /// on the dual formula, and `M` being exactly zero gives it `r = 0`, the
+    /// primal route's value. With a sparse `keep_y`, every column stops at
+    /// the keep-boundary band and is computed by the second pass, so the
+    /// "stays on the dual formula" text holds only for `keep_y = None`.
     /// `pls3_dual_route_hands_an_orthogonal_training_half_to_the_primal` is
     /// the test that pins the gate.
     #[allow(clippy::many_single_char_names)]
     #[test]
     fn pls3_dual_route_degenerate_x_gives_zero_not_nan() {
         use crate::signal_test::{draw_splits, mean_fisher_z};
-        let x = Mat::<f64>::from_fn(60, 5, |_, _| 1.25);
-        let (_, y) = linked_blocks(60, 5, 3, 3.0, 7);
-        let (_, mut rng) = crate::rng::resolve_seed(Some(4)).unwrap();
-        let splits = draw_splits(60, 1, 6, &mut rng).unwrap();
-        let perms: Vec<Vec<usize>> = vec![crate::resample::permute_indices(60, &mut rng)];
-        let z = crate::dual_route::pls3_split_zbars_columns(
-            x.as_ref(),
-            y.as_ref(),
-            &splits,
-            &perms,
-            None,
-            100,
-            1e-8,
-        );
-        for (col, v) in z.iter().enumerate() {
-            assert!(v.is_finite(), "col {col} not finite: {v}");
-            assert!(v.abs() < 1e-12, "col {col}: {v}");
-        }
+        // 6 splits of 30 training rows at p = 5 and p = 400, one at a time
+        // (budget 0) and all in one batch (no limit), with the same bits.
+        for p in [5_usize, 400] {
+            let x = Mat::<f64>::from_fn(60, p, |_, _| 1.25);
+            let (_, y) = linked_blocks(60, p, 3, 3.0, 7);
+            for keep_y in [None, Some(2_usize)] {
+                let (_, mut rng) = crate::rng::resolve_seed(Some(4)).unwrap();
+                let splits = draw_splits(60, 1, 6, &mut rng).unwrap();
+                let perms: Vec<Vec<usize>> = vec![crate::resample::permute_indices(60, &mut rng)];
+                let run = |b| {
+                    crate::resample::with_batch_log(|| {
+                        crate::fit::with_budget(b, || {
+                            crate::dual_route::pls3_split_zbars_columns(
+                                x.as_ref(),
+                                y.as_ref(),
+                                &splits,
+                                &perms,
+                                keep_y,
+                                100,
+                                1e-8,
+                            )
+                        })
+                    })
+                };
+                let ((z, log_one), (all, log_all)) = (run(0), run(u64::MAX));
+                // With a sparse `keep_y` every column goes to the second
+                // pass, so both passes run over the six splits.
+                let passes = if keep_y.is_some() { 2 } else { 1 };
+                crate::resample::assert_batches(&log_one, 6, 1, passes);
+                crate::resample::assert_batches(&log_all, 6, 6, passes);
+                assert_eq!(
+                    z.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    all.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "p={p} keep_y={keep_y:?}"
+                );
+                for (col, v) in z.iter().enumerate() {
+                    assert!(
+                        v.is_finite(),
+                        "p={p} keep_y={keep_y:?}: col {col} not finite: {v}"
+                    );
+                    assert!(v.abs() < 1e-12, "p={p} keep_y={keep_y:?}: col {col}: {v}");
+                }
 
-        // Route agreement, not just finiteness: the same honest per-split
-        // refit the equivalence test uses, on the same splits and the same
-        // permutation.
-        let o = Pls3ConfirmatoryTestOpts {
-            args: ConfirmatoryArgs::SplitExact {
-                n_perm: 1,
-                n_splits: 6,
-            },
-            seed: Some(4),
-            ..Pls3ConfirmatoryTestOpts::default()
-        };
-        let mut a = Vec::with_capacity(z.len());
-        a.push(mean_fisher_z(&pls3_split_lv_correlations(
-            x.as_ref(),
-            y.as_ref(),
-            &splits,
-            &o,
-        )));
-        for perm in &perms {
-            let y_perm = Mat::<f64>::from_fn(60, 3, |i, j| y[(perm[i], j)]);
-            a.push(mean_fisher_z(&pls3_split_lv_correlations(
-                x.as_ref(),
-                y_perm.as_ref(),
-                &splits,
-                &o,
-            )));
-        }
-        assert_eq!(a.len(), z.len());
-        for (col, (av, bv)) in a.iter().zip(z.iter()).enumerate() {
-            let scale = av.abs().max(bv.abs());
-            let rel = if scale == 0.0 {
-                0.0
-            } else {
-                (av - bv).abs() / scale
-            };
-            assert!(rel < 1e-10, "col {col}: primal={av} dual={bv} rel={rel}");
+                // Route agreement, not just finiteness: the same honest per-split
+                // refit the equivalence test uses, on the same splits and the same
+                // permutation.
+                let o = Pls3ConfirmatoryTestOpts {
+                    args: ConfirmatoryArgs::SplitExact {
+                        n_perm: 1,
+                        n_splits: 6,
+                    },
+                    seed: Some(4),
+                    keep_y,
+                    ..Pls3ConfirmatoryTestOpts::default()
+                };
+                let mut a = Vec::with_capacity(z.len());
+                a.push(mean_fisher_z(&pls3_split_lv_correlations(
+                    x.as_ref(),
+                    y.as_ref(),
+                    &splits,
+                    &o,
+                )));
+                for perm in &perms {
+                    let y_perm = Mat::<f64>::from_fn(60, 3, |i, j| y[(perm[i], j)]);
+                    a.push(mean_fisher_z(&pls3_split_lv_correlations(
+                        x.as_ref(),
+                        y_perm.as_ref(),
+                        &splits,
+                        &o,
+                    )));
+                }
+                assert_eq!(a.len(), z.len());
+                for (col, (av, bv)) in a.iter().zip(z.iter()).enumerate() {
+                    let scale = av.abs().max(bv.abs());
+                    let rel = if scale == 0.0 {
+                        0.0
+                    } else {
+                        (av - bv).abs() / scale
+                    };
+                    assert!(
+                        rel < 1e-10,
+                        "p={p} keep_y={keep_y:?}: col {col}: primal={av} dual={bv} rel={rel}"
+                    );
+                }
+            }
         }
     }
 
@@ -1403,9 +1885,9 @@ mod tests {
     /// from the runner's own primal machinery, so both of those separate the
     /// two p-values. A wrong routing argument (`n_tr`, `n_perm + 1`, `q`)
     /// flips the runner to primal instead, which the precondition assert
-    /// below covers. The same input also runs `split_nb` (always primal),
-    /// whose statistic must equal the dual `split_exact` one to the route
-    /// tolerance.
+    /// below covers. The same input also runs dense `split_nb` (the
+    /// streamed route), whose statistic must equal the dual `split_exact`
+    /// one to the route tolerance.
     // The p-value is a count over a fixed denominator and must match exactly.
     #[allow(clippy::float_cmp)]
     #[allow(clippy::many_single_char_names)]
@@ -1476,7 +1958,7 @@ mod tests {
             r.statistic
         );
 
-        // split_nb always refits on the primal route; `force` keeps the gate
+        // Dense split_nb reads X block by block; `force` keeps the gate
         // from deciding what runs.
         let nb = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(n_splits, true, seed))
             .unwrap();
@@ -1591,10 +2073,17 @@ mod tests {
                     max_iter,
                     tol,
                 )[0];
-                let rel = (a - b).abs() / a.abs().max(b.abs()).max(f64::MIN_POSITIVE);
-                assert!(
-                    rel < 1e-12,
-                    "seed {seed}, t = {t:e}: primal = {a}, dual = {b}, rel = {rel:e}"
+                // Every `t` of the window takes the fallback: it sits within
+                // 33 ulps (a relative 8e-15 at most) of the point where the
+                // two magnitudes at the keep boundary cross, and the route's
+                // selection band is a relative 1e-10. The fallback refits on
+                // the halves the route materializes for it, so its value is
+                // the primal route's to the bit.
+                assert!(a.is_finite(), "seed {seed}, t = {t:e}: primal = {a}");
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "seed {seed}, t = {t:e}: primal = {a}, dual = {b}"
                 );
                 z_min = z_min.min(a);
                 z_max = z_max.max(a);

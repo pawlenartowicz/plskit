@@ -42,8 +42,9 @@ pub(crate) use multi_k::{nspace_blocks_built, K_DUAL_MAX};
 /// Hard cap on the training-set size the dual route will accept.
 ///
 /// `G` is `n_tr²` f64s, 128 MB at `n_tr = 4000`. Folds (`pls1_cv_r2_columns`)
-/// and splits (`pls3_split_zbars_columns`) run one at a time, so one `G` is
-/// alive. The flop rule below already excludes that regime,
+/// and splits (`pls3_split_zbars_columns`) run in batches of
+/// `resample::map_units`, each counted as its `G`, `M` and two stream blocks.
+/// The flop rule below already excludes training sets that large,
 /// so this should never bind; it bounds `G` specifically, so getting the
 /// flop rule wrong should make `G` degrade to "slower", never to an
 /// out-of-memory kill. It does not bound the `B × n` permutation and
@@ -127,11 +128,21 @@ pub(crate) const RESOLVE_BAND: f64 = 4.0;
 /// requires of its `√(z'Gz)` and `t't` before trusting its own decision.
 pub(crate) const ABS_BAND: f64 = 100.0;
 
+/// Multiple of the relative floor (`pls3::sigma_rel_floor`) that the PLS3
+/// Gram route's lower bound on `σ₁` (and, on the sparse Y side, on the
+/// sparse `σ`) must clear before it trusts that the primal fit keeps
+/// LV1. See "Truncation" on [`pls3_split_zbars_columns`] for why 8 and not
+/// `RESOLVE_BAND`.
+pub(crate) const FLOOR_BAND: f64 = 8.0;
+
 /// Relative floor on the centered norm of a Gram route's test-half scores
 /// `s = M·alpha` at `split_exact`: a column keeps them only when
 /// `‖s_c‖ ≥ SCORE_BAND · ‖s‖` and `s` is not constant to rounding;
 /// otherwise the primal refit decides that column. Shared by every PLS1
 /// Gram route that forms test-half scores.
+/// `pls3_signal_test::pls3_split_r_streamed` applies the same floor to the
+/// two held-out scores of a PLS3 split and hands a split that fails it to
+/// the materialized fit.
 ///
 /// `guarded_pearson`'s `constant_to_rounding` test is a second
 /// discontinuity after truncation: it returns `r = 0` for scores whose
@@ -192,10 +203,15 @@ pub(crate) const SCORE_BAND: f64 = 1e-3;
 /// `fit::pls1_kernel` drops the component, and the fold then predicts zero, when
 /// `‖X̃'z‖` falls under `fit::w_rel_floor(n_tr, p, ‖X̃‖_F, ‖z‖)`
 /// (`max(n_tr, p)·ε·‖X̃‖_F·‖z‖`) or under `1e-14`, or when `t't < 1e-14`.
-/// The floor itself is evaluated here on bit-identical inputs (`X̃_tr` and `z`
-/// come out of the same `standardize` / `standardize1` calls as on the primal
-/// route). The quantity compared against it is not: `z'Gz` is formed from a
-/// rounded `G`, and its absolute error is bounded by
+/// The floor itself is evaluated here on inputs that match the primal route's:
+/// `z` comes out of the same `standardize1` call as on the primal route, and
+/// `‖X̃_tr‖_F` comes from the column moments of the same standardization, equal
+/// to the primal route's `norm_l2` to rounding, except when a finite `x`
+/// overflows in standardization: the moments' norm then stays finite and
+/// `norm_l2` does not, but `G` is not finite either, so the column fails the
+/// gates below and takes the fallback. The quantity compared against the
+/// floor is not: `z'Gz` is formed from a rounded `G`, and its absolute error
+/// is bounded by
 /// `(p + 2·n_tr)·ε·‖z‖²·‖X̃‖_F²`, so `√(z'Gz)` resolves `‖X̃'z‖` only down to
 /// about `√((p + 2·n_tr)·ε)·‖X̃‖_F·‖z‖`, far above the floor. A `z` orthogonal
 /// to the columns of `X̃_tr` makes `z'Gz` pure rounding: it can come out
@@ -212,8 +228,9 @@ pub(crate) const SCORE_BAND: f64 = 1e-3;
 /// clear `ABS_BAND` times the `1e-14` exits. Past those gates the true
 /// `‖X̃'z‖` and `t't` lie within a factor 2 of the dual values, so the
 /// primal route keeps the component too. Every other column (inside a band, or a
-/// NaN) is recomputed for this fold by `fit::pls1_fit_prepared_fro` on the same
-/// `X̃_tr`, `z` and `‖X̃_tr‖_F`, exactly as `signal_test::cv_fold_contribution`
+/// NaN) is recomputed by `fit::pls1_fit_prepared_fro` in a second pass, one fold
+/// at a time, on that fold's materialized blocks (`X̃_tr`, `X̃_val` and
+/// `X̃_tr.norm_l2()`), exactly as `signal_test::cv_fold_contribution`
 /// does, so its contribution is the primal route's to the bit, truncation
 /// decision included. The one exception is `z` exactly zero (a constant
 /// training `y`): `X̃'z` is then an exact zero on both routes, and the zero
@@ -239,7 +256,9 @@ pub(crate) const SCORE_BAND: f64 = 1e-3;
 /// Dense, unweighted, `K = 1`. Those are not checked: the parameters that
 /// would make them otherwise are simply absent from the signature, so an
 /// ineligible call cannot be written. `run_raw_perm` owns the routing
-/// decision.
+/// decision. Folds run in batches of `resample::map_units`, each counted as
+/// its `G`, `M` and two stream blocks; the result does not depend on the
+/// batch size.
 ///
 /// # Shapes
 /// - `x`: `(n, p)` raw (unstandardized) predictors
@@ -263,40 +282,69 @@ pub(crate) fn pls1_cv_r2_columns(
     folds: &[Vec<usize>],
 ) -> crate::error::PlsKitResult<Vec<f64>> {
     use crate::linalg::{standardize1, standardize_apply_rows, standardize_rows};
+    use faer::linalg::matmul::matmul;
+    use faer::Accum;
+
+    type Contrib = crate::error::PlsKitResult<(f64, f64)>;
 
     let n_cols = y_mat.ncols();
-    let mut ss_res = vec![0.0_f64; n_cols];
-    let mut ss_tot = vec![0.0_f64; n_cols];
-    let mut failed = vec![false; n_cols];
-
-    for (fi, val_idx) in folds.iter().enumerate() {
-        let train_idx: Vec<usize> = folds
+    let p = x.ncols();
+    let train_rows = |fi: usize| -> Vec<usize> {
+        folds
             .iter()
             .enumerate()
             .filter(|(j, _)| *j != fi)
             .flat_map(|(_, f)| f.iter().copied())
-            .collect();
+            .collect()
+    };
+    // Column `col` on the training rows, standardized with its own moments:
+    // `(z, mean, scale)`.
+    let train_target = |train_idx: &[usize], col: usize| {
+        let y_tr = Col::<f64>::from_fn(train_idx.len(), |i| y_mat[(train_idx[i], col)]);
+        standardize1(y_tr.as_ref())
+    };
+    // `(ss_res, ss_tot)` of the prediction `y_pred` for column `col` on the
+    // validation rows, y on the training fold's scale.
+    let val_ss = |val_idx: &[usize], col: usize, y_mean: f64, y_scale: f64, y_pred: &Col<f64>| {
+        let n_val = val_idx.len();
+        let ys_val = Col::<f64>::from_fn(n_val, |i| (y_mat[(val_idx[i], col)] - y_mean) / y_scale);
+        #[allow(clippy::cast_precision_loss)]
+        let mean_val: f64 = (0..n_val).map(|i| ys_val[i]).sum::<f64>() / n_val as f64;
+        let res: f64 = (0..n_val).map(|i| (y_pred[i] - ys_val[i]).powi(2)).sum();
+        let tot: f64 = (0..n_val).map(|i| (ys_val[i] - mean_val).powi(2)).sum();
+        (res, tot)
+    };
 
-        // Training moments on the training fold only, applied to the
-        // validation fold: mirrors signal_test::pooled_cv_r2_columns
-        // (change together).
-        let (xs_tr, x_mean, x_scale) = standardize_rows(x, &train_idx, None, None);
-        let xs_val = standardize_apply_rows(x, val_idx, x_mean.as_ref(), x_scale.as_ref(), None);
+    // Pass 1: one fold's contribution for every column the gates decide;
+    // `None` for a column they cannot. Nothing the size of X is written.
+    let decide_fold = |fi: usize| -> Vec<Option<Contrib>> {
+        let val_idx = folds[fi].as_slice();
+        let train_idx = train_rows(fi);
+        let n_tr = train_idx.len();
+        let n_val = val_idx.len();
 
         // Built once per fold and reused by every column: this is the whole
         // saving. G is n_tr × n_tr, M is n_val × n_tr; neither carries p.
+        // Both are summed over column blocks of X standardized with the
+        // training moments, so this pass writes neither the training nor
+        // the validation block of the fold. `x_fro` is `‖X̃_tr‖_F` from the
+        // same moments, for the truncation gates (see "Truncation" above).
         let bpar = crate::fit::par_fixed();
-        let g = crate::linalg::mat_mul(xs_tr.as_ref(), xs_tr.transpose(), bpar);
-        let m = crate::linalg::mat_mul(xs_val.as_ref(), xs_tr.transpose(), bpar);
-
-        let n_tr = train_idx.len();
-        let n_val = val_idx.len();
-        let p = x.ncols();
-
-        // Once per fold: the inputs of the truncation gates (see
-        // "Truncation" above). `x_fro` is the same `‖X̃_tr‖_F` that
-        // `fit::pls1_kernel` computes for its floor, from the same matrix.
-        let x_fro = xs_tr.norm_l2();
+        let mut g = Mat::<f64>::zeros(n_tr, n_tr);
+        let mut m = Mat::<f64>::zeros(n_val, n_tr);
+        let x_fro = crate::linalg::standardized_blocks(
+            x,
+            &train_idx,
+            val_idx,
+            None,
+            None,
+            None,
+            crate::linalg::stream_block_width(n_tr.max(n_val)),
+            |_, a, c| {
+                matmul(g.as_mut(), Accum::Add, a, a.transpose(), 1.0, bpar);
+                matmul(m.as_mut(), Accum::Add, c, a.transpose(), 1.0, bpar);
+            },
+        );
         let fro2 = x_fro * x_fro;
         #[allow(clippy::cast_precision_loss)]
         let (num_err, den_err) = (
@@ -304,12 +352,8 @@ pub(crate) fn pls1_cv_r2_columns(
             ((2 * p + 3 * n_tr) as f64) * f64::EPSILON * fro2 * fro2,
         );
 
-        let per_col = |col: usize| -> Option<crate::error::PlsKitResult<(f64, f64)>> {
-            if failed[col] {
-                return None;
-            }
-            let y_tr = Col::<f64>::from_fn(n_tr, |i| y_mat[(train_idx[i], col)]);
-            let (z, y_mean, y_scale) = standardize1(y_tr.as_ref());
+        crate::resample::map_indexed(n_cols, |col| {
+            let (z, y_mean, y_scale) = train_target(&train_idx, col);
             // The primal fold fit's y-side check (`check_fit_y_and_k` in
             // `signal_test::cv_fold_contribution`; change together).
             if let Err(e) = crate::fit::check_finite_col(z.as_ref()) {
@@ -328,13 +372,13 @@ pub(crate) fn pls1_cv_r2_columns(
             // truncated K=1 fit has coef = 0, hence a zero prediction. The
             // gates below keep the Gram formula only where the primal route
             // provably keeps the component; everything else is decided by
-            // the primal kernel itself.
+            // the primal kernel itself, in the second pass.
             let zz = z_norm * z_norm;
             let w_norm = num.max(0.0).sqrt();
             let tt = if num > 0.0 { den / num } else { 0.0 };
             let w_floor = crate::fit::w_rel_floor(n_tr, p, x_fro, z_norm);
             // Written as `a >= b` conjunctions so a NaN anywhere fails the
-            // gate and takes the primal fallback.
+            // gate and leaves the column pending.
             let resolved = num >= RESOLVE_BAND * num_err * zz
                 && den >= RESOLVE_BAND * den_err * zz
                 && w_norm >= RESOLVE_BAND * w_floor
@@ -348,9 +392,44 @@ pub(crate) fn pls1_cv_r2_columns(
                 let mz = crate::linalg::mat_vec(m.as_ref(), z.as_ref(), seq);
                 Col::<f64>::from_fn(n_val, |i| c * mz[i])
             } else {
-                // The primal fold fit, bit for bit as in
-                // `signal_test::cv_fold_contribution` (change together).
-                match crate::fit::pls1_fit_prepared_fro(
+                return None;
+            };
+            Some(Ok(val_ss(val_idx, col, y_mean, y_scale, &y_pred)))
+        })
+    };
+
+    // Folds in batches of `resample::map_units`, each counted as `G` and `M`
+    // (`n_tr · n` values at the largest training set) plus the two stream
+    // blocks of `standardized_blocks`; the columns of a fold map in parallel.
+    let n = y_mat.nrows();
+    let n_tr_max = n - folds.iter().map(Vec::len).min().unwrap_or(0);
+    let gram_unit = crate::resample::copy_bytes(n_tr_max, n)
+        .saturating_add(2 * crate::linalg::STREAM_BLOCK_BYTES);
+    let rows: Vec<Vec<Option<Contrib>>> =
+        crate::resample::map_units(folds.len(), gram_unit, decide_fold);
+
+    // Pass 2: the folds with pending columns run in batches of
+    // `resample::map_units`, one standardized copy of X counted per fold.
+    // The columns left pending get the primal fold fit, bit for bit as in
+    // `signal_test::cv_fold_contribution` (change together), on the primal
+    // route's own blocks and its own `‖X̃_tr‖_F`, call for call as
+    // `signal_test::prepare_cv_fold` builds them without weights (change
+    // together).
+    let rows = crate::resample::fill_pending(
+        rows,
+        crate::resample::copy_bytes(x.nrows(), x.ncols()),
+        |fi, pending| {
+            let val_idx = folds[fi].as_slice();
+            let train_idx = train_rows(fi);
+            let (xs_tr, x_mean, x_scale) = standardize_rows(x, &train_idx, None, None);
+            let xs_val =
+                standardize_apply_rows(x, val_idx, x_mean.as_ref(), x_scale.as_ref(), None);
+            let x_fro = xs_tr.norm_l2();
+            crate::resample::map_indexed(pending.len(), |u| {
+                let col = pending[u];
+                let (z, y_mean, y_scale) = train_target(&train_idx, col);
+                let seq = faer::Par::Seq;
+                let y_pred = match crate::fit::pls1_fit_prepared_fro(
                     xs_tr.as_ref(),
                     z.as_ref(),
                     1,
@@ -359,38 +438,34 @@ pub(crate) fn pls1_cv_r2_columns(
                     x_fro,
                 ) {
                     Ok(fit) => crate::linalg::mat_vec(xs_val.as_ref(), fit.coef.as_ref(), seq),
-                    // Unreachable: the prepared kernel has no error path.
-                    // NaN rather than a panic, which `run_raw_perm` counts
-                    // as an exceedance.
-                    Err(_) => Col::<f64>::from_fn(n_val, |_| f64::NAN),
-                }
-            };
+                    // Unreachable: the prepared kernel has no error path. NaN
+                    // rather than a panic, which `run_raw_perm` counts as an
+                    // exceedance.
+                    Err(_) => Col::<f64>::from_fn(val_idx.len(), |_| f64::NAN),
+                };
+                Ok(val_ss(val_idx, col, y_mean, y_scale, &y_pred))
+            })
+        },
+    );
 
-            let ys_val =
-                Col::<f64>::from_fn(n_val, |i| (y_mat[(val_idx[i], col)] - y_mean) / y_scale);
-            #[allow(clippy::cast_precision_loss)]
-            let mean_val: f64 = (0..n_val).map(|i| ys_val[i]).sum::<f64>() / n_val as f64;
-            let res: f64 = (0..n_val).map(|i| (y_pred[i] - ys_val[i]).powi(2)).sum();
-            let tot: f64 = (0..n_val).map(|i| (ys_val[i] - mean_val).powi(2)).sum();
-            Some(Ok((res, tot)))
-        };
-
-        // `collect` preserves column order, so the result does not depend
-        // on which worker runs which column (same shape as
-        // split_perm_nr_zbars' per-split dispatch).
-        let contrib: Vec<Option<crate::error::PlsKitResult<(f64, f64)>>> = {
-            use rayon::prelude::*;
-            (0..n_cols).into_par_iter().map(per_col).collect()
-        };
-        for (col, r) in contrib.into_iter().enumerate() {
+    // Fold order, from `0.0`: a failed fit of column 0 is returned (the
+    // first in fold order); a failed fit of another column makes it NaN,
+    // and its contributions from the other folds are dropped.
+    let mut ss_res = vec![0.0_f64; n_cols];
+    let mut ss_tot = vec![0.0_f64; n_cols];
+    let mut failed = vec![false; n_cols];
+    for row in rows {
+        for (col, r) in row.into_iter().enumerate() {
+            if failed[col] {
+                continue;
+            }
             match r {
-                None => {}
-                Some(Ok((res, tot))) => {
+                Ok((res, tot)) => {
                     ss_res[col] += res;
                     ss_tot[col] += tot;
                 }
-                Some(Err(e)) if col == 0 => return Err(e),
-                Some(Err(_)) => failed[col] = true,
+                Err(e) if col == 0 => return Err(e),
+                Err(_) => failed[col] = true,
             }
         }
     }
@@ -412,7 +487,9 @@ pub(crate) fn pls1_cv_r2_columns(
 
 /// Per-column z̄ for the PLS3 `split_exact` statistic through the Gram
 /// route. Returns `perms.len() + 1` values; column 0 is the observed Y and
-/// columns `1..` are the permutation nulls, in `perms` order.
+/// columns `1..` are the permutation nulls, in `perms` order. Splits run in
+/// batches of `resample::map_units`, each counted as its `G`, `M` and two
+/// stream blocks; the result does not depend on the batch size.
 ///
 /// # The reduction this function exploits
 /// PLS3's fit is a singular decomposition, so unlike PLS1 at `K = 1` there
@@ -449,12 +526,17 @@ pub(crate) fn pls1_cv_r2_columns(
 /// The primal fit keeps LV1 only when `σ₁` clears `pls3::SIGMA_FLOOR` and
 /// the relative floor `pls3::sigma_rel_floor(n_tr, p, q, ‖X̃_tr‖_F,
 /// ‖Ỹ_tr‖_F)` (`max(n_tr, p, q)·ε·‖X̃_tr‖_F·‖Ỹ_tr‖_F`); otherwise it keeps
-/// nothing and `r = 0`. The floor itself is evaluated here on bit-identical
-/// inputs (`X̃_tr` and `Ỹ_tr` come out of the same `standardize` calls as on
-/// the primal route). The quantity compared against it is not: `λ_max` is
-/// an eigenvalue of a rounded `C`, and bounding the rounding of each entry
-/// `ỹ_j'Gỹ_k` as `pls1_cv_r2_columns` bounds `z'Gz`, plus the symmetric
-/// eigensolver's backward error, puts it within
+/// nothing and `r = 0`. The floor itself is evaluated here on inputs that
+/// match the primal route's: `Ỹ_tr` comes out of the same `standardize` call
+/// as on the primal route, and `‖X̃_tr‖_F` comes from the column moments of
+/// the same standardization, equal to the primal route's `norm_l2` to
+/// rounding, with the exception "Truncation" on [`pls1_cv_r2_columns`]
+/// names (a finite `x` that overflows in standardization). Unlike there, a
+/// non-finite `G` can pass the gates here: with a positive relative floor,
+/// `λ_max = +inf` clears each of them. The quantity compared against the
+/// floor is not: `λ_max` is an eigenvalue of a rounded `C`, and bounding
+/// the rounding of each entry `ỹ_j'Gỹ_k` as `pls1_cv_r2_columns` bounds
+/// `z'Gz`, plus the symmetric eigensolver's backward error, puts it within
 /// `λ_err = (p + 2·n_tr + q)·ε·‖X̃_tr‖_F²·‖Ỹ_tr‖_F²` of `σ₁²`. So `√λ_max`
 /// resolves `σ₁` only down to about `√((p + 2·n_tr + q)·ε)·‖X̃_tr‖_F·‖Ỹ_tr‖_F`,
 /// far above the floor, and a `Ỹ_tr` orthogonal to `X̃_tr` up to rounding
@@ -471,11 +553,21 @@ pub(crate) fn pls1_cv_r2_columns(
 /// backward error (a small multiple of `max(p, q)·ε·σ₁`), about twice the
 /// floor, so it keeps LV1 too. `FLOOR_BAND` is 8 rather than
 /// `RESOLVE_BAND` for that second term, which `pls1_cv_r2_columns` has no
-/// counterpart of. Every other column is recomputed by
-/// `pls3_signal_test::pls3_split_column_r_primal` on the same blocks, so its
-/// value is the primal route's to the bit, truncation included; that also
-/// covers a degenerate half (`λ_max = 0`, a constant X or Y block), where
-/// the primal keeps nothing either.
+/// counterpart of. Every other column is recomputed in a second pass, the
+/// splits in batches of `resample::map_units`, by
+/// `pls3_signal_test::pls3_split_columns_z_primal` on the
+/// split's materialized halves (`X̃_tr`, `X̃_te` and `X̃_tr.norm_l2()`), so its
+/// value is the primal route's to the bit, truncation included. An
+/// exactly degenerate half (`λ_max = 0`: an `X̃_tr` or `Ỹ_tr` that is
+/// exactly zero) is not such a column on the dense arm. The code
+/// compares `λ_max` with `RESOLVE_BAND·λ_err`, with `FLOOR_BAND` times the
+/// relative floor times `√λ_max`, and with `ABS_BAND·SIGMA_FLOOR·√λ_max`
+/// (the two floor gates multiplied through by `√λ_max`). There `λ_err` and
+/// the relative floor are zero and `SIGMA_FLOOR` is multiplied by
+/// `√λ_max = 0`, so every gate reads `0 >= 0`, and the Gram formula returns
+/// exactly 0, the value of the primal route, which keeps nothing. With a
+/// sparse `keep_y` that half takes the fallback, at the selection band of
+/// "Near-ties".
 ///
 /// On the sparse Y side the primal truncates on the sparse `σ = u'Av`
 /// instead, with `u = Av_{T−1}/‖Av_{T−1}‖` from the last sweep, which is
@@ -487,7 +579,9 @@ pub(crate) fn pls1_cv_r2_columns(
 /// of order `1/√(n_tr·min(p, q))` or larger, against bands of order
 /// `√((p + n_tr)·ε)` and `max(n_tr, p, q)·ε`. They fire on columns whose
 /// training `Ỹ` is orthogonal, or nearly so, to `X̃_tr`, and cost one
-/// primal fit of that column.
+/// primal fit of that column. The second pass standardizes both halves of X
+/// once for each split that has such columns, those splits in batches of
+/// `resample::map_units`.
 ///
 /// # No `K = 1` restriction in principle
 /// PLS3 has no deflation, so the same reduction would serve any
@@ -569,8 +663,9 @@ pub(crate) fn pls1_cv_r2_columns(
 /// (`STOP_BAND_REL`, `STOP_BAND_ABS`); and once, up front, the relative
 /// eigengap `(λ_q − λ_{q−1}) / λ_q` that sets how far the two initializers
 /// can sit apart (`GAP_BAND`). If any is inside its band, the column is
-/// recomputed by `pls3_signal_test::pls3_split_column_r_primal`, the exact
-/// primal computation, on the same standardized blocks, so that column's
+/// recomputed in the second pass by
+/// `pls3_signal_test::pls3_split_columns_z_primal`, the exact primal
+/// computation, on the split's materialized halves, so that column's
 /// value is the primal route's to the bit. Outside the bands every branch
 /// the primal takes is the one taken here, because the bands sit orders of
 /// magnitude above the measured route discrepancy (`‖v_primal − v_dual‖_∞`
@@ -630,17 +725,10 @@ pub(crate) fn pls3_split_zbars_columns(
     max_iter: usize,
     tol: f64,
 ) -> Vec<f64> {
-    use crate::linalg::{standardize, standardize_apply, standardize_apply_rows, standardize_rows};
+    use crate::linalg::{standardize, standardize_apply};
 
     let (p, q) = (x.ncols(), y.ncols());
     let n_cols = perms.len() + 1;
-
-    /// Multiple of the relative floor (`pls3::sigma_rel_floor`) that the
-    /// Gram route's lower bound on `σ₁` (and, on the sparse Y side, on the
-    /// sparse `σ`) must clear before it trusts that the primal fit keeps
-    /// LV1. See "Truncation" in the doc comment for why 8 and not
-    /// `RESOLVE_BAND`.
-    const FLOOR_BAND: f64 = 8.0;
 
     /// The floor `spls3_component` applies to the selected `v` before
     /// normalizing it. Named directly from `pls3` rather than re-declared, so
@@ -677,20 +765,33 @@ pub(crate) fn pls3_split_zbars_columns(
     /// never even evaluates the gate.
     const DRIFT_SWEEPS: usize = 400;
 
-    let per_split = |sp: &crate::signal_test::SplitIdx| -> Vec<f64> {
+    let per_split = |sp: &crate::signal_test::SplitIdx| -> Vec<Option<f64>> {
         let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
-        let (xs_tr, x_mean, x_scale) = standardize_rows(x, tr, None, None);
-        let xs_te = standardize_apply_rows(x, te, x_mean.as_ref(), x_scale.as_ref(), None);
+        use faer::linalg::matmul::matmul;
+        use faer::Accum;
 
-        // Built once per split; neither carries p into the replicate loop.
-        let bpar = crate::fit::par_fixed();
-        let g = crate::linalg::mat_mul(xs_tr.as_ref(), xs_tr.transpose(), bpar);
-        let m = crate::linalg::mat_mul(xs_te.as_ref(), xs_tr.transpose(), bpar);
         let (n_tr, n_te) = (tr.len(), te.len());
-        // Once per split: the X-side inputs of the truncation gate (see
-        // "Truncation" above). `x_fro` is the same `‖X̃_tr‖_F` the primal
-        // fit computes for its relative floor, from the same matrix.
-        let x_fro = xs_tr.norm_l2();
+        // Built once per split; neither carries p into the replicate loop.
+        // Both are summed over column blocks of X standardized with the
+        // training moments, so this pass writes no half of X. `x_fro` is
+        // `‖X̃_tr‖_F` from the same moments, the X-side input of the
+        // truncation gate (see "Truncation" above).
+        let bpar = crate::fit::par_fixed();
+        let mut g = Mat::<f64>::zeros(n_tr, n_tr);
+        let mut m = Mat::<f64>::zeros(n_te, n_tr);
+        let x_fro = crate::linalg::standardized_blocks(
+            x,
+            tr,
+            te,
+            None,
+            None,
+            None,
+            crate::linalg::stream_block_width(n_tr.max(n_te)),
+            |_, a, c| {
+                matmul(g.as_mut(), Accum::Add, a, a.transpose(), 1.0, bpar);
+                matmul(m.as_mut(), Accum::Add, c, a.transpose(), 1.0, bpar);
+            },
+        );
         #[allow(clippy::cast_precision_loss)]
         let lam_err_x = ((p + 2 * n_tr + q) as f64) * f64::EPSILON * x_fro * x_fro;
 
@@ -716,35 +817,20 @@ pub(crate) fn pls3_split_zbars_columns(
             // `signal_test::eigenvalues_symmetric`. faer returns
             // eigenvalues ascending, so the leading pair is the last.
             let Ok((lambda, eig_u)) = crate::linalg::self_adjoint_eigen(c.as_ref(), seq) else {
-                return 0.0;
+                return Some(0.0);
             };
             let lambda_max = lambda[q - 1];
-            // Exact primal recomputation of this column, for the
-            // truncation gate and the near-tie guards below.
-            // `keep_x = None` is the dense X side this route is
-            // restricted to (`Some(p)` would give the same fit).
-            let primal_fallback = || {
-                crate::pls3_signal_test::pls3_split_column_r_primal(
-                    xs_tr.as_ref(),
-                    x_fro,
-                    xs_te.as_ref(),
-                    ys_tr.as_ref(),
-                    ys_te.as_ref(),
-                    None,
-                    keep_y,
-                    max_iter,
-                    tol,
-                )
-                .clamp(-0.9999, 0.9999)
-                .atanh()
-            };
             // Truncation gate (see "Truncation" above). The primal fit
             // keeps LV1 only when `σ₁` clears both floors; this route
             // keeps its own formula only where it can prove that, and
-            // hands every other column (a degenerate half, a `Ỹ_tr`
-            // orthogonal to `X̃_tr` up to rounding, a NaN) to the primal,
+            // hands every other column (a `Ỹ_tr` orthogonal to `X̃_tr` up
+            // to rounding, a NaN) to the primal (in the second pass below),
             // whose answer is then the primal's to the bit. `a >= b`
-            // conjunctions, so a NaN anywhere fails the gate.
+            // conjunctions, so a NaN anywhere fails the gate. An exactly
+            // zero `X̃_tr` or `Ỹ_tr` passes it instead (every comparison
+            // reads `0 >= 0`): the dense arm then returns exactly 0, the
+            // primal's value, and the sparse arm falls back at its
+            // selection band.
             let y_fro = ys_tr.norm_l2();
             let lam_err = lam_err_x * y_fro * y_fro;
             let floor = crate::pls3::sigma_rel_floor(n_tr, p, q, x_fro, y_fro);
@@ -756,7 +842,7 @@ pub(crate) fn pls3_split_zbars_columns(
             };
             // Dense LV1: `σ₁ = λ_max / √λ_max`.
             if !resolved(lambda_max, lambda_max) {
-                return primal_fallback();
+                return None;
             }
             // Sparse Y side: alternate in q-space. `None`, and the
             // dense endpoint `keep_y == q`, are a LITERAL skip of the
@@ -766,7 +852,7 @@ pub(crate) fn pls3_split_zbars_columns(
                 Some(ky) if ky < q => {
                     // `ky < q` implies `q >= 2`, so `lambda[q - 2]` exists.
                     if lambda_max - lambda[q - 2] < GAP_BAND * lambda_max {
-                        return primal_fallback();
+                        return None;
                     }
                     let stop_band = (STOP_BAND_REL * tol).max(STOP_BAND_ABS);
                     // Per-column scratch, reused across sweeps.
@@ -837,16 +923,16 @@ pub(crate) fn pls3_split_zbars_columns(
                             },
                         );
                         if kth - kth_next <= SEL_BAND * top {
-                            return primal_fallback();
+                            return None;
                         }
                         if crate::fit::select_and_normalize(&mut v, ky, V_NORM_FLOOR).is_none() {
-                            return 0.0;
+                            return Some(0.0);
                         }
                         let dv = (0..q)
                             .map(|j| (v[j] - v_for_u[j]).abs())
                             .fold(0.0_f64, f64::max);
                         if (dv - tol).abs() <= stop_band {
-                            return primal_fallback();
+                            return None;
                         }
                         if dv < tol {
                             break;
@@ -858,7 +944,7 @@ pub(crate) fn pls3_split_zbars_columns(
                     if sweeps > DRIFT_SWEEPS
                         && restricted_sweeps(c.as_ref(), &v) > DRIFT_SWEEPS as f64
                     {
-                        return primal_fallback();
+                        return None;
                     }
                     // The sparse `σ = u'Av` the primal fit truncates
                     // on, with `u = Av_{T−1}/‖Av_{T−1}‖`:
@@ -867,7 +953,7 @@ pub(crate) fn pls3_split_zbars_columns(
                     let num: f64 = (0..q).map(|j| v[j] * cvp[j]).sum();
                     let den2: f64 = (0..q).map(|j| v_for_u[j] * cvp[j]).sum();
                     if !resolved(num, den2) {
-                        return primal_fallback();
+                        return None;
                     }
                     Some((v_for_u, v))
                 }
@@ -889,13 +975,35 @@ pub(crate) fn pls3_split_zbars_columns(
             // `signal_test::nb_test` (change together): keeps the
             // statistic identical to the primal route's and z̄ finite at
             // |r| = 1.
-            r.clamp(-0.9999, 0.9999).atanh()
+            Some(r.clamp(-0.9999, 0.9999).atanh())
         })
     };
 
-    // Splits run one at a time (`false`): one prepared split (x_tr, x_te,
-    // G, M) is alive, and the columns of each split run in parallel.
-    crate::signal_test::zbars_over_splits(splits, n_cols, false, per_split)
+    // Pass 1. Splits in batches of `resample::map_units`, each counted as
+    // `G` and `M` (`n_tr · n` values) plus the two stream blocks of
+    // `standardized_blocks`; the columns of a split map in parallel.
+    // Nothing the size of X is written. Every split has the same training
+    // size (the split sizes depend on `n` and `k` only), so the first
+    // split's stands for all.
+    let n_tr = splits.first().map_or(0, |sp| sp.tr.len());
+    let gram_unit = crate::resample::copy_bytes(n_tr, x.nrows())
+        .saturating_add(2 * crate::linalg::STREAM_BLOCK_BYTES);
+    let rows: Vec<Vec<Option<f64>>> =
+        crate::resample::map_units(splits.len(), gram_unit, |j| per_split(&splits[j]));
+    // Pass 2: the splits with pending columns run in batches of
+    // `resample::map_units`, one standardized copy of X counted per split.
+    // The columns left pending are the primal route's, on halves
+    // materialized once per split.
+    let rows = crate::resample::fill_pending(
+        rows,
+        crate::resample::copy_bytes(x.nrows(), x.ncols()),
+        |j, pending| {
+            crate::pls3_signal_test::pls3_split_columns_z_primal(
+                x, y, &splits[j], perms, None, keep_y, max_iter, tol, pending,
+            )
+        },
+    );
+    crate::signal_test::zbars_from_rows(n_cols, &rows)
 }
 
 /// `1/g` for the relative gap `g = (λ₁ − λ₂)/λ₁` between the top two

@@ -58,6 +58,173 @@ pub(crate) fn map_indexed<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> V
     (0..n).into_par_iter().map(&f).collect()
 }
 
+/// Bytes of an `f64` copy of `rows × cols` values, `rows·cols·8`,
+/// saturating. The usual term of a `unit_bytes` estimate.
+pub(crate) fn copy_bytes(rows: usize, cols: usize) -> usize {
+    rows.saturating_mul(cols).saturating_mul(8)
+}
+
+/// How many of `n_units` units a loop runs at once: `budget / unit_bytes`
+/// (the budget is [`crate::fit::memory_budget`]), at least 1 and at most
+/// `n_units`. `unit_bytes = 0` gives `n_units`. One unit always runs, even
+/// when its buffers alone exceed the budget; `n_units = 0` gives 0.
+pub(crate) fn units_at_once(n_units: usize, unit_bytes: usize) -> usize {
+    if n_units == 0 {
+        return 0;
+    }
+    if unit_bytes == 0 {
+        return n_units;
+    }
+    let per_budget = crate::fit::memory_budget() / unit_bytes as u64;
+    usize::try_from(per_budget).map_or(n_units, |k| k.clamp(1, n_units))
+}
+
+/// Map `0..n_units` in batches of [`units_at_once`]`(n_units, unit_bytes)`:
+/// in parallel inside a batch, batch after batch, collected in unit order.
+/// The next batch starts only when the current one has ended, so the number
+/// of live units is at most the batch size even when `f` maps its columns
+/// in parallel (where a worker waiting on its columns would otherwise start
+/// another unit). A batch of 1 is a sequential loop. `unit_bytes` is the
+/// estimated size of the large buffers one unit holds. Element `u` is
+/// `f(u)` whatever the batch size, so results do not depend on it.
+pub(crate) fn map_units<T: Send>(
+    n_units: usize,
+    unit_bytes: usize,
+    f: impl Fn(usize) -> T + Sync,
+) -> Vec<T> {
+    let k = units_at_once(n_units, unit_bytes);
+    #[cfg(test)]
+    BATCH_LOG.with(|log| {
+        if let Some(log) = log.borrow_mut().as_mut() {
+            log.push((n_units, k));
+        }
+    });
+    if k <= 1 {
+        return (0..n_units).map(&f).collect();
+    }
+    let mut out = Vec::with_capacity(n_units);
+    for start in (0..n_units).step_by(k) {
+        let len = k.min(n_units - start);
+        out.extend(map_indexed(len, |i| f(start + i)));
+    }
+    out
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by `with_batch_log`; [`map_units`] appends to it while it is `Some`.
+    static BATCH_LOG: std::cell::RefCell<Option<Vec<(usize, usize)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` and return its result with `(n_units, batch)` for every
+/// [`map_units`] call made on the calling thread while `f` runs, in call
+/// order, `batch` being [`units_at_once`]`(n_units, unit_bytes)` (test
+/// builds). Calls on other threads are not recorded: a loop that a test
+/// reaches on its own thread (as `fit::with_budget` needs) is, the calls
+/// inside units that run on Rayon workers are not. The previous log is
+/// restored afterwards, also when `f` panics.
+#[cfg(test)]
+pub(crate) fn with_batch_log<T>(f: impl FnOnce() -> T) -> (T, Vec<(usize, usize)>) {
+    struct Restore(Option<Vec<(usize, usize)>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            BATCH_LOG.with(|log| *log.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(BATCH_LOG.with(|log| log.replace(Some(Vec::new()))));
+    let out = f();
+    let log = BATCH_LOG
+        .with(|log| log.borrow_mut().take())
+        .unwrap_or_default();
+    (out, log)
+}
+
+/// Assert that a [`with_batch_log`] log holds exactly `calls` calls of
+/// [`map_units`] over `n_units` units in batches of `batch`, and, when
+/// `batch` is 1, that no call in it ran a larger batch (test builds).
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn assert_batches(log: &[(usize, usize)], n_units: usize, batch: usize, calls: usize) {
+    let found = log.iter().filter(|&&e| e == (n_units, batch)).count();
+    assert_eq!(
+        found, calls,
+        "map_units calls over {n_units} units in batches of {batch}; log {log:?}"
+    );
+    if batch == 1 {
+        assert!(
+            log.iter().all(|&(_, b)| b <= 1),
+            "a batch larger than 1; log {log:?}"
+        );
+    }
+}
+
+/// [`map_units`] with a child generator per unit: `child_seeds(parent,
+/// n_units)` is drawn up front (the same parent consumption as
+/// [`parallel_for_each_seeded`]), then unit `u` runs
+/// `f(u, &mut child_rng(seeds[u]))`. Results do not depend on the batch
+/// size or on which worker runs a unit.
+pub(crate) fn map_units_seeded<T: Send>(
+    parent: &mut Rng,
+    n_units: usize,
+    unit_bytes: usize,
+    f: impl Fn(usize, &mut Rng) -> T + Sync,
+) -> Vec<T> {
+    let seeds = child_seeds(parent, n_units);
+    map_units(n_units, unit_bytes, |u| f(u, &mut child_rng(seeds[u])))
+}
+
+/// Second pass of a two-pass loop over units (splits or folds) and columns.
+/// `rows[u][c]` is `None` where the first pass left column `c` of unit `u`
+/// undecided. For each unit that has such columns, `fill(u, &pending)`
+/// returns their values, `pending` being the undecided column indices
+/// ascending. The units with pending columns run through [`map_units`] with
+/// `unit_bytes` (the large buffers `fill` builds for one unit, such as a
+/// standardized copy of its rows of X), so at most
+/// [`units_at_once`] of them exist at once; `fill` may map its columns in
+/// parallel itself. A unit with nothing pending is not handed to `fill`.
+/// The result does not depend on the batch size.
+///
+/// # Panics
+/// When `fill` returns fewer values than it was given columns.
+pub(crate) fn fill_pending<T: Send>(
+    rows: Vec<Vec<Option<T>>>,
+    unit_bytes: usize,
+    fill: impl Fn(usize, &[usize]) -> Vec<T> + Sync,
+) -> Vec<Vec<T>> {
+    let pending: Vec<(usize, Vec<usize>)> = rows
+        .iter()
+        .enumerate()
+        .map(|(u, row)| (u, (0..row.len()).filter(|&c| row[c].is_none()).collect()))
+        .filter(|(_, p): &(usize, Vec<usize>)| !p.is_empty())
+        .collect();
+    let mut filled = map_units(pending.len(), unit_bytes, |i| {
+        let (u, cols) = &pending[i];
+        fill(*u, cols)
+    })
+    .into_iter();
+    let mut next_unit = pending.iter().map(|(u, _)| *u).peekable();
+    rows.into_iter()
+        .enumerate()
+        .map(|(u, row)| {
+            let mut vals = if next_unit.peek() == Some(&u) {
+                next_unit.next();
+                filled.next().unwrap_or_default().into_iter()
+            } else {
+                Vec::new().into_iter()
+            };
+            row.into_iter()
+                .map(|v| {
+                    v.unwrap_or_else(|| {
+                        vals.next()
+                            .expect("fill returns one value per pending column")
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// The outcome columns of a replicate loop: column 0 is `y`, column
 /// `c ≥ 1` is `y` permuted by `permutation_from_seed(n, seeds[c - 1])`.
 /// The runner draws `seeds` once, before it chooses a route, so every route
@@ -190,6 +357,108 @@ mod tests {
         let f = |i: usize| (i * 7919) % 101;
         assert_eq!(map_indexed(500, f), (0..500).map(f).collect::<Vec<_>>());
         assert_eq!(map_indexed(0, f), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn fill_pending_fills_each_unit_in_order_and_skips_complete_ones() {
+        let rows: Vec<Vec<Option<usize>>> = vec![
+            vec![Some(1), None, Some(3), None],
+            vec![Some(5), Some(6)],
+            vec![None, None, None],
+            vec![],
+        ];
+        let calls = std::sync::Mutex::new(Vec::<(usize, Vec<usize>)>::new());
+        let out = fill_pending(rows.clone(), 1, |u, pending| {
+            calls.lock().unwrap().push((u, pending.to_vec()));
+            pending.iter().map(|&c| 100 * u + c).collect()
+        });
+        let mut calls = calls.into_inner().unwrap();
+        calls.sort();
+        assert_eq!(calls, vec![(0, vec![1, 3]), (2, vec![0, 1, 2])]);
+        // One unit at a time: the calls come in unit order.
+        let ordered = std::sync::Mutex::new(Vec::<(usize, Vec<usize>)>::new());
+        crate::fit::with_budget(0, || {
+            fill_pending(rows.clone(), 1, |u, pending| {
+                ordered.lock().unwrap().push((u, pending.to_vec()));
+                pending.iter().map(|&c| 100 * u + c).collect()
+            })
+        });
+        assert_eq!(
+            ordered.into_inner().unwrap(),
+            vec![(0, vec![1, 3]), (2, vec![0, 1, 2])]
+        );
+        let expected = vec![vec![1, 1, 3, 3], vec![5, 6], vec![200, 201, 202], vec![]];
+        assert_eq!(out, expected);
+        // The batch size does not change the output.
+        for budget in [0, 1, u64::MAX] {
+            let out = crate::fit::with_budget(budget, || {
+                fill_pending(rows.clone(), 1, |u, pending| {
+                    pending.iter().map(|&c| 100 * u + c).collect()
+                })
+            });
+            assert_eq!(out, expected, "budget {budget}");
+        }
+    }
+
+    #[test]
+    fn units_at_once_clamps_to_one_and_to_the_unit_count() {
+        crate::fit::with_budget(1000, || {
+            assert_eq!(units_at_once(10, 1001), 1); // one unit over budget still runs
+            assert_eq!(units_at_once(10, 500), 2);
+            assert_eq!(units_at_once(10, 499), 2);
+            assert_eq!(units_at_once(3, 1), 3);
+            assert_eq!(units_at_once(10, 0), 10);
+            assert_eq!(units_at_once(0, 10), 0);
+        });
+        crate::fit::with_budget(0, || assert_eq!(units_at_once(10, 1), 1));
+        assert_eq!(copy_bytes(usize::MAX, 2), usize::MAX);
+        assert_eq!(copy_bytes(3, 4), 96);
+    }
+
+    #[test]
+    fn map_units_keeps_order_and_bounds_live_units_with_nested_columns() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let (live, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let out = pool.install(|| {
+            crate::fit::with_budget(300, || {
+                map_units(10, 100, |u| {
+                    peak.fetch_max(live.fetch_add(1, SeqCst) + 1, SeqCst);
+                    // Hold the unit open so that units of one batch overlap.
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    let s: usize = map_indexed(64, |c| c * u).into_iter().sum();
+                    live.fetch_sub(1, SeqCst);
+                    s
+                })
+            })
+        });
+        assert_eq!(
+            out,
+            (0..10)
+                .map(|u| (0..64).map(|c| c * u).sum())
+                .collect::<Vec<usize>>()
+        );
+        assert!(peak.load(SeqCst) <= 3, "peak {}", peak.load(SeqCst));
+        assert!(peak.load(SeqCst) >= 2, "peak {}", peak.load(SeqCst));
+    }
+
+    #[test]
+    fn map_units_seeded_is_parallel_for_each_seeded_at_any_budget() {
+        use rand::Rng as _;
+        let (_, mut a) = resolve_seed(Some(21)).unwrap();
+        let want = parallel_for_each_seeded(&mut a, 23, demo_row);
+        for budget in [0, 200, u64::MAX] {
+            let (_, mut b) = resolve_seed(Some(21)).unwrap();
+            let got =
+                crate::fit::with_budget(budget, || map_units_seeded(&mut b, 23, 100, demo_row));
+            assert_eq!(got, want, "budget {budget}");
+            let (_, mut a2) = resolve_seed(Some(21)).unwrap();
+            let _ = parallel_for_each_seeded(&mut a2, 23, demo_row);
+            assert_eq!(a2.next_u64(), b.next_u64(), "budget {budget}");
+        }
     }
 
     #[test]

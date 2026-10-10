@@ -130,7 +130,7 @@ first.
 
 - `pre_standardized_X` / `pre_standardized_Y` are accepted but have **no
   effect** on either method: every training half is re-standardized on its
-  own rows, and the gate standardizes its own copy of X.
+  own rows, and the gate standardizes X itself.
 - Minimum sizes: `n ≥ 6`, `n_splits ≥ 2`, `n_perm ≥ 1`; smaller values
   raise `invalid_argument`.
 - On the result, `n_eff` equals `n`, `ci` is `None`, `n_perm` is `None`

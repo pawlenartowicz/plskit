@@ -31,10 +31,32 @@ pub enum KSpec {
 /// and `PLSKIT_NUM_THREADS=16` give the same result. `Seq` and the parallel
 /// arm of `Auto` can differ from each other in the last bits.
 ///
-/// Resamplers (`pls1_perm_null`, `pls1_rotation_stability`,
-/// `pls1_confirmatory_test`, `pls1_find_k_*`) force `Seq` for the inner
-/// fits: outer Rayon is already saturating the cores, and nested
-/// parallelism would oversubscribe.
+/// Inside the resampling functions, the PLS1 fit of one resample takes
+/// `Auto`, so a large fit still uses the cores when the memory budget
+/// (`PLSKIT_MEMORY_BUDGET`) lets only a few resamples run at once. This
+/// holds for the per-split fits of `pls1_confirmatory_test` with
+/// `ConfirmatoryMethod::SplitNb` and `ConfirmatoryMethod::SplitExact`, the
+/// cross-validation fold fits of `pls1_find_k_optimal`,
+/// `spls1_find_k_optimal` and `spls1_find_keep_optimal`, and the subsample
+/// and bootstrap fits of the confirmatory CI (`ConfirmatoryTestOpts::ci`)
+/// and of `pls1_rotation_stability`. The fold fits of
+/// `ConfirmatoryMethod::RawPerm`, the permutation refits of
+/// `pls1_perm_null` and the per-split fits of `pls3_confirmatory_test` are
+/// each sequential (the resamples themselves can still run in parallel).
+//
+// Route detail. `Auto` (where the loop runs its units through
+// `resample::map_units`): `signal_test::split_column_r` through
+// `signal_test::SPLIT_FIT_PAR`, which also covers the second passes of the
+// K = 1 no-refit routes and the first step `ŝ₁ = Xs'ys` of `split_exact`'s
+// Gram-p arm (formed under the `Par` that fit resolves); the two
+// `find_k` fold fits; `subsample::fit_rows`;
+// `rotation_stability::fit_subsample`. `Seq`: the `raw_perm` fold fit
+// (`signal_test::cv_fold_contribution`), its K = 1 Gram route's second
+// pass and the Gram-p arm's first step on its folds; the permutation
+// refits of `pls1_perm_null` and the Gram-p arm's first step there; the
+// per-replicate products of the Gram-p and n-space backends beyond that
+// first step; and the per-split PLS3 fit of `pls3_signal_test`, which
+// runs every product with `Par::Seq`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParChoice {
     /// Decide per fit based on `n * d * k`.
@@ -138,6 +160,100 @@ pub(crate) fn parse_num_threads(raw: Option<&str>) -> PlsKitResult<Option<usize>
     }
 }
 
+/// Environment variable that sets the memory budget of the resampling
+/// loops; see [`memory_budget`]. Validated once per top-level call by
+/// [`with_thread_limit`].
+pub(crate) const MEMORY_BUDGET_ENV: &str = "PLSKIT_MEMORY_BUDGET";
+
+/// Budget in bytes when `PLSKIT_MEMORY_BUDGET` is unset: 2 GiB.
+pub(crate) const DEFAULT_MEMORY_BUDGET: u64 = 2 << 30;
+
+/// `PLSKIT_MEMORY_BUDGET` as read from the environment: unset → the default;
+/// otherwise a whole number of bytes, optionally followed by a unit letter
+/// `K`, `M`, `G` or `T` (powers of 1024), optionally followed by `B`
+/// (after digits or a unit letter) or `iB` (after a unit letter only), in
+/// any case. `0` is a valid budget (one unit at a time). Anything else, or
+/// a value past `u64`, is an error that quotes the value (no trimming, so
+/// stray whitespace shows in the message).
+pub(crate) fn parse_memory_budget(raw: Option<&str>) -> PlsKitResult<u64> {
+    let Some(s) = raw else {
+        return Ok(DEFAULT_MEMORY_BUDGET);
+    };
+    let parsed = (|| {
+        let mut t = s.as_bytes();
+        let unit_at = |t: &[u8]| -> Option<u32> {
+            match t.last()?.to_ascii_uppercase() {
+                b'K' => Some(10),
+                b'M' => Some(20),
+                b'G' => Some(30),
+                b'T' => Some(40),
+                _ => None,
+            }
+        };
+        if t.len() >= 2 && t[t.len() - 2..].eq_ignore_ascii_case(b"ib") {
+            t = &t[..t.len() - 2];
+            unit_at(t)?;
+        } else if t.last().is_some_and(|c| c.eq_ignore_ascii_case(&b'b')) {
+            t = &t[..t.len() - 1];
+        }
+        let shift = unit_at(t);
+        if shift.is_some() {
+            t = &t[..t.len() - 1];
+        }
+        if t.is_empty() || !t.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let n: u64 = std::str::from_utf8(t).ok()?.parse().ok()?;
+        n.checked_mul(1_u64 << shift.unwrap_or(0))
+    })();
+    parsed.ok_or_else(|| bad_memory_budget(&format!("{s:?}")))
+}
+
+fn bad_memory_budget(quoted: &str) -> PlsKitError {
+    PlsKitError::InvalidArgument(format!(
+        "{MEMORY_BUDGET_ENV} must be a whole number of bytes with an optional K, M, G or T \
+         and an optional B or iB (for example 2G), got {quoted}"
+    ))
+}
+
+#[cfg(test)]
+thread_local! {
+    static MEMORY_BUDGET_OVERRIDE: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Bytes of working memory the resampling loops may spend on the buffers
+/// that grow with the data: `PLSKIT_MEMORY_BUDGET` read on each call, the
+/// default when it is unset or does not parse (the entry points reject a
+/// bad value up front, see [`with_thread_limit`]). Under `cfg(test)` a
+/// thread-local override set by `with_budget` wins.
+pub(crate) fn memory_budget() -> u64 {
+    #[cfg(test)]
+    if let Some(b) = MEMORY_BUDGET_OVERRIDE.with(std::cell::Cell::get) {
+        return b;
+    }
+    match std::env::var(MEMORY_BUDGET_ENV) {
+        Ok(s) => parse_memory_budget(Some(&s)).unwrap_or(DEFAULT_MEMORY_BUDGET),
+        Err(_) => DEFAULT_MEMORY_BUDGET,
+    }
+}
+
+/// Run `f` with [`memory_budget`] fixed to `bytes` on the calling thread
+/// (loop sites that `f` reaches on this thread see it; other threads read
+/// the environment). The previous override is restored afterwards, also
+/// when `f` panics.
+#[cfg(test)]
+pub(crate) fn with_budget<T>(bytes: u64, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MEMORY_BUDGET_OVERRIDE.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(MEMORY_BUDGET_OVERRIDE.with(|c| c.replace(Some(bytes))));
+    f()
+}
+
 /// The plskit-owned pool for the last `n` asked for. One size is cached:
 /// a different `n` builds a new pool and drops the old one once its last
 /// running call finishes (each call holds its own `Arc`).
@@ -191,7 +307,9 @@ pub(crate) fn run_with_threads<T: Send>(
 }
 
 /// Every public entry point that reaches Rayon runs its body through this:
-/// it reads `PLSKIT_NUM_THREADS` once and runs `f` on the matching pool.
+/// it reads `PLSKIT_NUM_THREADS` once and runs `f` on the matching pool. It
+/// also checks that `PLSKIT_MEMORY_BUDGET`, when set, parses, so a bad value
+/// is rejected before any work.
 /// Crate-internal callers call the `_impl` functions instead, so inner fits
 /// inside replicate workers never re-read the variable.
 pub(crate) fn with_thread_limit<T: Send>(
@@ -206,6 +324,15 @@ pub(crate) fn with_thread_limit<T: Send>(
             )))
         }
     };
+    match std::env::var(MEMORY_BUDGET_ENV) {
+        Ok(s) => {
+            parse_memory_budget(Some(&s))?;
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            return Err(bad_memory_budget(&format!("{raw:?}")));
+        }
+    }
     run_with_threads(n, f)?
 }
 
@@ -959,9 +1086,8 @@ pub(crate) fn select_and_normalize(v: &mut Col<f64>, keep: usize, floor: f64) ->
 }
 
 /// Absolute floor of the PLS1 kernel (`pls1_component_loop`): a component
-/// stops when `w_norm` or `t't` falls below it. The Gram-route gates that mirror those exits
-/// (`dual_route::pls1_cv_r2_columns`, `signal_test::split_perm_nr_zbars`)
-/// name this constant rather than restate the literal.
+/// stops when `w_norm` or `t't` falls below it. The gates that mirror those
+/// exits name this constant rather than restate the literal.
 pub(crate) const NIPALS_ABS_FLOOR: f64 = 1e-14;
 
 /// Relative floor on `w_norm = ‖X_a'y_a‖` for every PLS1 component:
@@ -1031,9 +1157,10 @@ pub(crate) const NIPALS_ABS_FLOOR: f64 = 1e-14;
 /// at least `2.7e7×` above it.
 ///
 /// The K = 1 Gram mirror `dual_route::pls1_cv_r2_columns` evaluates this
-/// same function on bit-identical inputs, but it cannot form `‖X'y‖` to the
-/// accuracy the floor needs, so a column it cannot resolve is recomputed
-/// by this kernel (see the doc comment there).
+/// same function on the kernel's `‖y‖`, to the bit, and on an `‖X‖_F` taken
+/// from the column moments, equal to the kernel's to rounding, but it
+/// cannot form `‖X'y‖` to the accuracy the floor needs, so a column it
+/// cannot resolve is recomputed by this kernel (see the doc comment there).
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn w_rel_floor(n: usize, d: usize, x_fro: f64, y_norm: f64) -> f64 {
     (n.max(d) as f64) * f64::EPSILON * x_fro * y_norm
@@ -1540,8 +1667,6 @@ mod tests {
         let d = x.ncols();
         // Owned working copies — deflated in place across components.
         // The caller resolves `par` from `FitOpts::par` (see `resolve_par`).
-        // Resamplers explicitly force `ParChoice::Seq`; oversubscribing the
-        // outer Rayon pool with nested parallelism here would tank throughput.
         let mut xk: Mat<f64> = x.to_owned();
         let mut yk: Col<f64> = y.to_owned();
         // From the undeflated inputs, once. It only ever gates a `break`, so no
@@ -2071,6 +2196,60 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mw.k_used, 20);
+    }
+
+    #[test]
+    fn memory_budget_parses_every_documented_form() {
+        let g2 = 2_u64 << 30;
+        for s in [
+            "2147483648",
+            "2048M",
+            "2G",
+            "2g",
+            "2GB",
+            "2gb",
+            "2GiB",
+            "2gib",
+        ] {
+            assert_eq!(parse_memory_budget(Some(s)).unwrap(), g2, "{s}");
+        }
+        assert_eq!(parse_memory_budget(Some("0")).unwrap(), 0);
+        assert_eq!(parse_memory_budget(Some("512K")).unwrap(), 512 << 10);
+        assert_eq!(parse_memory_budget(Some("1T")).unwrap(), 1 << 40);
+        assert_eq!(parse_memory_budget(Some("7B")).unwrap(), 7);
+        assert_eq!(parse_memory_budget(None).unwrap(), DEFAULT_MEMORY_BUDGET);
+        for bad in [
+            "",
+            " 2G",
+            "2G ",
+            "2.5G",
+            "-1",
+            "2X",
+            "G",
+            "2GiBB",
+            "99999999999T",
+            "2iB",
+            "B",
+            "iB",
+            "18446744073709551616",
+        ] {
+            let e = parse_memory_budget(Some(bad)).unwrap_err().to_string();
+            assert!(
+                e.contains(MEMORY_BUDGET_ENV) && e.contains(&format!("{bad:?}")),
+                "{bad}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_budget_override_wins_and_is_restored() {
+        let before = memory_budget();
+        with_budget(123, || {
+            assert_eq!(memory_budget(), 123);
+            with_budget(0, || assert_eq!(memory_budget(), 0));
+            assert_eq!(memory_budget(), 123);
+        });
+        assert_eq!(memory_budget(), before);
     }
 
     #[test]

@@ -4,11 +4,70 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+- Added: `PLSKIT_MEMORY_BUDGET`, an environment variable set and checked
+  like `PLSKIT_NUM_THREADS` in Rust, Python, R and Julia: the bytes of working
+  memory, beyond the inputs, for the buffers that grow with the data
+  (copies of `X` or of its halves, Gram matrices, the blocks in which `X`
+  is read). It takes a whole number of bytes with an optional `K`, `M`,
+  `G` or `T` (powers of 1024) and an optional `B`, or `iB` after the
+  letter, in any case;
+  the default is `2G`, and `0` runs one unit at a time. An invalid value
+  is `InvalidArgument` from every function that reads
+  `PLSKIT_NUM_THREADS`, before any work. The splits, folds and resamples
+  of `pls1_confirmatory_test` (`split_nb`, `split_exact`, `raw_perm` and
+  the `ci` pass), `pls3_confirmatory_test` (`split_nb`, `split_exact`),
+  the cross-validated selection of `pls1_find_k_optimal`,
+  `spls1_find_k_optimal` and `spls1_find_keep_optimal`, and
+  `pls1_rotation_stability` run in parallel batches sized by the budget,
+  at least one unit per batch, so their peak memory is bounded by it
+  whatever the thread count: where each unit copies `X`, an `X` too large
+  for two copies in the budget runs one unit at a time, with a peak of
+  about `X` plus one copy.
+  The budget is an estimate of the large buffers, not an exact ceiling.
+  Results do not depend on it. See
+  [Memory budget](_docs/concepts/threads.md#memory-budget).
+- Changed (numerics): for shapes with `n·d·k` at or above 1,000,000 (`n`
+  training rows, `d` columns, `k` components), the PLS1 fits inside
+  `pls1_confirmatory_test`'s `split_nb` and `split_exact` (the per-split
+  fits of their refit routes, and the standardized-copy fallback of the
+  `k = 1` routes), the cross-validated selection, the `ci` pass of
+  `pls1_confirmatory_test` and `pls1_rotation_stability` use the fixed
+  8-piece parallel arithmetic that `pls1_fit` uses at that size, not one
+  thread, so their outputs differ from the previous release in the last
+  bits. The steps of `pls1_find_k_sequence` and
+  `spls1_find_k_sequence`, the `diagnostic` of `pls1_find_k_optimal` and
+  `spls1_find_k_optimal`, and `pls1_fit` with `k="optimal"` or
+  `"sequence"` (Python, R and Julia) run these and move with them.
+  Smaller shapes are unchanged. Results do not depend on the thread count
+  or the budget. The testdata corpus is unchanged and passes within its
+  tolerance.
+- Changed (performance): `pls1_confirmatory_test` at `k = 1` on dense
+  input (`split_exact`, `split_nb`, and `raw_perm` on its Gram route) and
+  `pls3_confirmatory_test` on dense `X` (`split_exact` on its Gram route;
+  `split_nb` with dense `Y`) no longer write a standardized copy of `X`
+  per split or fold: `X` is read one block of columns at a time and only
+  the small products are kept. A split, fold or column the block-by-block
+  route cannot decide safely is computed on a standardized copy as
+  before. The `split_nb` auto-gate does the same on `X` with at least as
+  many columns as rows.
+- Changed (numerics): on those requests results differ from the previous
+  release at rounding level. Products are summed block by block and the
+  truncation floors take `‖X‖_F` from the standardization moments. Dense
+  `split_nb` also changes formula: `pls1_confirmatory_test` at `k = 1`
+  takes `split_exact`'s no-refit formula, and `pls3_confirmatory_test`
+  scores the held-out half through `X'Y`; each is tested against the
+  refit to `1e-10`. The steps of `pls1_find_k_sequence` and of the
+  `diagnostic` of `pls1_find_k_optimal`, and of their `spls1_` forms at
+  `keep = n_features`, run the `k = 1` test and move with it.
+  `pls3_confirmatory_test`'s dense `split_nb` statistic agrees with
+  `split_exact`'s at the same seed to rounding (tested to `1e-10`); where
+  `split_exact` takes its primal route the two were bit-identical in the
+  previous release. The testdata corpus is unchanged.
 - Changed (performance): the `split_nb` auto-gate takes the stable rank
   from the Gram matrix on the shorter side of the standardized `X`, not
-  from an SVD of it, so the gate holds one copy of `X` where it held two.
-  `stable_rank` differs from the previous release in the last bits. The
-  testdata corpus is unchanged.
+  from an SVD of it, so on `X` with more rows than columns the gate holds
+  one copy of `X` where it held two. `stable_rank` differs from the
+  previous release in the last bits. The testdata corpus is unchanged.
 - Changed (performance): `pls3_fit`, `plssvd_fit` and `spls3_fit` no longer
   write a standardized copy of `X`: `X'Y` and the X scores are formed from
   the raw `X`, read in its own memory layout (a C-ordered NumPy array in

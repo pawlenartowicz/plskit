@@ -64,11 +64,14 @@ These call `pls1_fit` with `check_n_eff: false`. The full-data check has
 already run at the entry, and each site tolerates a low-`n_eff` or
 truncated fit by design (the comment at each call site says why):
 
-- `signal_test.rs`: `pls1_cv_r2` CV folds (`raw_perm`);
-  `split_half_correlations` per-half fits (`split_nb`, `split_exact` refit
-  route; these pass `weights = None` because the weights are already baked
-  into the row-scaled data, so the check could not fire anyway); the
-  `e`-value train-half refit in `run_e`.
+- `signal_test.rs`: the `e`-value train-half refit in `run_e`. The
+  `raw_perm` CV folds (`cv_fold_contribution`) and the per-half fits of the
+  split tests (`split_column_r`: the `split_exact` refit route, `split_nb`
+  at `k ≥ 2` or with `keep` set, and the fallback of `nr_split_r`, the
+  no-refit body of both tests at `k = 1` without `keep`) do not call
+  `pls1_fit`: they run its kernel tail, `fit::pls1_fit_prepared_fro`, which
+  has no check and takes no weights (the weights are already in the
+  row-scaled data).
 - `find_k.rs`: `select_cv` fold fits; the `select_bic` full-`k_max` fit
   (the BIC sweep is truncation-tolerant); the `first_component_exhausted`
   full-data `k = 1` fit ahead of the CV selectors (a truncation is the

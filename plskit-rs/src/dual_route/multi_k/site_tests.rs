@@ -14,10 +14,10 @@ use crate::linalg::fold_split;
 use crate::resample::Columns;
 use crate::rng::{child_seeds, resolve_seed};
 use crate::signal_test::{
-    draw_splits, fold_block, fold_unit, pls1_confirmatory_test, prepare_cv_fold, prepare_split,
-    raw_perm_route, split_block, split_exact_refit_route, split_unit, with_gram_routes_disabled,
-    ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput,
-    ReplicateRoute, SplitIdx,
+    draw_splits, fold_block, fold_unit, pls1_confirmatory_test, pooled_cv_r2_columns,
+    prepare_cv_fold, prepare_split, raw_perm_route, split_block, split_exact_refit_route,
+    split_unit, split_zbars_columns, with_gram_routes_disabled, ConfirmatoryArgs,
+    ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput, ReplicateRoute, SplitIdx,
 };
 use crate::test_support::{orthonormal_basis, project_off};
 use faer::{Col, Mat, Par};
@@ -100,8 +100,10 @@ fn assert_public_raw_perm_invisible(
         ReplicateRoute::Nspace,
         "k={k}"
     );
+    // Budget 0 runs the folds one at a time on this thread, where the block
+    // counter lives; the bits do not depend on the budget.
     let before = nspace_blocks_built();
-    let gram = raw_perm(x, y, k, n_folds, seed);
+    let gram = crate::fit::with_budget(0, || raw_perm(x, y, k, n_folds, seed));
     assert_eq!(
         nspace_blocks_built(),
         before + n_folds,
@@ -349,8 +351,10 @@ fn split_exact_is_route_invisible_on_the_public_surface() {
             split_exact_refit_route(40, 2000, 50, k, None, false),
             ReplicateRoute::Nspace
         );
+        // Budget 0 runs the splits one at a time on this thread, where the
+        // block counter lives; the bits do not depend on the budget.
         let before = nspace_blocks_built();
-        let gram = split_exact(&x, &y, k, seed);
+        let gram = crate::fit::with_budget(0, || split_exact(&x, &y, k, seed));
         assert_eq!(
             nspace_blocks_built(),
             before + 10,
@@ -470,4 +474,80 @@ fn a_run_of_columns_answers_each_column_as_its_own_unit() {
     };
     assert!(matches!(kernel(&ordinary), NspaceOutcome::Resolved { .. }));
     assert!(matches!(kernel(&orthogonal), NspaceOutcome::Unresolved));
+}
+
+/// The two n-space drivers, called directly on the inputs of
+/// `raw_perm_fold_units_match_the_primal_arm` (five folds) and
+/// `split_exact_units_match_the_primal_arm` (five splits), with their units
+/// one at a time (budget 0) and all in one batch (no limit): the same bits.
+/// At budget 0 every block is built on this thread, which shows the n-space
+/// route ran.
+#[test]
+fn the_drivers_give_the_same_bits_at_every_budget() {
+    let bits = |v: &[f64]| v.iter().map(|z| z.to_bits()).collect::<Vec<_>>();
+    let (x, y) = wide(40, 2000, 0.5, 1);
+    let folds = folds_of(40, 5, 2);
+    let seeds = seeds_for(20, 3);
+    let cols = Columns {
+        y: y.as_ref(),
+        seeds: &seeds,
+    };
+    for k in 2..=K_DUAL_MAX {
+        let run = |budget| {
+            crate::fit::with_budget(budget, || {
+                pooled_cv_r2_columns(
+                    ReplicateRoute::Nspace,
+                    x.as_ref(),
+                    &folds,
+                    None,
+                    k,
+                    None,
+                    cols.len(),
+                    &|c| cols.column(c),
+                )
+                .expect("columns")
+            })
+        };
+        let before = nspace_blocks_built();
+        let one = run(0);
+        assert_eq!(
+            nspace_blocks_built(),
+            before + folds.len(),
+            "k={k}: one block per fold"
+        );
+        assert_eq!(bits(&one), bits(&run(u64::MAX)), "raw_perm k={k}");
+    }
+
+    let (x, y) = wide(40, 2000, 0.5, 71);
+    let (_, mut rng) = resolve_seed(Some(72)).expect("seed");
+    let splits = draw_splits(40, 2, 5, &mut rng).expect("splits");
+    let seeds = seeds_for(20, 73);
+    let cols = Columns {
+        y: y.as_ref(),
+        seeds: &seeds,
+    };
+    for k in 2..=K_DUAL_MAX {
+        let run = |budget| {
+            crate::fit::with_budget(budget, || {
+                split_zbars_columns(
+                    ReplicateRoute::Nspace,
+                    x.as_ref(),
+                    &splits,
+                    None,
+                    k,
+                    None,
+                    cols.len(),
+                    &|c| cols.column(c),
+                )
+            })
+        };
+        let before = nspace_blocks_built();
+        let one = run(0);
+        assert_eq!(
+            nspace_blocks_built(),
+            before + splits.len(),
+            "k={k}: one block per split"
+        );
+        assert_eq!(bits(&one), bits(&run(u64::MAX)), "split_exact k={k}");
+    }
 }

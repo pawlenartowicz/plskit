@@ -572,7 +572,7 @@ def pls3_confirmatory_test(
     pre_standardized_X, pre_standardized_Y : bool, default False
         Accepted but have no effect on either method: each training half is
         re-standardized with its own moments regardless, and the gate
-        standardizes its own copy of X. Kept on the signature so it does not
+        standardizes X itself. Kept on the signature so it does not
         change when a method that reads them lands.
     seed : int | None
         RNG seed. ``None`` draws from OS entropy and records the value on
@@ -715,7 +715,7 @@ def split_nb_gate(
     ``fires=True`` means a ``'split_nb'`` request on this X reroutes to
     ``'split_exact'`` unless you pass ``args={'force': True}``.
 
-    Standardizes its own copy of X (weighted moments when ``weights`` is
+    Standardizes X itself (weighted moments when ``weights`` is
     given), as the embedded gates do. Only X and the weights enter the rule —
     y does not.
 

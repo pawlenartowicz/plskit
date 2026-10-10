@@ -13,7 +13,9 @@ a function or read its result.
 ## Conventions
 
 - To cap the thread count, set `PLSKIT_NUM_THREADS`; see
-  [Threads](../concepts/threads.md).
+  [Threads](../concepts/threads.md). To bound the memory of the resampling
+  loops (default 2 GiB), set `PLSKIT_MEMORY_BUDGET`; see
+  [Memory budget](../concepts/threads.md#memory-budget).
 - **Method-axis dispatch** uses `(method, args)`: a `method` string +
   an `args` dict for method-specific kwargs. Cross-cutting kwargs
   (`seed`, `weights`, `pre_standardized`) live at the top level.

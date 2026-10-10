@@ -140,12 +140,12 @@ fn route_fixtures_take_their_routes() {
 // ── Route pins for tests/thread_count_parity.rs ──
 //
 // Integration tests cannot call the crate's route selectors, so the shapes
-// that file uses to exercise the n-space and p-space Gram routes are
-// pinned here, copied from it.
+// that file uses to exercise the n-space and p-space Gram routes and the
+// K = 1 Gram closed form are pinned here, copied from it.
 
 #[test]
 fn thread_count_parity_shapes_take_their_routes() {
-    use ReplicateRoute::{GramP, Nspace};
+    use ReplicateRoute::{GramP, Nspace, Special};
     // thread_count_parity's n-space perm_null row: 40 x 2000, n_perm = 100,
     // k = 2.
     assert_eq!(
@@ -185,5 +185,39 @@ fn thread_count_parity_shapes_take_their_routes() {
         split_exact_refit_route(2000, 200, 400, 1, Some(10), false),
         GramP,
         "split_exact keep"
+    );
+    // thread_count_parity's K = 1 Gram raw_perm row: 40 x 20000,
+    // n_folds 5, n_perm 50.
+    assert_eq!(
+        raw_perm_route(40, 5, 20_000, 50, 1, None, false),
+        Special,
+        "raw_perm k=1"
+    );
+
+    // thread_count_parity's three 20,000-column rows are there to sum over
+    // several column blocks: each spans more than two blocks at the row
+    // count its route passes to `linalg::stream_block_width`. Shapes copied
+    // from that file, row counts from the routes (change together).
+    //
+    // The K = 1 Gram raw_perm row above: 5 folds of 8 rows, so
+    // `dual_route::pls1_cv_r2_columns` sizes its blocks for the 32 training
+    // rows.
+    assert!(
+        20_000 > 2 * crate::linalg::stream_block_width(32),
+        "raw_perm k=1 blocks"
+    );
+    // thread_count_parity's split_nb_gate 40 x 20000 row:
+    // `signal_test::resolve_split_nb` sizes its blocks for all 40 rows.
+    assert!(
+        20_000 > 2 * crate::linalg::stream_block_width(40),
+        "split_nb_gate blocks"
+    );
+    // thread_count_parity's pls3 split_exact 60 x 20000 x 3 row, k = 1:
+    // `dual_route::pls3_split_zbars_columns` sizes its blocks for the larger
+    // half of a split.
+    let (n_train, n_test) = crate::resample::split_sizes(60, 1);
+    assert!(
+        20_000 > 2 * crate::linalg::stream_block_width(n_train.max(n_test)),
+        "pls3 split_exact blocks"
     );
 }

@@ -415,7 +415,12 @@ fn perm_block(route: ReplicateRoute, xs_fit: MatRef<'_, f64>, par: faer::Par) ->
         ReplicateRoute::Nspace => {
             PermBlock::Nspace(crate::dual_route::NspaceGram::new(xs_fit, par))
         }
-        ReplicateRoute::GramP => PermBlock::GramP(crate::gram_p::GramPBlock::new(xs_fit, par)),
+        // `Seq`: the `ParChoice` of the Primal arm's fit, `perm_row`.
+        ReplicateRoute::GramP => PermBlock::GramP(crate::gram_p::GramPBlock::new(
+            xs_fit,
+            par,
+            crate::fit::ParChoice::Seq,
+        )),
         ReplicateRoute::Special | ReplicateRoute::Primal => PermBlock::Primal {
             x_fro: xs_fit.norm_l2(),
         },

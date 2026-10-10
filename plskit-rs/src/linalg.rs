@@ -287,16 +287,90 @@ pub(crate) fn standardize_rows(
     w: Option<ColRef<'_, f64>>,
     row_scale: Option<ColRef<'_, f64>>,
 ) -> (Mat<f64>, Col<f64>, Col<f64>) {
+    let (xs, mean, scale, _) = standardize_rows_fro(x, idx, w, row_scale);
+    (xs, mean, scale)
+}
+
+/// [`standardize_rows`] with a fourth value taken from the column moments
+/// ([`fro_from_terms`]): `‖result‖_F`, to rounding, when `row_scale[i]²`
+/// equals `w[i]` renormalized to mean one, or when `w` and `row_scale` are
+/// both `None`.
+pub(crate) fn standardize_rows_fro(
+    x: MatRef<'_, f64>,
+    idx: &[usize],
+    w: Option<ColRef<'_, f64>>,
+    row_scale: Option<ColRef<'_, f64>>,
+) -> (Mat<f64>, Col<f64>, Col<f64>, f64) {
     let w_prime: Option<Col<f64>> = w.map(renormalize_mean_one);
     let row_scale: Option<Vec<f64>> = row_scale.map(|r| (0..r.nrows()).map(|i| r[i]).collect());
-    let (xs, mean, scale, _) = standardize_columns(
+    standardize_columns(
         x,
         Some(idx),
         w_prime.as_ref().map(owned_col_slice),
         row_scale.as_deref(),
         true,
-    );
-    (xs, mean, scale)
+    )
+}
+
+/// Bytes one block of [`standardized_blocks`] may hold per half: small
+/// enough to stay in cache between the standardizing pass and the products
+/// formed from the block.
+pub(crate) const STREAM_BLOCK_BYTES: usize = 2 << 20;
+
+/// Columns per block of [`standardized_blocks`] for halves of at most
+/// `n_rows` rows: [`STREAM_BLOCK_BYTES`] worth, rounded down to a multiple
+/// of [`STD_BLOCK`], at least one `STD_BLOCK`. A function of the row count
+/// alone, so the block boundaries, and with them the bits of every product
+/// summed over blocks, do not depend on the thread count.
+pub(crate) fn stream_block_width(n_rows: usize) -> usize {
+    let cols = STREAM_BLOCK_BYTES / (8 * n_rows.max(1));
+    (cols / STD_BLOCK * STD_BLOCK).max(STD_BLOCK)
+}
+
+/// `standardize_rows(x, tr, w_tr, sw_tr)` and
+/// `standardize_apply_rows(x, te, mean, scale, sw_te)`, `width` columns at
+/// a time: `f(j0, a, c)` receives the two standardized blocks of columns
+/// `j0 .. j0 + a.ncols()`, in column order, and nothing the size of `x` is
+/// written. Each column's moments are one sum chain in row order whatever
+/// columns it is grouped with ([`scaled_moments_block`]), so every entry of
+/// `a` and `c` has the bits the two full calls give, and the blocks are
+/// column-major for every layout of `x`. `te` may be empty.
+///
+/// Returns `‖X̃_tr‖_F` from the column moments, the block values combined
+/// by [`fro_from_terms`]: valid under [`standardize_rows_fro`]'s condition
+/// on `w_tr` and `sw_tr`.
+///
+/// # Panics
+/// When `width` is zero.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::similar_names,
+    clippy::many_single_char_names
+)]
+pub(crate) fn standardized_blocks(
+    x: MatRef<'_, f64>,
+    tr: &[usize],
+    te: &[usize],
+    w_tr: Option<ColRef<'_, f64>>,
+    sw_tr: Option<ColRef<'_, f64>>,
+    sw_te: Option<ColRef<'_, f64>>,
+    width: usize,
+    mut f: impl FnMut(usize, MatRef<'_, f64>, MatRef<'_, f64>),
+) -> f64 {
+    assert!(width > 0, "standardized_blocks: width must be positive");
+    let p = x.ncols();
+    let mut fro = Vec::with_capacity(p.div_ceil(width));
+    let mut j0 = 0;
+    while j0 < p {
+        let w = width.min(p - j0);
+        let xb = x.subcols(j0, w);
+        let (a, mean, scale, fro_b) = standardize_rows_fro(xb, tr, w_tr, sw_tr);
+        let c = standardize_apply_rows(xb, te, mean.as_ref(), scale.as_ref(), sw_te);
+        fro.push(fro_b);
+        f(j0, a.as_ref(), c.as_ref());
+        j0 += w;
+    }
+    fro_from_terms(&fro)
 }
 
 /// `standardize_apply(row_subset(x, idx), mean, scale)` in one pass, with
@@ -483,9 +557,9 @@ fn mean_and_scale_from(m: &ScaledMoments, n: usize) -> (f64, f64) {
 /// helpers byte-identical to standardizing a gathered copy, and what makes
 /// every layout of `x` give the same bits. The fourth value is
 /// [`fro_from_terms`] of the columns' [`fro_term`]s: the Frobenius norm of
-/// the result when `row_scale` is `None` or `row_scale[i]² = w[i]`. With
-/// `write` false only the moments are formed, and the matrix returned is
-/// `n_rows × 0`.
+/// the result, to rounding, when `w` and `row_scale` are both `None` or
+/// `row_scale[i]² = w[i]`. With `write` false only the moments are formed,
+/// and the matrix returned is `n_rows × 0`.
 fn standardize_columns(
     x: MatRef<'_, f64>,
     rows: Option<&[usize]>,
@@ -615,7 +689,7 @@ fn fro_term(m: &ScaledMoments, scale: f64) -> f64 {
 /// before it is squared, so that no `r²` can overflow (with scale 1, a
 /// constant column of large entries would give `r` near `1e285`).
 /// Non-finite when a term is.
-fn fro_from_terms(r: &[f64]) -> f64 {
+pub(crate) fn fro_from_terms(r: &[f64]) -> f64 {
     let big = r.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
     if big == 0.0 || !big.is_finite() {
         return big;
@@ -644,9 +718,11 @@ pub(crate) struct FitX {
     /// Column scales, the bits of [`standardize_weighted`]'s.
     pub(crate) scale: Col<f64>,
     /// `‖result‖_F` from the moments ([`fro_from_terms`] of the columns'
-    /// [`fro_term`]s): equal to the norm of the stored result, to rounding, when
-    /// `row_scale` is `None` or `row_scale[i]² = w'ᵢ`, as `pls1_fit` passes
-    /// it. The fit uses it only for its truncation floor.
+    /// [`fro_term`]s): equal to the norm of the stored result, to rounding,
+    /// with no weights and no `row_scale`, or with `row_scale[i]² = w'ᵢ`.
+    /// `pls1_fit` always passes one of those two: no weights and no row
+    /// scale, or `√w` of the mean-one weights it took the moments with. The
+    /// fit uses it only for its truncation floor.
     pub(crate) fro: f64,
 }
 
@@ -1144,7 +1220,7 @@ impl ScaledMoments {
 /// run its lockstep form [`scaled_moments_block`], which returns the same
 /// bits) and the
 /// split-half correlations
-/// (`signal_test::guarded_pearson`, `signal_test::split_perm_nr_zbars`,
+/// (`signal_test::guarded_pearson`, `signal_test::nr_split_r`,
 /// PLS3's `pls3_signal_test::pearson_r_guarded`), so a column and a
 /// held-out vector are judged constant by literally the same sums. The sums
 /// of squares neither overflow nor underflow at any magnitude of `v`:
@@ -1394,19 +1470,30 @@ pub fn compute_n_eff(w: ColRef<'_, f64>) -> f64 {
 #[must_use]
 #[allow(clippy::doc_markdown)] // "NeuroImage"
 pub fn stable_rank(a: MatRef<'_, f64>) -> f64 {
-    let par = crate::fit::par_fixed();
     let short = if a.nrows() <= a.ncols() {
         a
     } else {
         a.transpose()
     };
-    let d = short.nrows();
+    if short.nrows() == 0 {
+        return 0.0;
+    }
+    let g = mat_mul(short, short.transpose(), crate::fit::par_fixed());
+    stable_rank_from_gram(g.as_ref())
+}
+
+/// [`stable_rank`] of a matrix whose Gram matrix on its shorter side is
+/// `g`: `trace(g) / λ_max(g)`, `0.0` for an empty or non-positive `g`.
+///
+/// # Panics
+/// When the eigendecomposition fails to converge, as in [`stable_rank`].
+pub(crate) fn stable_rank_from_gram(g: MatRef<'_, f64>) -> f64 {
+    let d = g.nrows();
     if d == 0 {
         return 0.0;
     }
-    let g = mat_mul(short, short.transpose(), par);
-    let (lam, _) =
-        self_adjoint_eigen(g.as_ref(), par).expect("eigendecomposition failed to converge");
+    let (lam, _) = self_adjoint_eigen(g, crate::fit::par_fixed())
+        .expect("eigendecomposition failed to converge");
     // Ascending, so the last one is σ₁².
     let sigma1_sq = lam[d - 1];
     if sigma1_sq <= 0.0 {
@@ -2015,6 +2102,17 @@ mod tests {
         let x = Mat::<f64>::zeros(4, 3);
         assert_relative_eq!(stable_rank(x.as_ref()), 0.0, epsilon = 1e-15);
     }
+
+    #[test]
+    fn stable_rank_from_gram_is_stable_rank_of_the_short_side() {
+        let x = mat(3, 3, &[2.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        let g = mat_mul(x.as_ref(), x.transpose(), crate::fit::par_fixed());
+        assert_eq!(
+            stable_rank_from_gram(g.as_ref()).to_bits(),
+            stable_rank(x.as_ref()).to_bits()
+        );
+        assert_relative_eq!(stable_rank_from_gram(Mat::<f64>::zeros(0, 0).as_ref()), 0.0);
+    }
 }
 
 #[cfg(test)]
@@ -2212,7 +2310,9 @@ mod empirical_quantile_tests {
 #[allow(clippy::many_single_char_names)]
 mod row_standardize_tests {
     use super::*;
-    use crate::test_support::{assert_bits_eq, col_vals, mat_vals, test_weights, Layouts};
+    use crate::test_support::{
+        assert_bits_eq, assert_mat_bits_eq, col_vals, mat_vals, test_weights, unif, Layouts,
+    };
 
     /// 24 × 5 with a constant column (2), a column constant on the even
     /// rows only (3) and a huge-offset column (4).
@@ -2243,6 +2343,96 @@ mod row_standardize_tests {
             ),
             ("single row", vec![9]),
         ]
+    }
+
+    /// Training and held-out blocks of `standardized_blocks`, concatenated.
+    #[allow(clippy::similar_names)]
+    fn collect_blocks(
+        x: MatRef<'_, f64>,
+        tr: &[usize],
+        te: &[usize],
+        w: Option<ColRef<'_, f64>>,
+        sw_tr: Option<ColRef<'_, f64>>,
+        sw_te: Option<ColRef<'_, f64>>,
+        width: usize,
+    ) -> (Mat<f64>, Mat<f64>, f64, Vec<usize>) {
+        let mut a_all = Mat::<f64>::zeros(tr.len(), x.ncols());
+        let mut c_all = Mat::<f64>::zeros(te.len(), x.ncols());
+        let mut starts = Vec::new();
+        let fro = standardized_blocks(x, tr, te, w, sw_tr, sw_te, width, |j0, a, c| {
+            starts.push(j0);
+            for j in 0..a.ncols() {
+                for i in 0..a.nrows() {
+                    a_all[(i, j0 + j)] = a[(i, j)];
+                }
+                for i in 0..c.nrows() {
+                    c_all[(i, j0 + j)] = c[(i, j)];
+                }
+            }
+        });
+        (a_all, c_all, fro, starts)
+    }
+
+    #[test]
+    #[allow(clippy::similar_names)]
+    fn standardized_blocks_concatenate_to_the_full_standardizers() {
+        // 24 × 37: wider than one STD_BLOCK and not a multiple of it.
+        let x = unif(24, 37, 5);
+        let lay = Layouts::new(x.as_ref());
+        let tr: Vec<usize> = (0..24).step_by(2).collect();
+        let te: Vec<usize> = (1..24).step_by(2).collect();
+        // Mean-one weights with `sw_tr² = w`: the condition under which the
+        // returned norm is the norm of the result.
+        let w = renormalize_mean_one(test_weights(tr.len()).as_ref());
+        let sw_tr = Col::<f64>::from_fn(tr.len(), |i| w[i].sqrt());
+        let sw_te = Col::<f64>::from_fn(te.len(), |i| 0.5 + (i % 3) as f64);
+        for (view, xv) in lay.all(&x) {
+            for weighted in [false, true] {
+                let (wr, sr, se) = if weighted {
+                    (Some(w.as_ref()), Some(sw_tr.as_ref()), Some(sw_te.as_ref()))
+                } else {
+                    (None, None, None)
+                };
+                let (full_a, mean, scale) = standardize_rows(xv, &tr, wr, sr);
+                let full_c = standardize_apply_rows(xv, &te, mean.as_ref(), scale.as_ref(), se);
+                for width in [1, 8, 16, 24, 37, 64] {
+                    let what = format!("{view} weighted={weighted} width={width}");
+                    let (a, c, fro, starts) = collect_blocks(xv, &tr, &te, wr, sr, se, width);
+                    assert_mat_bits_eq(a.as_ref(), full_a.as_ref(), &what);
+                    assert_mat_bits_eq(c.as_ref(), full_c.as_ref(), &what);
+                    let expect: Vec<usize> = (0..37).step_by(width).collect();
+                    assert_eq!(starts, expect, "{what}: block starts");
+                    approx::assert_relative_eq!(fro, full_a.norm_l2(), max_relative = 1e-13);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn standardized_blocks_take_an_empty_held_out_set() {
+        let x = data();
+        let rows: Vec<usize> = (0..24).collect();
+        let (full, _, _) = standardize_rows(x.as_ref(), &rows, None, None);
+        let (a, _, _, _) = collect_blocks(x.as_ref(), &rows, &[], None, None, None, 2);
+        assert_mat_bits_eq(a.as_ref(), full.as_ref(), "all rows, no held-out");
+        // The held-out block has no rows and the training block's columns.
+        standardized_blocks(x.as_ref(), &rows, &[], None, None, None, 2, |_, a, c| {
+            assert_eq!((c.nrows(), c.ncols()), (0, a.ncols()));
+        });
+    }
+
+    #[test]
+    fn stream_block_width_is_a_multiple_of_the_moment_block() {
+        for n in [1, 2, 127, 203, 254, 6000, 10_000_000] {
+            let w = stream_block_width(n);
+            assert!(w >= STD_BLOCK && w % STD_BLOCK == 0, "n={n}: width {w}");
+            assert!(
+                w == STD_BLOCK || 8 * n * w <= STREAM_BLOCK_BYTES,
+                "n={n}: width {w}"
+            );
+        }
+        assert_eq!(stream_block_width(127), 2064);
+        assert_eq!(stream_block_width(0), stream_block_width(1));
     }
 
     #[test]
