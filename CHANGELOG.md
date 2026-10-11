@@ -4,6 +4,52 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+- Changed (performance): `pls1_fit`, `spls1_fit`, `pls3_fit`, `spls3_fit`
+  and `plssvd_fit` on raw `X` read `X` in strips of columns for its
+  standardization moments (2 MiB strips, so that each strip's sweeps run
+  from cache when `X` has at most 32,768 rows; a C-ordered `X` with more
+  than 1,024 rows in wider strips, about one per thread, so that each
+  strip's rows stay long), on large inputs over several threads. Results
+  are unchanged to the bit. The testdata corpus
+  is unchanged.
+- Changed (numerics): every PLS1 fit on standardized `X` (`pls1_fit` and
+  `spls1_fit` with `pre_standardized`, and the fits on a standardized copy
+  of `X` inside the selection and sequence functions,
+  `pls1_confirmatory_test` with `test_method="e"`, the confirmatory CI,
+  `pls1_rotation_stability` and the reference fit of `pls1_perm_null`)
+  forms the sum of squares behind its truncation floor in a fixed number
+  of pieces, over several threads on large inputs. A fit whose component sits within rounding of its floor
+  can stop at a different `k_used`, and the results built on it change
+  with it; other results are unchanged. The testdata corpus is unchanged.
+- Changed (performance, numerics): `pls1_fit` and `spls1_fit` with
+  `pre_standardized` and no weights, on a C-ordered `X` with at least
+  2,048 columns, form `X'·t` block by block over the rows of `X`, as they
+  do without `pre_standardized`. So do the fits on raw C-ordered `X` of
+  that width that fall back to a standardized copy (column means far from
+  zero relative to their scale, or a component near the truncation
+  floor). Results differ from the previous release at rounding level; so
+  do `pls1_rotation_stability` and the confirmatory CI on such input. The
+  testdata corpus is unchanged.
+- Changed (performance, numerics): `selector="bic"` in
+  `pls1_find_k_optimal`, `spls1_find_k_optimal` and
+  `pls1_fit(k="optimal")` takes each `k`'s residual sum of squares from the
+  fit's scores, with no pass over `X` per `k`. `bic_scores` differ from the
+  previous release at rounding level, and a near tie can select the other
+  `k`. The testdata corpus is unchanged.
+- Changed (performance): `pls1_find_k_sequence`, `spls1_find_k_sequence`,
+  `pls1_fit(k="sequence")` and the `diagnostic` of `pls1_find_k_optimal`
+  and `spls1_find_k_optimal` standardize `X` once per call instead of once
+  per step. Results are unchanged to the bit. The testdata corpus is
+  unchanged.
+- Added: `pls1_perm_alpha(gram, Y, k=1, *, n_features)` in every wrapper.
+  For each column of `Y` it returns the PLS1 dual coefficients `alpha`
+  (`coef = X̃'·alpha`) from the Gram matrix `X̃X̃'` of a standardized
+  block the caller holds; plskit never sees the block. `k = 1` only. A
+  column the fit cannot certify from the Gram matrix alone is reported
+  (`resolved = False`, `alpha` NaN), not refitted. `gram` is checked for
+  a non-negative diagonal, symmetry, off-diagonal entries within the
+  Cauchy-Schwarz bound of the diagonal, centring and its trace. One new
+  testdata fixture.
 - Added: `PLSKIT_MEMORY_BUDGET`, an environment variable set and checked
   like `PLSKIT_NUM_THREADS` in Rust, Python, R and Julia: the bytes of working
   memory, beyond the inputs, for the buffers that grow with the data
@@ -322,8 +368,8 @@ All notable changes to this project will be documented here.
   order: an F-ordered `X` no longer pays a full copy (about 25 to 40 ms per
   fit at 1e7 entries), and results for different memory layouts of the same
   values agree to rounding (corpus tolerance) rather than bit for bit.
-  `pls1_fit`, `spls1_fit`, `pls1_predict`, `pls1_rotation_stability` and,
-  without `pre_standardized_X`, `pls3_fit`, `plssvd_fit` and `spls3_fit` can
+  `pls1_fit`, `spls1_fit`, `pls1_predict`, `pls1_rotation_stability`,
+  `pls1_confirmatory_test` with `ci` and, without `pre_standardized_X`, `pls3_fit`, `plssvd_fit` and `spls3_fit` can
   differ in the last bits between C and F order; the same array in the same
   layout still gives byte-identical results across runs and thread counts.
   Julia arrays are column-major and now read in place, so Julia
@@ -373,15 +419,17 @@ All notable changes to this project will be documented here.
   every layout.
 - Changed (performance): `pls1_fit` / `spls1_fit` on a row-major
   (C-ordered, the Python default) `X` at least 2048 columns wide read the
-  standardization moments and the `X'·t` products in blocks of 8 rows. On
+  `X'·t` products in blocks of 8 rows (the standardization moments are
+  read in strips of columns, see the entry on strips of columns above). On
   one M4 core a 1000 × 10000 C-ordered k = 1 fit drops from about 24 ms to
   about 13 ms (it was about 1.4x slower than its column-major copy, and is
   now no slower). Moments are
   bit-identical. Fits of such inputs that are not pre-standardized move in
   the last bits, agreeing with 0.6.2 to corpus tolerance but not bit for
-  bit, and stay byte-identical across thread counts. Column-major `X`,
-  pre-standardized fits and narrower `X` are unchanged bit for bit. The
-  reference fit inside `pls1_rotation_stability`, `pls1_confirmatory_test`
+  bit, and stay byte-identical across thread counts; for pre-standardized
+  ones, see the entry on `pre_standardized` and C-ordered `X` above.
+  Column-major `X` and narrower `X` are unchanged bit for bit by this
+  change. The reference fit inside `pls1_rotation_stability`, `pls1_confirmatory_test`
   with `ci`, and the final fit of `pls1_fit(k="optimal"|"sequence")` take
   the same path.
 - Changed (performance): the rule that sends a `perm_null`, `raw_perm` or

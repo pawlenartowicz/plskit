@@ -47,6 +47,7 @@ const CORPUS_CASES = [
     "pls1_confirmatory_split_nb_ci",
     "pls1_confirmatory_auto_split_exact",
     "pls1_perm_null_basic_n80_d6_k2",
+    "pls1_perm_alpha_n40_p60_m4_k1",
     "pls1_rotation_stability_n80_d6_k2",
     "rotate_varimax_d6_k2",
 ]
@@ -145,6 +146,9 @@ function run_case(case, inputs)
         model = pls3_fit(inputs["X"], inputs["Y"]; k=kw["k"])
         return record(pls3_transform(model; X_new=inputs["X_new"], Y_new=inputs["Y_new"],
                                      which=kw["which"]))
+    elseif fn == "pls1_perm_alpha"
+        return record(pls1_perm_alpha(inputs["gram"], inputs["Y"]; k=kw["k"],
+                                      n_features=kw["n_features"]))
     end
     named = Dict{Symbol,Any}(:X => inputs["X"])
     haskey(inputs, "y") && (named[:y] = inputs["y"])

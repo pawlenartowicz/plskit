@@ -20,6 +20,7 @@ from plskit._results import (
     FindKOptimalResult,
     FindKeepOptimalResult,
     FindKSequenceResult,
+    PermAlphaResult,
     PermNullResult,
     PLS1Result,
     PLS3Result,
@@ -200,14 +201,17 @@ def _aligned_model(value, path: str = "model", depth: int = 0):
 
 def _make_result(type_name: str, fields: dict):
     """The result class `type_name` built from the fields the extension
-    returns. The extension hands over `PLS3Result.converged` and `n_iter` as
-    lists and `RotationSpec.args` as a dict; they become a bool array, an
-    int64 array and a read-only mapping."""
+    returns. The extension hands over `PLS3Result.converged` and `n_iter` and
+    `PermAlphaResult.k_used` and `resolved` as lists and `RotationSpec.args`
+    as a dict; they become bool and int64 arrays and a read-only mapping."""
     if type_name == "PLS3Result":
         if fields["converged"] is not None:
             fields["converged"] = np.asarray(fields["converged"], dtype=bool)
         if fields["n_iter"] is not None:
             fields["n_iter"] = np.asarray(fields["n_iter"], dtype=np.int64)
+    elif type_name == "PermAlphaResult":
+        fields["k_used"] = np.asarray(fields["k_used"], dtype=np.int64)
+        fields["resolved"] = np.asarray(fields["resolved"], dtype=bool)
     elif type_name == "RotationSpec":
         fields["args"] = MappingProxyType(fields["args"])
     return getattr(_results, type_name)(**fields)
@@ -1106,6 +1110,52 @@ def pls1_perm_null(
                  return_perm_matrix=return_perm_matrix,
                  pre_standardized=pre_standardized, seed=seed, verbose=verbose,
                  weights=weights)
+
+
+@_convert_errors
+def pls1_perm_alpha(
+    gram: np.ndarray,
+    Y: np.ndarray,
+    k: int = 1,
+    *,
+    n_features: int,
+) -> PermAlphaResult:
+    """PLS1 dual coefficients for many outcomes, from a Gram matrix.
+
+    For each column of ``Y`` returns the n-vector ``alpha`` with
+    ``coef = X̃.T @ alpha``, where ``coef`` is the PLS1 coefficient at ``k``
+    components on the standardized scale (``PLS1Result.coef``) and ``X̃`` is
+    the standardized block whose Gram matrix is ``gram``. plskit never sees
+    ``X̃``. Nothing is random, so there is no ``seed``.
+
+    Parameters
+    ----------
+    gram : np.ndarray, shape (n, n)
+        ``X̃ @ X̃.T`` for a block whose columns are centred and scaled as
+        ``plskit.preprocess`` scales them (sum of squares ``n``), computed in
+        float64. Checked for a non-negative diagonal (exactly) and for
+        symmetry, ``|gram[i, j]| <= sqrt(gram[i, i] * gram[j, j])``,
+        ``trace(gram) <= n * n_features`` and row sums near zero, each to
+        rounding; ``PlsKitError(code="invalid_input")`` otherwise.
+    Y : np.ndarray, shape (n, m)
+        One raw outcome per column; each column is standardized inside.
+    k : int, default 1
+        Number of components. Only ``1`` is accepted.
+    n_features : int
+        Number of columns of ``X̃`` summed into ``gram``, constant ones
+        included.
+
+    Returns
+    -------
+    PermAlphaResult
+        ``resolved[j]`` is False, ``alpha[:, j]`` NaN and ``k_used[j]`` 0
+        where the fit of column ``j`` cannot be certified from ``gram``
+        alone. The zero model (a zero column with ``k_used[j] = 0``) comes
+        from an outcome that standardizes to exact zeros (all zeros, or a
+        constant whose computed mean is exact), and from a ``gram`` whose
+        every entry is exactly zero (every outcome then gets it).
+    """
+    return _call("pls1_perm_alpha", gram=gram, Y=Y, k=k, n_features=n_features)
 
 
 __all__ = [

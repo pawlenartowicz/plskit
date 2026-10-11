@@ -23,14 +23,15 @@ a function or read its result.
   array; `np.ndarray, shape (n,)` is a 1-D vector.
 - **Arrays** are read as `float64` in their own memory layout. A C- or
   F-ordered `float64` `X` reaches the engine without a copy, and so does
-  an F-ordered `float64` `Y`, `Y_new`, `W` or `L` (a C-ordered one is
+  an F-ordered `float64` `Y`, `Y_new`, `W`, `L` or `gram` (a C-ordered one is
   copied column-major, which gives the same bits as F order); other
   dtypes are converted, and a strided view is copied by the extension.
   Results for two layouts of the same values agree to rounding (the
   corpus tolerance, `1e-10 + 1e-14·|value|`), not bit for bit, and a
   fit sitting on its truncation floor can stop at a different
   `k_used`. The last bits move with the layout in `pls1_fit`,
-  `spls1_fit`, `pls1_predict`, `pls1_rotation_stability` and, without
+  `spls1_fit`, `pls1_predict`, `pls1_rotation_stability`,
+  `pls1_confirmatory_test` with `ci` and, without
   `pre_standardized_X`, in `pls3_fit`, `plssvd_fit` and `spls3_fit`; the
   others currently give C and F order the same bits. The same array in the
   same layout gives byte-identical results on every run and at every
@@ -537,6 +538,81 @@ individual directions need survive to the test half when singular values
 are close, and whether the statistic should then be per-component or
 subspace-level is not settled.
 
+### 3.5 Dual coefficients from a Gram matrix
+
+**function:** `pls1_perm_alpha`
+**need:** PLS1 fits of many outcomes against one standardized block `X̃`
+that the caller holds and plskit never sees, such as a permutation null
+whose per-feature maps the caller computes itself. For each outcome the
+n-vector `alpha` with `coef = X̃.T @ alpha`, where `coef` is
+`PLS1Result.coef` at `k` components.
+**arguments:** `gram` (`X̃ @ X̃.T`, shape `(n, n)`), `Y` (shape `(n, m)`,
+one raw outcome per column, each standardized inside), `k` (default `1`;
+only `1` is accepted)
+**options:** `n_features` (int, keyword-only, required; in R pass it by
+name, `n_features = p`, since the third positional argument is `k`): the
+number of columns of `X̃` summed into `gram`, constant columns included.
+There is no
+`seed`: nothing is random.
+**returns:** `PermAlphaResult`: `alpha` `(n, m)`, `k_used` and `resolved`
+`(m,)`, `k`, `n_features`.
+`k = 0`, `k >= 2`, `n_features = 0` or above `2^53`, and a 1-D `Y` raise
+`invalid_argument`; a non-square `gram` and a `Y` whose row count differs
+from `gram`'s raise `shape_mismatch`; `n <= 1` raises `k_exceeds_max`; NaN
+or infinity in `gram` or `Y` raises `non_finite_input`; a `gram` that
+fails the checks below raises `invalid_input`.
+
+**The contract.** `gram` is the Gram matrix of the same `X̃` the caller
+multiplies `alpha` by. The columns of `X̃` are centred and scaled as
+`preprocess` scales them (population standard deviation, so each column has
+sum of squares `n`; a constant or zeroed column is zero to rounding and
+still counts in `n_features`, and a smaller count passes the checks
+whenever the columns it leaves out are zero). `gram` is
+computed in float64, each entry within the rounding of one
+length-`n_features` dot product; sums over column blocks, and one final
+scaling such as `n * D @ D.T` for a store of unit-norm columns `D`, stay
+within it. Then `X̃.T @ alpha[:, j]` equals `pls1_fit(X, Y[:, j], k=1).coef`
+to rounding. For a store `D` passed as `n * D @ D.T`, `X̃ = sqrt(n) * D`, so
+the coefficient is `sqrt(n) * D.T @ alpha[:, j]`.
+
+**The checks.** `gram` must have a non-negative diagonal (checked
+exactly), be symmetric, have every off-diagonal entry within the
+Cauchy-Schwarz bound `|gram[i, j]| <= sqrt(gram[i, i] * gram[j, j])`, have
+`trace(gram) <= n * n_features`, and have row sums near zero, the last four
+within four times the worst-case rounding the contract allows; otherwise
+`invalid_input`. A zero diagonal entry therefore admits only exact zeros in
+its row and column. The centring tolerance admits raw columns whose mean lies
+up to a million standard deviations from zero. The trace check catches a
+raw `X @ X.T` only when the raw columns' mean square, averaged over
+columns, exceeds 1. The checks do not catch a `gram` of another block; a
+block on a smaller common scale (sample instead of population standard
+deviation, which R's `scale()` and pandas' `.std()` compute with `n - 1`;
+unit-norm columns without the factor `n`; `gram / n` or
+`gram / n_features`); columns scaled unequally whose sums of squares add up
+to at most `n * n_features`; an `n_features` that leaves out only zero
+columns, which passes the trace check exactly and makes the certification
+of each fit too permissive; or an `n_features` above the true count (up to `2^53`),
+which passes and only makes the certification more conservative. On a block of
+another common scale `X̃.T @ alpha` is the PLS1 coefficient of the caller's
+scaling; on unequally scaled columns it is the PLS1 fit of a differently
+weighted block. On a `gram` scaled by a common factor below 1, the
+certification gates that compare against an absolute floor can leave
+unresolved a column that the correctly scaled `gram` resolves.
+
+**Unresolved columns.** Each fit is certified against the rounding of
+`gram`, by gates whose bounds grow with `n_features`. Where it
+cannot be, `resolved[j]` is `False`, `alpha[:, j]` is NaN and `k_used[j]`
+is `0`; refit that column with `pls1_fit` on `X`. An outcome that
+standardizes to exact zeros (all zeros, or a constant whose computed mean
+is exact) is the zero model: `alpha[:, j]` is `+0.0`, `k_used[j]` is `0`
+and `resolved[j]` is `True`. A `gram` whose entries are all exactly zero
+(every column of `X̃` zero) gives the zero model for every outcome.
+
+**Reproducibility.** Column `j` depends only on `gram`, `Y[:, j]`, `k` and
+`n_features`: the same bits whatever the other columns of `Y`, the thread
+count and the array layouts. Across machines results agree to rounding,
+not bit for bit.
+
 ---
 
 ## 4. Interpretive
@@ -611,6 +687,7 @@ See [results](results.md) for full field shapes:
 - `FindKOptimalResult`, `FindKSequenceResult`
 - `FindKeepOptimalResult` — returned by `spls1_find_keep_optimal`
 - `PermNullResult`
+- `PermAlphaResult`
 - `RotateResult`, `RotationSpec`
 - `RotationStabilityResult`
 - `CIScalar` — the rotation-invariant CI primitive used throughout

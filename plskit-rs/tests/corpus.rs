@@ -52,6 +52,7 @@ const COVERED_FUNCTIONS: &[&str] = &[
     "rotate",
     "preprocess",
     "pls1_perm_null",
+    "pls1_perm_alpha",
     "pls1_rotation_stability",
     "spls1_fit",
     "spls1_find_keep_optimal",
@@ -976,6 +977,33 @@ fn pls1_perm_null_cases_match_corpus() {
                 );
             },
         );
+    });
+}
+
+#[test]
+fn pls1_perm_alpha_cases_match_corpus() {
+    let kwargs = Kwargs::top(&["k", "n_features"]);
+    for_each_case("pls1_perm_alpha", kwargs, |case, inputs, fx| {
+        let kw = &case["kwargs"];
+        let r = plskit::pls1_perm_alpha(
+            inputs.mat("gram").as_ref(),
+            inputs.mat("Y").as_ref(),
+            kw_usize(kw, "k"),
+            kw_usize(kw, "n_features"),
+        )
+        .expect("perm_alpha");
+        fx.mat("alpha", &r.alpha);
+        let k_used: Vec<i64> = r
+            .k_used
+            .iter()
+            .map(|&v| i64::try_from(v).unwrap())
+            .collect();
+        fx.ints("k_used", &k_used);
+        // `resolved` is written as 0/1: the npz writer has no bool dtype.
+        let resolved: Vec<i64> = r.resolved.iter().map(|&b| i64::from(b)).collect();
+        fx.ints("resolved", &resolved);
+        fx.int("k", r.k);
+        fx.int("n_features", r.n_features);
     });
 }
 

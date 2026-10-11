@@ -411,6 +411,17 @@ static REGISTRY: &[FnSpec] = &[
         run: fns::inference::pls3_confirmatory_test,
     },
     FnSpec {
+        name: "pls1_perm_alpha",
+        params: &[
+            pos("gram", K::Mat),
+            pos("Y", K::Mat),
+            pos_d("k", K::Int, I(1)),
+            kw("n_features", K::Int, DefaultValue::Required),
+        ],
+        result_types: &["PermAlphaResult"],
+        run: fns::inference::pls1_perm_alpha,
+    },
+    FnSpec {
         name: "rotate",
         params: &[
             pos("model_or_W", K::ModelOrMat),

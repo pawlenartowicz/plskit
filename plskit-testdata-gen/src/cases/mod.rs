@@ -9,6 +9,7 @@ pub mod pls1_confirmatory_test;
 pub mod pls1_find_k_optimal;
 pub mod pls1_find_k_sequence;
 pub mod pls1_fit;
+pub mod pls1_perm_alpha;
 pub mod pls1_perm_null;
 pub mod pls1_predict;
 pub mod pls1_rotation_stability;
@@ -412,6 +413,7 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_perm_null::pre_standardized_n80_d6_k2(root)?);
     cases.push(pls1_perm_null::weighted_n40_d1_k1(root)?);
     cases.push(pls1_perm_null::weighted_prestd_n80_d6_k2(root)?);
+    cases.push(pls1_perm_alpha::n40_p60_m4_k1(root)?);
     cases.push(pls1_rotation_stability::n80_d6_k2(root)?);
     cases.push(pls1_rotation_stability::weighted_n80_d6_k2(root)?);
     cases.push(pls1_rotation_stability::weighted_prestd_n80_d6_k2(root)?);

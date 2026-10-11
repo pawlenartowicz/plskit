@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use faer::{Col, Mat};
 use plskit::{
     CIScalar, ConfirmatoryCI, ConfirmatoryTestOutput, FindKOptimalOutput, FindKSequenceOutput,
-    FindKeepOptimalOutput, PermNullOutput, Pls1Model, Pls3Model, Pls3Scores,
+    FindKeepOptimalOutput, PermAlphaOutput, PermNullOutput, Pls1Model, Pls3Model, Pls3Scores,
     RotationStabilityOutput,
 };
 
@@ -248,6 +248,31 @@ pub(crate) fn perm_null(out: PermNullOutput) -> Record<'static> {
         .field("beta_perm_z", floats(beta_perm_z))
         .field("beta_perm_matrix", matrix)
         .field("n_eff", Value::F64(n_eff))
+}
+
+/// `PermAlphaResult`.
+pub(crate) fn perm_alpha(out: PermAlphaOutput) -> Record<'static> {
+    let PermAlphaOutput {
+        alpha,
+        k_used,
+        resolved,
+        k,
+        n_features,
+    } = out;
+    Record::typed("PermAlphaResult")
+        .field("alpha", mat(&alpha))
+        .field(
+            "k_used",
+            Value::IntVec(
+                k_used
+                    .into_iter()
+                    .map(|v| i64::try_from(v).unwrap_or(i64::MAX))
+                    .collect(),
+            ),
+        )
+        .field("resolved", Value::BoolVec(resolved))
+        .field("k", count(k))
+        .field("n_features", count(n_features))
 }
 
 /// `RotationStabilityResult`.

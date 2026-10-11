@@ -11,7 +11,7 @@
 use super::*;
 use crate::fit::{pls1_fit_prepared_fro, ParChoice, PreparedFit};
 use crate::linalg::{standardize, standardize1};
-use crate::test_support::assert_mat_bits_eq;
+use crate::test_support::{assert_bits_eq, assert_mat_bits_eq, col_vals};
 use faer::{Col, Mat, Par};
 use rand::{RngExt, SeedableRng};
 
@@ -253,6 +253,45 @@ fn an_exactly_zero_outcome_is_the_zero_model() {
         NspaceOutcome::ZeroModel
     ));
     assert_eq!(primal(&xs, &z, 2).k_used, 0);
+}
+
+/// A block built from `G` alone holds the same `G` bits and `p`, an
+/// `x_fro` equal to `‖X̃‖_F` to rounding, and gives the same `alpha` bits
+/// where both blocks resolve: `x_fro` reaches only the gates.
+#[test]
+fn a_block_from_the_gram_matrix_gives_the_alpha_bits_of_the_block_from_x() {
+    let (n, p) = (40_usize, 2000_usize);
+    let xs = standardized(n, p, 7);
+    let from_x = NspaceGram::new(xs.as_ref(), Par::Seq);
+    let g = gram_of(xs.as_ref(), Par::Seq);
+    let from_g = NspaceGram::from_gram(g.as_ref(), p);
+    assert_mat_bits_eq(from_g.g.as_ref(), from_x.g.as_ref(), "G");
+    assert_eq!(from_g.p, p);
+    let rel = (from_g.x_fro - from_x.x_fro).abs() / from_x.x_fro;
+    assert!(rel <= 4.0 * p as f64 * f64::EPSILON, "x_fro: {rel:e}");
+    for seed in 0..8_u64 {
+        let z = outcome(&xs, 1.0, 300 + seed);
+        match (
+            pls1_nspace_kernel(&from_g.block(), z.as_ref(), 1),
+            pls1_nspace_kernel(&from_x.block(), z.as_ref(), 1),
+        ) {
+            (
+                NspaceOutcome::Resolved {
+                    alpha: a,
+                    k_used: 1,
+                },
+                NspaceOutcome::Resolved {
+                    alpha: b,
+                    k_used: 1,
+                },
+            ) => assert_bits_eq(
+                &col_vals(a.as_ref()),
+                &col_vals(b.as_ref()),
+                &format!("seed {seed}"),
+            ),
+            _ => panic!("seed {seed}: both blocks must resolve an ordinary outcome at k = 1"),
+        }
+    }
 }
 
 #[test]

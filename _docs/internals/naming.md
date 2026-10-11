@@ -45,7 +45,9 @@ Format: `name` | description | functions where used.
 |---|---|---|
 | `X` | predictor matrix `(n, p)`, float64 | `pls1_fit`, `pls2_fit`, `pls3_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_confirmatory_test`, `split_nb_gate`, `nested_cv_r2_ci`, `anisotropic_null`, `bootstrap_saliences`, `grassmannian_alignment_test` |
 | `y` | target vector `(n,)`, float64 | `pls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_confirmatory_test`, `nested_cv_r2_ci`, `grassmannian_alignment_test` |
-| `Y` | target matrix `(n, q)`, float64 | `pls2_fit`, `pls3_fit`, `bootstrap_saliences` (PLS2/3 path) |
+| `Y` | target matrix `(n, q)` fitted jointly (PLS2/3), or `(n, m)` with one PLS1 outcome per column (`pls1_perm_alpha`), float64 | `pls2_fit`, `pls3_fit`, `bootstrap_saliences` (PLS2/3 path), `pls1_perm_alpha` |
+| `gram` | Gram matrix `X̃ X̃'` `(n, n)` of a standardized block the caller holds, float64 | `pls1_perm_alpha` |
+| `n_features` | number of columns of `X̃` summed into `gram`, constant columns included | `pls1_perm_alpha` |
 | `X_new` | held-out predictor matrix | `pls1_predict`, `pls2_predict`, `pls3_transform` |
 | `Y_new` | held-out Y for symmetric transform | `pls3_transform` |
 | `model` | fitted result object | `pls1_predict`, `pls2_predict`, `pls3_transform`, `rotate` (model overload) |
@@ -61,6 +63,8 @@ Format: `name` | description | functions where used.
 `split_nb_gate(X, weights=None)` is the one entry point that takes `X`
 without `y`: the `split_nb` auto-gate rule reads only the design.
 
+`pls1_perm_alpha(gram, Y, k=1, *, n_features)` is the one entry point that fits without `X` (the others that take no `X`, `pls1_predict`, `pls3_transform` / `plssvd_transform` and `rotate`, read a fitted `model` or `W`): the caller holds the block and passes its Gram matrix in place of `X`.
+
 `pls1_confirmatory_test` takes `(X, y, k)` directly — there is no `model` overload (the test refuses to consume a model whose K was selected on the same data).
 
 **`plskit.preprocess(X, Y=None, weights=None)`** — public cache-pattern helper. Standardizes X (and optionally Y), normalizes weights, and returns a `PreprocessResult`. Pass `pre_standardized=True` on the downstream entry points to skip redundant rescaling.
@@ -69,7 +73,7 @@ without `y`: the `split_nb` auto-gate rule reads only the design.
 
 | name | description | functions |
 |---|---|---|
-| `k` | number of components to fit/test, or `"optimal"` / `"sequence"` (string modes on `pls1_fit` only) | `pls1_fit`, `pls2_fit`, `pls3_fit`, `pls1_confirmatory_test` |
+| `k` | number of components to fit/test, or `"optimal"` / `"sequence"` (string modes on `pls1_fit` only) | `pls1_fit`, `pls2_fit`, `pls3_fit`, `pls1_confirmatory_test`, `pls1_perm_alpha` |
 | `k_max` | upper bound on k for K-selection | `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_fit(k="optimal" \| "sequence")`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `nested_cv_r2_ci` *(planned)* |
 
 ### 3. Resampling counts
@@ -110,6 +114,8 @@ There is no `at` argument (legacy `"fitted_k"` / `"first_k"` / `"postselection"`
 | `alpha` | significance threshold for the closed-test path | `pls1_find_k_sequence` |
 | `level` | CI confidence level (default 0.95) | `percentile_ci`, `nested_cv_r2_ci`, `pls1_confirmatory_test` (`ci=True`), `pls1_rotation_stability` |
 | `strata` | block labels for blocked resampling | `bootstrap_saliences` |
+
+`alpha` is also a result field of `PermAlphaResult`, the dual coefficients; the two never meet in one signature.
 
 ### 6. Reproducibility
 
@@ -216,6 +222,7 @@ What ships today, on both the Rust core (`lib.rs`) and the Python wrapper
 - **sPLS3**, the two-sided sparse keep-count family: `spls3_fit`.
 - **`split_nb_gate`**, a standalone read of the `split_nb` auto-gate rule
   (`X` only, no `y`).
+- **`pls1_perm_alpha`**, PLS1 dual coefficients for many outcomes from a caller's Gram matrix (`gram`, `Y`, `n_features`; no `X`).
 
 What is **not yet implemented**, and where this convention is
 forward-looking, is the Pillar-1 / Pillar-3 surface: `bootstrap_saliences`,

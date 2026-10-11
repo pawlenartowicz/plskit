@@ -1,11 +1,12 @@
-//! Integration tests for the confirmatory-test family, permutation null
-//! and rotation stability through `call`.
+//! Integration tests for the confirmatory-test family, permutation null,
+//! dual coefficients from a Gram matrix (`pls1_perm_alpha`) and rotation
+//! stability through `call`.
 #![allow(clippy::many_single_char_names)]
 
 mod common;
 
 use common::*;
-use plskit_bind::{check_record, Value, VecF64};
+use plskit_bind::{check_record, MatF64, Value, VecF64};
 
 fn args(fields: Vec<(&str, Value<'static>)>) -> Value<'static> {
     Value::Record(rec(fields))
@@ -232,6 +233,80 @@ fn perm_null_record_and_matrix_shape() {
         panic!()
     };
     assert_eq!((m.nrows(), m.ncols()), (100, 6));
+}
+
+#[test]
+fn perm_alpha_record_and_errors() {
+    let (n, p) = (30_usize, 200_usize);
+    let (x, y) = data(n, p, 1);
+    let pre = ok("preprocess", vec![("X", x)]);
+    let xs = floats(field(record(&pre), "X_std"));
+    // gram = X̃X̃', column-major.
+    let g: Vec<f64> = (0..n * n)
+        .map(|e| {
+            (0..p)
+                .map(|l| xs[e % n + l * n] * xs[e / n + l * n])
+                .sum::<f64>()
+        })
+        .collect();
+    let gram = || {
+        Value::Mat(MatF64::Owned {
+            data: g.clone(),
+            nrows: n,
+            ncols: n,
+        })
+    };
+    let mut cols = floats(&y);
+    cols.extend(std::iter::repeat_n(0.0, n));
+    let outcomes = || {
+        Value::Mat(MatF64::Owned {
+            data: cols.clone(),
+            nrows: n,
+            ncols: 2,
+        })
+    };
+    let o = ok(
+        "pls1_perm_alpha",
+        vec![
+            ("gram", gram()),
+            ("Y", outcomes()),
+            ("n_features", Value::I64(200)),
+        ],
+    );
+    let r = record(&o);
+    check_record(r).unwrap();
+    let Value::Mat(alpha) = field(r, "alpha") else {
+        panic!()
+    };
+    assert_eq!((alpha.nrows(), alpha.ncols()), (n, 2));
+    assert!(matches!(field(r, "k_used"), Value::IntVec(v) if *v == [1, 0]));
+    assert!(matches!(field(r, "resolved"), Value::BoolVec(v) if *v == [true, true]));
+    assert_eq!((i(r, "k"), i(r, "n_features")), (1, 200));
+
+    let e = err(
+        "pls1_perm_alpha",
+        vec![
+            ("gram", gram()),
+            ("Y", outcomes()),
+            ("k", Value::I64(2)),
+            ("n_features", Value::I64(200)),
+        ],
+    );
+    assert_eq!(e.code, "invalid_argument");
+    assert!(e.message.contains("supports k = 1 only"), "{}", e.message);
+    let e = err("pls1_perm_alpha", vec![("gram", gram()), ("Y", outcomes())]);
+    assert_eq!(e.code, "invalid_argument");
+    assert!(
+        e.message.contains("missing required argument 'n_features'"),
+        "{}",
+        e.message
+    );
+    let e = err(
+        "pls1_perm_alpha",
+        vec![("gram", gram()), ("Y", y), ("n_features", Value::I64(200))],
+    );
+    assert_eq!(e.code, "invalid_argument");
+    assert_eq!(e.message, "Y must be 2-D, got 1-D");
 }
 
 #[test]

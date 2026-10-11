@@ -1,4 +1,5 @@
-//! Confirmatory tests, the `split_nb` gate, permutation null, rotation stability.
+//! Confirmatory tests, the `split_nb` gate, permutation null, dual
+//! coefficients from a Gram matrix (`pls1_perm_alpha`), rotation stability.
 
 use plskit::{
     CIOpts, ConfirmatoryTestInput, ConfirmatoryTestOpts, PermNullOpts, Pls3ConfirmatoryTestOpts,
@@ -158,6 +159,22 @@ pub(crate) fn pls1_perm_null(inp: &mut Inputs<'_>) -> Result<Outcome, BindError>
         seed,
     ))?;
     Ok(done(convert::perm_null(out)))
+}
+
+/// `pls1_perm_alpha(gram, Y, k=1, *, n_features)`.
+pub(crate) fn pls1_perm_alpha(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
+    let gram = inp.mat("gram")?;
+    let y = inp.mat("Y")?;
+    let k = inp.usize("k")?;
+    let n_features = inp.usize("n_features")?;
+    inp.finish()?;
+    let out = engine(plskit::pls1_perm_alpha(
+        gram.as_mat(),
+        y.as_mat(),
+        k,
+        n_features,
+    ))?;
+    Ok(done(convert::perm_alpha(out)))
 }
 
 /// `pls1_rotation_stability(X, y, k, *, rotation_method="varimax",

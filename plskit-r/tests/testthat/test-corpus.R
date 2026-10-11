@@ -56,6 +56,9 @@ run_case <- function(case, inputs) {
       model <- pls3_fit(arr("X"), arr("Y"), k = kw[["k"]])
       pls3_transform(model, arr("X_new"), arr("Y_new"), which = kw[["which"]])
     },
+    pls1_perm_alpha = {
+      pls1_perm_alpha(arr("gram"), arr("Y"), k = kw[["k"]], n_features = kw[["n_features"]])
+    },
     {
       args <- list(X = arr("X"))
       if (!is.null(inputs[["y"]])) args[["y"]] <- arr("y")

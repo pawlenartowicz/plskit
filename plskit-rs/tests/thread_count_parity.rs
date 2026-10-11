@@ -41,8 +41,8 @@ use std::fmt::Debug;
 use common::{perm_opts, synth};
 use faer::{Col, Mat, MatRef};
 use plskit::{
-    pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_null,
-    pls1_rotation_stability, pls3_confirmatory_test, pls3_fit, split_nb_gate,
+    pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_alpha,
+    pls1_perm_null, pls1_rotation_stability, pls3_confirmatory_test, pls3_fit, split_nb_gate,
     spls1_find_k_sequence, spls1_fit, spls3_fit, CIOpts, ConfirmatoryArgs, ConfirmatoryMethod,
     ConfirmatoryTestInput, ConfirmatoryTestOpts, FindKOptimalOpts, FindKSequenceOpts, FitOpts,
     KSpec, PermNullOpts, Pls3ConfirmatoryTestOpts, Pls3FitOpts, RotationStabilityMethod,
@@ -190,6 +190,32 @@ fn pls1_fit_auto_is_pool_size_invariant() {
         )
         .unwrap()
     });
+    // Pool: the pre-standardized fit on a row-major view of the same shape.
+    // n·d·k = 3.0e6 takes the Rayon arm, on which the sum of squares behind
+    // its truncation floor is formed in parallel pieces, and its `Xs'·t`
+    // products take the row split.
+    let pp = plskit::preprocess(plskit::PreprocessInput {
+        x: Some(x_wide.as_ref()),
+        y: Some(y_wide.as_ref()),
+        weights: None,
+    })
+    .unwrap();
+    let (x_std, _, _) = pp.x_std.unwrap();
+    let (y_std, _, _) = pp.y_std.unwrap();
+    let x_std_t = x_std.transpose().to_owned();
+    c.check("pls1_fit pre_standardized row-major 203x5000 k=3", || {
+        pls1_fit(
+            x_std_t.transpose(),
+            y_std.as_ref(),
+            KSpec::Fixed(3),
+            None,
+            FitOpts {
+                pre_standardized: true,
+                ..FitOpts::default()
+            },
+        )
+        .unwrap()
+    });
 
     let (x, y) = synth(2000, 600, 1.0, 4);
     let w = row_weights(2000);
@@ -210,6 +236,29 @@ fn pls1_fit_auto_is_pool_size_invariant() {
             KSpec::Fixed(5),
             100,
             None,
+            FitOpts::default(),
+        )
+        .unwrap()
+    });
+    c.finish();
+}
+
+#[test]
+fn pls1_fit_weighted_row_major_is_pool_size_invariant() {
+    let mut c = Checker::default();
+    // Pool: a weighted fit on a row-major 203 x 5000 view: four strips
+    // (three of 1,288 columns and one of 1,136) map in parallel with the
+    // weights, and the implicit products take the row split. At k = 3,
+    // n·d·k = 3.0e6 takes the Rayon arm.
+    let (x, y) = synth(203, 5000, 1.0, 5);
+    let x_t = x.transpose().to_owned();
+    let w = row_weights(203);
+    c.check("pls1_fit weighted row-major view 203x5000 k=3", || {
+        pls1_fit(
+            x_t.transpose(),
+            y.as_ref(),
+            KSpec::Fixed(3),
+            Some(w.as_ref()),
             FitOpts::default(),
         )
         .unwrap()
@@ -557,6 +606,34 @@ fn perm_null_is_pool_size_invariant() {
             ..perm_opts()
         };
         pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts, Some(18)).unwrap()
+    });
+    c.finish();
+}
+
+#[test]
+fn perm_alpha_is_pool_size_invariant() {
+    let mut c = Checker::default();
+    // Guard only: every product is `Par::Seq`; the columns map in parallel.
+    let (x, yy) = two_block(40, 2000, 64, 19);
+    let (xs, _, _) = plskit::linalg::standardize(x.as_ref());
+    let mut g = Mat::<f64>::zeros(40, 40);
+    faer::linalg::matmul::matmul(
+        g.as_mut(),
+        faer::Accum::Replace,
+        xs.as_ref(),
+        xs.as_ref().transpose(),
+        1.0,
+        faer::Par::Seq,
+    );
+    // The pool comparison must carry resolved columns to mean anything: an
+    // all-unresolved output would compare equal across pools vacuously.
+    let out = pls1_perm_alpha(g.as_ref(), yy.as_ref(), 1, 2000).unwrap();
+    assert!(
+        out.resolved.iter().all(|&r| r),
+        "perm_alpha 40x2000 m=64: unresolved columns"
+    );
+    c.check("perm_alpha 40x2000 m=64", || {
+        pls1_perm_alpha(g.as_ref(), yy.as_ref(), 1, 2000).unwrap()
     });
     c.finish();
 }

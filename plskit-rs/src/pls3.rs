@@ -47,7 +47,8 @@ pub struct Pls3FitOpts {
     pub pre_standardized_x: bool,
     /// Skip Y centering/scaling; same contract as `pre_standardized_x`.
     pub pre_standardized_y: bool,
-    /// Parallelism strategy for the score matmuls. See [`ParChoice`].
+    /// Parallelism strategy for the moments of a raw X and the score
+    /// matmuls. See [`ParChoice`].
     /// Resamplers force `Seq` — outer Rayon already owns the cores.
     pub par: ParChoice,
     /// Iteration cap for the sparse alternation. Ignored on the dense path,
@@ -479,6 +480,10 @@ fn prepare(
     // block, whose standardization moments would be NaN, is refused.
     crate::preprocess::check_has_rows(n_samples)?;
 
+    // The SVD cost is min(p,q)·p·q; the matmuls are n·p·q. Size the par
+    // decision on the matmul term, which dominates whenever n ≥ min(p,q).
+    let par = resolve_par(opts.par, n_samples, n_features, n_targets);
+
     // Standardize OR skip, recording the moments either way so
     // `pls3_transform` can apply the same transform to new data. A skipped
     // block that is row-major or has a negative column stride is copied
@@ -498,7 +503,7 @@ fn prepare(
             None,
         )
     } else {
-        let fx = crate::linalg::fit_x_moments(x, None);
+        let fx = crate::linalg::fit_x_moments(x, None, par);
         let ratio = fx.max_mean_ratio();
         // Written so that a NaN ratio takes the copy. So does `n - 1 < k`:
         // the dense fit then always truncates, and would be refitted on
@@ -522,10 +527,6 @@ fn prepare(
         let (ys, m, s) = crate::linalg::standardize(y);
         (Some(ys), m, s)
     };
-
-    // The SVD cost is min(p,q)·p·q; the matmuls are n·p·q. Size the par
-    // decision on the matmul term, which dominates whenever n ≥ min(p,q).
-    let par = resolve_par(opts.par, n_samples, n_features, n_targets);
 
     let mut prepared = Prepared {
         xs_owned,

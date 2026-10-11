@@ -84,7 +84,8 @@ thread count.
   `pls1_fit` with `k="optimal"` or `k="sequence"` (Python, R and Julia).
 
 `pls1_perm_null` holds at most one standardized copy of `X`, shared by all
-its permutations, and is not batched.
+its permutations, and is not batched. `pls1_perm_alpha` holds one copy of
+`gram`, shared by all its columns, and is not batched.
 
 | Value | Behaviour |
 |---|---|

@@ -25,7 +25,7 @@ Python wrapper:
 - **Sparse PLS1** — `spls1_fit`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`. `keep ∈ [1, n_features]`; `keep = n_features` reproduces the dense functions bit-exactly. One axis is always fixed: no joint `(k, keep)` 2-D search. Prediction uses `pls1_predict` on the `Pls1Model` returned by `spls1_fit` — no separate `spls1_predict`. Per-coordinate β CIs are not offered under selection (post-selection inference, deferred to a separate spec).
 - **PLS3 / PLSSVD** — `pls3_fit` (alias `plssvd_fit`), `pls3_transform` (alias `plssvd_transform`), `pls3_confirmatory_test`. Symmetric X↔Y covariance analysis: one SVD of the standardized `X'Y`, no deflation, so all `k ≤ min(p, q)` components are orthogonal by construction and `p ≫ n` is the ordinary case. There is no `pls3_predict` — neither block is the outcome. Observation weights are not implemented for this family and error rather than being ignored.
 - **Sparse PLS3**: `spls3_fit`. Keep-count selection on both salience sides: `keep_x ∈ [1, n_features]` bounds the non-zeros per `U` column, `keep_y ∈ [1, n_targets]` per `V` column. `keep_x = n_features && keep_y = n_targets` delegates to `pls3_fit` and is bit-identical; off that endpoint `max_iter = 0` and a NaN, infinite or negative `tol` return `InvalidArgument` (in `pls3_confirmatory_test` too). Unlike the dense fit the columns are not orthogonal and `singular_values` are not singular values of `X'Y`, so no explained-variance share can be read off them. `k_used` is decided independently of the dense fit's and may exceed it for the same `(x, y, k)`. There is no `spls3_find_keep_optimal` and no per-component keep budget. `pls3_confirmatory_test` also accepts `keep_x` / `keep_y` on its options struct, applying the selection inside each training half only; a `keep_x` below `n_features` silently forces the primal route (the Gram reduction needs `u` to be a positive multiple of `X'Yv`), and this confirmatory sparse surface is Rust-only today, with no wrapper exposing it.
-- **Inference**: `pls1_confirmatory_test` (with the five methods `raw_perm` / `split_nb` / `split_exact` / `score` / `e`; `split_exact` at `k=1` is the recommended method; see [Choosing the method in Rust](#choosing-the-method-in-rust)). CIs ride on `pls1_confirmatory_test(ci=true)` plus the standalone `pls1_rotation_stability`. `pls1_perm_null` is the permutation-null engine (`PermNullOpts` implements `Default`, `n_perm` 1000). `split_nb_gate` answers whether the `split_nb` auto-gate flags a design, without running a test.
+- **Inference**: `pls1_confirmatory_test` (with the five methods `raw_perm` / `split_nb` / `split_exact` / `score` / `e`; `split_exact` at `k=1` is the recommended method; see [Choosing the method in Rust](#choosing-the-method-in-rust)). CIs ride on `pls1_confirmatory_test(ci=true)` plus the standalone `pls1_rotation_stability`. `pls1_perm_null` is the permutation-null engine (`PermNullOpts` implements `Default`, `n_perm` 1000). `split_nb_gate` answers whether the `split_nb` auto-gate flags a design, without running a test. `pls1_perm_alpha` returns PLS1 dual coefficients (`coef = X̃'·alpha`) for every column of `y` from a caller's Gram matrix `X̃X̃'`, at `k = 1`; it takes no `x`.
 - **Interpretive** — `rotate` with pluggable `L` and method-axis `(method, args)` dispatch.
 
 ### Planned — not yet implemented
@@ -155,6 +155,21 @@ pub fn spls3_fit(
 `keep_x = n_features && keep_y = n_targets` produces bit-exact `pls3_fit`
 output. The wrapper spelling of the two counts is `keep_X` / `keep_Y`,
 matching `pre_standardized_X` / `pre_standardized_Y`.
+
+## Dual coefficients from a Gram matrix
+
+```rust
+pub fn pls1_perm_alpha(
+    gram: MatRef<f64>,       // (n, n): X̃X̃' of the caller's standardized block
+    y: MatRef<f64>,          // (n, m): one raw outcome per column
+    k: usize,                // must be 1
+    n_features: usize,       // columns of X̃ summed into gram
+) -> PlsKitResult<PermAlphaOutput>
+// PermAlphaOutput: alpha (Mat<f64>, (n, m)), k_used (Vec<usize>), resolved (Vec<bool>), k, n_features
+```
+
+The contract on `gram`, its checks and the unresolved case are those of
+[api.md](../python/api.md) §3.5. The wrapper spelling of `y` is `Y`.
 
 ## Choosing the method in Rust
 

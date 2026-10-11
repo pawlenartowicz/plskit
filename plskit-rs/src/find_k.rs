@@ -22,7 +22,8 @@ pub enum Selector {
     R2Se,
     /// Maximize CV R² without the 1-SE rule.
     R2Max,
-    /// Minimize `BIC(k) = n · log(SSR / n) + k · log(n)`.
+    /// Minimize `BIC(k) = n_eff · log(SSR / n_eff) + k · log(n_eff)`
+    /// (`n_eff` is `n` without weights).
     Bic,
 }
 
@@ -993,6 +994,14 @@ fn select_cv(
     ))
 }
 
+/// The BIC selector: one fit to `k_max` on the standardized copy of X
+/// (weighted moments, whatever `pre_standardized` says, as
+/// [`first_component_exhausted`] standardizes), then
+/// `BIC(k) = n_eff · ln(SSR_k / n_eff) + k · ln(n_eff)` for each
+/// `k ≤ k_used`. `SSR_k` is the squared norm of the outcome the fit worked
+/// on less its first `k` score columns times their y-loadings: the weighted
+/// residual sum of squares of the `k`-component model, with no pass over X.
+/// No component kept gives `k_star = 0` and no scores.
 #[allow(clippy::many_single_char_names)]
 fn select_bic(
     x: MatRef<'_, f64>,
@@ -1011,7 +1020,7 @@ fn select_bic(
         weights,
         FitOpts {
             pre_standardized: true,
-            // check_n_eff: false — the BIC sweep below iterates 1..=k_used and
+            // check_n_eff: false: the BIC sweep below iterates 1..=k_used and
             // is truncation-tolerant by design (rank-deficient X just shortens
             // the sweep); n_eff was already validated at the top-level entry.
             check_n_eff: false,
@@ -1024,19 +1033,25 @@ fn select_bic(
     if m.w_star.ncols() == 0 {
         return Ok((0, BTreeMap::new()));
     }
+    // The outcome the fit worked on, `√w''·ys` (`m.weights` holds the
+    // weights it normalized and row-scaled with; `ys` when there are none),
+    // and its residual after each component, `e ← e − q_k·t_k`, in
+    // ascending `i`.
+    let mut e: Col<f64> = match m.weights.as_ref() {
+        Some(w) => crate::fit::scale_col(ys.as_ref(), crate::linalg::sqrt_col(w.as_ref()).as_ref()),
+        None => ys.clone(),
+    };
     let mut best_k = 1;
     let mut best_bic = f64::INFINITY;
     let mut bic_scores = BTreeMap::<usize, f64>::new();
     let nv = ys.nrows();
-    for k in 1..=m.w_star.ncols() {
-        let coef_k =
-            crate::fit::pls1_coef_at_k(&m.w_star, &m.p_loadings, &m.q_loadings, k, faer::Par::Seq);
-        // Outside any replicate loop, like the `Auto` fit above.
-        let y_pred = crate::linalg::mat_vec(xs.as_ref(), coef_k.as_ref(), crate::fit::par_fixed());
-        let ssr_w: f64 = match weights {
-            None => (0..nv).map(|i| (y_pred[i] - ys[i]).powi(2)).sum(),
-            Some(w) => (0..nv).map(|i| w[i] * (y_pred[i] - ys[i]).powi(2)).sum(),
-        };
+    for k in 1..=m.k_used {
+        let t = m.t_scores.col(k - 1);
+        let q = m.q_loadings[k - 1];
+        for i in 0..nv {
+            e[i] -= q * t[i];
+        }
+        let ssr_w: f64 = (0..nv).map(|i| e[i] * e[i]).sum();
         let bic = n_eff * (ssr_w / n_eff).ln() + k as f64 * n_eff.ln();
         bic_scores.insert(k, bic);
         if bic < best_bic {
@@ -2277,5 +2292,86 @@ mod tests {
         };
         assert_eq!(peak_at(0), 1);
         assert!(peak_at(u64::MAX) >= 2);
+    }
+
+    /// The BIC sweep agrees, to the corpus array tolerance, with the BIC of
+    /// the predictions `xs·coef_k` of the same fit to `k_max` on the same
+    /// standardized copy, weighted by `w`, and picks the same `k`. Dense,
+    /// weighted (zero weights included), wide and weighted wide, and a rank-two
+    /// X on which the fit stops before `k_max`; dense and `keep = 3`.
+    #[test]
+    fn bic_sweep_matches_the_prediction_sweep() {
+        use crate::test_support::{assert_agree, copy_free_families, signal_data, Agree, Family};
+        // Every column a combination of the same two: rank two.
+        let (b, yb) = signal_data(40, 2, 103);
+        let xb = Mat::<f64>::from_fn(40, 6, |i, j| {
+            (j + 1) as f64 * b[(i, j % 2)] - b[(i, 1 - j % 2)]
+        });
+        let mut families = copy_free_families();
+        families.push(Family {
+            name: "rank_two",
+            x: xb,
+            y: yb,
+            w: None,
+        });
+        for f in families {
+            let n = f.x.nrows();
+            let (w_norm, n_eff) =
+                crate::fit::validate_and_normalize_weights(f.w.as_ref().map(Col::as_ref), n, 4)
+                    .unwrap();
+            let wr = w_norm.as_ref().map(Col::as_ref);
+            for keep in [None, Some(3)] {
+                let what = format!("{} keep={keep:?}", f.name);
+                let (k_star, scores) =
+                    select_bic(f.x.as_ref(), f.y.as_ref(), 4, wr, n_eff, keep).unwrap();
+                let (xs, _, _) = standardize_weighted(f.x.as_ref(), wr);
+                let (ys, _, _) = standardize1_weighted(f.y.as_ref(), wr);
+                let m = pls1_fit_impl(
+                    xs.as_ref(),
+                    ys.as_ref(),
+                    KSpec::Fixed(4),
+                    wr,
+                    FitOpts {
+                        pre_standardized: true,
+                        check_n_eff: false,
+                        keep,
+                        ..FitOpts::default()
+                    },
+                )
+                .unwrap();
+                if f.name == "rank_two" {
+                    assert!(m.k_used > 0 && m.k_used < 4, "{what}: k_used {}", m.k_used);
+                }
+                assert!(scores.keys().copied().eq(1..=m.k_used), "{what}: keys");
+                let want: Vec<f64> = (1..=m.k_used)
+                    .map(|k| {
+                        let coef = crate::fit::pls1_coef_at_k(
+                            &m.w_star,
+                            &m.p_loadings,
+                            &m.q_loadings,
+                            k,
+                            faer::Par::Seq,
+                        );
+                        let pred = crate::linalg::mat_vec(
+                            xs.as_ref(),
+                            coef.as_ref(),
+                            crate::fit::par_fixed(),
+                        );
+                        let ssr: f64 = (0..n)
+                            .map(|i| wr.map_or(1.0, |w| w[i]) * (pred[i] - ys[i]).powi(2))
+                            .sum();
+                        n_eff * (ssr / n_eff).ln() + k as f64 * n_eff.ln()
+                    })
+                    .collect();
+                let got: Vec<f64> = scores.values().copied().collect();
+                assert_agree(&got, &want, Agree::Corpus(1e-10), &what);
+                let argmin = want
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| a.1.total_cmp(b.1))
+                    .map_or(0, |(i, _)| i + 1);
+                assert_eq!(k_star, argmin, "{what}");
+            }
+        }
     }
 }

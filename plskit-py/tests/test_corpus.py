@@ -233,6 +233,18 @@ def test_corpus_case(case):
                       "n_perm", "k", "seed", "n_eff", "beta_perm_matrix"]:
             if field in expected:
                 assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+    elif fn == "pls1_perm_alpha":
+        r = plskit.pls1_perm_alpha(
+            inputs["gram"], inputs["Y"], k=kwargs["k"], n_features=kwargs["n_features"]
+        )
+        for field in ["alpha", "k_used", "k", "n_features"]:
+            if field in expected:
+                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+        if "resolved" in expected:
+            assert_close(
+                r.resolved.astype(np.int64), expected["resolved"],
+                f"{case['name']}.resolved",
+            )
     elif fn == "pls1_rotation_stability":
         # As for pls1_perm_null: only the data-shape keys are dropped.
         kw = {k: v for k, v in kwargs.items() if k not in ("d", "n")}

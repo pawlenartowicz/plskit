@@ -44,6 +44,7 @@ TITLES = {
     "split_nb_gate": "Query the split_nb auto-gate",
     "pls1_perm_null": "Permutation null of PLS1 coefficients",
     "pls3_confirmatory_test": "Confirmatory test of a PLS3 signal",
+    "pls1_perm_alpha": "Dual coefficients of PLS1 fits from a Gram matrix",
     "rotate": "Rotate PLS1 weights or a fitted PLS1 model",
     "pls1_rotation_stability": "Rotation-stability diagnostic for PLS1",
 }

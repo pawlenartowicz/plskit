@@ -194,6 +194,17 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
         ],
     },
     ResultTypeSpec {
+        name: "PermAlphaResult",
+        r_class: "perm_alpha_result",
+        fields: &[
+            req("alpha", "mat"),
+            req("k_used", "intvec"),
+            req("resolved", "boolvec"),
+            req("k", "i64"),
+            req("n_features", "i64"),
+        ],
+    },
+    ResultTypeSpec {
         name: "CIScalar",
         r_class: "ci_scalar",
         fields: &[

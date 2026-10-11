@@ -538,6 +538,29 @@ pls3_confirmatory_test <- function(
   ))
 }
 
+#' Dual coefficients of PLS1 fits from a Gram matrix
+#'
+#' R binding of `pls1_perm_alpha`. Arguments, defaults and result fields are
+#' documented once, in the canonical reference: section
+#' "3.5 Dual coefficients from a Gram matrix" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#'
+#' @param gram,Y,k,n_features See the canonical reference.
+#' @return A list of class `c("perm_alpha_result", "plskit_result")`.
+#' @export
+pls1_perm_alpha <- function(
+  gram,
+  Y,
+  k = 1L,
+  n_features
+) {
+  .plskit_call("pls1_perm_alpha", list(
+    gram = gram,
+    Y = Y,
+    k = k,
+    n_features = n_features
+  ))
+}
+
 #' Rotate PLS1 weights or a fitted PLS1 model
 #'
 #' R binding of `rotate`. Arguments, defaults and result fields are

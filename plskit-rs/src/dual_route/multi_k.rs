@@ -13,6 +13,10 @@
 //! (`ReplicateRoute::Nspace`), build one block per fold, split or call from
 //! the constructors here, and run the unit bodies here per replicate; a
 //! unit the kernel cannot certify runs the primal unit body instead.
+//! `perm_alpha::pls1_perm_alpha` is the one caller without an `X̃`: it
+//! builds its block from the caller's Gram matrix
+//! ([`NspaceGram::from_gram`]) and reports a unit the kernel cannot
+//! certify.
 //!
 //! The parent module's `pls1_cv_r2_columns` (the `K = 1` closed form at
 //! `raw_perm`) and `signal_test::split_perm_nr_zbars` (the `K = 1` no-refit
@@ -213,15 +217,17 @@ pub(crate) enum NspaceOutcome {
     /// `coef = 0`, predictions and scores exactly zero.
     ZeroModel,
     /// Some component sat inside a gate band, below it, or was NaN: the
-    /// caller recomputes this unit with the primal kernel.
+    /// caller recomputes this unit with the primal kernel or, holding no
+    /// `X̃` (`pls1_perm_alpha`), reports it.
     Unresolved,
 }
 
 /// One fixed training block, shared read-only by every replicate: its Gram
-/// matrix `g = X̃X̃'` (`n_tr × n_tr`), `x_fro = ‖X̃‖_F` computed by
+/// matrix `g = X̃X̃'` (`n_tr × n_tr`), `x_fro = ‖X̃‖_F`, computed by
 /// `norm_l2` on the same view the primal kernel is handed (so the relative
-/// floor is evaluated on bit-identical inputs), `g2`, the block's
-/// [`gram_norm_bound`], and the feature count `p`.
+/// floor is evaluated on bit-identical inputs), or `√trace(g)` for a block
+/// built from a Gram matrix, which has no primal; `g2`, the block's
+/// [`gram_norm_bound`]; and the feature count `p`.
 pub(crate) struct NspaceBlock<'a> {
     g: MatRef<'a, f64>,
     x_fro: f64,
@@ -233,7 +239,8 @@ pub(crate) struct NspaceBlock<'a> {
 /// block `X̃`: `G`, `‖X̃‖_F`, the `‖G‖₂` bound and `p`. Built by the drivers'
 /// block constructors (one per `perm_null` call, `raw_perm` fold or
 /// `split_exact` split), each on the thread that runs its call, fold or
-/// split.
+/// split, or from a caller's Gram matrix by [`NspaceGram::from_gram`] (one
+/// per `pls1_perm_alpha` call, on the calling thread).
 pub(crate) struct NspaceGram {
     g: Mat<f64>,
     x_fro: f64,
@@ -259,8 +266,28 @@ impl NspaceGram {
         }
     }
 
-    /// `‖xs‖_F`: `xs.norm_l2()`, the norm the primal kernel takes of the
-    /// same block, so a fallback to it reads the same bits.
+    /// The block of a caller's Gram matrix `g = X̃X̃'` (`n × n`) of a block
+    /// with `p` columns that plskit does not hold (`pls1_perm_alpha`).
+    /// `g` is copied into column-major storage, so the products read the
+    /// same bits whatever the caller's layout. `x_fro = √trace(g)`, the
+    /// diagonal summed in index order, equals `‖X̃‖_F` to rounding; no
+    /// primal kernel reads this block, so nothing needs the bits of
+    /// `xs.norm_l2()`. `g2` is the sequential `‖G‖₂` bound. The caller has
+    /// checked that `g` is square and finite with a non-negative diagonal.
+    pub(crate) fn from_gram(g: MatRef<'_, f64>, p: usize) -> Self {
+        #[cfg(test)]
+        BLOCKS_BUILT.with(|c| c.set(c.get() + 1));
+        let n = g.nrows();
+        let g = Mat::<f64>::from_fn(n, n, |i, j| g[(i, j)]);
+        let x_fro = (0..n).map(|i| g[(i, i)]).sum::<f64>().sqrt();
+        let g2 = gram_norm_bound(g.as_ref(), x_fro);
+        Self { g, x_fro, g2, p }
+    }
+
+    /// `‖X̃‖_F`: `xs.norm_l2()` for a block from [`NspaceGram::new`], the
+    /// norm the primal kernel takes of the same block, so a fallback to it
+    /// reads the same bits; `√trace(g)` for a block from
+    /// [`NspaceGram::from_gram`], which has no fallback.
     pub(crate) fn x_fro(&self) -> f64 {
         self.x_fro
     }
@@ -412,7 +439,8 @@ pub(crate) struct ComponentTrace {
 ///
 /// Everything else is `Unresolved`, and the caller recomputes that unit
 /// with the primal kernel, whose answer (truncation included) is then the
-/// primal route's to the bit. The one truncation decided here is `z`
+/// primal route's to the bit. `pls1_perm_alpha`, which holds no `X̃`,
+/// reports such a unit instead. The one truncation decided here is `z`
 /// exactly zero (`ZeroModel`). The gates are first-order bounds, not worst
 /// cases: they protect the decisions, and the validation sweep checks that
 /// no `Resolved` call ever keeps a different number of components than the
@@ -509,7 +537,8 @@ pub(crate) struct ComponentTrace {
 ///
 /// # Preconditions
 /// `block.g` is `n_tr × n_tr`, `z` has `n_tr` rows, and `1 ≤ k ≤ n_tr − 1`
-/// (the eligibility functions guarantee all three). A shape or `k`
+/// (the eligibility functions, or `pls1_perm_alpha`'s argument checks,
+/// guarantee all three). A shape or `k`
 /// violation returns `Unresolved` (an exactly zero `z` returns
 /// `ZeroModel` at any `k`), never a panic.
 pub(crate) fn pls1_nspace_kernel(

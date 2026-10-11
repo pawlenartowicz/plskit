@@ -29,8 +29,9 @@ what they mean, when to use them, and the numerical recipe.
   `pls1_perm_null`, `split_nb_gate`, `preprocess`, and the sparse
   `spls1_*` family
 - Do not take `weights`: `pls1_predict` (prediction is `intercept + X_new · beta`;
-  the weights have already shaped `beta` and `intercept` at fit time)
-  and `rotate`
+  the weights have already shaped `beta` and `intercept` at fit time),
+  `rotate`, and `pls1_perm_alpha` (it takes the Gram matrix of the
+  caller's block in place of `X`, and the fit is unweighted)
 - `pls3_fit` / `plssvd_fit` accept the argument but refuse anything other
   than `None`: weights are not implemented for PLS3
 

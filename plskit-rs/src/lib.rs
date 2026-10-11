@@ -12,7 +12,8 @@
 /// Dual (Gram) execution routes for resampling loops, including the
 /// n-space PLS1 kernel for `k ≥ 1`. Crate-internal: the route is chosen by
 /// the engine from `(n_tr, p, B)` and the per-replicate multiplicity, and
-/// is not observable from any public surface.
+/// is not observable from the resampling functions. `pls1_perm_alpha`
+/// returns the kernel's dual coefficients for a caller's Gram matrix.
 pub(crate) mod dual_route;
 /// Error types for plskit.
 pub mod error;
@@ -30,6 +31,9 @@ mod fixture_route_pins;
 pub(crate) mod gram_p;
 /// Low-level linear algebra helpers (standardize, row-subset, etc.).
 pub mod linalg;
+/// PLS1 dual coefficients from a caller's Gram matrix (`pls1_perm_alpha`),
+/// for callers that hold the standardized block themselves.
+pub mod perm_alpha;
 /// Permutation-null engine for signed per-voxel z statistics.
 /// Powers the TFCE / cluster-mass / max-stat downstream pipeline.
 pub mod perm_null;
@@ -84,6 +88,7 @@ pub use find_k::{
     FindKSequenceOutput, FindKeepOptimalOpts, FindKeepOptimalOutput, Selector,
 };
 pub use fit::{pls1_fit, spls1_fit, FitOpts, KSpec, ParChoice, Pls1Model};
+pub use perm_alpha::{pls1_perm_alpha, PermAlphaOutput};
 pub use perm_null::{pls1_perm_null, PermNullOpts, PermNullOutput};
 pub use pls3::{
     pls3_fit, pls3_transform, plssvd_fit, plssvd_transform, spls3_fit, Pls3FitOpts, Pls3Model,

@@ -272,8 +272,11 @@ pub(crate) fn run_incremental_sequence(
     let mut pvalues_vec: Vec<f64> = vec![f64::NAN; k_max];
     let mut last_sig: Option<usize> = None;
 
+    // Every step reads the same standardized X and y.
+    let (xs_owned, ys_full) = sequence_inputs(x, y, weights, opts.pre_standardized);
+    let xs_full = xs_owned.as_ref().map_or(x, Mat::as_ref);
     for h in 1..=k_max {
-        let p = p_for_incremental(x, y, h, weights, &opts, &mut rng)?;
+        let p = p_for_incremental(xs_full, ys_full.as_ref(), h, weights, &opts, &mut rng)?;
         pvalues_vec[h - 1] = p;
         if p < opts.alpha {
             last_sig = Some(h);
@@ -333,32 +336,25 @@ fn p_for_confirmatory_at_k(
     Ok(r.pvalue)
 }
 
-fn p_for_incremental(
+/// X and y as every step of the sequence reads them, formed once per run:
+/// used as given under `pre_standardized` (X copied when
+/// `linalg::col_major_or_copy` says it must be: a view that is not
+/// column-major, or one with a negative column stride); otherwise
+/// standardized with weighted moments when weights are present and with the
+/// plain `standardize` / `standardize1` when they are not. The first value
+/// is `None` when X is read as given.
+fn sequence_inputs(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
-    h: usize,
     weights: Option<ColRef<'_, f64>>,
-    opts: &IncrementalSequenceOpts,
-    rng: &mut crate::rng::Rng,
-) -> PlsKitResult<f64> {
-    use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
+    pre_standardized: bool,
+) -> (Option<Mat<f64>>, Col<f64>) {
     use crate::linalg::{standardize, standardize1, standardize1_weighted, standardize_weighted};
-
-    // Standardize the same way the per-step fit will: weighted moments when
-    // weights are present, and skip standardization entirely when the caller
-    // asserts pre-standardized inputs (IncrementalSequenceOpts.pre_standardized
-    // contract). The weights=None, pre_standardized=false path must stay
-    // bit-identical — it resolves to the plain standardize/standardize1 calls.
-    //
-    // Pre-standardized input is used as given, copied only when it is not
-    // column-major (`linalg::col_major_or_copy`).
-    let x_copy = if opts.pre_standardized {
-        crate::linalg::col_major_or_copy(x)
-    } else {
-        None
-    };
-    let (xs_std, ys_full): (Option<Mat<f64>>, Col<f64>) = if opts.pre_standardized {
-        (None, Col::<f64>::from_fn(y.nrows(), |i| y[i]))
+    if pre_standardized {
+        (
+            crate::linalg::col_major_or_copy(x),
+            Col::<f64>::from_fn(y.nrows(), |i| y[i]),
+        )
     } else if weights.is_some() {
         let (xs, _, _) = standardize_weighted(x, weights);
         let (ys, _, _) = standardize1_weighted(y, weights);
@@ -367,11 +363,21 @@ fn p_for_incremental(
         let (xs, _, _) = standardize(x);
         let (ys, _, _) = standardize1(y);
         (Some(xs), ys)
-    };
-    let xs_full: MatRef<'_, f64> = match (&xs_std, &x_copy) {
-        (Some(m), _) | (None, Some(m)) => m.as_ref(),
-        (None, None) => x,
-    };
+    }
+}
+
+/// The p-value of step `h` on X and y as [`sequence_inputs`] formed them:
+/// for `h > 1`, both deflated by a fit to `h − 1` components, then the
+/// `k = 1` confirmatory test on the result.
+fn p_for_incremental(
+    xs_full: MatRef<'_, f64>,
+    ys_full: ColRef<'_, f64>,
+    h: usize,
+    weights: Option<ColRef<'_, f64>>,
+    opts: &IncrementalSequenceOpts,
+    rng: &mut crate::rng::Rng,
+) -> PlsKitResult<f64> {
+    use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
 
     let deflated: Option<(Mat<f64>, Col<f64>)> = if h == 1 {
         None
@@ -380,7 +386,7 @@ fn p_for_incremental(
         // test so that the deflated residual matches the weighted model.
         let prev = pls1_fit_impl(
             xs_full,
-            ys_full.as_ref(),
+            ys_full,
             KSpec::Fixed(h - 1),
             weights,
             FitOpts {
@@ -428,7 +434,7 @@ fn p_for_incremental(
     };
     let (xs_def, ys_def): (MatRef<'_, f64>, ColRef<'_, f64>) = match &deflated {
         Some((xd, yd)) => (xd.as_ref(), yd.as_ref()),
-        None => (xs_full, ys_full.as_ref()),
+        None => (xs_full, ys_full),
     };
     let mut sub_opts = *opts;
     sub_opts.pre_standardized = true;
@@ -583,7 +589,8 @@ mod tests {
         assert!(all.iter().all(|p| !p.is_nan()), "{all:?}");
     }
 
-    /// Layout invariance: every step reads X through `standardize` /
+    /// Layout invariance: every step reads the X that `sequence_inputs`
+    /// formed through `standardize_weighted`, `standardize` or
     /// `col_major_or_copy`, so padded, row-major and reversed-column views
     /// give bit-identical p-values to the owned matrix, for all four
     /// sequential methods, dense and `keep = 3`, over the copy-free families

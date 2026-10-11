@@ -4,13 +4,13 @@
 export preprocess, pls1_fit, pls1_predict, pls1_find_k_optimal, pls1_find_k_sequence,
        spls1_fit, spls1_find_keep_optimal, spls1_find_k_optimal, spls1_find_k_sequence,
        pls3_fit, plssvd_fit, pls3_transform, plssvd_transform, spls3_fit,
-       pls1_confirmatory_test, split_nb_gate, pls1_perm_null, pls3_confirmatory_test, rotate,
-       pls1_rotation_stability
+       pls1_confirmatory_test, split_nb_gate, pls1_perm_null, pls3_confirmatory_test,
+       pls1_perm_alpha, rotate, pls1_rotation_stability
 
 export PreprocessResult, PLS1Result, PLS3Result, PLS3Scores, FindKOptimalResult,
        FindKSequenceResult, FindKeepOptimalResult, ConfirmatoryTestResult, SplitNbGateResult,
-       PermNullResult, CIScalar, ConfirmatoryCI, RotateResult, RotationStabilityResult,
-       RotationSpec
+       PermNullResult, PermAlphaResult, CIScalar, ConfirmatoryCI, RotateResult,
+       RotationStabilityResult, RotationSpec
 
 # Field order of every result type, as in _docs/python/results.md.
 const _RESULT_FIELDS = Dict{Symbol,Vector{Symbol}}(
@@ -24,6 +24,7 @@ const _RESULT_FIELDS = Dict{Symbol,Vector{Symbol}}(
     :ConfirmatoryTestResult => [:pvalue, :statistic, :test_method, :k, :n_perm, :n_splits, :seed, :n_eff, :rho_hat, :stable_rank, :ci],
     :SplitNbGateResult => [:fires, :stable_rank, :n_eff],
     :PermNullResult => [:n_perm, :k, :seed, :beta_ref, :beta_perm_mean, :beta_perm_sd, :beta_perm_z, :beta_perm_matrix, :n_eff],
+    :PermAlphaResult => [:alpha, :k_used, :resolved, :k, :n_features],
     :CIScalar => [:point, :lower, :upper, :sd],
     :ConfirmatoryCI => [:n_boot, :m, :m_rate, :level, :beta_sign_z, :beta_sign_z_signed, :leverage_ci_lower, :leverage_ci_upper, :leverage_se, :beta_ci_lower, :beta_ci_upper, :beta_se, :holdout_corr, :n_boot_finite, :n_boot_finite_holdout_corr],
     :RotateResult => [:W_rot, :spec],
@@ -120,6 +121,15 @@ Fields: `n_perm`, `k`, `seed`, `beta_ref`, `beta_perm_mean`, `beta_perm_sd`, `be
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
 """
 const PermNullResult = PlsKitResult{:PermNullResult}
+
+"""
+    PermAlphaResult
+
+`PlsKitResult{:PermAlphaResult}`, the Julia form of Python's `plskit.PermAlphaResult`.
+Fields: `alpha`, `k_used`, `resolved`, `k`, `n_features`.
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+"""
+const PermAlphaResult = PlsKitResult{:PermAlphaResult}
 
 """
     CIScalar
@@ -362,6 +372,17 @@ result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_doc
 """
 function pls3_confirmatory_test(X, Y; k=1, test_method="auto", args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, verbose=false)
     _call(:pls3_confirmatory_test; X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, verbose)
+end
+
+"""
+    pls1_perm_alpha(gram, Y; k=1, n_features) -> PermAlphaResult
+
+Call Python's `plskit.pls1_perm_alpha` with the same arguments and defaults.
+Reference: [`pls1_perm_alpha` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+"""
+function pls1_perm_alpha(gram, Y; k=1, n_features)
+    _call(:pls1_perm_alpha; gram, Y, k, n_features)
 end
 
 """

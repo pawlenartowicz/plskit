@@ -201,6 +201,16 @@ costs one SVD and no resampling.
 | `beta_perm_z` | `Vec<f64>` | signed per-voxel z = β_ref / β_perm_sd; NaN where SD ≈ 0, length D |
 | `beta_perm_matrix` | `Option<Vec<f64>>` | optional `(n_perm, D)` β matrix, row-major; `Some` when `opts.return_perm_matrix == true` |
 
+## `PermAlphaOutput`, what `pls1_perm_alpha` returns
+
+| Field | Rust type | Notes |
+|---|---|---|
+| `alpha` | `Mat<f64>` | `(n, m)`; column `j` gives `coef = X̃'·alpha[:, j]` on the standardized scale; NaN in a column that is not resolved |
+| `k_used` | `Vec<usize>` | length `m`; `k` for a resolved fit, `0` for a zero model and for an unresolved column |
+| `resolved` | `Vec<bool>` | length `m`; `false` where the fit cannot be certified from `gram` alone |
+| `k` | `usize` | as passed |
+| `n_features` | `usize` | as passed |
+
 ## `CIScalar` — scalar subsample CI
 
 Centered-scaled subsampling CI for a scalar functional, plus its SD.

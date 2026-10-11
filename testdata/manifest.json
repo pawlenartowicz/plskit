@@ -1022,6 +1022,20 @@
       }
     },
     {
+      "name": "pls1_perm_alpha_n40_p60_m4_k1",
+      "function": "pls1_perm_alpha",
+      "inputs": "inputs/pls1_perm_alpha_n40_p60_m4_k1.npz",
+      "outputs": "outputs/pls1_perm_alpha/pls1_perm_alpha_n40_p60_m4_k1.npz",
+      "kwargs": {
+        "k": 1,
+        "n_features": 60
+      },
+      "hashes": {
+        "inputs_sha256": "8f6d5dfd41860ed9ac09fbb6345b2721ae38a2a715ba611e188e16f76544cdd8",
+        "outputs_sha256": "c8d75060e2e1d77f3c580fca390839ee87ec31dd3d5307992c438a24819fb6f5"
+      }
+    },
+    {
       "name": "pls1_rotation_stability_n80_d6_k2",
       "function": "pls1_rotation_stability",
       "inputs": "inputs/pls1_rotation_stability_n80_d6_k2.npz",

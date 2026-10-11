@@ -7,8 +7,8 @@ refuses such an array and the Python wrapper copies it into an aligned one
 first. Every result must be bit-identical to the same values passed aligned.
 
 A C- or F-ordered float64 X is handed to the extension as it is, not copied.
-The block inputs (`Y`, `Y_new`, `W`, `L`) are read in place when F-ordered
-and copied column-major otherwise; every layout gives the same bits.
+The block inputs (`Y`, `Y_new`, `W`, `L`, `gram`) are read in place when
+F-ordered and copied column-major otherwise; every layout gives the same bits.
 """
 import dataclasses
 
@@ -98,12 +98,14 @@ def test_extension_refuses_a_misaligned_array(name):
 
 
 # In every case the first array `mk` makes is X (`W`, or the model's `T`,
-# for `rotate`): `test_public_api_hands_the_extension_x_uncopied` looks for
-# that one.
+# for `rotate`; `gram` for `pls1_perm_alpha`):
+# `test_public_api_hands_the_extension_x_uncopied` looks for that one.
 def _public_cases():
     X, y, Y, w = _data()
     m1 = plskit.pls1_fit(X, y, k=2)
     m3 = plskit.pls3_fit(X, Y, k=2)
+    Xg = plskit.preprocess(X).X_std
+    G = Xg @ Xg.T
     return {
         "pls1_fit": lambda mk: plskit.pls1_fit(mk(X), mk(y), k=2, weights=mk(w)),
         "spls1_fit": lambda mk: plskit.spls1_fit(mk(X), mk(y), k=2, keep=3, weights=mk(w)),
@@ -123,6 +125,8 @@ def _public_cases():
             mk(X), mk(y), 3, seed=5, weights=mk(w)),
         "pls1_confirmatory_test": lambda mk: plskit.pls1_confirmatory_test(
             mk(X), mk(y), k=1, test_method="split_exact", seed=6, weights=mk(w)),
+        "pls1_perm_alpha": lambda mk: plskit.pls1_perm_alpha(
+            mk(G), mk(Y), n_features=X.shape[1]),
     }
 
 
@@ -227,6 +231,8 @@ def _block_cases():
     m1 = plskit.pls1_fit(X, y, k=3)
     W = np.asarray(m1.W)
     L = W @ rng.standard_normal((3, 3))
+    Xg = plskit.preprocess(X).X_std
+    G = Xg @ Xg.T
     return {
         "pls3_fit": (Y, lambda Yv: plskit.pls3_fit(X, Yv, k=2)),
         "pls3_fit_pre": (Ys, lambda Yv: plskit.pls3_fit(Xs, Yv, k=1, **pre)),
@@ -239,12 +245,14 @@ def _block_cases():
         "rotate_L": (L, lambda Lv: plskit.rotate(W, method="varimax", L=Lv)),
         "pls1_rotation_stability_L": (L, lambda Lv: plskit.pls1_rotation_stability(
             X, y, 3, L=Lv, n_boot=100, seed=3)),
+        "pls1_perm_alpha_gram": (G, lambda Gv: plskit.pls1_perm_alpha(Gv, Y, n_features=p)),
+        "pls1_perm_alpha_Y": (Y, lambda Yv: plskit.pls1_perm_alpha(G, Yv, n_features=p)),
     }
 
 
 @pytest.mark.parametrize("name", list(_block_cases()))
 def test_block_inputs_give_the_same_bits_in_every_layout(name):
-    """`Y`, `Y_new`, `W` and `L` in any layout give the bits of the
+    """`Y`, `Y_new`, `W`, `L` and `gram` in any layout give the bits of the
     column-major copy the extension makes of a strided one."""
     value, call = _block_cases()[name]
     layouts = _block_layouts(value)

@@ -204,6 +204,16 @@ querying it costs one SVD and no resampling.
 | `beta_perm_matrix` | `np.ndarray \| None` | shape `(n_perm, D)` when `return_perm_matrix=True` |
 | `n_eff` | `float` | effective sample size; `nan` if unavailable |
 
+## `PermAlphaResult`, what `pls1_perm_alpha` returns
+
+| Field | Python type | Notes |
+|---|---|---|
+| `alpha` | `np.ndarray` | shape `(n, m)`; column `j` gives `coef = X̃.T @ alpha[:, j]` on the standardized scale (`PLS1Result.coef`); NaN where `resolved[j]` is `False` |
+| `k_used` | `np.ndarray` | shape `(m,)`, `int64`; `k` for a resolved fit, `0` for a zero model (an outcome that standardizes to exact zeros, or every outcome on a `gram` whose entries are all exactly zero) and for an unresolved column |
+| `resolved` | `np.ndarray` | shape `(m,)`, `bool`; `False` where the fit cannot be certified from `gram` alone (refit that column with `pls1_fit`) |
+| `k` | `int` | as passed |
+| `n_features` | `int` | as passed |
+
 ## `CIScalar` — scalar subsample CI
 
 Centered-scaled subsampling CI for a scalar functional, plus its SD.

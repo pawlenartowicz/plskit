@@ -14,7 +14,8 @@ least as many observations as parameters. With weighted data, the
 relevant count is the effective number of observations, not the raw
 count.
 
-Every PLS1 and sPLS1 result reports the `n_eff` it was computed with, and
+Every PLS1 and sPLS1 result reports the `n_eff` it was computed with
+(except `pls1_perm_alpha`'s, which has no `n_eff` field), and
 `preprocess` and `split_nb_gate` report it too.
 
 ## Where the check fires
@@ -37,7 +38,9 @@ will try, so a feasible `k_max` guarantees every candidate `k` is feasible
 on the full data.
 
 No check runs in `preprocess` and `split_nb_gate` (they take no `k`), in
-`pls1_predict` and `rotate` (they take no weights), or in the PLS3 family
+`pls1_predict` and `rotate` (they take no weights), in `pls1_perm_alpha`
+(it fits PLS1 but takes no `X` and no weights, so `n_eff = n`; its own
+check refuses `k > n - 1`), or in the PLS3 family
 (which takes no weights, so `n_eff = n`).
 
 ### Inside resampling loops

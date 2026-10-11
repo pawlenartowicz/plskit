@@ -322,6 +322,8 @@ pub(crate) const STREAM_BLOCK_BYTES: usize = 2 << 20;
 /// of [`STD_BLOCK`], at least one `STD_BLOCK`. A function of the row count
 /// alone, so the block boundaries, and with them the bits of every product
 /// summed over blocks, do not depend on the thread count.
+/// [`fit_x_moments`] reads X in strips of this width, a row-major X only
+/// while the width is at least [`ROW_MAJOR_MIN_STRIP`].
 pub(crate) fn stream_block_width(n_rows: usize) -> usize {
     let cols = STREAM_BLOCK_BYTES / (8 * n_rows.max(1));
     (cols / STD_BLOCK * STD_BLOCK).max(STD_BLOCK)
@@ -513,8 +515,8 @@ fn mean_and_scale(n: usize, v: impl Fn(usize) -> f64, w: Option<ColRef<'_, f64>>
 /// constant, or `sd` is below the normal range (`0` or subnormal, e.g. a
 /// single `5e-324` among zeros), where it cannot be formed accurately and
 /// `1/sd` may overflow. The tail of [`mean_and_scale`], shared with
-/// [`standardize_columns`] and [`row_major_moments`], so every standardizer
-/// and both fit routes see the same scale.
+/// [`standardize_columns_terms`] and [`row_major_moments`], so every
+/// standardizer and both fit routes see the same scale.
 ///
 /// Such a column is only centered, and its centered entries are rounding
 /// noise of size up to about `2n·ε·|mean|`. Dividing by `max(1, |mean|)`
@@ -541,25 +543,9 @@ fn mean_and_scale_from(m: &ScaledMoments, n: usize) -> (f64, f64) {
     (mean, scale)
 }
 
-/// The body of [`standardize_weighted`], [`standardize_rows`] and the
-/// column-major arm of [`fit_x_moments`] once the weights are mean-one (`w`, one per
-/// output row; `None` for unit weights). The input is `x` itself
-/// (`rows = None`) or its rows `idx` in that order (`rows = Some(idx)`,
-/// repeats allowed). Columns go through [`scaled_moments_block`]
-/// `STD_BLOCK` at a time (a shorter last block one column at a time), and
-/// each block is then appended to the output as `(v - mean) / scale`,
-/// times `row_scale[i]` when given, while it is still in cache; every
-/// output entry is written once. A column-major `x` read without `rows` is
-/// used in place; otherwise each block is copied, exactly, into a
-/// column-major scratch buffer first: from a row-major `x` (such as a view
-/// of a C-ordered host array) row by row over contiguous slices, from any
-/// other layout column by column. Sharing this body is what makes the row
-/// helpers byte-identical to standardizing a gathered copy, and what makes
-/// every layout of `x` give the same bits. The fourth value is
-/// [`fro_from_terms`] of the columns' [`fro_term`]s: the Frobenius norm of
-/// the result, to rounding, when `w` and `row_scale` are both `None` or
-/// `row_scale[i]² = w[i]`. With `write` false only the moments are formed,
-/// and the matrix returned is `n_rows × 0`.
+/// [`standardize_columns_terms`] with its fourth value combined by
+/// [`fro_from_terms`]: the Frobenius norm of the result, to rounding, when
+/// `w` and `row_scale` are both `None` or `row_scale[i]² = w[i]`.
 fn standardize_columns(
     x: MatRef<'_, f64>,
     rows: Option<&[usize]>,
@@ -567,6 +553,35 @@ fn standardize_columns(
     row_scale: Option<&[f64]>,
     write: bool,
 ) -> (Mat<f64>, Col<f64>, Col<f64>, f64) {
+    let (xs, mean, scale, terms) = standardize_columns_terms(x, rows, w, row_scale, write);
+    (xs, mean, scale, fro_from_terms(&terms))
+}
+
+/// The body of [`standardize_weighted`] and [`standardize_rows`] once the
+/// weights are mean-one (`w`, one per output row; `None` for unit weights),
+/// and of [`fit_x_moments`] on one strip of columns of any layout but
+/// row-major. The input is `x` itself (`rows = None`) or its rows `idx` in
+/// that order (`rows = Some(idx)`, repeats allowed). Columns go through
+/// [`scaled_moments_block`] `STD_BLOCK` at a time (a shorter last block one
+/// column at a time), and each block is then appended to the output as
+/// `(v - mean) / scale`, times `row_scale[i]` when given, while it is still
+/// in cache; every output entry is written once. A column-major `x` read
+/// without `rows` is used in place; otherwise each block is copied, exactly,
+/// into a column-major scratch buffer first: from a row-major `x` (such as a
+/// view of a C-ordered host array) row by row over contiguous slices, from
+/// any other layout column by column. Sharing this body is what makes the
+/// row helpers byte-identical to standardizing a gathered copy, and what
+/// makes every layout of `x` give the same bits. The fourth value is the
+/// columns' [`fro_term`]s in column order; [`standardize_columns`] combines
+/// them. With `write` false only the moments are formed, and the matrix
+/// returned is `n_rows × 0`.
+fn standardize_columns_terms(
+    x: MatRef<'_, f64>,
+    rows: Option<&[usize]>,
+    w: Option<&[f64]>,
+    row_scale: Option<&[f64]>,
+    write: bool,
+) -> (Mat<f64>, Col<f64>, Col<f64>, Vec<f64>) {
     let n_rows = rows.map_or(x.nrows(), <[usize]>::len);
     let n_cols = x.ncols();
     // Read in place only when every row is taken, in order, from a column-major x.
@@ -656,7 +671,7 @@ fn standardize_columns(
             }),
         }
     }
-    (xs, mean, scale, fro_from_terms(&fro))
+    (xs, mean, scale, fro)
 }
 
 /// `(v - mean) / scale`: the element expression of every standardizer,
@@ -788,7 +803,7 @@ impl FitX {
             }
             storage
         } else {
-            // Same capacity request as `standardize_columns`, so the same
+            // Same capacity request as `standardize_columns_terms`, so the same
             // column stride and alignment.
             let mut xs = Mat::<f64>::with_capacity(n, d);
             match &factor {
@@ -806,46 +821,125 @@ impl FitX {
 }
 
 /// The moments of `standardize_weighted(x, weights)`: its `mean` and `scale`,
-/// bit for bit, and `fro`, with nothing written. A row-major `x` (a C-ordered
-/// host array read in place) is read over its contiguous rows, one at a time
-/// or in blocks on a wide `x` ([`row_major_moments`]); any other layout through
-/// [`standardize_columns`].
+/// bit for bit, and `fro`, with nothing written. `x` is read in strips of
+/// columns, and each strip's sweeps run while it is in cache. A column-major
+/// or strided `x` is read in strips of [`stream_block_width`]`(n)` columns,
+/// so `x` is read from memory once while a strip fits in
+/// [`STREAM_BLOCK_BYTES`], for `n` up to 32,768 (the width does not go below
+/// [`STD_BLOCK`] columns), through [`standardize_columns_terms`]. A
+/// row-major `x` (a C-ordered host array read in place) is read over the
+/// strip's segments of its contiguous rows ([`row_major_moments`]), in
+/// strips of [`row_major_strip_width`] columns: `stream_block_width(n)`
+/// while that is at least [`ROW_MAJOR_MIN_STRIP`] columns (`n` up to
+/// 1,024), otherwise wider strips, about one per thread the strips can use,
+/// so that each row segment stays long. Under `Par::Rayon` the strips map
+/// in parallel. Each column's sums run in row order whatever strip holds
+/// it, and `fro` is one [`fro_from_terms`] over every column's
+/// [`fro_term`] in column order, so no bit depends on the strips, on `par`
+/// or on the pool size.
 /// [`FitX::materialize`] then writes the standardized matrix in `x`'s layout
 /// when the caller needs it. The kernel's products round differently on the
 /// two layouts, so a fit's last bits depend on the layout of `x`, within the
 /// crate's tolerance.
-pub(crate) fn fit_x_moments(x: MatRef<'_, f64>, weights: Option<ColRef<'_, f64>>) -> FitX {
+pub(crate) fn fit_x_moments(
+    x: MatRef<'_, f64>,
+    weights: Option<ColRef<'_, f64>>,
+    par: Par,
+) -> FitX {
     let w_prime: Option<Col<f64>> = weights.map(renormalize_mean_one);
     let w = w_prime.as_ref().map(owned_col_slice);
-    if x.try_as_col_major().is_none() && x.try_as_row_major().is_some() {
-        return row_major_moments(x, w);
+    let row_major = x.try_as_col_major().is_none() && x.try_as_row_major().is_some();
+    let (n, d) = (x.nrows(), x.ncols());
+    let width = if row_major {
+        row_major_strip_width(n, d, par)
+    } else {
+        stream_block_width(n)
+    };
+    let starts: Vec<usize> = (0..d).step_by(width).collect();
+    let strip = |j0: usize| {
+        let xb = x.subcols(j0, width.min(d - j0));
+        if row_major {
+            row_major_moments(xb, w)
+        } else {
+            let (_, mean, scale, terms) = standardize_columns_terms(xb, None, w, None, false);
+            (mean, scale, terms)
+        }
+    };
+    let strips: Vec<(Col<f64>, Col<f64>, Vec<f64>)> = match par {
+        Par::Seq => starts.iter().map(|&j0| strip(j0)).collect(),
+        Par::Rayon(_) => {
+            use rayon::prelude::*;
+            starts.par_iter().map(|&j0| strip(j0)).collect()
+        }
+    };
+    let mut mean = Col::<f64>::zeros(d);
+    let mut scale = Col::<f64>::zeros(d);
+    let mut terms = Vec::with_capacity(d);
+    for (&j0, (m, s, t)) in starts.iter().zip(&strips) {
+        for b in 0..m.nrows() {
+            mean[j0 + b] = m[b];
+            scale[j0 + b] = s[b];
+        }
+        terms.extend_from_slice(t);
     }
-    let (_, mean, scale, fro) = standardize_columns(x, None, w, None, false);
     FitX {
         storage: None,
-        row_major: false,
+        row_major,
         mean,
         scale,
-        fro,
+        fro: fro_from_terms(&terms),
     }
 }
 
+/// The narrowest [`stream_block_width`] at which [`fit_x_moments`] reads a
+/// row-major `x` in strips of that width. Narrower, each strip row is a
+/// short segment of a long row (8 columns at 20,000 rows), visited once per
+/// row and sweep, and the strided reads cost more than the cache saves.
+const ROW_MAJOR_MIN_STRIP: usize = 256;
+
+/// Columns per strip of a row-major `n × d` `x` in [`fit_x_moments`]:
+/// [`stream_block_width`]`(n)` when that is at least
+/// [`ROW_MAJOR_MIN_STRIP`]; otherwise `max(stream_block_width(n), ⌈d / t⌉)`
+/// rounded up to a multiple of [`STD_BLOCK`] and capped at `d`, with `t`
+/// the threads the strips can use (1 under `Par::Seq`, the pool size under
+/// `Par::Rayon`). At least one column. The width only schedules the work:
+/// no bit depends on it.
+fn row_major_strip_width(n: usize, d: usize, par: Par) -> usize {
+    let width = stream_block_width(n);
+    if width >= ROW_MAJOR_MIN_STRIP {
+        return width;
+    }
+    let t = match par {
+        Par::Seq => 1,
+        Par::Rayon(_) => rayon::current_num_threads().max(1),
+    };
+    width
+        .max(d.div_ceil(t))
+        .next_multiple_of(STD_BLOCK)
+        .min(d)
+        .max(1)
+}
+
 /// Rows the row-major kernels ([`row_major_moments`],
-/// [`row_major_t_mul`]) advance together on a wide matrix: each pass then
-/// reads and writes its per-column running sums once per block of this many
-/// rows, not once per row. The rows of a block are read in order, so every
-/// column's sum still adds its terms one row at a time.
+/// [`row_major_t_mul`]) advance together: each pass reads and writes its
+/// per-column running sums once per block of this many rows, not once per
+/// row. The rows of a block are read in order, so every column's sum still
+/// adds its terms one row at a time.
 const ROW_BLOCK: usize = 8;
 
-/// The row width from which the row-major kernels block rows
-/// ([`ROW_BLOCK`]). One row at a time, a pass loads and stores its per-column
-/// sums for every entry; that is cheap while they stay in the L1 cache and
-/// dominates once they spill (with faer's `X'·t`, which does the same, a
-/// C-ordered `1000 × 10000` X fitted about 1.4× slower than its column-major
-/// copy). Blocked, the rows of a block are read as that many streams, which
-/// costs more than it saves on narrow rows (measured on an Apple M4: slower
-/// at 1000 columns, even at 2000, faster from 4000). Below it the product
-/// [`row_major_t_mul`] declines and the caller keeps faer's.
+/// The row width from which [`row_major_t_mul`] forms `x'·t` itself, its
+/// rows in blocks of [`ROW_BLOCK`]; below it the product declines and the
+/// caller keeps faer's. One row at a time, a pass loads and stores its
+/// per-column sums for every entry; that is cheap while they stay in the L1
+/// cache and dominates once they spill (with faer's `X'·t`, which does the
+/// same, a C-ordered `1000 × 10000` X fitted about 1.4× slower than its
+/// column-major copy). Blocked, the full rows of a block are streamed from
+/// memory as that many streams, which costs more than it saves on narrow
+/// rows (measured on an Apple M4: slower at 1000 columns, even at 2000,
+/// faster from 4000). The moment passes of [`row_major_moments`] do not use
+/// this threshold: they block their rows on a strip of any width, because
+/// on a strip's row segments blocking measured faster at every width tried
+/// (8 to 60,000 columns, on an x86 core), short segments included.
 pub(crate) const ROW_BLOCK_MIN_COLS: usize = 2048;
 
 /// One pass of a row-major kernel: the rows of `x`, in order, `K` at a time
@@ -857,26 +951,25 @@ trait RowPass {
     fn rows<const K: usize>(&mut self, rows: [&[f64]; K], f: Option<[f64; K]>);
 }
 
-/// Runs `pass` over `rows` (each `d` long) and their factors `f` (one per
-/// row), [`ROW_BLOCK`] rows at a time when `d >= ROW_BLOCK_MIN_COLS`,
-/// otherwise one at a time. Either way the rows reach each column in order,
-/// so the blocking changes no bit.
-fn run_rows(rows: &[&[f64]], f: Option<&[f64]>, d: usize, pass: &mut impl RowPass) {
-    fn blocks<const R: usize>(rows: &[&[f64]], f: Option<&[f64]>, pass: &mut impl RowPass) {
-        let mut chunks = rows.chunks_exact(R);
-        for (b, chunk) in (&mut chunks).enumerate() {
-            let blk: [&[f64]; R] = core::array::from_fn(|k| chunk[k]);
-            pass.rows(blk, f.map(|f| core::array::from_fn(|k| f[b * R + k])));
-        }
-        let i0 = rows.len() - chunks.remainder().len();
-        for (t, &r) in chunks.remainder().iter().enumerate() {
-            pass.rows([r], f.map(|f| [f[i0 + t]]));
-        }
+/// Runs `pass` over `rows` and their factors `f` (one per row),
+/// [`ROW_BLOCK`] rows at a time (a last, shorter block one row at a time),
+/// whatever the rows' width. Every caller blocks: the moment passes of
+/// [`row_major_moments`] on a strip of any width, and [`row_major_t_mul`]
+/// on rows at least [`ROW_BLOCK_MIN_COLS`] wide (it declines narrower
+/// ones). The rows reach each column in order, so the blocking changes no
+/// bit.
+fn run_rows(rows: &[&[f64]], f: Option<&[f64]>, pass: &mut impl RowPass) {
+    let mut chunks = rows.chunks_exact(ROW_BLOCK);
+    for (b, chunk) in (&mut chunks).enumerate() {
+        let blk: [&[f64]; ROW_BLOCK] = core::array::from_fn(|k| chunk[k]);
+        pass.rows(
+            blk,
+            f.map(|f| core::array::from_fn(|k| f[b * ROW_BLOCK + k])),
+        );
     }
-    if d >= ROW_BLOCK_MIN_COLS {
-        blocks::<ROW_BLOCK>(rows, f, pass);
-    } else {
-        blocks::<1>(rows, f, pass);
+    let i0 = rows.len() - chunks.remainder().len();
+    for (t, &r) in chunks.remainder().iter().enumerate() {
+        pass.rows([r], f.map(|f| [f[i0 + t]]));
     }
 }
 
@@ -988,15 +1081,17 @@ impl RowPass for CenteredSq<'_> {
     }
 }
 
-/// The row-major arm of [`fit_x_moments`]. The moments are those of
-/// [`scaled_moments_block`] (the same terms, in the same row order, from the
-/// same start, so the same bits), each column's sums advancing together over
-/// contiguous rows ([`run_rows`]: one row at a time, or a block of
-/// [`ROW_BLOCK`] rows on a wide `x`); change the two together. Three passes
-/// over `x`: `max |x|`, the mean sum and `Σu²` together, and `Σ(u − mean)²`,
-/// with `u = x·(1/s)`.
+/// The row-major arm of [`fit_x_moments`] on one strip of columns (a
+/// row-major view, each row a contiguous segment): the columns' means,
+/// scales and [`fro_term`]s, in column order. The moments are those of
+/// [`scaled_moments_block`] (the same terms, in the same row order, from
+/// the same start, so the same bits), each column's sums advancing together
+/// over the rows ([`run_rows`]: blocks of [`ROW_BLOCK`] rows, on a strip of
+/// any width); change the two together. Three passes over the strip:
+/// `max |x|`, the mean sum and `Σu²` together, and `Σ(u − mean)²`, with
+/// `u = x·(1/s)`.
 #[allow(clippy::cast_precision_loss, clippy::many_single_char_names)]
-fn row_major_moments(x: MatRef<'_, f64>, w: Option<&[f64]>) -> FitX {
+fn row_major_moments(x: MatRef<'_, f64>, w: Option<&[f64]>) -> (Col<f64>, Col<f64>, Vec<f64>) {
     let (n, d) = (x.nrows(), x.ncols());
     let rows = row_slices(x);
     let zero = sum_start();
@@ -1005,7 +1100,6 @@ fn row_major_moments(x: MatRef<'_, f64>, w: Option<&[f64]>) -> FitX {
     run_rows(
         &rows,
         None,
-        d,
         &mut MaxAbs {
             max_abs: &mut max_abs,
         },
@@ -1018,7 +1112,6 @@ fn row_major_moments(x: MatRef<'_, f64>, w: Option<&[f64]>) -> FitX {
     run_rows(
         &rows,
         w,
-        d,
         &mut SumSq {
             sum: &mut sum,
             sq: &mut sq,
@@ -1032,7 +1125,6 @@ fn row_major_moments(x: MatRef<'_, f64>, w: Option<&[f64]>) -> FitX {
     run_rows(
         &rows,
         w,
-        d,
         &mut CenteredSq {
             ss: &mut ss,
             inv: &inv,
@@ -1056,25 +1148,21 @@ fn row_major_moments(x: MatRef<'_, f64>, w: Option<&[f64]>) -> FitX {
         scale[j] = col_scale;
         fro.push(fro_term(&m, col_scale));
     }
-    FitX {
-        storage: None,
-        row_major: true,
-        mean,
-        scale,
-        fro: fro_from_terms(&fro),
-    }
+    (mean, scale, fro)
 }
 
-/// `x'·t` accumulated into `out` (one sum per column, rows in order).
+/// `x'·t` over the columns `j0 .. j0 + out.len()` of the rows, accumulated
+/// into `out` (one sum per column, rows in order).
 struct TMul<'a> {
     out: &'a mut [f64],
+    j0: usize,
 }
 
 impl RowPass for TMul<'_> {
     fn rows<const K: usize>(&mut self, rows: [&[f64]; K], f: Option<[f64; K]>) {
         let t = f.expect("TMul reads its rows' entries of t as factors");
-        let d = self.out.len();
-        let rows = rows.map(|r| &r[..d]);
+        let (j0, d) = (self.j0, self.out.len());
+        let rows = rows.map(|r| &r[j0..j0 + d]);
         for (j, o) in self.out.iter_mut().enumerate() {
             let mut acc = *o;
             for (r, &ti) in rows.iter().zip(&t) {
@@ -1085,9 +1173,10 @@ impl RowPass for TMul<'_> {
     }
 }
 
-/// `x'·t` for a row-major `x` (a C-ordered host array read in place) at
-/// least [`ROW_BLOCK_MIN_COLS`] wide, read one contiguous block of rows at a
-/// time ([`run_rows`]). faer forms this product as a column-major GEMV of
+/// `x'·t` for a row-major `x` at least [`ROW_BLOCK_MIN_COLS`] wide (a
+/// C-ordered host array read in place, raw or pre-standardized, or the
+/// row-major copy [`FitX::materialize`] writes), read one contiguous block of
+/// rows at a time ([`run_rows`]). faer forms this product as a column-major GEMV of
 /// `x'`, which loads and stores the whole output once per row: on a wide `x`
 /// the output leaves the L1 cache and the product ran about 1.6× slower than
 /// on the column-major copy. `None` for any other layout or a narrower `x`:
@@ -1095,9 +1184,17 @@ impl RowPass for TMul<'_> {
 ///
 /// Column `j` is `Σᵢ tᵢ·xᵢⱼ` from `0.0` in row order. Under `Par::Rayon` the
 /// rows are cut into [`crate::fit::PAR_DEGREE`] contiguous pieces, each
-/// summed on its own and the pieces' sums then added in piece order, so the
-/// bits depend on the shape and on `par`, never on the pool size; `Par::Seq`
-/// and `Par::Rayon` can differ in the last bits, as faer's two arms do.
+/// summed on its own from `0.0` and the pieces' sums then added in piece
+/// order, `((p₀ + p₁) + p₂) + …` up to the last piece, so the bits depend
+/// on the shape and on `par`, never on the pool size; `Par::Seq` and
+/// `Par::Rayon` can differ in the last bits, as faer's two arms do. The
+/// parallel arm maps chunks of columns in parallel ([`t_mul_chunk_width`]:
+/// about `PAR_DEGREE` chunks up to `PAR_DEGREE · T_MUL_CHUNK` columns,
+/// chunks of [`T_MUL_CHUNK`] columns on wider rows, the last chunk
+/// shorter); each chunk forms the pieces for its columns, the first in
+/// place and the others in one chunk-sized scratch, so no partial vector of
+/// length `d` is allocated. The chunks never change a piece's rows or the
+/// order of the pieces, so no bit depends on them.
 #[allow(clippy::many_single_char_names)]
 pub(crate) fn row_major_t_mul(
     x: MatRef<'_, f64>,
@@ -1110,45 +1207,70 @@ pub(crate) fn row_major_t_mul(
     }
     let rows = row_slices(x);
     let t: Vec<f64> = (0..n).map(|i| t[i]).collect();
-    let piece = |lo: usize, hi: usize| {
-        let mut out = vec![0.0_f64; d];
-        run_rows(
-            &rows[lo..hi],
-            Some(&t[lo..hi]),
-            d,
-            &mut TMul { out: &mut out },
-        );
-        out
-    };
-    let out = match par {
-        Par::Seq => piece(0, n),
+    let mut out = vec![0.0_f64; d];
+    match par {
+        Par::Seq => run_rows(
+            &rows,
+            Some(&t),
+            &mut TMul {
+                out: &mut out,
+                j0: 0,
+            },
+        ),
         Par::Rayon(_) => {
             use rayon::prelude::*;
             let p = crate::fit::PAR_DEGREE;
-            let parts: Vec<Vec<f64>> = (0..p)
-                .into_par_iter()
-                .map(|k| piece(k * n / p, (k + 1) * n / p))
-                .collect();
-            let mut parts = parts.into_iter();
-            let mut out = parts.next().expect("PAR_DEGREE >= 1");
-            for part in parts {
-                for (o, v) in out.iter_mut().zip(&part) {
-                    *o += v;
+            let chunk = t_mul_chunk_width(d);
+            out.par_chunks_mut(chunk).enumerate().for_each(|(c, o)| {
+                let j0 = c * chunk;
+                let piece = |k: usize, out: &mut [f64]| {
+                    let (lo, hi) = (k * n / p, (k + 1) * n / p);
+                    run_rows(&rows[lo..hi], Some(&t[lo..hi]), &mut TMul { out, j0 });
+                };
+                piece(0, o);
+                let mut part = vec![0.0_f64; o.len()];
+                for k in 1..p {
+                    part.fill(0.0);
+                    piece(k, &mut part);
+                    for (a, v) in o.iter_mut().zip(&part) {
+                        *a += v;
+                    }
                 }
-            }
-            out
+            });
         }
-    };
+    }
     Some(Col::<f64>::from_fn(d, |j| out[j]))
 }
 
-/// `Σ xᵢⱼ²` with no overflow guard, four interleaved partial sums over each
-/// contiguous column (column-major) or row (row-major), entry by entry for
-/// any other layout. Non-finite when an entry is non-finite or a square
-/// overflows (`|x|` above about `1e154`). The summation order depends on the
-/// layout; `pls1_fit` uses it only for its truncation floor and as a
-/// finiteness screen.
-pub(crate) fn sum_of_squares(x: MatRef<'_, f64>) -> f64 {
+/// The most columns per chunk of [`row_major_t_mul`]'s parallel arm: a
+/// chunk's output and scratch (at most 32 KiB each) stay in cache while its
+/// pieces run.
+const T_MUL_CHUNK: usize = 4096;
+
+/// Columns per chunk of [`row_major_t_mul`]'s parallel arm on rows `d`
+/// long: `⌈d / PAR_DEGREE⌉` rounded up to a multiple of [`STD_BLOCK`], at
+/// least `STD_BLOCK` and at most [`T_MUL_CHUNK`]. Every `d` the product
+/// takes (at least [`ROW_BLOCK_MIN_COLS`]) then gets at least `PAR_DEGREE`
+/// chunks, so narrow rows keep the arm's parallelism, and wide rows get
+/// cache-sized chunks. A function of `d` alone, never of the pool size.
+fn t_mul_chunk_width(d: usize) -> usize {
+    d.div_ceil(crate::fit::PAR_DEGREE)
+        .next_multiple_of(STD_BLOCK)
+        .clamp(STD_BLOCK, T_MUL_CHUNK)
+}
+
+/// `Σ xᵢⱼ²` with no overflow guard. The storage lines (contiguous columns
+/// of a column-major `x`, contiguous rows of a row-major one, columns of any
+/// other layout) are cut into [`crate::fit::PAR_DEGREE`] contiguous ranges;
+/// each range is summed with four interleaved partial sums over each of its
+/// lines (entry by entry on a strided view, into the first sum), and the
+/// ranges' sums are added in range order. Under `Par::Rayon` the ranges run
+/// in parallel; the bits are the same under either arm and at any pool
+/// size. Non-finite when an entry is non-finite or a square overflows (`|x|`
+/// above about `1e154`). The summation order depends on the layout;
+/// `pls1_fit` uses it only for its truncation floor and as a finiteness
+/// screen.
+pub(crate) fn sum_of_squares(x: MatRef<'_, f64>, par: Par) -> f64 {
     #[allow(clippy::needless_range_loop)]
     fn add_slice(v: &[f64], acc: &mut [f64; 4]) {
         let mut chunks = v.chunks_exact(4);
@@ -1161,24 +1283,38 @@ pub(crate) fn sum_of_squares(x: MatRef<'_, f64>) -> f64 {
             acc[l] += e * e;
         }
     }
-    let mut acc = [0.0_f64; 4];
-    if let Some(xc) = x.try_as_col_major() {
-        for j in 0..x.ncols() {
-            add_slice(xc.col(j).as_slice(), &mut acc);
-        }
-    } else if let Some(xr) = x.try_as_row_major() {
-        for i in 0..x.nrows() {
-            add_slice(xr.row(i).as_slice(), &mut acc);
-        }
+    let xc = x.try_as_col_major();
+    let xr = if xc.is_none() {
+        x.try_as_row_major()
     } else {
-        for j in 0..x.ncols() {
-            for i in 0..x.nrows() {
-                let e = x[(i, j)];
-                acc[0] += e * e;
+        None
+    };
+    let lines = if xr.is_some() { x.nrows() } else { x.ncols() };
+    let pieces = crate::fit::PAR_DEGREE;
+    let piece = |k: usize| -> f64 {
+        let mut acc = [0.0_f64; 4];
+        for l in k * lines / pieces..(k + 1) * lines / pieces {
+            if let Some(xc) = xc {
+                add_slice(xc.col(l).as_slice(), &mut acc);
+            } else if let Some(xr) = xr {
+                add_slice(xr.row(l).as_slice(), &mut acc);
+            } else {
+                for i in 0..x.nrows() {
+                    let e = x[(i, l)];
+                    acc[0] += e * e;
+                }
             }
         }
-    }
-    acc.iter().sum()
+        acc.iter().sum::<f64>()
+    };
+    let parts: Vec<f64> = match par {
+        Par::Seq => (0..pieces).map(piece).collect(),
+        Par::Rayon(_) => {
+            use rayon::prelude::*;
+            (0..pieces).into_par_iter().map(piece).collect()
+        }
+    };
+    parts.iter().sum()
 }
 
 /// An owned column's entries as a slice (an owned `Col` is contiguous).
@@ -2553,7 +2689,7 @@ mod fast_standardize_tests {
         weights: Option<ColRef<'_, f64>>,
         row_scale: Option<ColRef<'_, f64>>,
     ) -> FitX {
-        let mut f = fit_x_moments(x, weights);
+        let mut f = fit_x_moments(x, weights, Par::Seq);
         f.materialize(x, row_scale);
         f
     }
@@ -2683,9 +2819,9 @@ mod fast_standardize_tests {
         (600, 100),
         (2000, 37),
         (6, 40),
-        // At least `ROW_BLOCK_MIN_COLS` wide: a row-major view's moments
-        // read their rows in blocks of `ROW_BLOCK`, here one block and three
-        // single rows.
+        // One strip of rows wider than `ROW_BLOCK_MIN_COLS`, with a partial
+        // block: a row-major view's moments read one block of `ROW_BLOCK`
+        // rows and three single rows.
         (11, 2050),
         // Neither rows nor columns.
         (0, 0),
@@ -2742,12 +2878,255 @@ mod fast_standardize_tests {
         }
     }
 
+    /// Asserts that `f`'s mean, scale and `fro` have the bits of `mean`,
+    /// `scale` and `fro`.
+    fn assert_moments_bits(f: &FitX, mean: &Col<f64>, scale: &Col<f64>, fro: f64, what: &str) {
+        assert_eq!(
+            col_bits(f.mean.as_ref()),
+            col_bits(mean.as_ref()),
+            "{what}: mean"
+        );
+        assert_eq!(
+            col_bits(f.scale.as_ref()),
+            col_bits(scale.as_ref()),
+            "{what}: scale"
+        );
+        assert_eq!(bits(f.fro), bits(fro), "{what}: fro");
+    }
+
+    /// Rayon pools of one and of four threads.
+    fn pools() -> Vec<(usize, rayon::ThreadPool)> {
+        [1_usize, 4]
+            .into_iter()
+            .map(|t| {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(t)
+                    .build()
+                    .expect("thread pool");
+                (t, pool)
+            })
+            .collect()
+    }
+
+    /// `fit_x_moments` reads X in strips of columns, on one thread or in
+    /// parallel. On shapes with three strips of `stream_block_width(n)`
+    /// columns or more (the last one partial; strips narrower and wider than
+    /// `ROW_BLOCK_MIN_COLS`), every layout, weighted or not, under `Par::Seq`
+    /// and `fit::par_fixed()`, and on tall row-major shapes, whose strips
+    /// are wider (one strip under `Par::Seq`, several with a partial last
+    /// one under `fit::par_fixed()` in a pool of four threads), in pools of
+    /// one and four threads, the mean, scale and `fro` are those of one
+    /// full-width `standardize_columns` on the owned column-major matrix,
+    /// bit for bit.
+    #[test]
+    fn fit_x_moments_in_strips_are_the_full_width_moments() {
+        let shapes = [(40_usize, 13_200_usize), (1000, 700), (203, 3000)];
+        assert!(
+            shapes
+                .iter()
+                .any(|&(n, _)| stream_block_width(n) >= ROW_BLOCK_MIN_COLS),
+            "no shape has strips at least ROW_BLOCK_MIN_COLS wide"
+        );
+        for (k, &(n, p)) in shapes.iter().enumerate() {
+            assert!(
+                p > 2 * stream_block_width(n),
+                "{n}x{p}: fewer than three strips"
+            );
+            assert!(
+                p % stream_block_width(n) != 0,
+                "{n}x{p}: the last strip is not partial"
+            );
+            let x = test_matrix(n, p, 950 + k as u64);
+            let lay = Layouts::new(x.as_ref());
+            // Neither stride is one: the column body's strided arm.
+            let rows_rev = x.as_ref().reverse_rows().to_owned();
+            let strided = rows_rev.as_ref().reverse_rows();
+            assert!(strided.try_as_col_major().is_none() && strided.try_as_row_major().is_none());
+            let weights = test_weight_sets(n);
+            let mut cases: Vec<(&str, Option<ColRef<'_, f64>>)> = vec![("unweighted", None)];
+            cases.extend(weights.iter().map(|(l, w)| (*l, Some(w.as_ref()))));
+            for (label, wref) in cases {
+                let w_prime = wref.map(renormalize_mean_one);
+                let (_, mean, scale, fro) = standardize_columns(
+                    x.as_ref(),
+                    None,
+                    w_prime.as_ref().map(owned_col_slice),
+                    None,
+                    false,
+                );
+                for (view, xv) in lay.all(&x).into_iter().chain([("strided", strided)]) {
+                    for par in [Par::Seq, crate::fit::par_fixed()] {
+                        let what = format!("{n}x{p} {view} {label} {par:?}");
+                        let f = fit_x_moments(xv, wref, par);
+                        assert_moments_bits(&f, &mean, &scale, fro, &what);
+                    }
+                }
+            }
+        }
+
+        let pools = pools();
+        for (k, &(n, p)) in [(20_000_usize, 200_usize), (5000, 900)].iter().enumerate() {
+            assert!(
+                stream_block_width(n) < ROW_MAJOR_MIN_STRIP,
+                "{n}x{p}: row-major strips of stream_block_width(n)"
+            );
+            let x = test_matrix(n, p, 970 + k as u64);
+            let x_t = x.transpose().to_owned();
+            let xv = x_t.as_ref().transpose();
+            assert!(xv.try_as_col_major().is_none() && xv.try_as_row_major().is_some());
+            let weights = test_weight_sets(n);
+            let mut cases: Vec<(&str, Option<ColRef<'_, f64>>)> = vec![("unweighted", None)];
+            cases.extend(weights.iter().map(|(l, w)| (*l, Some(w.as_ref()))));
+            for (label, wref) in cases {
+                let w_prime = wref.map(renormalize_mean_one);
+                let (_, mean, scale, fro) = standardize_columns(
+                    x.as_ref(),
+                    None,
+                    w_prime.as_ref().map(owned_col_slice),
+                    None,
+                    false,
+                );
+                for (threads, pool) in &pools {
+                    pool.install(|| {
+                        for par in [Par::Seq, crate::fit::par_fixed()] {
+                            let width = row_major_strip_width(n, p, par);
+                            let what = format!(
+                                "{n}x{p} row-major {label} {par:?} pool {threads}: strips of {width}"
+                            );
+                            if *threads == 4 && matches!(par, Par::Rayon(_)) {
+                                assert!(
+                                    width < p && p % width != 0,
+                                    "{what}: not several strips with a partial last one"
+                                );
+                            } else {
+                                assert_eq!(width, p, "{what}: not one strip");
+                            }
+                            let f = fit_x_moments(xv, wref, par);
+                            assert_moments_bits(&f, &mean, &scale, fro, &what);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /// `row_major_t_mul`'s parallel arm, which maps chunks of
+    /// `t_mul_chunk_width(d)` columns, has the bits of `PAR_DEGREE` row
+    /// pieces each formed over the full width from `0.0` in row order and
+    /// added in piece order (a plain loop below), on row-major shapes with
+    /// several chunks and a partial last one (chunks narrower than
+    /// `T_MUL_CHUNK` and chunks of exactly `T_MUL_CHUNK`), in pools of one
+    /// and four threads.
+    #[test]
+    fn row_major_t_mul_in_column_chunks_is_the_full_width_pieces() {
+        fn full_width_pieces(x: MatRef<'_, f64>, t: ColRef<'_, f64>) -> Vec<u64> {
+            let (n, d) = (x.nrows(), x.ncols());
+            let p = crate::fit::PAR_DEGREE;
+            let piece = |k: usize| {
+                let mut out = vec![0.0_f64; d];
+                for i in k * n / p..(k + 1) * n / p {
+                    for (j, o) in out.iter_mut().enumerate() {
+                        *o += t[i] * x[(i, j)];
+                    }
+                }
+                out
+            };
+            let mut out = piece(0);
+            for k in 1..p {
+                for (o, v) in out.iter_mut().zip(&piece(k)) {
+                    *o += v;
+                }
+            }
+            out.into_iter().map(bits).collect()
+        }
+
+        let shapes = [
+            (203_usize, 9000_usize),
+            (37, 4097),
+            (203, 2100),
+            (11, 40_000),
+        ];
+        assert!(shapes
+            .iter()
+            .any(|&(_, d)| t_mul_chunk_width(d) == T_MUL_CHUNK));
+        assert!(shapes
+            .iter()
+            .any(|&(_, d)| t_mul_chunk_width(d) < T_MUL_CHUNK && d < T_MUL_CHUNK));
+        let pools = pools();
+        for (k, &(n, d)) in shapes.iter().enumerate() {
+            let chunk = t_mul_chunk_width(d);
+            assert!(
+                d > chunk && d % chunk != 0,
+                "{n}x{d}: chunks of {chunk}, not several with a partial last one"
+            );
+            let x = test_matrix(n, d, 990 + k as u64);
+            let x_t = x.transpose().to_owned();
+            let xv = x_t.as_ref().transpose();
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(995 + k as u64);
+            let t = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
+            let want = full_width_pieces(xv, t.as_ref());
+            // The one-chain sum of `Par::Seq` differs in some column: the
+            // comparison tells the two arithmetics apart.
+            let seq = row_major_t_mul(xv, t.as_ref(), Par::Seq).expect("row-major and wide");
+            assert_ne!(col_bits(seq.as_ref()), want, "{n}x{d}: Seq");
+            for (threads, pool) in &pools {
+                let got = pool.install(|| {
+                    row_major_t_mul(xv, t.as_ref(), crate::fit::par_fixed())
+                        .expect("row-major and wide")
+                });
+                assert_eq!(col_bits(got.as_ref()), want, "{n}x{d} pool {threads}");
+            }
+        }
+    }
+
+    /// `row_major_strip_width` and `t_mul_chunk_width` at their edges:
+    /// `stream_block_width(n)` up to 1,024 rows, no columns, fewer columns
+    /// than threads, the cap at `d`, and the `STD_BLOCK` floor and
+    /// `T_MUL_CHUNK` cap of the chunks (narrow rows the product itself
+    /// declines included).
+    #[test]
+    fn strip_and_chunk_widths_at_their_edges() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("thread pool");
+        let par = crate::fit::par_fixed();
+        assert_eq!(stream_block_width(1024), ROW_MAJOR_MIN_STRIP);
+        assert_eq!(row_major_strip_width(1024, 9000, Par::Seq), 256);
+        assert_eq!(pool.install(|| row_major_strip_width(1024, 9000, par)), 256);
+        assert_eq!(stream_block_width(1025), 248);
+        assert_eq!(row_major_strip_width(1025, 0, Par::Seq), 1);
+        assert_eq!(pool.install(|| row_major_strip_width(1025, 0, par)), 1);
+        // Fewer columns than threads, and the cap at `d`.
+        assert_eq!(pool.install(|| row_major_strip_width(2000, 3, par)), 3);
+        assert_eq!(row_major_strip_width(20_000, 100, Par::Seq), 100);
+        assert_eq!(pool.install(|| row_major_strip_width(20_000, 100, par)), 32);
+        assert_eq!(pool.install(|| row_major_strip_width(2000, 600, par)), 152);
+        assert_eq!(row_major_strip_width(2000, 600, Par::Seq), 600);
+
+        for (d, chunk) in [
+            (0, 8),
+            (11, 8),
+            (40, 8),
+            (64, 8),
+            (65, 16),
+            (2048, 256),
+            (2100, 264),
+            (32_768, 4096),
+            (40_000, 4096),
+        ] {
+            assert_eq!(t_mul_chunk_width(d), chunk, "d = {d}");
+        }
+    }
+
     /// A non-finite entry makes its column's mean non-finite on every
     /// layout, weighted or not, a zero weight on its row included (`0·inf`
     /// and `0·NaN` are NaN). `pls1_fit` reads X's finiteness from this.
     #[test]
     fn standardize_fit_x_flags_non_finite_columns() {
-        // The second shape takes the blocked row-major moments.
+        // Row-major views take the blocked row-major moments; the second
+        // shape is one strip of rows wider than `ROW_BLOCK_MIN_COLS`, with a
+        // partial block.
         for (n, p) in [(37, 19), (11, ROW_BLOCK_MIN_COLS + 2)] {
             flags_non_finite_columns(n, p);
         }
@@ -2784,7 +3163,7 @@ mod fast_standardize_tests {
             let lay = Layouts::new(x.as_ref());
             let norm = x.norm_l2();
             for (view, xv) in lay.all(&x) {
-                let ss = sum_of_squares(xv);
+                let ss = sum_of_squares(xv, Par::Seq);
                 assert!(
                     (ss.sqrt() - norm).abs() <= 1e-13 * norm.max(1.0),
                     "{n}x{p} {view}: {} vs {norm}",
@@ -2794,9 +3173,33 @@ mod fast_standardize_tests {
         }
         let mut x = Mat::<f64>::from_fn(4, 3, |i, j| (i + j) as f64);
         x[(2, 1)] = f64::NAN;
-        assert!(!sum_of_squares(x.as_ref()).is_finite());
+        assert!(!sum_of_squares(x.as_ref(), Par::Seq).is_finite());
         let big = Mat::<f64>::from_fn(4, 3, |_, _| 1e200);
-        assert!(!sum_of_squares(big.as_ref()).is_finite());
+        assert!(!sum_of_squares(big.as_ref(), Par::Seq).is_finite());
+    }
+
+    /// `sum_of_squares` has the same bits under `Par::Seq` and
+    /// `fit::par_fixed()` on every layout, also with fewer storage lines
+    /// than pieces.
+    #[test]
+    fn sum_of_squares_is_the_same_on_both_arms() {
+        for (k, &(n, p)) in SHAPES.iter().enumerate() {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(1300 + k as u64);
+            let x = Mat::<f64>::from_fn(n, p, |_, _| rng.random_range(-1.0..1.0));
+            let lay = Layouts::new(x.as_ref());
+            // Neither stride is one (from two rows on): the entry-by-entry arm.
+            let rows_rev = x.as_ref().reverse_rows().to_owned();
+            let strided = rows_rev.as_ref().reverse_rows();
+            for (view, xv) in lay.all(&x).into_iter().chain([("strided", strided)]) {
+                let seq = sum_of_squares(xv, Par::Seq);
+                let par = sum_of_squares(xv, crate::fit::par_fixed());
+                assert_eq!(
+                    seq.to_bits(),
+                    par.to_bits(),
+                    "{n}x{p} {view}: {seq:e} vs {par:e}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -33,8 +33,8 @@
 mod multi_k;
 pub(crate) use multi_k::{
     fold_column_nspace, nspace_eligible_perm_null, nspace_eligible_raw_perm,
-    nspace_eligible_split_exact, nspace_perm_row, split_columns_r_nspace, NspaceFold, NspaceGram,
-    NspaceSplit, NSPACE_BATCH,
+    nspace_eligible_split_exact, nspace_perm_row, pls1_nspace_kernel, split_columns_r_nspace,
+    NspaceFold, NspaceGram, NspaceOutcome, NspaceSplit, NSPACE_BATCH,
 };
 #[cfg(test)]
 pub(crate) use multi_k::{nspace_blocks_built, K_DUAL_MAX};

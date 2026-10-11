@@ -225,6 +225,24 @@ class PermNullResult:
 
 
 @dataclass(frozen=True)
+class PermAlphaResult:
+    """Output of `pls1_perm_alpha`: PLS1 dual coefficients, one column per outcome.
+
+    Column `j` of `alpha` gives `coef = X̃.T @ alpha[:, j]` on the
+    standardized scale (`PLS1Result.coef`), for the block `X̃` whose Gram
+    matrix was passed. Where `resolved[j]` is False the fit cannot be
+    certified from the Gram matrix alone: `alpha[:, j]` is NaN and
+    `k_used[j]` is 0; refit that column with `pls1_fit` on the raw block `X`
+    that `X̃` standardizes.
+    """
+    alpha: np.ndarray       # shape (n, m)
+    k_used: np.ndarray      # shape (m,), int64; k where resolved, 0 for a zero model (an outcome that standardizes to exact zeros, i.e. all zeros or a constant whose computed mean is exact, or every outcome on a `gram` whose every entry is exactly zero) and for an unresolved column
+    resolved: np.ndarray    # shape (m,), bool
+    k: int
+    n_features: int
+
+
+@dataclass(frozen=True)
 class PreprocessResult:
     """Return type of `plskit.preprocess(...)`.
 

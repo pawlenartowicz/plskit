@@ -31,6 +31,11 @@ pub enum KSpec {
 /// and `PLSKIT_NUM_THREADS=16` give the same result. `Seq` and the parallel
 /// arm of `Auto` can differ from each other in the last bits.
 ///
+/// The chosen arm also runs the fit's pass over `X` before the kernel: the
+/// standardization moments of a raw `X`, over strips of columns (also in
+/// the PLS3 fits), and the sum of squares of a pre-standardized `X`, in
+/// pieces. Both give the same bits on either arm.
+///
 /// Inside the resampling functions, the PLS1 fit of one resample takes
 /// `Auto`, so a large fit still uses the cores when the memory budget
 /// (`PLSKIT_MEMORY_BUDGET`) lets only a few resamples run at once. This
@@ -94,7 +99,8 @@ pub struct FitOpts {
     /// bootstrap subsamples) where the upstream accumulator handles degeneracy.
     /// See `_docs/internals/n-eff-check.md`.
     pub check_n_eff: bool,
-    /// Parallelism strategy for the PLS1 kernel. See `ParChoice`.
+    /// Parallelism strategy for the fit's pass over `X` (the standardization
+    /// moments or the sum of squares) and the PLS1 kernel. See `ParChoice`.
     pub par: ParChoice,
     /// Sparse keep-count (spls1 family plumbing): retain the `keep`
     /// largest-|w| coordinates per component, zero the rest — hard selection
@@ -703,11 +709,17 @@ pub(crate) fn pls1_fit_impl(
     // *not* preprocessing, so it applies even when pre_standardized=true.
     let sqw: Option<Col<f64>> = wref.map(crate::linalg::sqrt_col);
 
+    // The arm the kernel's products take (`pls1_fit_prepared_fro` and
+    // `pls1_fit_implicit` resolve the same one). The moments map their
+    // column strips, and the pre-standardized sum of squares its pieces, in
+    // parallel on it, with the same bits on either arm.
+    let fit_par = resolve_par(opts.par, n_samples, n_features, k_requested);
+
     // Standardization moments, or none when pre_standardized, weighted when
     // weights is Some. The standardized X itself is written only when its
     // columns' means are too large for the implicit products (below).
     let mut fx: Option<crate::linalg::FitX> =
-        (!opts.pre_standardized).then(|| crate::linalg::fit_x_moments(x, wref));
+        (!opts.pre_standardized).then(|| crate::linalg::fit_x_moments(x, wref, fit_par));
     let (ys_owned, y_mean, y_scale) = if opts.pre_standardized {
         (None, 0.0, 1.0)
     } else {
@@ -748,7 +760,7 @@ pub(crate) fn pls1_fit_impl(
         }
         f.fro
     } else {
-        let ss = crate::linalg::sum_of_squares(x_for_nipals);
+        let ss = crate::linalg::sum_of_squares(x_for_nipals, fit_par);
         if ss.is_finite() {
             ss.sqrt()
         } else {
@@ -1338,6 +1350,31 @@ pub(crate) fn pls1_component_loop<B: ComponentBackend>(
     }
 }
 
+/// `alpha·Xs'·v`, `(d,)`. A row-major `Xs` at least
+/// `linalg::ROW_BLOCK_MIN_COLS` wide (a C-ordered host array, or the
+/// row-major copy `FitX::materialize` writes) reads its rows in blocks
+/// (`linalg::row_major_t_mul`), as `ImplicitXBackend::xs_t_mul` does, and
+/// each entry is then multiplied by `alpha`; any other `Xs` goes to faer
+/// (GEMV with `alpha`, as in the explicit-deflation kernel).
+fn xs_t_mul(xs: MatRef<'_, f64>, v: ColRef<'_, f64>, alpha: f64, par: Par) -> Col<f64> {
+    if let Some(mut g) = crate::linalg::row_major_t_mul(xs, v, par) {
+        for j in 0..g.nrows() {
+            g[j] *= alpha;
+        }
+        return g;
+    }
+    let mut g = Col::<f64>::zeros(xs.ncols());
+    matmul(
+        g.as_mut().as_mat_mut(),
+        Accum::Replace,
+        xs.transpose(),
+        v.as_mat(),
+        alpha,
+        par,
+    );
+    g
+}
+
 /// Algorithm 1 of Dayal and MacGregor (1997): scores and loadings from the
 /// undeflated `Xs`, two reads per component, no writes, no copy.
 #[allow(clippy::doc_markdown)] // "MacGregor"
@@ -1372,18 +1409,9 @@ impl ComponentBackend for XBackend<'_> {
     }
 
     fn loading(&mut self, _r: &Col<f64>, t: Option<&Col<f64>>, inv_tt: f64) -> Col<f64> {
-        // p = Xs' t / (t't)  (GEMV, alpha = 1/tt as in the explicit-deflation kernel)
+        // p = Xs' t / (t't)
         let t = t.expect("the X backend always forms t");
-        let mut p = Col::<f64>::zeros(self.xs.ncols());
-        matmul(
-            p.as_mut().as_mat_mut(),
-            Accum::Replace,
-            self.xs.transpose(),
-            t.as_ref().as_mat(),
-            inv_tt,
-            self.par,
-        );
-        p
+        xs_t_mul(self.xs, t.as_ref(), inv_tt, self.par)
     }
 
     fn q(&mut self, _s: &Col<f64>, _w: &Col<f64>, t: Option<&Col<f64>>, inv_tt: f64) -> f64 {
@@ -1477,8 +1505,9 @@ impl ImplicitXBackend<'_> {
             .map(|sqw| Col::<f64>::from_fn(n, |i| t[i] * sqw[i]));
         let tw = tw_owned.as_ref().map_or(t, Col::as_ref);
         let sum_tw: f64 = (0..n).map(|i| tw[i]).sum();
-        // A wide row-major X (a C-ordered host array) reads its rows in
-        // blocks; any other X goes to faer.
+        // A row-major X at least `linalg::ROW_BLOCK_MIN_COLS` wide (a
+        // C-ordered host array) reads its rows in blocks; any other X goes
+        // to faer.
         let mut g = crate::linalg::row_major_t_mul(self.x, tw, self.par).unwrap_or_else(|| {
             let mut g = Col::<f64>::zeros(self.x.ncols());
             matmul(
@@ -1561,8 +1590,11 @@ impl ComponentBackend for ImplicitXBackend<'_> {
 /// two differ in rounding only; `fit::kernel_tests` bounds the difference.
 ///
 /// Each component reads `Xs` twice (`t = Xs r`, `p = Xs't/tt`) and never
-/// writes it; `s_1 = Xs'ys` is one more read per fit. `par` threads the
-/// three GEMVs, resolved by the caller as before (`resolve_par`).
+/// writes it; `s_1 = Xs'ys` is one more read per fit. On a row-major `Xs` at
+/// least `linalg::ROW_BLOCK_MIN_COLS` wide the `Xs'·v` products read its rows
+/// in blocks (`linalg::row_major_t_mul`). `par`, resolved by the caller
+/// (`resolve_par`), threads the three products: `t = Xs r` is a faer GEMV,
+/// and `Xs'ys` and `Xs't` are the blocked row product or a faer GEMV.
 ///
 /// # Errors
 /// None today; the `Result` matches the call site.
@@ -1580,16 +1612,8 @@ pub(crate) fn pls1_kernel(
 ) -> PlsKitResult<(Mat<f64>, Mat<f64>, Mat<f64>, Col<f64>)> {
     let n = xs.nrows();
     let d = xs.ncols();
-    // s_1 = Xs' ys  (GEMV)
-    let mut s0 = Col::<f64>::zeros(d);
-    matmul(
-        s0.as_mut().as_mat_mut(),
-        Accum::Replace,
-        xs.transpose(),
-        ys.as_mat(),
-        1.0,
-        par,
-    );
+    // s_1 = Xs' ys, formed as the loadings are (`xs_t_mul`)
+    let s0 = xs_t_mul(xs, ys, 1.0, par);
     // `x_fro` is `‖xs‖_F`, supplied by the caller: `pls1_fit` forms it from
     // its standardization moments or its sum-of-squares screen, the other
     // callers take `xs.norm_l2()`. It only ever gates a `break`, so no output
@@ -2406,10 +2430,11 @@ mod boundary_tests {
         // Sizes where `ParChoice::Auto` resolves to the Rayon path (at k = 3):
         // the owned Seq and Auto runs agree too (nothing else runs the Rayon
         // implicit products against Seq at this size). At 2100 columns
-        // (`linalg::ROW_BLOCK_MIN_COLS` and up) the row-major view reads its
-        // rows in blocks for the moments and `Xs'·t`
-        // (`linalg::row_major_t_mul`); 203 rows leave a partial block, also in
-        // each Rayon piece. At 2000 it keeps faer's product.
+        // (`linalg::ROW_BLOCK_MIN_COLS` and up) the row-major view forms
+        // `Xs'·t`, raw or pre-standardized, with its rows in blocks
+        // (`linalg::row_major_t_mul`); 203 rows leave a partial block, also
+        // in each Rayon piece. Its moments run over strips of 1,288 and 812
+        // columns, in blocks of rows too. At 2000 it keeps faer's product.
         for (n, d, seed) in [(200, 2000, 9), (203, 2100, 10)] {
             let (x, y) = signal_data(n, d, seed);
             // The row-major view of `Layouts` (the transpose of a stored
@@ -2423,6 +2448,8 @@ mod boundary_tests {
                     "{n}x{d} {par:?}: left its row-major route"
                 );
             }
+            let (xs, _, _) = crate::linalg::standardize(x.as_ref());
+            let (ys, _, _) = standardize1(y.as_ref());
             for k in [1_usize, 3] {
                 for keep in [None, Some(3)] {
                     let what = format!("large {n}x{d} k={k} keep={keep:?}");
@@ -2448,8 +2475,63 @@ mod boundary_tests {
                         Agree::Corpus(FIT_LAYOUT_TOL),
                         &format!("{what} Auto vs Seq"),
                     );
+                    for par in [ParChoice::Seq, ParChoice::Auto] {
+                        fit_layouts(
+                            &format!("{what} pre {par:?}"),
+                            &xs,
+                            &ys,
+                            None,
+                            k,
+                            opts(true, keep, par),
+                        );
+                    }
                 }
             }
+        }
+        // The raw fallback on a row-major X at least
+        // `linalg::ROW_BLOCK_MIN_COLS` wide: +2e3 puts the column means past
+        // `IMPLICIT_MAX_MEAN_RATIO`, so the row-major view is standardized into
+        // a row-major copy (`FitX::materialize`) whose `Xs'·t` reads its rows
+        // in blocks, under both arms.
+        let (x, y) = signal_data(203, 2100, 10);
+        let x = offset(&x, 2e3);
+        let x_t = x.transpose().to_owned();
+        let mut fx = crate::linalg::fit_x_moments(x_t.transpose(), None, Par::Seq);
+        assert!(
+            fx.max_mean_ratio() > IMPLICIT_MAX_MEAN_RATIO,
+            "203x2100 + 2e3: left the standardized copy"
+        );
+        fx.materialize(x_t.transpose(), None);
+        for par in [Par::Seq, crate::fit::par_fixed()] {
+            assert!(
+                crate::linalg::row_major_t_mul(fx.xs(), y.as_ref(), par).is_some(),
+                "203x2100 + 2e3 {par:?}: the copy left its row-major route"
+            );
+        }
+        for k in [1_usize, 3] {
+            let what = format!("large 203x2100 + 2e3 k={k}");
+            let seq = fit_layouts(
+                &format!("{what} Seq"),
+                &x,
+                &y,
+                None,
+                k,
+                opts(false, None, ParChoice::Seq),
+            );
+            let auto = fit_layouts(
+                &format!("{what} Auto"),
+                &x,
+                &y,
+                None,
+                k,
+                opts(false, None, ParChoice::Auto),
+            );
+            assert_agree(
+                &auto,
+                &seq,
+                Agree::Corpus(FIT_LAYOUT_TOL),
+                &format!("{what} Auto vs Seq"),
+            );
         }
         // Offset X on both sides of `IMPLICIT_MAX_MEAN_RATIO`: +300 on the
         // dense family stays on the implicit products, +1e6 on the weighted
@@ -2458,7 +2540,7 @@ mod boundary_tests {
         for (f, c, implicit) in [(&fams[0], 300.0, true), (&fams[1], 1e6, false)] {
             let x = offset(&f.x, c);
             let w = f.w.as_ref().map(Col::as_ref);
-            let ratio = crate::linalg::fit_x_moments(x.as_ref(), w).max_mean_ratio();
+            let ratio = crate::linalg::fit_x_moments(x.as_ref(), w, Par::Seq).max_mean_ratio();
             let what = format!("{} + {c:e} (ratio {ratio:.0})", f.name);
             assert_eq!(
                 ratio > 100.0 && ratio < IMPLICIT_MAX_MEAN_RATIO,
@@ -2476,6 +2558,59 @@ mod boundary_tests {
                     opts(false, None, ParChoice::Seq),
                 );
             }
+        }
+    }
+
+    /// A pre-standardized fit on a row-major view at least
+    /// `linalg::ROW_BLOCK_MIN_COLS` wide forms `Xs'·ys` and `Xs'·t` with the
+    /// blocked row product, as the implicit backend does: the first weight
+    /// vector is `row_major_t_mul(Xs, ys)` scaled to unit norm, and the first
+    /// loading is `row_major_t_mul` of the first score times `1/t't`, bit for
+    /// bit, on both arms. At 203 × 5000 and k = 1, `Auto` takes the Rayon arm.
+    #[test]
+    fn pre_standardized_row_major_loading_is_the_row_product() {
+        let (x, y) = signal_data(203, 5000, 12);
+        let (xs, _, _) = crate::linalg::standardize(x.as_ref());
+        let (ys, _, _) = standardize1(y.as_ref());
+        let xs_t = xs.transpose().to_owned();
+        let view = xs_t.transpose();
+        assert!(matches!(
+            resolve_par(ParChoice::Auto, 203, 5000, 1),
+            Par::Rayon(_)
+        ));
+        for (choice, par) in [
+            (ParChoice::Seq, Par::Seq),
+            (ParChoice::Auto, crate::fit::par_fixed()),
+        ] {
+            let m = pls1_fit(
+                view,
+                ys.as_ref(),
+                KSpec::Fixed(1),
+                None,
+                FitOpts {
+                    pre_standardized: true,
+                    par: choice,
+                    ..FitOpts::default()
+                },
+            )
+            .unwrap();
+            let mut w =
+                crate::linalg::row_major_t_mul(view, ys.as_ref(), par).expect("row-major and wide");
+            select_and_normalize(&mut w, view.ncols(), 0.0).expect("s_1 is not zero");
+            assert_bits_eq(
+                &col_vals(m.w_star.col(0)),
+                &col_vals(w.as_ref()),
+                &format!("{choice:?} w"),
+            );
+            let t = m.t_scores.col(0);
+            let inv_tt = 1.0 / t.squared_norm_l2();
+            let g = crate::linalg::row_major_t_mul(view, t, par).expect("row-major and wide");
+            let want: Vec<f64> = (0..g.nrows()).map(|j| g[j] * inv_tt).collect();
+            assert_bits_eq(
+                &col_vals(m.p_loadings.col(0)),
+                &want,
+                &format!("{choice:?}"),
+            );
         }
     }
 

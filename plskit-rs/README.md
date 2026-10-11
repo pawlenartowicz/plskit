@@ -78,7 +78,7 @@ variant. PLS2 and multi-block PLS are planned.
 - **PLS3 / PLSSVD:** `pls3_fit` (alias `plssvd_fit`), `pls3_transform`
   (alias `plssvd_transform`), sparse `spls3_fit` (new in 0.6.0).
 - **Inference:** `pls1_confirmatory_test`, `pls3_confirmatory_test`,
-  `split_nb_gate`, `pls1_perm_null`.
+  `split_nb_gate`, `pls1_perm_null`, `pls1_perm_alpha`.
 - **Interpretive:** `rotate`, `pls1_rotation_stability`.
 - **Errors:** `PlsKitError` (with a stable `.code()` for programmatic
   handling) and the `PlsKitResult<T>` alias.
