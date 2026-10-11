@@ -3,7 +3,9 @@
 R package for [plskit](https://github.com/pawlenartowicz/plskit): PLS
 regression with modern inference. It wraps the Rust engine through
 extendr and the `plskit-bind` layer, with the same functions, argument
-names and result fields as the Python package.
+names and result fields as the Python package. The engine fits PLS1
+with [Improved Kernel PLS](../_docs/concepts/PLS1/fit-and-predict.md#how-plskit-computes-it)
+(Dayal and MacGregor 1997).
 
 ## Status
 

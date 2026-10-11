@@ -83,8 +83,9 @@ rows raises `code="invalid_argument"` (an empty column has no mean).
 **options:** `k_max` (required when `k` is a string); `find_k_args`
 (dict of method-specific kwargs forwarded to `pls1_find_k_optimal` /
 `pls1_find_k_sequence`; allowed keys are the public params of the
-target function except `seed` / `pre_standardized` / `weights` /
-`verbose`, which live on `pls1_fit` itself;
+target function except `seed` / `pre_standardized` / `weights`,
+which live on `pls1_fit` itself, and `verbose`, which the selection
+run does not take;
 unknown keys raise `PlsKitError(code="invalid_args")`);
 `pre_standardized` (bool, default `False`); `seed` (`int | None`,
 forwarded to the k-selection call when `k` is a string);
@@ -178,7 +179,7 @@ sequence. To recover the path-max p-value, compute
 
 ## 2b. Sparse PLS1 (sPLS1)
 
-Concepts: [sPLS1](../concepts/sPLS1/index.md).
+Concepts: [sPLS1](../concepts/PLS1/sparse.md).
 
 Sparse PLS1 fits a NIPALS model with a hard keep-count constraint: each
 latent direction loads on at most `keep` X variables. `keep` is a scalar

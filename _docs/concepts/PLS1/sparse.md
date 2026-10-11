@@ -1,7 +1,61 @@
-# Keep and selection
+# Sparse PLS1 (sPLS1)
 
-How `plskit` chooses `keep` and `k` for [sparse PLS1](index.md), and what
-you can and cannot infer once a selection has been made.
+Sparse PLS1 is [PLS1](index.md) with a hard limit on how many X
+variables each component may use. Everything else (scores, loadings,
+deflation, `coef`, `beta`, `intercept`, prediction) is the dense PLS1
+machinery unchanged. The difference is one step: after each weight vector
+is computed, all but its `keep` largest-magnitude entries are set to zero.
+
+## What `keep` is
+
+`keep` is an integer in `[1, n_features]`: the number of X variables each
+latent direction may load on.
+
+- **One value for all components.** `keep` is a scalar broadcast to every
+  component; there is no per-component budget.
+- **Hard selection, not shrinkage.** The surviving weights keep their
+  magnitudes (the vector is then rescaled to unit length as usual). This is
+  not soft thresholding, so there is no penalty parameter.
+- **Deterministic ties.** When two `|w|` entries tie exactly, the lower
+  column index survives, so the selected set does not depend on sort order
+  or thread count.
+- **Selection is per component.** Component 2 selects on the deflated
+  residual, so its variables need not include component 1's. Tune the
+  path; don't read it as a nested ranking of variables.
+- Out-of-range values (`keep = 0`, `keep > n_features`) raise
+  `PlsKitError(code="invalid_argument")`.
+
+The fitted model is an ordinary `PLS1Result` with its `keep` field set
+(it is `None` on a dense fit). Each column of `W` is zero outside its
+`keep` selected rows. There is no `spls1_predict`: pass the model to
+`pls1_predict`. Observation [weights](weights.md) and
+`pre_standardized` work as in dense PLS1.
+
+## `keep = n_features` is dense PLS1, bit for bit
+
+At the dense endpoint the selection step is skipped entirely rather than
+run as a no-op, so `spls1_fit(X, y, k, keep=X.shape[1])` returns the same
+floats as `pls1_fit(X, y, k)`, not merely close ones. The same holds for
+`spls1_find_k_optimal` and `spls1_find_k_sequence` against their dense
+counterparts at the same seed. The engine's test suite checks this with
+exact bit comparison.
+
+## One axis is always fixed
+
+sPLS1 has two tuning axes, `k` (components) and `keep` (variables per
+component). `plskit` never searches them jointly:
+
+| Function | Tunes | Holds fixed |
+|---|---|---|
+| `spls1_fit` | nothing | `k` and `keep` (both required) |
+| `spls1_find_keep_optimal` | `keep` | `k` |
+| `spls1_find_k_optimal` | `k` | `keep` |
+| `spls1_find_k_sequence` | `k` | `keep` |
+
+`spls1_fit` has no `'optimal'` / `'sequence'` string modes for `k`; call
+the `spls1_find_*` functions directly. The sections below describe how
+each selector works, and what inference is and is not available after
+selection.
 
 ## Tuning `keep`: the 1-SE rule on a keep grid
 
@@ -34,7 +88,7 @@ adequate point rather than the exact maximum, finer spacing buys little.
 
 `spls1_find_k_optimal` and `spls1_find_k_sequence` are
 `pls1_find_k_optimal` and `pls1_find_k_sequence` (see
-[Find K](../PLS1/find-k.md)) with every inner fit replaced by the sparse
+[Find K](find-k.md)) with every inner fit replaced by the sparse
 fit at your `keep`. Same selectors, same options, same result types. In
 the sequential version each step deflates on the sparse residual and tests
 the sparse component, so the sequence tests the model you will actually
@@ -53,7 +107,7 @@ default `selector="r2_se"` for sparse fits.
 
 For dense PLS1, `pls1_confirmatory_test(ci=True)` reports subsample CIs on
 each coordinate of β (`beta_ci_lower` / `beta_ci_upper`; see
-[Confidence intervals](../PLS1/ci.md)). sPLS1 has no equivalent, by
+[Confidence intervals](ci.md)). sPLS1 has no equivalent, by
 design.
 
 The zeros in a sparse `W` are **selection events**: the data decided which
@@ -67,13 +121,13 @@ Two practical consequences:
 
 - `pls1_confirmatory_test` has no `keep` argument. Its tests and its
   `ci=True` intervals are for the **dense** model, not for your sparse fit.
-- The honest-split rule from [Find K](../PLS1/find-k.md) applies to `keep`
+- The honest-split rule from [Find K](find-k.md) applies to `keep`
   as well as `k`: a `keep` chosen on the same data as a subsequent test
   makes that test exploratory, not confirmatory.
 
 ## Cross-references
 
-- [Sparse PLS1](index.md): what `keep` is, the one-axis-fixed rule
-- [Find K](../PLS1/find-k.md): the dense selectors these functions mirror
-- [Python API §2b](../../python/api.md): `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`
-- [Results](../../python/results.md): `FindKeepOptimalResult`, `FindKOptimalResult`, `FindKSequenceResult`
+- [PLS1](index.md): the dense model sPLS1 reduces to
+- [Find K](find-k.md): the dense K-selection paths the `spls1_find_k_*` functions mirror
+- [Python API §2b](../../python/api.md): signatures and options
+- [Results](../../python/results.md): `PLS1Result.keep`, `FindKeepOptimalResult`, `FindKOptimalResult`, `FindKSequenceResult`

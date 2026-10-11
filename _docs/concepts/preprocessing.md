@@ -118,11 +118,6 @@ even when `pre_standardized=True`.
   Either skip your mean-centering and leave the flag at default, or
   finish the standardize and pass `True`.
 - **Half-treated y** — same trap.
-- **Weights not normalized** — `pre_standardized=True` skips weight
-  normalization. If your weights are not already mean-1, your fit is
-  on the wrong scale. Either pass raw weights and leave the flag at
-  default, or normalize first (`w_norm = w * len(w) / w.sum()`) and
-  pass `True`.
 
 When `pre_standardized=True`, the fit's `coef` is in standardized space
 and `beta` equals `coef` (no back-projection). The `intercept` is `0`.

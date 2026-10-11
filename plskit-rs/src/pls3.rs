@@ -13,7 +13,7 @@
 //! single SVD, so it alternates per component with deflation between
 //! components. Its saliences are unit-norm but not orthogonal, and its
 //! `singular_values` are the per-component `u'Av` on the deflated `A`, not
-//! singular values of `X̃'Ỹ`. See `_docs/concepts/sPLS3/sparse-saliences.md`.
+//! singular values of `X̃'Ỹ`. See `_docs/concepts/PLS3/sparse.md`.
 
 use faer::linalg::matmul::matmul;
 use faer::{Accum, Col, ColRef, Mat, MatRef, Par};

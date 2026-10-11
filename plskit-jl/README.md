@@ -32,7 +32,7 @@ download). To use your own Python instead, see
 
 ## What is plskit?
 
-plskit is a Partial Least Squares (PLS) library built around three ideas:
+plskit is a Partial Least Squares (PLS) library built around four ideas:
 
 - **Modern inference.** Confirmatory tests use split-half held-out
   prediction: `split_exact` is calibrated by permutation, and
@@ -45,7 +45,11 @@ plskit is a Partial Least Squares (PLS) library built around three ideas:
   Rust engine; every wrapper calls into it, so a fixed
   `(version, seed, X, y)` gives the same results, within a bit-near
   tolerance, in every language and on every supported platform.
-- **Speed.** The engine is written in Rust with parallel resampling.
+- **Speed.** The engine is written in Rust and fits PLS1 with
+  [Improved Kernel PLS](../_docs/concepts/PLS1/fit-and-predict.md#how-plskit-computes-it)
+  (Dayal and MacGregor 1997).
+- **Parallel and RAM-safe.** Inference runs efficiently in parallel
+  without blowing up RAM.
 
 ## Status
 

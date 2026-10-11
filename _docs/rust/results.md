@@ -167,7 +167,7 @@ field semantics are identical to the Python counterpart; see
 | `statistic` | `f64` | always |
 | `test_method` | `String` | the method that ran: one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`, never `"auto"`; `"split_exact"` when an explicit `"split_nb"` request was rerouted by the auto-gate |
 | `k` | `usize` | the K tested (echoed from the input) |
-| `n_perm` | `Option<usize>` | `Some` for resampling-family methods, `None` for `score` / `e` |
+| `n_perm` | `Option<usize>` | `Some` for `raw_perm` / `split_exact`, `None` for `split_nb` / `score` / `e` |
 | `n_splits` | `Option<usize>` | `Some` for `split_*` methods, `None` for `raw_perm` / `score` / `e` |
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | always; Kish effective sample size, equals `n_samples` for uniform/absent weights |

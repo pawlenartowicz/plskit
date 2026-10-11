@@ -51,8 +51,8 @@ original scale and absorbs the means into `intercept`.
 
 Two opt-outs:
 
-- `pre_standardized=True`: skip standardization (and weight
-  normalization); the caller asserts that `X` and `y` are already
+- `pre_standardized=True`: skip standardization; the caller asserts
+  that `X` and `y` are already
   centered and scaled. The fit then reports `beta` equal to `coef` and
   `intercept = 0`. Used when the same preprocessing is shared across
   many fits and you want to avoid recomputing it.

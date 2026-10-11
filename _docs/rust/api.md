@@ -124,7 +124,8 @@ pub fn pls3_confirmatory_test(
     y: MatRef<f64>,
     k: usize,                // must be 1
     opts: Pls3ConfirmatoryTestOpts,
-    // args: ConfirmatoryArgs::SplitExact { n_perm, n_splits }
+    // args: ConfirmatoryArgs::Auto { n_perm, n_splits } (the default),
+    //    ConfirmatoryArgs::SplitExact { n_perm, n_splits }
     //    or ConfirmatoryArgs::SplitNb { n_splits, force };
     // pre_standardized_x, pre_standardized_y, keep_x, keep_y, max_iter (100),
     // tol (1e-8), seed, verbose

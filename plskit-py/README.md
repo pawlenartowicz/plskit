@@ -10,12 +10,12 @@ subsampling CIs), backed
 by a Rust engine.
 
 > Part of the **[plskit project](https://github.com/pawlenartowicz/plskit)**:
-> the Rust core, sibling wrappers (R and Julia, planned), shared test
+> the Rust core, sibling wrappers (R and Julia), shared test
 > corpus, issues, and PRs all live there.
 
 ## What is plskit?
 
-plskit is a Partial Least Squares (PLS) library built around three ideas:
+plskit is a Partial Least Squares (PLS) library built around four ideas:
 
 - **Modern inference.** Confirmatory tests use split-half held-out
   prediction: `split_exact` is calibrated by permutation, and
@@ -25,12 +25,16 @@ plskit is a Partial Least Squares (PLS) library built around three ideas:
   Procrustes alignment is needed. The tests are introduced in our
   [NeurIPS 2026 paper](https://openreview.net/forum?id=xb6CB7d9LO).
 - **Same results in every language.** All numerical work runs in one
-  Rust engine. Python (and the planned R and Julia wrappers) call
-  into it, so a fixed `(version, seed, X, y)` gives the same results,
-  within a bit-near tolerance, in every language and on every
-  supported platform.
-- **Speed.** The engine is written in Rust with parallel resampling,
-  which makes plskit probably the fastest PLS package available.
+  Rust engine. The Python and R wrappers call into it, and the Julia
+  wrapper runs the Python package, so a fixed `(version, seed, X, y)`
+  gives the same results, within a bit-near tolerance, in every
+  language and on every supported platform.
+- **Speed.** The engine is written in Rust and fits PLS1 with
+  [Improved Kernel PLS](https://github.com/pawlenartowicz/plskit/blob/main/_docs/concepts/PLS1/fit-and-predict.md#how-plskit-computes-it)
+  (Dayal and MacGregor 1997), which makes plskit probably the fastest
+  PLS package on a single core.
+- **Parallel and RAM-safe.** Inference runs efficiently in parallel
+  without blowing up RAM.
 
 ## Install
 

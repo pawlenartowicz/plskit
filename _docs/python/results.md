@@ -165,7 +165,7 @@ input gives `k_star = 0` from `spls1_find_k_optimal`.
 | `statistic` | `float` | always |
 | `test_method` | `str` | the method that ran: one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`, never `"auto"`; `"split_exact"` when an explicit `"split_nb"` request was rerouted by the auto-gate |
 | `k` | `int` | the K tested (echoed from the input) |
-| `n_perm` | `int \| None` | not None for resampling-family methods, None for `score` / `e` |
+| `n_perm` | `int \| None` | not None for `raw_perm` / `split_exact`, None for `split_nb` / `score` / `e` |
 | `n_splits` | `int \| None` | not None for `split_*` methods, None for `raw_perm` / `score` / `e` |
 | `seed` | `int` | always |
 | `n_eff` | `float` | always; Kish effective sample size, equals `n` for uniform/absent weights |

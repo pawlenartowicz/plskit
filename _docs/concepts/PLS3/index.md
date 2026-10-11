@@ -59,7 +59,7 @@ confirmatory test has only one name, `pls3_confirmatory_test`.
 
 - [Fit and transform](fit-and-transform.md): the sign convention, truncation and its traps, why weights are refused, projecting new data
 - [Inference](inference.md): `pls3_confirmatory_test`, the held-out LV correlation, why `k = 1` only, which methods exist and why
-- [sPLS3](../sPLS3/index.md): the sparse variant, `keep_X` / `keep_Y`, and [what sparsity costs](../sPLS3/sparse-saliences.md)
+- [sPLS3](sparse.md): the sparse variant, `keep_X` / `keep_Y`, and [what sparsity costs](sparse.md#what-sparsity-costs)
 
 ## Cross-references
 

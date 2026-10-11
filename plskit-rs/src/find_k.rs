@@ -181,7 +181,7 @@ pub fn pls1_find_k_optimal(
 /// biases the selected `k` upward under sparsity. This is a deliberate
 /// simplification (not a consequence of `keep` being fixed); BIC values are
 /// not comparable across `keep`. See
-/// `_docs/concepts/sPLS1/keep-and-selection.md` for the BIC bias.
+/// `_docs/concepts/PLS1/sparse.md` for the BIC bias.
 ///
 /// # Errors
 /// Everything `pls1_find_k_optimal` returns, plus `InvalidArgument` for

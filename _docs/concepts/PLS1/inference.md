@@ -27,8 +27,9 @@ otherwise:
    much as `split_nb` on very wide `X`. With `k ≥ 2`, a sparse `keep`, or in
    `pls3_confirmatory_test`, `split_exact` refits for every permutation and
    costs more, so this clause does not apply. In `pls1_find_k_sequence`
-   every step tests at `k = 1`, so the clause applies; it does not apply in
-   `spls1_find_k_sequence`, which always has a `keep`.
+   every step tests at `k = 1`, so the clause applies; in
+   `spls1_find_k_sequence` it applies only at `keep = n_features`, which
+   runs the dense path.
 
 These thresholds may change between versions.
 

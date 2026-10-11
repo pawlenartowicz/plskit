@@ -22,7 +22,7 @@ lists what looks different from Julia.
   in Julia.
 - **`args`, `find_k_args`, `rotation_args`** take a `NamedTuple` or a
   `Dict` with `Symbol` or `String` keys, nested like Python's dicts:
-  `find_k_args=(selector=:bic, args=(n_folds=5,))`.
+  `find_k_args=(selector=:r2_max, args=(n_folds=5,))`.
 - **String options** (`test_method`, `selector`, `which`, ...) take a `String`
   or a `Symbol`: `test_method=:split_exact`.
 - `nothing` is Python's `None`.
@@ -102,7 +102,7 @@ lists what looks different from Julia.
   [Python API reference](../python/api.md#errors).
 - An argument of the wrong kind (a `PLS3Result` passed to `rotate`, a
   string where an array belongs) raises `PlsKitError` with code
-  `:invalid_argument`, and an unknown `method` or `selector` string one
+  `:invalid_argument`, and an unknown `test_method` or `selector` string one
   with code `:invalid_args`. Any other Python exception (one Python
   itself raises, not plskit) reaches you unchanged as a PythonCall
   `PyException`.

@@ -4,13 +4,13 @@
 (`cargo add plskit`) with thin wrappers for Python (`pip install plskit`),
 R, and Julia. Its distinguishing feature is *modern inference* (the
 `split_exact` and `split_nb` tests and rotation-invariant subsampling
-CIs), alongside a compatibility layer for legacy outputs.
+CIs).
 
 ## Families
 
 - [PLS1](concepts/PLS1/index.md): single-response regression (`pls1_*`)
-- [sPLS1](concepts/sPLS1/index.md): sparse PLS1 with a per-component `keep` count (`spls1_*`)
-- [sPLS3](concepts/sPLS3/index.md): sparse PLS3 with per-side `keep_X` / `keep_Y` counts (`spls3_*`)
+- [sPLS1](concepts/PLS1/sparse.md): sparse PLS1 with a per-component `keep` count (`spls1_*`)
+- [sPLS3](concepts/PLS3/sparse.md): sparse PLS3 with per-side `keep_X` / `keep_Y` counts (`spls3_*`)
 - [PLS3 / PLSSVD](concepts/PLS3/index.md): symmetric two-block PLS, also known as PLSC (`pls3_*`, `plssvd_*`)
 
 ## Sections

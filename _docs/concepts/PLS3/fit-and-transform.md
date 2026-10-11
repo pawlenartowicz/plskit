@@ -140,7 +140,7 @@ SVD. `spls3_fit` constrains each component to `keep_X` X variables and
 `keep_Y` Y variables, which cannot be done in one decomposition; it
 alternates instead, and the resulting saliences are unit-norm but not
 orthogonal, with `singular_values` that are not singular values. See
-[what sparsity costs](../sPLS3/sparse-saliences.md) before reading a
+[what sparsity costs](sparse.md#what-sparsity-costs) before reading a
 sparse fit the way you would read a dense one.
 
 ## Cross-references
@@ -149,5 +149,5 @@ sparse fit the way you would read a dense one.
 - [Inference](inference.md): testing the LV1 association
 - [Preprocessing](../preprocessing.md): the standardization recipe and the `pre_standardized` decision
 - [Python API §2c](../../python/api.md): `pls3_fit`, `pls3_transform`
-- [sPLS3](../sPLS3/index.md): the sparse variant, `keep_X` / `keep_Y`
-- [What sparsity costs](../sPLS3/sparse-saliences.md): non-orthogonality, `singular_values`, rotation
+- [sPLS3](sparse.md): the sparse variant, `keep_X` / `keep_Y`
+- [What sparsity costs](sparse.md#what-sparsity-costs): non-orthogonality, `singular_values`, rotation

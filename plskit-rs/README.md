@@ -7,7 +7,7 @@ Rust crate for **plskit**: Partial Least Squares with modern
 inference (`split_exact` and `split_nb` tests, rotation-invariant
 subsampling CIs). This
 is the **canonical implementation**: every plskit language wrapper
-(Python today; R and Julia planned) calls into this crate.
+(Python, R, and Julia) runs on this crate.
 
 > Part of the **[plskit project](https://github.com/pawlenartowicz/plskit)**:
 > sibling wrappers, shared test corpus, issues, and PRs all live there.
@@ -24,10 +24,10 @@ plskit is a Partial Least Squares (PLS) library built around three ideas:
   Procrustes alignment is needed. The tests are introduced in our
   [NeurIPS 2026 paper](https://openreview.net/forum?id=xb6CB7d9LO).
 - **Same results in every language.** All numerical work runs in one
-  Rust engine. Python (and the planned R and Julia wrappers) call
-  into it, so a fixed `(version, seed, X, y)` gives the same results,
-  within a bit-near tolerance, in every language and on every
-  supported platform.
+  Rust engine. The Python and R wrappers call into it, and the Julia
+  wrapper runs the Python package, so a fixed `(version, seed, X, y)`
+  gives the same results, within a bit-near tolerance, in every
+  language and on every supported platform.
 - **Speed.** The engine is written in Rust with parallel resampling,
   which makes plskit probably the fastest PLS package available.
 
@@ -90,7 +90,7 @@ Each function exports its own options and output types alongside it
 groups the surface the same way and shows side-by-side Rust / Python
 calls; [docs.rs/plskit](https://docs.rs/plskit) has every signature.
 
-These names mirror the Python (and forthcoming R / Julia) wrappers, so
+These names mirror the Python, R, and Julia wrappers, so
 multi-language code is easy to read across the family.
 
 ## faer types in the public API

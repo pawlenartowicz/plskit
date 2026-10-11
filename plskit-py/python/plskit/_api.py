@@ -289,8 +289,9 @@ def pls1_fit(
     find_k_args : dict | None
         Extra kwargs forwarded to `pls1_find_k_optimal` / `pls1_find_k_sequence`.
         Allowed keys are the public params of the target function *except*
-        ``seed``, ``pre_standardized``, ``weights``, and ``verbose`` — pass
-        those on ``pls1_fit`` directly. Unknown keys
+        ``seed``, ``pre_standardized`` and ``weights`` — pass those on
+        ``pls1_fit`` directly — and ``verbose``, which the selection run
+        does not take. Unknown keys
         raise ``PlsKitError(code="invalid_args")`` listing the allowed set.
         Must be ``None`` when ``k`` is an int.
     pre_standardized : bool, default False
@@ -902,7 +903,7 @@ def spls1_fit(
     PLS1Result
         With ``keep`` set; each ``W`` column is zero outside its ``keep``
         selected rows. Per-coordinate β CIs are NOT offered under selection
-        (post-selection inference); see ``_docs/concepts/sPLS1/keep-and-selection.md``.
+        (post-selection inference); see ``_docs/concepts/PLS1/sparse.md``.
     """
     return _call("spls1_fit", X=X, y=y, k=k, keep=keep,
                  pre_standardized=pre_standardized, weights=weights)

@@ -97,10 +97,10 @@ of its site, which runs with the check off, as those sites do.
 ## Internal call sites that keep the check on
 
 - **Reference fits** in the `ci` branch of `pls1_confirmatory_test`
-  (`signal_test.rs`) and in `pls1_rotation_stability` use default
-  `FitOpts`. On the full data this repeats the entry check and cannot fail.
+  (`signal_test.rs`) and in `pls1_rotation_stability` leave
+  `check_n_eff` at its default. On the full data this repeats the entry check and cannot fail.
 - **CI subsamples** (`subsample.rs`, `run_one_confirmatory`): the
-  per-subsample fit uses default `FitOpts`, so the check fires on the
+  per-subsample fit leaves `check_n_eff` at its default, so the check fires on the
   subsample's own `n_eff`. The driver
   (`pls1_subsample_inference_confirmatory`) maps
   `InvalidWeights { reason: "insufficient_effective_n" }` to
@@ -109,13 +109,10 @@ of its site, which runs with the check off, as those sites do.
   `max_failure_rate` (`ResampleFailureRateExceeded`). Without weights the
   check cannot fire here, because the engine rejects `m < k + 2` up front.
 - **Rotation-stability subsamples** (`rotation_stability.rs`,
-  `run_one_rotation_stability`): also default `FitOpts`. Any worker error,
+  `run_one_rotation_stability`): `check_n_eff` is at its default here too. Any worker error,
   `n_eff` or numerical, becomes a NaN row; the NaN-row filter counts them
   as skips against `max_skip_rate`. This path deliberately does not split
-  skips from failures. (The comment above the subsample's
-  `validate_and_normalize_weights` call says it "propagates InvalidWeights
-  (e.g. n_eff_sub < k+1)"; that function no longer checks `n_eff`, and the
-  error actually comes from the `pls1_fit` call below it.)
+  skips from failures.
 
 ## History note
 
