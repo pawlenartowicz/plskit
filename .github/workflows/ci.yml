@@ -119,9 +119,9 @@ jobs:
 
   # R package: R CMD check on Linux; macOS and Windows only install and
   # smoke-test. Builds in dev mode: a cargo config outside the package patches
-  # plskit and plskit-bind to this checkout. There is no committed R
-  # Cargo.lock until plskit-bind is on crates.io, so dev mode is the only way
-  # the package builds.
+  # plskit and plskit-bind to this checkout, so the package is checked against
+  # the crates of this commit, not the published ones in the committed R
+  # Cargo.lock.
   r-package:
     name: R package (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -143,9 +143,10 @@ jobs:
         if: runner.os == 'Windows'
         run: rustup target add x86_64-pc-windows-gnu
       # Caches the Linux clippy build and the canary install; R CMD check
-      # itself compiles in a temporary copy of the package. Until plskit-bind
-      # is on crates.io, rust-cache's `cargo metadata` cannot resolve the pinned
-      # crates.io requirements and logs an error; the step still succeeds.
+      # itself compiles in a temporary copy of the package. When the pinned
+      # plskit / plskit-bind version is not on crates.io, rust-cache's
+      # `cargo metadata` cannot resolve it and logs an error; the step still
+      # succeeds.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: plskit-r/src/rust

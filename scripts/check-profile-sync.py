@@ -15,10 +15,10 @@ check fails when:
    plskit-r/DESCRIPTION's `Version:` (both are pinned to the R
    package version).
 
-No R lock file is committed, so check 2 is skipped unless
---r-lock names a lock file, e.g. the dev-mode one at
-plskit-r/src/rust/target/dev-crate/Cargo.lock. Plain python3 (3.11+,
-for tomllib), no dependencies.
+Check 2 reads plskit-r/src/rust/Cargo.lock and is skipped when that
+file is absent. --r-lock names another lock file instead, e.g. the
+dev-mode one at plskit-r/src/rust/target/dev-crate/Cargo.lock. Plain
+python3 (3.11+, for tomllib), no dependencies.
 """
 
 import argparse
