@@ -803,27 +803,46 @@ pub(crate) fn pls1_fit_impl(
         }
         None => None,
     };
+    // The moments of a finite X are finite, but `x − mean` can still
+    // overflow (entries near `±f64::MAX` of both signs), and the fit then is
+    // not finite. An implicit fit that is not finite is refitted on the
+    // written copy, as `pls3::prepare` refits an implicit `X̃'Ỹ` that
+    // overflows (change together); a fit on a written matrix that is not
+    // finite scans that matrix, and a non-finite entry there is non-finite
+    // input, the answer `signal_test::prepare_cv_fold` gives the same X. A
+    // finite fit pays for no scan.
+    let implicit_fit = implicit_fit.filter(|f| f.coef.is_all_finite());
     let fit = match (implicit_fit, fx.as_mut()) {
         (Some(fit), _) => fit,
         (None, Some(f)) => {
             f.materialize(x, sqw.as_ref().map(Col::as_ref));
-            pls1_fit_prepared_fro(
+            let fit = pls1_fit_prepared_fro(
                 f.xs(),
                 y_for_nipals,
                 k_requested,
                 opts.keep,
                 opts.par,
                 x_fro,
-            )?
+            )?;
+            if !fit.coef.is_all_finite() {
+                check_finite_mat(f.xs())?;
+            }
+            fit
         }
-        (None, None) => pls1_fit_prepared_fro(
-            x_for_nipals,
-            y_for_nipals,
-            k_requested,
-            opts.keep,
-            opts.par,
-            x_fro,
-        )?,
+        (None, None) => {
+            let fit = pls1_fit_prepared_fro(
+                x_for_nipals,
+                y_for_nipals,
+                k_requested,
+                opts.keep,
+                opts.par,
+                x_fro,
+            )?;
+            if !fit.coef.is_all_finite() {
+                check_finite_mat(x_for_nipals)?;
+            }
+            fit
+        }
     };
     let k_used = fit.k_used;
     if opts.pre_standardized && opts.check_n_eff && k_used < k_requested {

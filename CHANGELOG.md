@@ -68,10 +68,12 @@ All notable changes to this project will be documented here.
   A checkout of `main` builds only in dev mode (`PLSKIT_CARGO_CONFIG`).
 - Fixed: a finite `X` with entries near `±f64::MAX`, whose
   standardization overflows, no longer gives a NaN statistic or a panic
-  in `split_nb`, `split_exact` and `auto`. A split whose held-out half
-  overflows contributes `r = 0` to `split_nb` and `split_exact`
-  (`pls1_confirmatory_test` and `pls3_confirmatory_test`, every route), as
-  a split whose training half overflows already did. The `split_nb` gate
+  in `split_nb`, `split_exact` and `auto`; nor does such a `Y` in
+  `pls3_confirmatory_test`. A split whose held-out half of `X` (or, in
+  `pls3_confirmatory_test`, of `Y`) overflows contributes `r = 0` to
+  `split_nb` and `split_exact` (`pls1_confirmatory_test` and
+  `pls3_confirmatory_test`, every route), as a split whose training half
+  overflows already did. The `split_nb` gate
   (`split_nb_gate`, and the gate inside `split_nb`, `auto` and the
   `find_k` functions) reports `stable_rank = NaN` and fires when the Gram
   matrix of the standardized `X` is not finite, where it could panic in

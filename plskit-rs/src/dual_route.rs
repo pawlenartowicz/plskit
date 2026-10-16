@@ -270,8 +270,8 @@ pub(crate) const SCORE_BAND: f64 = 1e-3;
 /// not finite (a finite y near `±f64::MAX` can overflow in `y − mean`). A
 /// null column that fails the same way is NaN instead, as in
 /// `signal_test::pooled_cv_r2_columns` (change together). Also
-/// `NonFiniteInput` when a fold's standardized training block of X is not
-/// finite, as on the primal route.
+/// `NonFiniteInput` when a fold's standardized training or validation
+/// block of X is not finite, as on the primal route.
 ///
 /// # Panics
 /// Never (all indexing is over caller-supplied fold index vectors).
@@ -334,7 +334,7 @@ pub(crate) fn pls1_cv_r2_columns(
         let bpar = crate::fit::par_fixed();
         let mut g = Mat::<f64>::zeros(n_tr, n_tr);
         let mut m = Mat::<f64>::zeros(n_val, n_tr);
-        let mut tr_finite = true;
+        let (mut tr_finite, mut val_finite) = (true, true);
         let x_fro = crate::linalg::standardized_blocks(
             x,
             &train_idx,
@@ -346,14 +346,16 @@ pub(crate) fn pls1_cv_r2_columns(
             crate::linalg::stream_block_width(n_tr.max(n_val)),
             |_, a, c| {
                 tr_finite &= a.is_all_finite();
+                val_finite &= c.is_all_finite();
                 matmul(g.as_mut(), Accum::Add, a, a.transpose(), 1.0, bpar);
                 matmul(m.as_mut(), Accum::Add, c, a.transpose(), 1.0, bpar);
             },
         );
-        // The primal fold's X check (`check_finite_mat(xs_tr)` in
-        // `signal_test::prepare_cv_fold`; change together): a non-finite
-        // standardized training block fails every column of the fold.
-        if !tr_finite {
+        // The primal fold's X checks (`check_finite_mat` of `xs_tr` and of
+        // `xs_val` in `signal_test::prepare_cv_fold`; change together): a
+        // non-finite standardized training or validation block fails every
+        // column of the fold.
+        if !(tr_finite && val_finite) {
             return (0..n_cols)
                 .map(|_| Some(Err(crate::error::PlsKitError::NonFiniteInput)))
                 .collect();

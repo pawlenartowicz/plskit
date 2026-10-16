@@ -107,14 +107,9 @@ pub(crate) fn units_at_once(n_units: usize, unit_bytes: usize) -> usize {
     usize::try_from(per_budget).map_or(n_units, |k| k.clamp(1, n_units))
 }
 
-/// Map `0..n_units` in batches of [`units_at_once`]`(n_units, unit_bytes)`:
-/// in parallel inside a batch, batch after batch, collected in unit order.
-/// The next batch starts only when the current one has ended, so the number
-/// of live units is at most the batch size even when `f` maps its columns
-/// in parallel (where a worker waiting on its columns would otherwise start
-/// another unit). A batch of 1 is a sequential loop. `unit_bytes` is the
-/// estimated size of the large buffers one unit holds. Element `u` is
-/// `f(u)` whatever the batch size, so results do not depend on it.
+/// Map `0..n_units` in batches of [`units_at_once`]`(n_units, unit_bytes)`
+/// through [`map_batches`]. `unit_bytes` is the estimated size of the large
+/// buffers one unit holds.
 pub(crate) fn map_units<T: Send>(
     n_units: usize,
     unit_bytes: usize,
@@ -127,12 +122,23 @@ pub(crate) fn map_units<T: Send>(
             log.push((n_units, k));
         }
     });
+    map_batches(n_units, k, f)
+}
+
+/// Map `0..n` in batches of `k`: in parallel inside a batch, batch after
+/// batch, collected in index order. The next batch starts only when the
+/// current one has ended, so at most `k` calls of `f` are live even when
+/// `f` uses the pool itself (where a worker waiting inside `f` would
+/// otherwise start another index). A batch of 1 or less is a sequential
+/// loop. Element `i` is `f(i)` whatever `k` is, so results do not depend
+/// on it.
+pub(crate) fn map_batches<T: Send>(n: usize, k: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     if k <= 1 {
-        return (0..n_units).map(&f).collect();
+        return (0..n).map(&f).collect();
     }
-    let mut out = Vec::with_capacity(n_units);
-    for start in (0..n_units).step_by(k) {
-        let len = k.min(n_units - start);
+    let mut out = Vec::with_capacity(n);
+    for start in (0..n).step_by(k) {
+        let len = k.min(n - start);
         out.extend(map_indexed(len, |i| f(start + i)));
     }
     out

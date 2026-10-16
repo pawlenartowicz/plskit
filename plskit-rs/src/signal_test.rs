@@ -1258,13 +1258,17 @@ pub(crate) struct CvFold {
 /// (no weights when the slice is all zero or all equal), and `pls1_fit` would renormalize
 /// that again before its √w scaling, which `sqw_fit` reproduces. The X-side
 /// check of `pls1_fit` (a finite standardized training block) runs here,
-/// once per fold on every route, instead of once per column.
+/// once per fold on every route, instead of once per column, and so does
+/// the same check on the validation block, whose non-finite entries would
+/// make every prediction of the fold non-finite.
 ///
 /// # Errors
 /// `NonFiniteInput` when the standardized training block is not finite:
 /// the error every column's fit on this fold met first (`pls1_fit` checks X
 /// before y), so the driver returns the same error a per-column fit of
-/// column 0 would.
+/// column 0 would. `NonFiniteInput` too when the standardized validation
+/// block is not finite (a finite X can overflow there alone, when a
+/// validation row sits far outside the training rows' scale).
 pub(crate) fn prepare_cv_fold(
     x: MatRef<'_, f64>,
     folds: &[Vec<usize>],
@@ -1282,12 +1286,14 @@ pub(crate) fn prepare_cv_fold(
         .collect();
     let w_tr = renormalized_slice_weights(weights, &train_idx);
     // Without weights, `xs_tr`, `xs_val` and `x_fro` are mirrored by the
-    // materialized fold of `dual_route::pls1_cv_r2_columns`, and the check
-    // of `xs_tr` by that function's first pass (change together).
+    // materialized fold of `dual_route::pls1_cv_r2_columns`, and the checks
+    // of `xs_tr` and `xs_val` by that function's first pass (change
+    // together).
     let (xs_tr, x_mean, x_scale) =
         standardize_rows(x, &train_idx, w_tr.as_ref().map(Col::as_ref), None);
     check_finite_mat(xs_tr.as_ref())?;
     let xs_val = standardize_apply_rows(x, &val_idx, x_mean.as_ref(), x_scale.as_ref(), None);
+    check_finite_mat(xs_val.as_ref())?;
     let sqw_fit = w_tr.as_ref().map(|w| fit_row_scale(w.as_ref()));
     let xs_tr_fit = sqw_fit
         .as_ref()
@@ -1500,8 +1506,9 @@ pub(crate) fn fold_unit(
 /// (`resample::fold_blocks_bytes`), the √w-scaled copy `xs_tr_fit` of the
 /// training block when `weighted`, and the fold's block: `G` (`n_tr × n_tr`)
 /// and `M` (`n_val × n_tr`) on `Nspace`, `C` (`p × p`) on `GramP`, nothing
-/// on `Primal`; and, on `Primal` and `GramP`, one PLS1 fit per column that
-/// runs at once ([`columns_bytes`]). `n_tr` is the largest training
+/// on `Primal`; and one PLS1 fit per column that runs at once
+/// ([`columns_bytes`]), which on `Nspace` is the primal fit of a column the
+/// kernel leaves undecided. `n_tr` is the largest training
 /// set.
 fn fold_unit_bytes(
     route: ReplicateRoute,
@@ -1521,10 +1528,10 @@ fn fold_unit_bytes(
     };
     let fit_copy = if weighted { copy_bytes(n_tr, p) } else { 0 };
     let fits = match route {
-        ReplicateRoute::Primal | ReplicateRoute::GramP => {
+        ReplicateRoute::Primal | ReplicateRoute::GramP | ReplicateRoute::Nspace => {
             columns_bytes(crate::fit::pls1_fit_bytes(p, k), n_cols)
         }
-        ReplicateRoute::Nspace | ReplicateRoute::Special => 0,
+        ReplicateRoute::Special => 0,
     };
     fold_blocks_bytes(n, folds, p)
         .saturating_add(fit_copy)
@@ -1652,16 +1659,38 @@ pub(crate) fn split_blocks_bytes(splits: &[SplitIdx], cols: usize) -> usize {
 /// One fit's buffers, `fit_bytes` (`fit::pls1_fit_bytes` for a PLS1 fit,
 /// `pls3::lv1_bytes` for a PLS3 LV1 fit), per replicate column of a unit
 /// that runs at once. The columns map in parallel, so at most one per thread
-/// of the pool runs. A PLS3 LV1 fit runs sequentially and does not yield its
-/// thread; a PLS1 fit past the `ParChoice::Auto` threshold uses the pool
-/// itself, and a thread waiting inside it can start another column, so there
-/// the count can be low. Counted per unit: a batch of several units shares the
-/// threads and holds less. The thread count sets only how many units run
-/// at once, never a result.
+/// of the pool runs: a PLS3 LV1 fit runs sequentially and does not yield its
+/// thread, and the PLS1 split columns, whose fit can use the pool itself,
+/// map through [`map_split_columns`]. Counted per unit: a batch of several
+/// units shares the threads and holds less. The thread count sets only how
+/// many units run at once, never a result.
 pub(crate) fn columns_bytes(fit_bytes: usize, n_cols: usize) -> usize {
     n_cols
         .min(rayon::current_num_threads())
         .saturating_mul(fit_bytes)
+}
+
+/// Map the `n_cols` replicate columns of one split whose per-column work
+/// is [`split_column_r`] on a training half of `n_tr × p` to `k`
+/// components, or a route that falls back to it (the Gram-p arm forms its
+/// first product with the same `Par`). Past the `ParChoice::Auto` threshold
+/// that fit uses the pool, and a worker waiting inside it can start another
+/// column of the same map, so the columns run in batches of the pool's
+/// thread count, the bound [`columns_bytes`] counts. Below it the fit is
+/// sequential and the columns run in one map. Element `c` is `f(c)` either
+/// way.
+pub(crate) fn map_split_columns<T: Send>(
+    n_tr: usize,
+    p: usize,
+    k: usize,
+    n_cols: usize,
+    f: impl Fn(usize) -> T + Sync,
+) -> Vec<T> {
+    let batch = match crate::fit::resolve_par(SPLIT_FIT_PAR, n_tr, p, k) {
+        Par::Seq => n_cols,
+        Par::Rayon(_) => rayon::current_num_threads(),
+    };
+    crate::resample::map_batches(n_cols, batch, f)
 }
 
 /// Per-column `z̄` over the J splits: `per_split` maps one split to its
@@ -1764,8 +1793,8 @@ pub(crate) fn draw_splits(
 /// and the r are deterministic. The J splits run in batches of
 /// `resample::map_units` by the memory budget, one unit being the split's
 /// standardized halves of X ([`prepare_split`] writes the √w scaling into
-/// them, so weights add no copy); the result does not depend on the batch
-/// size.
+/// them, so weights add no copy) and one fit's buffers; the result does not
+/// depend on the batch size.
 ///
 /// Its only production caller is `run_split_nb`, for K ≥ 2 or a sparse
 /// `keep`; `split_exact`'s refit route (`run_split_perm`) reaches the same
@@ -1791,8 +1820,10 @@ fn split_half_correlations(
     w_norm: Option<ColRef<'_, f64>>,
     keep: Option<usize>,
 ) -> Col<f64> {
-    // The splits run in batches by the memory budget, collected in split order.
-    let unit = split_blocks_bytes(splits, x.ncols());
+    // The splits run in batches by the memory budget, collected in split
+    // order; a split holds its halves of X and one fit.
+    let unit = split_blocks_bytes(splits, x.ncols())
+        .saturating_add(crate::fit::pls1_fit_bytes(x.ncols(), k));
     let r_vec = crate::resample::map_units(splits.len(), unit, |j| {
         split_half_r(x, y, k, &splits[j], w_norm, keep)
     });
@@ -2144,11 +2175,11 @@ pub(crate) fn split_unit(
 /// per run, so the per-replicate products with `G` and `M` become one
 /// product per run; the runs are fixed by `n_cols` alone, so the bits do
 /// not depend on the thread count. The columns a run hands back undecided
-/// then run the Primal arm (`split_column_r`) in a second indexed map over
-/// just those columns, so a fallback-heavy input keeps one task per column
-/// rather than one per run. Each column's value is computed from its own
-/// inputs alone, whichever worker computes it. `prep.x_finite` is the
-/// caller's precondition.
+/// then run the Primal arm (`split_column_r`) in a second map over just
+/// those columns ([`map_split_columns`]), so a fallback-heavy input keeps
+/// one task per column rather than one per run. Each column's value is
+/// computed from its own inputs alone, whichever worker computes it.
+/// `prep.x_finite` is the caller's precondition.
 pub(crate) fn split_columns_nspace(
     prep: &PreparedSplit,
     sp: &SplitIdx,
@@ -2165,7 +2196,7 @@ pub(crate) fn split_columns_nspace(
     });
     let decided: Vec<Option<f64>> = runs.into_iter().flatten().collect();
     let undecided: Vec<usize> = (0..n_cols).filter(|&c| decided[c].is_none()).collect();
-    let fallbacks = crate::resample::map_indexed(undecided.len(), |u| {
+    let fallbacks = map_split_columns(sp.tr.len(), prep.xs_tr.ncols(), k, undecided.len(), |u| {
         let yc = column_y(undecided[u]);
         split_column_r(prep, sp, &|i| yc[i], k, None)
     });
@@ -2179,10 +2210,11 @@ pub(crate) fn split_columns_nspace(
 /// The large buffers one split unit of [`split_zbars_columns`] holds on
 /// `route`, for X of `n × p`: the prepared halves `xs_tr` and `xs_te`
 /// ([`prepare_split`] writes the √w scaling into them, so weights add no
-/// copy), plus the split's block: `G` (`n_tr × n_tr`) and `M` (`n_te × n_tr`) on
-/// `Nspace`, `C` (`p × p`) on `GramP`, nothing on `Primal`; and, on `Primal`
-/// and `GramP`, one PLS1 fit per column that runs at once
-/// ([`columns_bytes`]). Every split has the same training size (the
+/// copy), plus the split's block: `G` (`n_tr × n_tr`) and `M`
+/// (`n_te × n_tr`) on `Nspace`, `C` (`p × p`) on `GramP`, nothing on
+/// `Primal`; and one PLS1 fit per column that runs at once
+/// ([`columns_bytes`]), which on `Nspace` is the primal fit of a column the
+/// kernel leaves undecided. Every split has the same training size (the
 /// split sizes depend on `n` and `k` only), so the first split's stands for
 /// all.
 fn split_unit_bytes(
@@ -2200,10 +2232,10 @@ fn split_unit_bytes(
         ReplicateRoute::Special | ReplicateRoute::Primal => 0,
     };
     let fits = match route {
-        ReplicateRoute::Primal | ReplicateRoute::GramP => {
+        ReplicateRoute::Primal | ReplicateRoute::GramP | ReplicateRoute::Nspace => {
             columns_bytes(crate::fit::pls1_fit_bytes(p, k), n_cols)
         }
-        ReplicateRoute::Nspace | ReplicateRoute::Special => 0,
+        ReplicateRoute::Special => 0,
     };
     split_blocks_bytes(splits, p)
         .saturating_add(block)
@@ -2217,10 +2249,10 @@ fn split_unit_bytes(
 /// `resample::units_at_once` prepared splits and their blocks
 /// ([`split_block`] under [`crate::fit::par_fixed`]) are alive at once,
 /// and the `n_cols` columns of each split map in parallel through
-/// [`split_unit`], the same width the replicate-outer loop had. On the
-/// `Nspace` route the
-/// columns go through [`split_columns_nspace`] instead, in fixed runs with
-/// the fallbacks mapped per column. `column_y(c)` builds column `c` (raw,
+/// [`split_unit`] ([`map_split_columns`]), the same width the
+/// replicate-outer loop had. On the `Nspace` route the columns go through
+/// [`split_columns_nspace`] instead, in fixed runs with the fallbacks
+/// mapped per column. `column_y(c)` builds column `c` (raw,
 /// length n) inside the unit (or run) that needs it, so no `B·n` buffer is
 /// held.
 /// `k <= p` is the caller's precondition; `k = 0` is reachable and gives
@@ -2259,7 +2291,7 @@ pub(crate) fn split_zbars_columns(
                     .map(fisher_z)
                     .collect()
             }
-            _ => crate::resample::map_indexed(n_cols, |c| {
+            _ => map_split_columns(sp.tr.len(), x.ncols(), k, n_cols, |c| {
                 let yc = column_y(c);
                 fisher_z(split_unit(&block, &prep, sp, &|i| yc[i], k, keep))
             }),
@@ -2341,14 +2373,16 @@ fn split_nb_correlations_nr(
         |j| nr_split_r(x, y_mat.as_ref(), &splits[j], w_norm, route_b)[0],
     );
     // Pass 2: the undecided splits run in batches of `resample::map_units`,
-    // the standardized halves of X counted per split. An undecided split is
-    // `split_half_r`'s, which standardizes both halves of X.
+    // the standardized halves of X and one fit counted per split. An
+    // undecided split is `split_half_r`'s, which standardizes both halves of
+    // X.
     let y_col = Col::<f64>::from_fn(n, |i| y_mat[(i, 0)]);
     let rows: Vec<Vec<Option<f64>>> = decided.into_iter().map(|r| vec![r]).collect();
-    let rows =
-        crate::resample::fill_pending(rows, split_blocks_bytes(splits, x.ncols()), |j, _| {
-            vec![split_half_r(x, y_col.as_ref(), 1, &splits[j], w_norm, None)]
-        });
+    let unit = split_blocks_bytes(splits, x.ncols())
+        .saturating_add(crate::fit::pls1_fit_bytes(x.ncols(), 1));
+    let rows = crate::resample::fill_pending(rows, unit, |j, _| {
+        vec![split_half_r(x, y_col.as_ref(), 1, &splits[j], w_norm, None)]
+    });
     Col::<f64>::from_fn(rows.len(), |j| rows[j][0])
 }
 
@@ -2973,7 +3007,7 @@ fn split_perm_nr_zbars(
         |j, pending| {
             let sp = &splits[j];
             let prep = prepare_split(x, sp, w_norm);
-            crate::resample::map_indexed(pending.len(), |u| {
+            map_split_columns(sp.tr.len(), x.ncols(), 1, pending.len(), |u| {
                 let col = pending[u];
                 split_column_r(&prep, sp, &|i| y_mat[(i, col)], 1, None)
             })
@@ -3028,7 +3062,6 @@ fn run_split_perm_nr(
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[allow(clippy::many_single_char_names)]
-#[allow(clippy::unnecessary_wraps)] // signature must match other run_* helpers returning PlsKitResult
 fn run_score(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -3082,6 +3115,12 @@ fn run_score(
         (None, ys)
     };
     let xs_eff: MatRef<'_, f64> = xs_w.as_ref().map_or(xs, Mat::as_ref);
+    // A finite X can overflow in `x − mean` (entries near `±f64::MAX` of
+    // both signs): non-finite input, as `pls1_fit` answers it, rather than
+    // an infinite statistic.
+    if xs_std.is_some() {
+        crate::fit::check_finite_mat(xs_eff)?;
+    }
 
     // T_obs = ||X'y||² = y'XX'y
     let par = crate::fit::par_fixed();
@@ -3230,6 +3269,12 @@ fn run_e(
     let y_te = col_row_subset(y, &te);
 
     let prep = prepare_split(x, &SplitIdx { tr, te }, w_norm);
+    // A non-finite training half is the error the fit below would return;
+    // a non-finite held-out half would make every prediction non-finite.
+    // Mirrors `prepare_cv_fold`'s two block checks (change together).
+    if !prep.x_finite {
+        return Err(PlsKitError::NonFiniteInput);
+    }
     let w_tr_ref = prep.w_tr.as_ref().map(Col::as_ref);
 
     let (ys_tr, y_mean, y_scale) = if let Some(w) = w_tr_ref {
@@ -3667,11 +3712,85 @@ mod tests {
         );
     }
 
+    /// A finite X whose centering overflows ([`centering_overflow`]) is
+    /// non-finite input to the fits and to the `score` test, as it is to
+    /// `raw_perm`: `pls1_fit` at k = 1 on a tall and a wide X (both take the
+    /// implicit route), `pls3_fit` at k = 1 with three targets, and `score`
+    /// on a design under and over its `d <= n` branch.
+    #[test]
+    fn fits_and_score_reject_x_whose_centering_overflows() {
+        for (n, p) in [(40, 6), (40, 200)] {
+            let (mut x, y) = signal_data(n, p, 3);
+            centering_overflow(&mut x);
+            let r = pls1_fit(
+                x.as_ref(),
+                y.as_ref(),
+                KSpec::Fixed(1),
+                None,
+                FitOpts::default(),
+            );
+            assert!(
+                matches!(r, Err(PlsKitError::NonFiniteInput)),
+                "pls1_fit {n}x{p}: {:?}",
+                r.map(|m| m.coef[0])
+            );
+        }
+        let (mut x, _) = signal_data(40, 6, 3);
+        centering_overflow(&mut x);
+        let y3 = Mat::<f64>::from_fn(40, 3, |i, j| x[(i, j + 1)]);
+        let r = crate::pls3_fit(
+            x.as_ref(),
+            y3.as_ref(),
+            1,
+            None,
+            crate::Pls3FitOpts::default(),
+        );
+        assert!(
+            matches!(r, Err(PlsKitError::NonFiniteInput)),
+            "pls3_fit: {:?}",
+            r.map(|m| m.k_used)
+        );
+        for (n, p) in [(40, 6), (600, 20), (20, 40)] {
+            let (mut x, y) = signal_data(n, p, 3);
+            centering_overflow(&mut x);
+            let r = pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k: 1,
+                    weights: None,
+                },
+                ConfirmatoryTestOpts {
+                    args: ConfirmatoryArgs::Score,
+                    seed: Some(3),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                matches!(r, Err(PlsKitError::NonFiniteInput)),
+                "score {n}x{p}: {r:?}"
+            );
+        }
+    }
+
+    /// A finite X that overflows only where held-out rows are standardized:
+    /// column 0 scaled by 1e-3, so that its training scale is below one,
+    /// and row 0 of it at 1e306, which a validation fold or held-out half
+    /// holding row 0 standardizes to `+∞`.
+    fn held_out_overflow(x: &mut Mat<f64>) {
+        for i in 0..x.nrows() {
+            x[(i, 0)] *= 1e-3;
+        }
+        x[(0, 0)] = 1e306;
+    }
+
     /// A finite X whose fold standardization overflows is non-finite input
     /// on every `raw_perm` route, as the y of
     /// `raw_perm_rejects_y_whose_fold_standardization_overflows_on_every_route`
-    /// is: a training fold holding rows 0, 1 and 2 (at least two of the
-    /// five do) has a standardized training block with an infinite entry.
+    /// is: in a training fold ([`centering_overflow`]: a fold holding rows
+    /// 0, 1 and 2, as at least two of the five do) or only in a validation
+    /// fold ([`held_out_overflow`]). The `e` test meets the second X in its
+    /// held-out half and rejects it the same way.
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn raw_perm_rejects_x_whose_fold_standardization_overflows_on_every_route() {
@@ -3682,12 +3801,8 @@ mod tests {
             (30, 200, 99, 2, ReplicateRoute::Nspace),
             (2500, 20, 999, 1, ReplicateRoute::GramP),
         ];
-        for (n, p, n_perm, k, want) in rows {
-            let route = raw_perm_route(n, 5, p, n_perm, k, None, false);
-            assert_eq!(route, want, "n={n} p={p} k={k}");
-            let (mut x, y) = signal_data(n, p, 61);
-            centering_overflow(&mut x);
-            let r = pls1_confirmatory_test(
+        let run = |x: &Mat<f64>, y: &Col<f64>, k, args| {
+            pls1_confirmatory_test(
                 ConfirmatoryTestInput::Raw {
                     x: x.as_ref(),
                     y: y.as_ref(),
@@ -3695,16 +3810,29 @@ mod tests {
                     weights: None,
                 },
                 ConfirmatoryTestOpts {
-                    args: ConfirmatoryArgs::RawPerm { n_perm, n_folds: 5 },
+                    args,
                     seed: Some(3),
                     ..Default::default()
                 },
-            );
-            assert!(
-                matches!(r, Err(PlsKitError::NonFiniteInput)),
-                "{route:?}: {r:?}"
-            );
+            )
+        };
+        for overflow in [centering_overflow, held_out_overflow] {
+            for (n, p, n_perm, k, want) in rows {
+                let route = raw_perm_route(n, 5, p, n_perm, k, None, false);
+                assert_eq!(route, want, "n={n} p={p} k={k}");
+                let (mut x, y) = signal_data(n, p, 61);
+                overflow(&mut x);
+                let r = run(&x, &y, k, ConfirmatoryArgs::RawPerm { n_perm, n_folds: 5 });
+                assert!(
+                    matches!(r, Err(PlsKitError::NonFiniteInput)),
+                    "{route:?}: {r:?}"
+                );
+            }
         }
+        let (mut x, y) = signal_data(40, 6, 61);
+        held_out_overflow(&mut x);
+        let r = run(&x, &y, 1, ConfirmatoryArgs::E);
+        assert!(matches!(r, Err(PlsKitError::NonFiniteInput)), "e: {r:?}");
     }
 
     /// A held-out half that overflows in standardization gives `r = 0`,
@@ -3730,13 +3858,11 @@ mod tests {
     }
 
     /// Every PLS1 split statistic stays finite on an X that overflows only
-    /// in held-out halves: column 0 scaled by 1e-3, so that its training
-    /// scale is below one, and row 0 of it at 1e306, which a held-out half
-    /// standardizes to `+∞`. Checked on `split_nb` at K = 1 (the no-refit
-    /// body) and K = 2, on `split_exact` on its no-refit route and on each
-    /// refit route (the two Gram routes agreeing with the primal), on a
-    /// weighted run, whose held-out half carries √w, and on `split_nb`
-    /// forced past a gate that fired on a NaN stable rank.
+    /// in held-out halves ([`held_out_overflow`]). Checked on `split_nb` at
+    /// K = 1 (the no-refit body) and K = 2, on `split_exact` on its no-refit
+    /// route and on each refit route (the two Gram routes agreeing with the
+    /// primal), on a weighted run, whose held-out half carries √w, and on
+    /// `split_nb` forced past a gate that fired on a NaN stable rank.
     #[test]
     #[allow(clippy::many_single_char_names, clippy::too_many_lines)]
     #[allow(clippy::cast_precision_loss)]
@@ -3813,10 +3939,7 @@ mod tests {
                 );
             }
             let (mut x, y) = signal_data(n, p, 11);
-            for i in 0..n {
-                x[(i, 0)] *= 1e-3;
-            }
-            x[(0, 0)] = 1e306;
+            held_out_overflow(&mut x);
             let call = || {
                 pls1_confirmatory_test(
                     ConfirmatoryTestInput::Raw {
@@ -3852,10 +3975,7 @@ mod tests {
         }
 
         let (mut x, y) = signal_data(40, 6, 11);
-        for i in 0..40 {
-            x[(i, 0)] *= 1e-3;
-        }
-        x[(0, 0)] = 1e306;
+        held_out_overflow(&mut x);
         let w = Col::<f64>::from_fn(40, |i| 1.0 + (i % 3) as f64);
         let r = pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
@@ -5250,9 +5370,11 @@ mod tests {
     /// A PLS1 unit whose replicate columns run in parallel counts its
     /// blocks of X and one fit's buffers per column that can run at once:
     /// one per thread, at most the column count. A budget of two such units
-    /// runs two folds or splits at once, on a pool of 1 thread and on a pool
-    /// of 4, for `pooled_cv_r2_columns` and `split_zbars_columns` on the
-    /// primal route.
+    /// runs two folds or splits at once and a byte less runs one, on a pool
+    /// of 1 thread and on a pool of 4, for `pooled_cv_r2_columns` and
+    /// `split_zbars_columns` on the primal route and on the n-space route
+    /// (whose undecided columns fall back to the primal fit; the n-space
+    /// unit adds `G` and `M`).
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn pls1_column_units_count_one_fit_per_running_column() {
@@ -5273,46 +5395,128 @@ mod tests {
             }
         };
         let fit = pls1_fit_bytes(p, k);
+        let (fold_n_tr, split_n_tr) = (n - folds[0].len(), splits[0].tr.len());
         for threads in [1, 4] {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .build()
                 .unwrap();
-            let budget = |blocks: usize| u64::try_from(2 * (blocks + threads * fit)).unwrap();
-            let (_, log) = pool.install(|| {
-                crate::resample::with_batch_log(|| {
-                    crate::fit::with_budget(budget(fold_blocks_bytes(n, &folds, p)), || {
-                        pooled_cv_r2_columns(
-                            ReplicateRoute::Primal,
-                            x.as_ref(),
-                            &folds,
-                            None,
-                            k,
-                            None,
-                            n_cols,
-                            &column_y,
-                        )
-                    })
+            for route in [ReplicateRoute::Primal, ReplicateRoute::Nspace] {
+                let gram = |blocks: usize| match route {
+                    ReplicateRoute::Nspace => blocks,
+                    _ => 0,
+                };
+                let fold_unit = fold_blocks_bytes(n, &folds, p)
+                    + gram(fold_blocks_bytes(n, &folds, fold_n_tr))
+                    + threads * fit;
+                let split_unit = split_blocks_bytes(&splits, p)
+                    + gram(split_blocks_bytes(&splits, split_n_tr))
+                    + threads * fit;
+                for (extra, batch) in [(1, 1), (0, 2)] {
+                    let budget = |unit: usize| u64::try_from(2 * unit - extra).unwrap();
+                    let (_, log) = pool.install(|| {
+                        crate::resample::with_batch_log(|| {
+                            crate::fit::with_budget(budget(fold_unit), || {
+                                pooled_cv_r2_columns(
+                                    route,
+                                    x.as_ref(),
+                                    &folds,
+                                    None,
+                                    k,
+                                    None,
+                                    n_cols,
+                                    &column_y,
+                                )
+                            })
+                        })
+                    });
+                    crate::resample::assert_batches(&log, 4, batch, 1);
+                    let (_, log) = pool.install(|| {
+                        crate::resample::with_batch_log(|| {
+                            crate::fit::with_budget(budget(split_unit), || {
+                                split_zbars_columns(
+                                    route,
+                                    x.as_ref(),
+                                    &splits,
+                                    None,
+                                    k,
+                                    None,
+                                    n_cols,
+                                    &column_y,
+                                )
+                            })
+                        })
+                    });
+                    crate::resample::assert_batches(&log, 4, batch, 1);
+                }
+            }
+        }
+    }
+
+    /// `map_split_columns` keeps at most one column per thread live when
+    /// the per-column fit is past the `ParChoice::Auto` threshold (here
+    /// `n_tr·p·k = 1000·1000·1`), even when each column uses the pool
+    /// itself: a worker waiting on its own column's nested tasks would
+    /// otherwise start another column. Every column's value comes back in
+    /// column order.
+    #[test]
+    fn map_split_columns_bounds_live_columns_past_the_auto_threshold() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let (live, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap();
+        let out = pool.install(|| {
+            map_split_columns(1000, 1000, 1, 64, |c| {
+                peak.fetch_max(live.fetch_add(1, SeqCst) + 1, SeqCst);
+                let s: usize = crate::resample::map_indexed(16, |i| {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    i * c
                 })
-            });
-            crate::resample::assert_batches(&log, 4, 2, 1);
-            let (_, log) = pool.install(|| {
-                crate::resample::with_batch_log(|| {
-                    crate::fit::with_budget(budget(split_blocks_bytes(&splits, p)), || {
-                        split_zbars_columns(
-                            ReplicateRoute::Primal,
-                            x.as_ref(),
-                            &splits,
-                            None,
-                            k,
-                            None,
-                            n_cols,
-                            &column_y,
-                        )
-                    })
-                })
-            });
-            crate::resample::assert_batches(&log, 4, 2, 1);
+                .into_iter()
+                .sum();
+                live.fetch_sub(1, SeqCst);
+                s
+            })
+        });
+        assert_eq!(out, (0..64).map(|c| 120 * c).collect::<Vec<usize>>());
+        assert!(peak.load(SeqCst) <= 4, "peak {}", peak.load(SeqCst));
+    }
+
+    /// A PLS1 split loop with one fit per split counts the split's halves of
+    /// X and that fit's buffers: a budget of two such units runs two of the
+    /// four splits at once, a byte less runs one. `split_half_correlations`
+    /// at K = 2, and the second pass of `split_nb_correlations_nr` at K = 1
+    /// (a constant X leaves every split undecided).
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn pls1_single_fit_split_units_count_the_fit() {
+        use crate::fit::pls1_fit_bytes;
+        let (n, p) = (40_usize, 12_usize);
+        let (x, y) = synth(n, p, 3, 4.0, 7);
+        let xc = Mat::<f64>::from_fn(n, p, |_, j| (j + 1) as f64);
+        for k in [1_usize, 2] {
+            let (_, mut rng) = crate::rng::resolve_seed(Some(3)).unwrap();
+            let splits = draw_splits(n, k, 4, &mut rng).unwrap();
+            let unit = split_blocks_bytes(&splits, p) + pls1_fit_bytes(p, k);
+            for (budget, batch) in [(2 * unit - 1, 1), (2 * unit, 2)] {
+                let ((), log) = crate::resample::with_batch_log(|| {
+                    crate::fit::with_budget(u64::try_from(budget).unwrap(), || {
+                        if k == 2 {
+                            split_half_correlations(x.as_ref(), y.as_ref(), k, &splits, None, None);
+                        } else {
+                            split_nb_correlations_nr(xc.as_ref(), y.as_ref(), &splits, None);
+                        }
+                    });
+                });
+                // The last call is the refit loop (the second pass at K = 1).
+                assert_eq!(
+                    log.last(),
+                    Some(&(4, batch)),
+                    "k={k} budget={budget}; log {log:?}"
+                );
+            }
         }
     }
 

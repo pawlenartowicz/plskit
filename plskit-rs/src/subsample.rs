@@ -1618,9 +1618,11 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
     // holds at most two n-row copies of X at once: the bootstrap fit's
     // standardized rows and, when weighted, their √w-scaled copy (the
     // subsample fit's copies, of m rows, and the n - m hold-out rows are
-    // smaller and not alive at the same time). The unit counts the two
-    // copies whether weighted or not.
-    let unit = crate::resample::copy_bytes(n, x.ncols()).saturating_mul(2);
+    // smaller and not alive at the same time), and one fit's buffers. The
+    // unit counts the two copies whether weighted or not.
+    let unit = crate::resample::copy_bytes(n, x.ncols())
+        .saturating_mul(2)
+        .saturating_add(crate::fit::pls1_fit_bytes(x.ncols(), k));
     let outcomes: Vec<WorkerOutcome> =
         crate::resample::map_units_seeded(rng, opts.n_boot, unit, |_, child| {
             match run_one_confirmatory(x, y, k, m, pre_std, weights, child) {
@@ -2042,6 +2044,12 @@ mod tests_engine {
             assert_eq!(one, all, "weighted={}", weights.is_some());
             crate::resample::assert_batches(&log_one, 100, 1, 1);
             crate::resample::assert_batches(&log_all, 100, 100, 1);
+            // A replicate counts two n-row copies of X and one fit's buffers.
+            let unit = 2 * crate::resample::copy_bytes(n, 6) + crate::fit::pls1_fit_bytes(6, k);
+            for (budget, batch) in [(2 * unit - 1, 1), (2 * unit, 2)] {
+                let (_, log) = run(u64::try_from(budget).unwrap());
+                crate::resample::assert_batches(&log, 100, batch, 1);
+            }
         }
     }
 }

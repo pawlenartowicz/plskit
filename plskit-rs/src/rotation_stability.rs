@@ -252,14 +252,16 @@ pub(crate) fn rotation_stability_impl(
 
     let pre_std = opts.pre_standardized;
     // The resamples run in batches by the memory budget. One resample holds
-    // the m standardized (or gathered) rows of X its fit takes and, when
-    // weighted, their √w-scaled copy written inside the fit.
+    // the m standardized (or gathered) rows of X its fit takes, when
+    // weighted their √w-scaled copy written inside the fit, and the fit's
+    // buffers.
     let sub_copy = crate::resample::copy_bytes(m, d);
-    let unit = if w_norm.is_some() {
+    let copies = if w_norm.is_some() {
         sub_copy.saturating_mul(2)
     } else {
         sub_copy
     };
+    let unit = copies.saturating_add(crate::fit::pls1_fit_bytes(d, k));
     let rows: Vec<RotationStabilityWorkerRow> =
         crate::resample::map_units_seeded(&mut rng, opts.n_boot, unit, |_, child| {
             run_one_rotation_stability(
@@ -1078,6 +1080,7 @@ mod tests {
     /// The paired bootstrap seed comes from the parent generator after the
     /// loop, so the output also pins the parent's state.
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn rotation_stability_does_not_depend_on_the_budget() {
         let (x, y) = synth_factor_model(120, 17);
         let w = crate::test_support::test_weights(120);
@@ -1109,6 +1112,16 @@ mod tests {
             assert_eq!(one, all, "weighted={}", weights.is_some());
             crate::resample::assert_batches(&log_one, 100, 1, 1);
             crate::resample::assert_batches(&log_all, 100, 100, 1);
+            // A resample counts its m rows of X (twice when weighted) and
+            // one fit's buffers: m = ceil(120^0.7) = 29.
+            let (m, d) = (29, x.ncols());
+            let copies = if weights.is_some() { 2 } else { 1 };
+            let unit =
+                copies * crate::resample::copy_bytes(m, d) + crate::fit::pls1_fit_bytes(d, 2);
+            for (budget, batch) in [(2 * unit - 1, 1), (2 * unit, 2)] {
+                let (_, log) = run(u64::try_from(budget).unwrap());
+                crate::resample::assert_batches(&log, 100, batch, 1);
+            }
         }
     }
 }

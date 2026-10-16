@@ -560,18 +560,25 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
     let raw_perm = |n_perm, n_folds| ConfirmatoryArgs::RawPerm { n_perm, n_folds };
     vec![
         // `split_half_correlations` (K >= 2 refits on prepared halves; the
-        // √w scaling is written into the halves, so weights add no copy).
-        case("pls1 split_nb k=2", split_copy, 2, move || {
-            split_nb_out(&pls1_test(x, y, 2, None, SPLIT_NB, None, 11))
-        }),
-        case("pls1 split_nb k=2 weighted", split_copy, 2, move || {
-            split_nb_out(&pls1_test(x, y, 2, Some(w), SPLIT_NB, None, 12))
-        }),
+        // √w scaling is written into the halves, so weights add no copy):
+        // the halves of X and one PLS1 fit.
+        case(
+            "pls1 split_nb k=2",
+            split_copy + pls1_fit_bytes(PP, 2),
+            2,
+            move || split_nb_out(&pls1_test(x, y, 2, None, SPLIT_NB, None, 11)),
+        ),
+        case(
+            "pls1 split_nb k=2 weighted",
+            split_copy + pls1_fit_bytes(PP, 2),
+            2,
+            move || split_nb_out(&pls1_test(x, y, 2, Some(w), SPLIT_NB, None, 12)),
+        ),
         // The same loop with each split's fit past the `Auto` threshold, so
         // a batch runs fits that use the pool themselves.
         case(
             "pls1 split_nb k=2 200x6000",
-            2 * copy(AUTO_N / 2, AUTO_P),
+            2 * copy(AUTO_N / 2, AUTO_P) + pls1_fit_bytes(AUTO_P, 2),
             2,
             move || {
                 split_nb_out(&pls1_test(
@@ -580,16 +587,21 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
             },
         ),
         // `split_nb_correlations_nr`'s second pass: a constant X leaves
-        // every split undecided. Its first pass runs one split at a time at
-        // this budget.
-        case("pls1 split_nb k=1 constant X", split_copy, 2, move || {
-            split_nb_out(&pls1_test(&d.xc, y, 1, None, SPLIT_NB, None, 13))
-        }),
+        // every split undecided: the halves of X and one PLS1 fit. Its first
+        // pass runs one split at a time at this budget.
+        case(
+            "pls1 split_nb k=1 constant X",
+            split_copy + pls1_fit_bytes(PP, 1),
+            2,
+            move || split_nb_out(&pls1_test(&d.xc, y, 1, None, SPLIT_NB, None, 13)),
+        ),
         // `split_zbars_columns` on the n-space route (dense, unweighted,
-        // k = 2, 20·(40 + 400) < 400·40): the halves of X plus `G` and `M`.
+        // k = 2, 20·(40 + 400) < 400·40): the halves of X plus `G` and `M`,
+        // and one PLS1 fit per thread for the columns the kernel leaves
+        // undecided (19 + 1 columns); sized on the pool of 4.
         case(
             "split_exact k=2",
-            split_copy + split_blocks(P_SPLIT_TR),
+            split_copy + split_blocks(P_SPLIT_TR) + MAX_THREADS * pls1_fit_bytes(PP, 2),
             2,
             move || format!("{:?}", pls1_test(x, y, 2, None, SPLIT_EXACT, None, 14)),
         ),
@@ -629,10 +641,12 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
             },
         ),
         // `pooled_cv_r2_columns` on the n-space route (32·(40 + 400) <
-        // 400·40): the fold's two blocks of X plus `G` and `M`.
+        // 400·40): the fold's two blocks of X plus `G` and `M`, and one
+        // PLS1 fit per thread for the columns the kernel leaves undecided
+        // (19 + 1 columns); sized on the pool of 4.
         case(
             "raw_perm k=2",
-            fold_copy + fold_blocks(P_FOLD_TR),
+            fold_copy + fold_blocks(P_FOLD_TR) + MAX_THREADS * pls1_fit_bytes(PP, 2),
             2,
             move || {
                 format!(
@@ -777,23 +791,29 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
             },
         ),
         // `pls1_subsample_inference_confirmatory`: two n-row copies of X
-        // per replicate. `score` performs no fit, so the CI is the only
-        // loop.
-        case("ci (score) k=2", 2 * one_copy, 3, move || {
-            let ci = CIOpts {
-                n_boot: P_BOOT,
-                m_rate: P_M_RATE,
-                ..CIOpts::default()
-            };
-            format!(
-                "{:?}",
-                pls1_test(x, y, 2, None, ConfirmatoryArgs::Score, Some(ci), 30)
-            )
-        }),
-        // `rotation_stability_impl`: the m subsample rows of X.
+        // and one PLS1 fit per replicate. `score` performs no fit, so the CI
+        // is the only loop.
+        case(
+            "ci (score) k=2",
+            2 * one_copy + pls1_fit_bytes(PP, 2),
+            3,
+            move || {
+                let ci = CIOpts {
+                    n_boot: P_BOOT,
+                    m_rate: P_M_RATE,
+                    ..CIOpts::default()
+                };
+                format!(
+                    "{:?}",
+                    pls1_test(x, y, 2, None, ConfirmatoryArgs::Score, Some(ci), 30)
+                )
+            },
+        ),
+        // `rotation_stability_impl`: the m subsample rows of X and one PLS1
+        // fit.
         case(
             "pls1_rotation_stability k=2",
-            copy(P_ROT_M, PP),
+            copy(P_ROT_M, PP) + pls1_fit_bytes(PP, 2),
             3,
             move || {
                 let out = pls1_rotation_stability(

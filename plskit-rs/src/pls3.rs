@@ -541,9 +541,17 @@ fn prepare(
     };
     let mut a = prepared.cross_cov(x, y);
     // Entries of `x` near `f64::MAX` overflow the implicit route's raw
-    // `X'Ỹ`; the written copy's products stay finite.
+    // `X'Ỹ`; the written copy's products stay finite unless `x − mean`
+    // itself overflowed (entries near `±f64::MAX` of both signs). Then the
+    // copy holds a non-finite entry, which is non-finite input, as in
+    // `fit::pls1_fit_impl` (change together), and so does a standardized Y
+    // that overflowed; an `A` that is finite pays for no scan.
     if prepared.x_implicit.is_some() && !a.is_all_finite() {
         a = prepared.materialize(x, y);
+    }
+    if !a.is_all_finite() {
+        check_finite_mat(prepared.xs(x))?;
+        check_finite_mat(prepared.ys(y))?;
     }
     Ok((prepared, a))
 }
