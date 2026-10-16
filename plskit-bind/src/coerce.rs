@@ -46,7 +46,9 @@ pub(crate) fn to_usize(v: &Value<'_>) -> Result<usize, String> {
             .ok()
             .and_then(|n| usize::try_from(n).ok())
             .ok_or_else(bad),
-        Value::F64(x) if whole_f64(x) => Ok(x as usize),
+        // Through `u64`, exact up to 2^53, so a 32-bit `usize` rejects
+        // what it cannot hold instead of saturating.
+        Value::F64(x) if whole_f64(x) => usize::try_from(x as u64).map_err(|_| bad()),
         _ => Err(bad()),
     }
 }
@@ -99,11 +101,7 @@ pub(crate) fn to_str<'v>(v: &'v Value<'_>) -> Result<&'v str, String> {
 
 /// A bool as a number: `true` is 1, `false` is 0 (numpy's cast).
 fn bool_f64(b: bool) -> f64 {
-    if b {
-        1.0
-    } else {
-        0.0
-    }
+    if b { 1.0 } else { 0.0 }
 }
 
 /// A 1-D float array. A scalar widens to one element; an integer or bool

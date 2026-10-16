@@ -225,7 +225,7 @@ mod tests_indices {
 use faer::{Col, ColRef, Mat, MatRef};
 
 use crate::error::{PlsKitError, PlsKitResult};
-use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
+use crate::fit::{FitOpts, KSpec, pls1_fit_impl};
 use crate::linalg::{col_row_subset, row_subset};
 
 /// Per-resample outputs for the confirmatory CI branch. Per-variable arrays
@@ -743,11 +743,7 @@ fn standard_normal_inv(p: f64) -> f64 {
             + 1.0);
         num / den
     };
-    if q < 0.0 {
-        -val
-    } else {
-        val
-    }
+    if q < 0.0 { -val } else { val }
 }
 
 /// Reduce `Option<ConfirmatoryWorkerRow>` rows under the `max_failure_rate`
@@ -1671,7 +1667,7 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
 #[cfg(test)]
 mod tests_engine {
     use super::*;
-    use crate::fit::{pls1_fit, FitOpts, KSpec};
+    use crate::fit::{FitOpts, KSpec, pls1_fit};
     use crate::rng::resolve_seed;
     use crate::test_support::synth;
     use faer::{Col, Mat};

@@ -1,12 +1,25 @@
 # The Rust static library is built by tools/cargo-build.R, which also
 # handles the PLSKIT_CARGO_CONFIG dev mode (in-repo crates via [patch]).
+# Under webR it copies its --target build into LIBDIR; mirrors the wasm
+# copy in tools/cargo-build.R — change together.
 LIBDIR = ./rust/target/release
 STATLIB = $(LIBDIR)/libplskit_r.a
 PKG_LIBS = -L$(LIBDIR) -lplskit_r
 
+all: $(SHLIB) rust_clean
+
 .PHONY: $(STATLIB)
 
 $(SHLIB): $(STATLIB)
+
+# R CMD INSTALL records the symbols of every libplskit_r.a in the package
+# once this makefile is done, and R CMD check reports C entry points found
+# there; Rust's std references abort and _exit. Check also scans the
+# Makefiles of the crates unpacked from rust/vendor.tar.xz. Both are
+# removed once plskit.so is linked. rust_clean in src/Makevars.win removes
+# rust/vendor the same way — change together.
+rust_clean: $(SHLIB)
+	rm -Rf $(STATLIB) ./rust/vendor
 
 $(STATLIB):
 	"$(R_HOME)/bin/Rscript" ../tools/cargo-build.R

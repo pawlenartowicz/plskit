@@ -1,15 +1,17 @@
 //! `PLSKIT_MEMORY_BUDGET` end to end, and the bits of the resampling routes
 //! that fit PLS1 inside each unit.
 //!
-//! `memory_budget_does_not_change_results` is the binary's only test that
-//! runs by default, so setting the process-wide variable races nothing (the
-//! tests of one binary run on parallel threads). Every resampling loop the
-//! budget batches runs through its public entry point at the budgets `0`
-//! (one unit at a time), a value that gives two or three units at once, and
-//! unset (the default, every unit of these small shapes at once), each
-//! inside Rayon pools of 1 and 4 threads (`ThreadPoolBuilder::install`); the
-//! `Debug` renderings of the six results must be identical (see
-//! `thread_count_parity.rs` for why that compares bits).
+//! `memory_budget_does_not_change_results` re-runs itself in child processes
+//! (`common::run_child`), one per budget, because the library reads the
+//! variable on each call and the test thread cannot change the environment
+//! safely. Every resampling loop the budget batches runs through its public
+//! entry point at the budgets `0` (one unit at a time), a value that gives two
+//! or three units at once (`Case::mid`, which differs per case, so that
+//! budget gets one child per case), and unset (the default, every unit of
+//! these small shapes at once), each inside Rayon pools of 1 and 4 threads
+//! (`ThreadPoolBuilder::install`); a child prints one result per case and
+//! pool. The `Debug` renderings of the six results of a case must be identical
+//! (see `thread_count_parity.rs` for why that compares bits).
 //!
 //! `memory_budget_bits_probe` (ignored; run it with `--ignored --nocapture`)
 //! prints the outputs of those routes on shapes past the `ParChoice::Auto`
@@ -22,14 +24,17 @@
 
 mod common;
 
-use common::synth;
+use std::ffi::OsStr;
+
+use common::{child_arg, emit_result, run_child, synth};
+use faer::linalg::svd::{ComputeSvdVectors, svd_scratch};
 use faer::{Col, Mat};
 use plskit::{
-    pls1_confirmatory_test, pls1_find_k_optimal, pls1_fit, pls1_rotation_stability,
-    pls3_confirmatory_test, spls1_find_keep_optimal, CIOpts, ConfirmatoryArgs,
-    ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput, FindKOptimalOpts,
-    FindKeepOptimalOpts, FitOpts, KSpec, Pls3ConfirmatoryTestOpts, PlsKitError,
-    RotationStabilityMethod, RotationStabilityOpts, Selector, VarimaxArgs,
+    CIOpts, ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput,
+    FindKOptimalOpts, FindKeepOptimalOpts, FitOpts, KSpec, Pls3ConfirmatoryTestOpts, PlsKitError,
+    RotationStabilityMethod, RotationStabilityOpts, Selector, VarimaxArgs, pls1_confirmatory_test,
+    pls1_find_k_optimal, pls1_fit, pls1_rotation_stability, pls3_confirmatory_test,
+    spls1_find_keep_optimal,
 };
 
 /// Component count of every case.
@@ -327,15 +332,21 @@ fn memory_budget_bits_probe() {
 }
 
 const BUDGET_VAR: &str = "PLSKIT_MEMORY_BUDGET";
+/// A `PLSKIT_NUM_THREADS` cap would run the calls on plskit's own pool, not on
+/// the pools installed by the test.
+const THREADS_VAR: &str = "PLSKIT_NUM_THREADS";
+/// Must equal the name of the test function.
+const TEST: &str = "memory_budget_does_not_change_results";
 
 /// Rows of every parity case. Splits take `split_sizes(40, k) = (20, 20)`
 /// at `k <= 2`; folds of 8 rows leave 32 training rows.
 const PN: usize = 40;
 /// Columns of X in the parity cases: `p >> n`, off every p-space Gram route.
 const PP: usize = 400;
-/// Columns of X in the constant-X cases on a Gram route: a copy of X
-/// (`8·40·13_120` bytes) is within 0.2% of the Gram unit, so one budget
-/// gives both passes two units at once.
+/// Columns of X in the constant-X cases on a Gram route. At each case's
+/// middle budget, the cases `raw_perm k=1 constant X wide` and
+/// `pls3 split_exact constant X wide keep_y=1` run in batches of units; their
+/// comments give the batch sizes.
 const PP_WIDE: usize = 13_120;
 /// Columns of Y in the PLS3 cases.
 const PQ: usize = 3;
@@ -359,13 +370,62 @@ const P_M_RATE: f64 = 0.7;
 /// Rotation stability's subsample rows, `ceil(40^0.7)`.
 const P_ROT_M: usize = 14;
 
-/// Bytes of an `f64` copy of `rows × cols` values, as the loops count it.
+/// Bytes of an owned `f64` matrix of `rows × cols`, as the loops count it:
+/// `resample::copy_bytes` (change together), the rows padded to a multiple
+/// of 8.
 const fn copy(rows: usize, cols: usize) -> usize {
-    8 * rows * cols
+    8 * rows.next_multiple_of(8) * cols
 }
 
-/// The two 2 MiB stream blocks every Gram-route and streamed-pass unit counts.
-const STREAM_BLOCKS: usize = 2 * (2 << 20);
+/// The two stream blocks a Gram-route or streamed-pass unit counts for
+/// halves of `n_a` and `n_b` rows: `linalg::stream_blocks_bytes` (change
+/// together), at `linalg::stream_block_width(max(n_a, n_b))` columns, 2 MiB
+/// of the larger half rounded down to a multiple of 8 columns, at least 8.
+const fn stream_blocks(n_a: usize, n_b: usize) -> usize {
+    let rows = if n_a > n_b { n_a } else { n_b };
+    let w = (2 << 20) / (8 * rows) / 8 * 8;
+    let w = if w < 8 { 8 } else { w };
+    copy(n_a, w) + copy(n_b, w)
+}
+
+/// One PLS3 LV1 fit on a `p × q` cross-product: `pls3::lv1_bytes` (change
+/// together), `A`, the thin SVD's `U` and `V`, and faer's SVD scratch.
+fn lv1(p: usize, q: usize) -> usize {
+    let r = p.min(q);
+    let scratch = svd_scratch::<f64>(
+        p,
+        q,
+        ComputeSvdVectors::Thin,
+        ComputeSvdVectors::Thin,
+        faer::Par::Seq,
+        faer::Spec::default(),
+    )
+    .size_bytes();
+    copy(p, q) + copy(p, r) + copy(q, r) + scratch
+}
+
+/// One PLS1 fit on `p` columns to `k` components: `fit::pls1_fit_bytes`
+/// (change together).
+const fn pls1_fit_bytes(p: usize, k: usize) -> usize {
+    5 * copy(p, k) + 4 * copy(p, 1)
+}
+
+/// One fold of `find_k::cv_select`: `find_k::cv_fold_bytes` (change
+/// together), one PLS1 fit to `k` components, a `p × (k + 2)` matrix and a
+/// block of validation rows of X: 2 MiB of `p`-wide rows rounded down to a
+/// multiple of 8, at least 8 (`linalg::stream_block_width(p)`), and at most
+/// `n_val`.
+const fn cv_fold(p: usize, k: usize, n_val: usize) -> usize {
+    let rows = (2 << 20) / (8 * p) / 8 * 8;
+    let rows = if rows < 8 { 8 } else { rows };
+    let rows = if rows < n_val { rows } else { n_val };
+    pls1_fit_bytes(p, k) + copy(p, k + 2) + copy(rows, p)
+}
+
+/// The larger of the two pools each case runs on. A unit whose columns run
+/// in parallel counts one fit per thread, so the middle budgets of those
+/// cases are sized on this pool, and the pool of 1 can run more units at once.
+const MAX_THREADS: usize = 4;
 
 /// One public call and its middle budget: `units` and a half times the
 /// `unit_bytes` of the loop the case exists for, so the budget gives
@@ -481,28 +541,37 @@ const SPLIT_EXACT: ConfirmatoryArgs = ConfirmatoryArgs::SplitExact {
 #[allow(clippy::too_many_lines)]
 fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
     let (x, y, w) = (&d.x, &d.y, &d.w);
+    // Two blocks of `cols` columns on the training rows and on the other
+    // rows of a split or a fold: two matrices, padded apart
+    // (`signal_test::split_blocks_bytes`, `resample::fold_blocks_bytes`; change
+    // together).
+    let split_blocks = |cols| 2 * copy(P_SPLIT_TR, cols);
+    let fold_blocks = |cols| copy(P_FOLD_TR, cols) + copy(PN - P_FOLD_TR, cols);
     let one_copy = copy(PN, PP);
+    let split_copy = split_blocks(PP);
+    let fold_copy = fold_blocks(PP);
     let fold_fit_copy = copy(P_FOLD_TR, PP);
-    // A Gram-route unit: `G` and `M` (`n_tr · n` values) and the stream
-    // blocks.
-    let split_gram = copy(P_SPLIT_TR, PN) + STREAM_BLOCKS;
-    let fold_gram = copy(P_FOLD_TR, PN) + STREAM_BLOCKS;
-    let wide_copy = copy(PN, PP_WIDE);
+    // A Gram-route unit: `G` (`n_tr × n_tr`), `M` (`n_te × n_tr`) and the
+    // stream blocks.
+    let split_gram = split_blocks(P_SPLIT_TR) + stream_blocks(P_SPLIT_TR, PN - P_SPLIT_TR);
+    let fold_gram = fold_blocks(P_FOLD_TR) + stream_blocks(P_FOLD_TR, PN - P_FOLD_TR);
+    let wide_fold_copy = fold_blocks(PP_WIDE);
+    let lv1_pls3 = lv1(PP, PQ);
     let raw_perm = |n_perm, n_folds| ConfirmatoryArgs::RawPerm { n_perm, n_folds };
     vec![
         // `split_half_correlations` (K >= 2 refits on prepared halves; the
         // √w scaling is written into the halves, so weights add no copy).
-        case("pls1 split_nb k=2", one_copy, 2, move || {
+        case("pls1 split_nb k=2", split_copy, 2, move || {
             split_nb_out(&pls1_test(x, y, 2, None, SPLIT_NB, None, 11))
         }),
-        case("pls1 split_nb k=2 weighted", one_copy, 2, move || {
+        case("pls1 split_nb k=2 weighted", split_copy, 2, move || {
             split_nb_out(&pls1_test(x, y, 2, Some(w), SPLIT_NB, None, 12))
         }),
         // The same loop with each split's fit past the `Auto` threshold, so
         // a batch runs fits that use the pool themselves.
         case(
             "pls1 split_nb k=2 200x6000",
-            copy(AUTO_N, AUTO_P),
+            2 * copy(AUTO_N / 2, AUTO_P),
             2,
             move || {
                 split_nb_out(&pls1_test(
@@ -513,14 +582,14 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
         // `split_nb_correlations_nr`'s second pass: a constant X leaves
         // every split undecided. Its first pass runs one split at a time at
         // this budget.
-        case("pls1 split_nb k=1 constant X", one_copy, 2, move || {
+        case("pls1 split_nb k=1 constant X", split_copy, 2, move || {
             split_nb_out(&pls1_test(&d.xc, y, 1, None, SPLIT_NB, None, 13))
         }),
         // `split_zbars_columns` on the n-space route (dense, unweighted,
-        // k = 2, 20·(40 + 400) < 400·40): a copy of X plus `G` and `M`.
+        // k = 2, 20·(40 + 400) < 400·40): the halves of X plus `G` and `M`.
         case(
             "split_exact k=2",
-            one_copy + copy(P_SPLIT_TR, PN),
+            split_copy + split_blocks(P_SPLIT_TR),
             2,
             move || format!("{:?}", pls1_test(x, y, 2, None, SPLIT_EXACT, None, 14)),
         ),
@@ -529,21 +598,28 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
         // for `fill_pending`.
         case(
             "split_exact k=1",
-            STREAM_BLOCKS + copy(PN - P_SPLIT_TR, P_SPLIT_TR),
+            stream_blocks(P_SPLIT_TR, PN - P_SPLIT_TR) + copy(PN - P_SPLIT_TR, P_SPLIT_TR),
             2,
             move || format!("{:?}", pls1_test(x, y, 1, None, SPLIT_EXACT, None, 15)),
         ),
-        // `split_perm_nr_zbars`' second pass: every split undecided. Its
-        // first pass runs one split at a time at this budget.
-        case("split_exact k=1 constant X", one_copy, 2, move || {
-            format!("{:?}", pls1_test(&d.xc, y, 1, None, SPLIT_EXACT, None, 16))
-        }),
+        // `split_perm_nr_zbars`' second pass: every split undecided. The
+        // halves of X and one PLS1 fit per thread (19 + 1 columns); sized on
+        // the pool of 4, so the pool of 1 runs three units. Its first pass
+        // runs one split at a time at this budget.
+        case(
+            "split_exact k=1 constant X",
+            split_copy + MAX_THREADS * pls1_fit_bytes(PP, 1),
+            2,
+            move || format!("{:?}", pls1_test(&d.xc, y, 1, None, SPLIT_EXACT, None, 16)),
+        ),
         // `pooled_cv_r2_columns` on the primal route (weights take it off
-        // the n-space route; p >> n_tr keeps it off the p-space one): a copy
-        // of X plus the √w-scaled training copy.
+        // the n-space route; p >> n_tr keeps it off the p-space one): the
+        // fold's two blocks of X, the √w-scaled training copy and one PLS1
+        // fit per thread (19 + 1 columns); sized on the pool of 4, so the
+        // pool of 1 runs three units.
         case(
             "raw_perm k=2 weighted",
-            one_copy + fold_fit_copy,
+            fold_copy + fold_fit_copy + MAX_THREADS * pls1_fit_bytes(PP, 2),
             2,
             move || {
                 format!(
@@ -553,10 +629,10 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
             },
         ),
         // `pooled_cv_r2_columns` on the n-space route (32·(40 + 400) <
-        // 400·40): a copy of X plus `G` and `M`.
+        // 400·40): the fold's two blocks of X plus `G` and `M`.
         case(
             "raw_perm k=2",
-            one_copy + copy(P_FOLD_TR, PN),
+            fold_copy + fold_blocks(P_FOLD_TR),
             2,
             move || {
                 format!(
@@ -574,11 +650,14 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
             )
         }),
         // Both passes of `pls1_cv_r2_columns`: a constant X leaves every
-        // column of every fold pending. The budget gives each pass two
-        // units.
+        // column of every fold pending. The second pass counts the fold's
+        // two blocks of X and one PLS1 fit per thread (39 + 1 columns);
+        // sized on the pool of 4, so the pool of 1 runs three units there.
+        // The first pass runs all five folds in one batch at this budget
+        // (`raw_perm k=1` covers it at two units).
         case(
             "raw_perm k=1 constant X wide",
-            fold_gram.max(wide_copy),
+            fold_gram.max(wide_fold_copy + MAX_THREADS * pls1_fit_bytes(PP_WIDE, 1)),
             2,
             move || {
                 format!(
@@ -587,11 +666,16 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
                 )
             },
         ),
-        // `pooled_cv_r2_columns` on the p-space Gram route: a copy of X
-        // plus `C` (`p × p`).
+        // `pooled_cv_r2_columns` on the p-space Gram route: the fold's two
+        // blocks of X (5 folds of 400 rows), `C` (`p × p`) and one PLS1 fit
+        // per thread (300 + 1 columns). The fit term is small, so both pools
+        // run two units.
         case(
             "raw_perm gram-p 2000x50 k=2",
-            copy(GRAM_P_N, GRAM_P_P) + copy(GRAM_P_P, GRAM_P_P),
+            copy(GRAM_P_N * 4 / 5, GRAM_P_P)
+                + copy(GRAM_P_N / 5, GRAM_P_P)
+                + copy(GRAM_P_P, GRAM_P_P)
+                + MAX_THREADS * pls1_fit_bytes(GRAM_P_P, 2),
             2,
             move || {
                 format!(
@@ -601,41 +685,55 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
             },
         ),
         // `pls3_split_lv_correlations` (a sparse X side).
-        case("pls3 split_nb keep_x=40", one_copy, 2, move || {
-            split_nb_out(&pls3_test(&d.x3, &d.y3, SPLIT_NB, Some(40), None, 21))
-        }),
-        // The streamed route's first pass: the stream blocks, `A` and its
-        // SVD's `U`. A random X leaves nothing for `fill_pending`.
+        case(
+            "pls3 split_nb keep_x=40",
+            split_copy + lv1_pls3,
+            2,
+            move || split_nb_out(&pls3_test(&d.x3, &d.y3, SPLIT_NB, Some(40), None, 21)),
+        ),
+        // The streamed route's first pass: the stream blocks and one LV1
+        // fit. A random X leaves nothing for `fill_pending`.
         case(
             "pls3 split_nb dense",
-            STREAM_BLOCKS + 2 * copy(PP, PQ),
+            stream_blocks(P_SPLIT_TR, PN - P_SPLIT_TR) + lv1_pls3,
             2,
             move || split_nb_out(&pls3_test(&d.x3, &d.y3, SPLIT_NB, None, None, 22)),
         ),
         // `pls3_split_lv_correlations_streamed`' second pass: every split
         // undecided. Its first pass runs one split at a time at this budget.
-        case("pls3 split_nb dense constant X", one_copy, 2, move || {
-            split_nb_out(&pls3_test(&d.xc, &d.y3, SPLIT_NB, None, None, 23))
-        }),
+        case(
+            "pls3 split_nb dense constant X",
+            split_copy + lv1_pls3,
+            2,
+            move || split_nb_out(&pls3_test(&d.xc, &d.y3, SPLIT_NB, None, None, 23)),
+        ),
         // `pls3_split_zbars_columns`' first pass (the Gram route, 20·(60 +
         // 400) < 400·60).
         case("pls3 split_exact dense", split_gram, 2, move || {
             format!("{:?}", pls3_test(&d.x3, &d.y3, SPLIT_EXACT, None, None, 24))
         }),
-        // `pls3_split_zbars_columns_primal` (a sparse X side).
-        case("pls3 split_exact keep_x=40", one_copy, 2, move || {
-            format!(
-                "{:?}",
-                pls3_test(&d.x3, &d.y3, SPLIT_EXACT, Some(40), None, 25)
-            )
-        }),
+        // `pls3_split_zbars_columns_primal` (a sparse X side): the halves of
+        // X and one LV1 fit per thread (19 + 1 columns); sized on the pool of
+        // 4, so the pool of 1 runs three units.
+        case(
+            "pls3 split_exact keep_x=40",
+            split_copy + MAX_THREADS * lv1_pls3,
+            2,
+            move || {
+                format!(
+                    "{:?}",
+                    pls3_test(&d.x3, &d.y3, SPLIT_EXACT, Some(40), None, 25)
+                )
+            },
+        ),
         // Both passes of `pls3_split_zbars_columns`. On a constant X the
         // dense arm decides every column (exactly 0); a sparse Y side falls
         // back at its selection band (every `|v|` is 0), so every column
-        // of every split is pending. The budget gives each pass two units.
+        // of every split is pending. Pass 1 runs four units at this budget,
+        // pass 2 two (three on the pool of 1).
         case(
             "pls3 split_exact constant X wide keep_y=1",
-            split_gram.max(wide_copy),
+            split_gram.max(split_blocks(PP_WIDE) + MAX_THREADS * lv1(PP_WIDE, PQ)),
             2,
             move || {
                 format!(
@@ -644,35 +742,40 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
                 )
             },
         ),
-        // `cv_select`: the fold's standardized slices of X, plus the
-        // √w-scaled training copy when weighted.
+        // `cv_select`: one fold fit on X in place, weighted or not
+        // (`k_max = 2` gives `max_comp = 2`; the keep grid fits at k = 2).
         case(
             "pls1_find_k_optimal r2_se k_max=2",
-            one_copy,
+            cv_fold(PP, 2, PN - P_FOLD_TR),
             2,
             move || format!("{:?}", find_k(x, y, None, 27)),
         ),
         case(
             "pls1_find_k_optimal r2_se k_max=2 weighted",
-            one_copy + fold_fit_copy,
+            cv_fold(PP, 2, PN - P_FOLD_TR),
             2,
             move || format!("{:?}", find_k(x, y, Some(w), 28)),
         ),
-        case("spls1_find_keep_optimal k=2", one_copy, 2, move || {
-            let out = spls1_find_keep_optimal(
-                x.as_ref(),
-                y.as_ref(),
-                2,
-                None,
-                FindKeepOptimalOpts {
-                    n_folds: P_UNITS,
-                    seed: Some(29),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            format!("{out:?}")
-        }),
+        case(
+            "spls1_find_keep_optimal k=2",
+            cv_fold(PP, 2, PN - P_FOLD_TR),
+            2,
+            move || {
+                let out = spls1_find_keep_optimal(
+                    x.as_ref(),
+                    y.as_ref(),
+                    2,
+                    None,
+                    FindKeepOptimalOpts {
+                        n_folds: P_UNITS,
+                        seed: Some(29),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                format!("{out:?}")
+            },
+        ),
         // `pls1_subsample_inference_confirmatory`: two n-row copies of X
         // per replicate. `score` performs no fit, so the CI is the only
         // loop.
@@ -750,15 +853,6 @@ struct ParityData {
     yg: Col<f64>,
 }
 
-/// Removes `PLSKIT_MEMORY_BUDGET` when dropped, also when the test panics.
-struct UnsetBudget;
-
-impl Drop for UnsetBudget {
-    fn drop(&mut self) {
-        std::env::remove_var(BUDGET_VAR);
-    }
-}
-
 /// The message of the `InvalidArgument` that `pls1_fit` returns while the
 /// variable holds a bad value.
 fn bad_budget_message(x: &Mat<f64>, y: &Col<f64>) -> String {
@@ -774,12 +868,14 @@ fn bad_budget_message(x: &Mat<f64>, y: &Col<f64>) -> String {
     }
 }
 
+/// Runs a child of the test with the budget `budget` (`None`: unset) and no
+/// thread cap.
+fn run_budget_child(arg: &str, budget: Option<&OsStr>) -> Vec<String> {
+    run_child(TEST, arg, &[(THREADS_VAR, None), (BUDGET_VAR, budget)])
+}
+
 #[test]
 fn memory_budget_does_not_change_results() {
-    let _unset = UnsetBudget;
-    // A `PLSKIT_NUM_THREADS` cap would run the calls on plskit's own pool,
-    // not on the pools installed below.
-    std::env::remove_var("PLSKIT_NUM_THREADS");
     let (x, y) = synth(PN, PP, 1.0, 1);
     let (x3, y3) = two_block(PN, PP, PQ, 2);
     let (x_auto, y_auto) = synth(AUTO_N, AUTO_P, 1.0, 3);
@@ -797,19 +893,43 @@ fn memory_budget_does_not_change_results() {
         xg,
         yg,
     };
-    let pools = [(1, pool(1)), (4, pool(4))];
-    let mut failures = Vec::new();
-    for c in parity_cases(&data) {
-        let mid = c.mid.to_string();
-        let mut runs: Vec<(String, String)> = Vec::new();
-        for budget in [Some("0"), Some(mid.as_str()), None] {
-            match budget {
-                Some(b) => std::env::set_var(BUDGET_VAR, b),
-                None => std::env::remove_var(BUDGET_VAR),
+    let cases = parity_cases(&data);
+    // Child argument: `bad` checks the bad-value message, a case index runs
+    // that case only, anything else runs every case.
+    if let Some(arg) = child_arg() {
+        if arg == "bad" {
+            emit_result(&bad_budget_message(&data.x, &data.y));
+            return;
+        }
+        let only = arg.parse::<usize>().ok();
+        let pools = [pool(1), pool(MAX_THREADS)];
+        for (i, c) in cases.iter().enumerate() {
+            if only.is_none_or(|o| o == i) {
+                for pl in &pools {
+                    emit_result(&pl.install(|| (c.run)()));
+                }
             }
-            for (t, pl) in &pools {
-                let label = format!("budget {} on {t} thread(s)", budget.unwrap_or("unset"));
-                runs.push((label, pl.install(|| (c.run)())));
+        }
+        return;
+    }
+
+    let zero = run_budget_child("all", Some(OsStr::new("0")));
+    let unset = run_budget_child("all", None);
+    assert_eq!(zero.len(), 2 * cases.len(), "budget 0 results");
+    assert_eq!(unset.len(), 2 * cases.len(), "unset budget results");
+    let mut failures = Vec::new();
+    for (i, c) in cases.iter().enumerate() {
+        let mid = c.mid.to_string();
+        let mid_runs = run_budget_child(&i.to_string(), Some(OsStr::new(&mid)));
+        assert_eq!(mid_runs.len(), 2, "{}: mid budget results", c.name);
+        let mut runs: Vec<(String, &String)> = Vec::new();
+        for (budget, results) in [
+            ("0", &zero[2 * i..2 * i + 2]),
+            (mid.as_str(), &mid_runs[..]),
+            ("unset", &unset[2 * i..2 * i + 2]),
+        ] {
+            for (t, out) in [1, MAX_THREADS].into_iter().zip(results) {
+                runs.push((format!("budget {budget} on {t} thread(s)"), out));
             }
         }
         let (label0, out0) = &runs[0];
@@ -829,7 +949,6 @@ fn memory_budget_does_not_change_results() {
             ));
         }
     }
-    std::env::remove_var(BUDGET_VAR);
     assert!(
         failures.is_empty(),
         "{} case(s) depend on the budget or the pool:\n{}",
@@ -838,18 +957,15 @@ fn memory_budget_does_not_change_results() {
     );
 
     // A bad value is rejected before any work, quoted as given.
-    std::env::set_var(BUDGET_VAR, "2X");
-    let msg = bad_budget_message(&data.x, &data.y);
+    let msg = run_budget_child("bad", Some(OsStr::new("2X"))).swap_remove(0);
     assert!(msg.contains(BUDGET_VAR) && msg.contains("\"2X\""), "{msg}");
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
-        std::env::set_var(BUDGET_VAR, std::ffi::OsStr::from_bytes(b"2\xffG"));
-        let msg = bad_budget_message(&data.x, &data.y);
+        let msg = run_budget_child("bad", Some(OsStr::from_bytes(b"2\xffG"))).swap_remove(0);
         assert!(
             msg.contains(BUDGET_VAR) && msg.contains(r#""2\xFFG""#),
             "{msg}"
         );
     }
-    std::env::remove_var(BUDGET_VAR);
 }

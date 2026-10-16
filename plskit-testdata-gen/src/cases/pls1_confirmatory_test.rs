@@ -17,16 +17,16 @@ use std::path::Path;
 use anyhow::Result;
 
 use plskit::{
-    pls1_confirmatory_test, CIOpts, ConfirmatoryArgs, ConfirmatoryCI, ConfirmatoryTestInput,
-    ConfirmatoryTestOpts, ConfirmatoryTestOutput,
+    CIOpts, ConfirmatoryArgs, ConfirmatoryCI, ConfirmatoryTestInput, ConfirmatoryTestOpts,
+    ConfirmatoryTestOutput, pls1_confirmatory_test,
 };
 
 use crate::cases::{
-    case_files, perm_null_weights, scalar_f64, scalar_i64, synth_data, weighted_prestd_n80_d6, Xyw,
-    WEIGHTED_PRESTD_N80_D6_INPUTS,
+    WEIGHTED_PRESTD_N80_D6_INPUTS, Xyw, case_files, perm_null_weights, scalar_f64, scalar_i64,
+    synth_data, weighted_prestd_n80_d6,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
+use crate::npz::{NpzWriter, sha256_of_file};
 
 /// Default synth design shared by every case except `raw_perm_wide`, which
 /// needs `n < p` and sets its own `n` / `d` on the descriptor.

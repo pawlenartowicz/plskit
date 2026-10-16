@@ -6,15 +6,15 @@ use std::path::Path;
 use anyhow::Result;
 
 use plskit::{
-    pls1_find_k_optimal, ConfirmatoryMethod, FindKOptimalOpts, FindKOptimalOutput, Selector,
+    ConfirmatoryMethod, FindKOptimalOpts, FindKOptimalOutput, Selector, pls1_find_k_optimal,
 };
 
 use crate::cases::{
-    case_files, ensure_moved, faer_col_to_array, scalar_i64, synth_data, weighted_n80_d6, Xyw,
-    WEIGHTED_N80_D6_INPUTS,
+    WEIGHTED_N80_D6_INPUTS, Xyw, case_files, ensure_moved, faer_col_to_array, scalar_i64,
+    synth_data, weighted_n80_d6,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
+use crate::npz::{NpzWriter, sha256_of_file};
 
 /// Shared synth parameters for all `pls1_find_k_optimal` cases.
 const SYNTH_N: usize = 80;

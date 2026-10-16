@@ -84,6 +84,8 @@ a `UserWarning`. `args={"force": True}` skips the reroute and runs `split_nb`
 anyway. `result.stable_rank` is set on an explicit `split_nb`
 request, and on an `"auto"` request that reached the stable-rank check
 (p > 4, n_eff ≥ 250); `None` otherwise. It is what the gate saw.
+It is NaN when the Gram matrix of the standardized `X` is not finite. The gate
+then fires.
 
 Y is deliberately never gated. In ordinary PLSC `q` is small (a handful of
 behavioural measures), so a stable-rank floor of 3 on Y would flag nearly

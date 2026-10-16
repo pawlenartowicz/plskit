@@ -1,0 +1,23 @@
+# atomic-wait 1.1.0 from crates.io (https://github.com/m-ou-se/atomic-wait,
+# BSD-2-Clause, see LICENSE) with one addition: src/emscripten.rs and its
+# `mod platform` arm in src/lib.rs, so that the crate builds for
+# wasm32-unknown-emscripten (Pyodide, webR). The workspace Cargo.toml uses
+# this copy through [patch.crates-io], and the publish-r job in
+# .github/workflows/release.yml copies it into the staged R package with
+# the same patch; every other target compiles the upstream code unchanged.
+# Mirrors the publish-r staging step — change together.
+[package]
+name = "atomic-wait"
+description = "Cross-platform atomic wait and wake (aka futex) functionality."
+repository = "https://github.com/m-ou-se/atomic-wait"
+keywords = ["atomic", "futex"]
+version = "1.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+categories = ["concurrency", "os", "no-std"]
+
+[target.'cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd"))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.42.0", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_System_WindowsProgramming"] }

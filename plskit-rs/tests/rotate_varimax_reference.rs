@@ -4,7 +4,7 @@
 //! on seed 42. Locks in that `plskit::rotate` reproduces them.
 
 use faer::{Mat, MatRef};
-use plskit::{rotate, RotationMethod, VarimaxArgs};
+use plskit::{RotationMethod, VarimaxArgs, rotate};
 use serde_json::Value;
 use std::fs;
 

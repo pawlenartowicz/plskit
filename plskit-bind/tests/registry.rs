@@ -1,7 +1,7 @@
 //! Registry tests: every declared result type exists, and every function
 //! rejects an unknown argument.
 
-use plskit_bind::{call, registry, result_type, Record, Value};
+use plskit_bind::{Record, Value, call, registry, result_type};
 
 #[test]
 fn every_declared_result_type_exists() {

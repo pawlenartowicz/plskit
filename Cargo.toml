@@ -11,8 +11,8 @@ members = [
 # Single source of truth for the workspace version. Every crate uses
 # `version.workspace = true`; DESCRIPTION / Project.toml / testdata pick
 # up the same number, and CI enforces lock-step on `v*` tags.
-version = "0.7.0"
-edition = "2021"
+version = "0.7.1"
+edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/pawlenartowicz/plskit"
 authors = ["Paweł Lenartowicz"]
@@ -23,7 +23,7 @@ rust-version = "1.85"
 # version. The exact pin must equal [workspace.package].version: on a
 # version bump without it, every build fails to resolve, so the two
 # cannot drift silently (a caret requirement would keep matching).
-plskit = { path = "plskit-rs", version = "=0.7.0" }
+plskit = { path = "plskit-rs", version = "=0.7.1" }
 plskit-bind = { path = "plskit-bind" }
 procrustes = "0.1.0"
 faer = "0.24"                   # caret within 0.24.x; faer minor bump = plskit major bump
@@ -48,3 +48,15 @@ lto = "thin"                    # cross-crate inlining
 panic = "unwind"                # default; pinned for determinism
 # target-cpu intentionally unset — wheels run on any compatible CPU
 # -ffast-math intentionally off — IEEE 754 determinism
+
+# faer's default `rayon` feature pulls in spindle, which pulls in
+# atomic-wait 1.1.0. That release has no Emscripten module, so the Pyodide
+# wheel does not build against it; vendor/atomic-wait adds one. A patch
+# applies only to builds from this workspace (the Python wheels and sdist);
+# the publish-r job in .github/workflows/release.yml adds the same patch to
+# the staged R package. The published plskit crate and plskit-r/src/rust as
+# committed get the crates.io atomic-wait. Mirrors the vendor/atomic-wait
+# entry of `include` in pyproject.toml and the publish-r staging step —
+# change together.
+[patch.crates-io]
+atomic-wait = { path = "vendor/atomic-wait" }

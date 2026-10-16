@@ -13,9 +13,9 @@
 #![allow(clippy::cast_precision_loss)]
 
 use faer::{Col, Mat};
-use plskit::fit::{pls1_fit, FitOpts, KSpec};
+use plskit::fit::{FitOpts, KSpec, pls1_fit};
 use plskit::{
-    pls3_confirmatory_test, pls3_fit, ConfirmatoryArgs, Pls3ConfirmatoryTestOpts, Pls3FitOpts,
+    ConfirmatoryArgs, Pls3ConfirmatoryTestOpts, Pls3FitOpts, pls3_confirmatory_test, pls3_fit,
 };
 
 /// Factors spanning both sides of an absolute `1e-12` threshold (a naive
@@ -44,11 +44,7 @@ fn linked(n: usize, p: usize, q: usize, seed: u64) -> (Mat<f64>, Mat<f64>) {
     let f: Vec<f64> = (0..n).map(|_| s.next()).collect();
     let x = Mat::<f64>::from_fn(n, p, |i, j| {
         let e = s.next();
-        if j < 2 {
-            2.0 * f[i] + e
-        } else {
-            e
-        }
+        if j < 2 { 2.0 * f[i] + e } else { e }
     });
     let y = Mat::<f64>::from_fn(n, q, |i, _| 1.5 * f[i] + s.next());
     (x, y)

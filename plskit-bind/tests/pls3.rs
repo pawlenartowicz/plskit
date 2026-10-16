@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use plskit_bind::{check_record, Record, Value, VecF64};
+use plskit_bind::{Record, Value, VecF64, check_record};
 
 fn blocks() -> (Value<'static>, Value<'static>) {
     let (x, _) = data(60, 6, 1);
@@ -70,10 +70,12 @@ fn transform_round_trips_and_validates() {
         "x_scores",
     ));
     let got = floats(field(r, "x_scores"));
-    assert!(fit_scores
-        .iter()
-        .zip(&got)
-        .all(|(a, b)| (a - b).abs() < 1e-10));
+    assert!(
+        fit_scores
+            .iter()
+            .zip(&got)
+            .all(|(a, b)| (a - b).abs() < 1e-10)
+    );
 
     let alias = ok(
         "plssvd_transform",

@@ -183,7 +183,7 @@ dropped from the public surface; only the headline result and
 | Field | Python type | Notes |
 |---|---|---|
 | `fires` | `bool` | `True` → an explicit `"split_nb"` request on this `X` reroutes to `"split_exact"` |
-| `stable_rank` | `float` | stable rank of the standardized `X` |
+| `stable_rank` | `float` | stable rank of the standardized `X`. NaN when the Gram matrix of the standardized `X` is not finite. The gate then fires. |
 | `n_eff` | `float` | Kish effective sample size; equals `n` for uniform/absent weights |
 
 Every field is always populated. This is the same rule the test

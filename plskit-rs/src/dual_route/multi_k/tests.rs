@@ -9,7 +9,7 @@
 )]
 
 use super::*;
-use crate::fit::{pls1_fit_prepared_fro, ParChoice, PreparedFit};
+use crate::fit::{ParChoice, PreparedFit, pls1_fit_prepared_fro};
 use crate::linalg::{standardize, standardize1};
 use crate::test_support::{assert_bits_eq, assert_mat_bits_eq, col_vals};
 use faer::{Col, Mat, Par};

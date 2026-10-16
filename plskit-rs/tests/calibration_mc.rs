@@ -37,10 +37,10 @@
 
 use faer::{Col, Mat};
 use plskit::{
-    linalg::{stable_rank, standardize_weighted},
-    pls1_confirmatory_test, pls1_find_k_sequence, pls3_confirmatory_test, spls1_find_k_sequence,
     ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
     FindKSequenceOpts, Pls3ConfirmatoryTestOpts,
+    linalg::{stable_rank, standardize_weighted},
+    pls1_confirmatory_test, pls1_find_k_sequence, pls3_confirmatory_test, spls1_find_k_sequence,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;

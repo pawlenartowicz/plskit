@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::perm_null::perm_null_route;
-use crate::signal_test::{raw_perm_route, split_exact_refit_route, ReplicateRoute};
+use crate::signal_test::{ReplicateRoute, raw_perm_route, split_exact_refit_route};
 
 fn testdata() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

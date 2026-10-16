@@ -14,10 +14,10 @@ use crate::linalg::fold_split;
 use crate::resample::Columns;
 use crate::rng::{child_seeds, resolve_seed};
 use crate::signal_test::{
-    draw_splits, fold_block, fold_unit, pls1_confirmatory_test, pooled_cv_r2_columns,
-    prepare_cv_fold, prepare_split, raw_perm_route, split_block, split_exact_refit_route,
-    split_unit, split_zbars_columns, with_gram_routes_disabled, ConfirmatoryArgs,
-    ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput, ReplicateRoute, SplitIdx,
+    ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput,
+    ReplicateRoute, SplitIdx, draw_splits, fold_block, fold_unit, pls1_confirmatory_test,
+    pooled_cv_r2_columns, prepare_cv_fold, prepare_split, raw_perm_route, split_block,
+    split_exact_refit_route, split_unit, split_zbars_columns, with_gram_routes_disabled,
 };
 use crate::test_support::{orthonormal_basis, project_off};
 use faer::{Col, Mat, Par};

@@ -55,27 +55,31 @@ mod tests {
 
     #[test]
     fn nothing_when_the_method_ran_as_asked() {
-        assert!(rerouted(
-            Some("split_nb"),
-            Some("split_nb"),
-            None,
-            Some(2.5),
-            Some(60.0)
-        )
-        .is_none());
+        assert!(
+            rerouted(
+                Some("split_nb"),
+                Some("split_nb"),
+                None,
+                Some(2.5),
+                Some(60.0)
+            )
+            .is_none()
+        );
         assert!(rerouted(None, None, None, None, Some(60.0)).is_none());
     }
 
     #[test]
     fn nothing_for_an_auto_request() {
-        assert!(rerouted(
-            Some("auto"),
-            Some("split_exact"),
-            Some(1000),
-            Some(2.5),
-            Some(60.0)
-        )
-        .is_none());
+        assert!(
+            rerouted(
+                Some("auto"),
+                Some("split_exact"),
+                Some(1000),
+                Some(2.5),
+                Some(60.0)
+            )
+            .is_none()
+        );
     }
 
     #[test]

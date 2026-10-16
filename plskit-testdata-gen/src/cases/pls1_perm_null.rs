@@ -1,14 +1,14 @@
 //! `pls1_perm_null` fixture cases.
 
 use crate::cases::{
-    case_files, ensure_moved, manifest_case, ndarray_to_faer_col, ndarray_to_faer_mat,
-    perm_null_weights, scalar_f64, scalar_i64, synth_data, weighted_prestd_n80_d6, CasePaths, Xyw,
-    WEIGHTED_PRESTD_N80_D6_INPUTS,
+    CasePaths, WEIGHTED_PRESTD_N80_D6_INPUTS, Xyw, case_files, ensure_moved, manifest_case,
+    ndarray_to_faer_col, ndarray_to_faer_mat, perm_null_weights, scalar_f64, scalar_i64,
+    synth_data, weighted_prestd_n80_d6,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
+use crate::npz::{NpzWriter, sha256_of_file};
 use anyhow::Result;
-use plskit::{pls1_perm_null, PermNullOpts, PermNullOutput};
+use plskit::{PermNullOpts, PermNullOutput, pls1_perm_null};
 use std::path::Path;
 
 /// Convert a `Vec<f64>` to a 1-D `ndarray::ArrayD<f64>`.

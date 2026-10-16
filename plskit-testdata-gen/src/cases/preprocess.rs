@@ -1,12 +1,12 @@
 //! `preprocess` fixture cases.
 
 use crate::cases::{
-    faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, synth_data, CasePaths,
+    CasePaths, faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, synth_data,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
+use crate::npz::{NpzWriter, sha256_of_file};
 use anyhow::Result;
-use plskit::{preprocess, PreprocessInput};
+use plskit::{PreprocessInput, preprocess};
 use std::path::Path;
 
 /// Case: `preprocess` on (n=50, d=10) data with non-uniform weights.

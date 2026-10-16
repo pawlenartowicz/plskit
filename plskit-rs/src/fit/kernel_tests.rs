@@ -535,7 +535,9 @@ fn random_design(rng: &mut ChaCha8Rng, idx: usize, n_max: usize, d_max: usize) -
         Col::<f64>::from_fn(n, |i| signal(i) + sigma * e[i])
     };
     Design {
-        label: format!("design {idx}: {family:?} n={n} d={d} k={k} keep={keep:?} rank_deficient={rank_deficient} weak={weak} sigma={sigma}"),
+        label: format!(
+            "design {idx}: {family:?} n={n} d={d} k={k} keep={keep:?} rank_deficient={rank_deficient} weak={weak} sigma={sigma}"
+        ),
         x,
         y,
         w,

@@ -39,6 +39,8 @@ when `split_nb` is chosen, and `result.n_perm` is then `None`. `force` is
 not accepted. `result.stable_rank` is set on an explicit `split_nb`
 request, and on an `"auto"` request that reached the stable-rank check
 (p > 4, n_eff ≥ 250, and p ≤ 100·n where clause 3 applies); `None` otherwise.
+It is NaN when the Gram matrix of the standardized `X` is not finite. The gate
+then fires.
 
 To repeat a run with the method that ran, pass
 `test_method=result.test_method, seed=result.seed` and the same `args`. When

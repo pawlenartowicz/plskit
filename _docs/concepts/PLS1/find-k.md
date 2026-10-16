@@ -8,7 +8,10 @@ largest `k` to consider, and both report their choice as `k_star`.
 
 - Picks the `k` that optimizes a criterion.
 - Selectors: `r2_se` (one-SE rule on CV R², the default), `r2_max` (CV R²
-  maximum), `bic`.
+  maximum), `bic`. `bic` counts each component as one degree of freedom;
+  on wide `X` (p much larger than n) a PLS fit's effective degrees of
+  freedom are much larger, so BIC tends to select `k_max`, and `r2_se` is
+  recommended there.
 - An optional same-sample diagnostic (`diagnostic="split_nb"` etc.) runs a
   sequential test up to the selected `k` and attaches `pvalues` to the
   result. It uses the same data, so it is a robustness check, not

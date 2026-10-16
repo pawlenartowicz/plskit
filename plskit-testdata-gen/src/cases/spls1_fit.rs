@@ -5,12 +5,12 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::cases::{
-    faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64,
-    synth_data, CasePaths,
+    CasePaths, faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64,
+    synth_data,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
-use plskit::{spls1_fit, FitOpts, KSpec};
+use crate::npz::{NpzWriter, sha256_of_file};
+use plskit::{FitOpts, KSpec, spls1_fit};
 
 struct Spls1FitCase<'a> {
     name: &'a str,

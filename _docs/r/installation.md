@@ -3,17 +3,39 @@
 ## Requirements
 
 - R 4.2 or newer.
+
+r-universe serves binaries for Windows, macOS and Linux. A source install
+(from the `r-universe` branch, from a checkout, or from r-universe where
+it has no binary for your R version or platform) also needs:
+
 - Rust 1.85 or newer with `cargo` (install with [rustup](https://rustup.rs)).
 - Windows: Rtools matching your R version, and the GNU Rust target:
   `rustup target add x86_64-pc-windows-gnu`.
 
-## Building from a checkout (until the first release)
+## Installing a release
+
+Install from r-universe:
+
+```r
+install.packages("plskit", repos = "https://pawlenartowicz.r-universe.dev")
+```
+
+or from the `r-universe` branch of the GitHub repository, which holds the
+latest released package with its `Cargo.lock` and its crates packed in
+`src/rust/vendor.tar.xz`:
+
+```r
+devtools::install_github("pawlenartowicz/plskit", ref = "r-universe")
+```
+
+## Building from a checkout (development)
 
 The package's Rust crate depends on the `plskit` and `plskit-bind` crates
-from crates.io. Until `plskit-bind` is published there, the package builds
-only in dev mode: a cargo config file outside the package patches both
-crates to a checkout of the monorepo, and the environment variable
-`PLSKIT_CARGO_CONFIG` names that file.
+from crates.io. A checkout of `main` carries no `Cargo.lock` and pins the
+next, unpublished version of both, so it builds only in dev mode: a cargo
+config file outside the package patches both crates to a checkout of the
+monorepo, and the environment variable `PLSKIT_CARGO_CONFIG` names that
+file.
 
 ```sh
 git clone https://github.com/pawlenartowicz/plskit
@@ -58,7 +80,7 @@ contract relies on.
 
 | Message | Cause | Fix |
 |---|---|---|
-| `rust/Cargo.lock is not committed yet, so plskit builds only in dev mode` | `PLSKIT_CARGO_CONFIG` is not set | set it as above |
+| `rust/Cargo.lock is missing: a checkout of main builds only in dev mode` | `PLSKIT_CARGO_CONFIG` is not set | set it as above, or install a release |
 | `PLSKIT_CARGO_CONFIG names a missing file` | wrong path | use an absolute path |
 | ``no matching package named `plskit-bind` found`` | the config patches only `plskit` | patch both crates |
 | `plskit resolved from a registry, not from the patch` | the config patches only `plskit-bind` | patch both crates |

@@ -211,7 +211,7 @@ pub(crate) fn rotation_stability_impl(
     let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
 
     let fit_ref = {
-        use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
+        use crate::fit::{FitOpts, KSpec, pls1_fit_impl};
         pls1_fit_impl(
             x,
             y,
@@ -348,7 +348,7 @@ fn fit_subsample(
     pre_standardized_x: bool,
     weights: Option<ColRef<'_, f64>>,
 ) -> PlsKitResult<Mat<f64>> {
-    use crate::fit::{pls1_fit_impl, validate_and_normalize_weights, FitOpts, KSpec};
+    use crate::fit::{FitOpts, KSpec, pls1_fit_impl, validate_and_normalize_weights};
     use crate::linalg::{col_row_subset, row_subset, standardize1_weighted};
 
     let m = sample_idx.len();

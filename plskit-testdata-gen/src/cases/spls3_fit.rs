@@ -3,14 +3,14 @@
 use std::path::Path;
 
 use anyhow::Result;
-use plskit::{spls3_fit, Pls3FitOpts};
+use plskit::{Pls3FitOpts, spls3_fit};
 
 use crate::cases::{
-    faer_col_to_array, faer_mat_to_array, i64_vec, ndarray_to_faer_mat, scalar_i64, synth_xy,
-    CasePaths,
+    CasePaths, faer_col_to_array, faer_mat_to_array, i64_vec, ndarray_to_faer_mat, scalar_i64,
+    synth_xy,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
+use crate::npz::{NpzWriter, sha256_of_file};
 
 /// Shared signal strength and factor count for every `spls3_fit` fixture,
 /// matching `cases/pls3.rs`'s constants so the dense-endpoint case can

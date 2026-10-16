@@ -7,7 +7,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use extendr_api::prelude::*;
-use plskit_bind::{result_type, result_types, BindError, Outcome, Record, Value};
+use plskit_bind::{BindError, Outcome, Record, Value, result_type, result_types};
 
 fn named_list(names: Vec<String>, values: Vec<Robj>) -> Robj {
     // Only fails when the lengths differ, which every caller rules out by

@@ -58,18 +58,19 @@ made inside it.
 
 ## Memory budget
 
-`PLSKIT_MEMORY_BUDGET` sets the bytes of working memory, beyond the
-inputs, that plskit gives to the buffers that grow with the data: copies of
-`X` or of its halves, Gram matrices, and the blocks in which `X` is read.
-`X` itself, the results, the outcome and permutation buffers and the
-per-column vectors are not counted.
+`PLSKIT_MEMORY_BUDGET` sets the bytes of working memory, beyond the inputs,
+that plskit gives to the buffers that grow with the data: copies of `X` or
+of its halves, Gram matrices, the blocks in which `X` is read, and the
+buffers of the model fits that run at once. `X` itself, the results, the
+outcome and permutation buffers and the per-column vectors are not counted.
 
 The functions below repeat a computation over units (splits, folds or
-resamples) and estimate the memory one unit needs from the shape of `X`.
-They run the units in batches of `budget / unit memory` units, at least one
-and at most all of them: in parallel inside a batch, one batch after
-another. At most one batch of units holds its buffers at once, whatever the
-thread count.
+resamples) and estimate the memory one unit needs from the shapes of `X`
+and `Y` and the number of components, and, where a unit fits its
+permutations in parallel, from the thread count. They run the units in
+batches of `budget / unit memory` units, at least one and at most all of
+them: in parallel inside a batch, one batch after another. At most one
+batch of units holds its buffers at once, whatever the thread count.
 
 - `pls1_confirmatory_test` with `split_nb`, `split_exact` or `raw_perm`,
   and its confidence intervals (`ci`);
@@ -120,7 +121,8 @@ At the default, an `X` whose copy is small next to 2 GiB (for example 200 ×
 data on many cores is fast without changing anything. On an `X` whose copy
 is more than half the budget (for example 254 × 1,447,336, about 2.7 GiB per
 copy), the units that copy `X` run one at a time; units that hold only Gram
-matrices, which are small when `X` has far more columns than rows, still
-run in parallel. Raise the budget to run more copies of a large `X` at
+matrices, which are small when `X` has far more columns than rows, and the
+folds of a selection by cross-validation, which fit `X` in place, still run
+in parallel. Raise the budget to run more copies of a large `X` at
 once: more memory, more units in parallel. Lower it, or set `0`, to keep
 the peak down on a machine shared with other jobs.

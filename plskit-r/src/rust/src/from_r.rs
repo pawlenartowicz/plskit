@@ -10,7 +10,7 @@
 use std::borrow::Cow;
 
 use extendr_api::prelude::*;
-use plskit_bind::{registry, result_types, BindError, MatF64, ParamKind, Record, Value, VecF64};
+use plskit_bind::{BindError, MatF64, ParamKind, Record, Value, VecF64, registry, result_types};
 
 /// An R object with every list element already visited.
 enum Node {
@@ -203,7 +203,7 @@ fn doubles<'a>(x: &'a Robj, ctx: Ctx, path: &str) -> Result<Value<'a>, BindError
                 return Err(bad(
                     path,
                     &format!("a {}-dimensional array is not supported", d.len()),
-                ))
+                ));
             }
         }
     }

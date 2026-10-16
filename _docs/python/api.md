@@ -31,15 +31,25 @@ a function or read its result.
   fit sitting on its truncation floor can stop at a different
   `k_used`. The last bits move with the layout in `pls1_fit`,
   `spls1_fit`, `pls1_predict`, `pls1_rotation_stability`,
-  `pls1_confirmatory_test` with `ci` and, without
+  `pls1_confirmatory_test` with `ci`, `pls1_find_k_optimal` and
+  `spls1_find_k_optimal` with every selector, `spls1_find_keep_optimal`,
+  the `selection` of `pls1_fit(k="optimal")` and, without
   `pre_standardized_X`, in `pls3_fit`, `plssvd_fit` and `spls3_fit`; the
-  others currently give C and F order the same bits. The same array in the
-  same layout gives byte-identical results on every run and at every
-  thread count. An array numpy cannot read as real numbers (strings,
-  numeric strings included, ragged nested lists, complex values,
-  non-numeric objects) raises `PlsKitError(code="invalid_argument")`;
-  booleans (read as `1`/`0`) and integers are converted, and `None` or
-  `pd.NA` in an object array reads as NaN (`non_finite_input`).
+  others currently give C and F order the same bits. In the selections the
+  `cv_scores`, `cv_scores_se` and `bic_scores` move, and a near tie (two
+  BIC scores, two CV scores at the best, or for `r2_se` a CV score at the
+  one-SE threshold) or a fit at its truncation floor can select another
+  `k_star` or `keep_star`. Where the first component
+  sits at its truncation floor, the selections by cross-validation
+  (`selector="r2_se"` or `"r2_max"`, and `spls1_find_keep_optimal`) can
+  return `k_star` (or `keep_star`) 0 on one layout and not on the other.
+  The same array in the same layout gives byte-identical results on every
+  run and at every thread count. An array numpy cannot read as real
+  numbers (strings, numeric strings included, ragged nested lists,
+  complex values, non-numeric objects) raises
+  `PlsKitError(code="invalid_argument")`; booleans (read as `1`/`0`) and
+  integers are converted, and `None` or `pd.NA` in an object array reads
+  as NaN (`non_finite_input`).
 - Per-function entry format:
 
   ```
@@ -150,6 +160,10 @@ to rounding), every selector returns `k_star=0` with an empty score
 dict, matching `pls1_find_k_sequence` (for `r2_se` / `r2_max` only at
 `n >= 3`, since those CV selectors reject `n <= 2` first; `bic` is
 unaffected).
+**BIC caveat:** `selector="bic"` counts each component as one degree
+of freedom. On wide `X` (p much larger than n) the effective degrees of
+freedom of a PLS fit are much larger, so BIC tends to select `k_max`;
+`r2_se` (the default) is recommended there.
 
 **function:** `pls1_find_k_sequence`
 **need:** sequential closed-test on nested hypotheses — "how many
@@ -444,7 +458,8 @@ one rule, it does not restate it.
 **arguments:** `X`
 **options:** `weights`.
 **returns:** `SplitNbGateResult` — `fires` (would an explicit
-`"split_nb"` request reroute?), plus the `stable_rank` and `n_eff` the rule read.
+`"split_nb"` request reroute?), plus the `stable_rank` and `n_eff` the rule read. `stable_rank` is NaN when the Gram matrix of the
+standardized `X` is not finite. The gate then fires.
 `y` is not an argument: only `X` and the weights enter the rule.
 
 ### 3.3 Permutation-null engine

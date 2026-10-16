@@ -45,4 +45,10 @@ editable-profile = "release"
 # cargo's sdist file selection only reaches files under the crate dir, so
 # without this maturin emits `License-File: LICENSE` metadata pointing at a
 # file the sdist doesn't ship, and PyPI's PEP 639 check rejects the upload.
-include = [{ path = "LICENSE", format = "sdist" }]
+# vendor/atomic-wait is the [patch.crates-io] path in the workspace
+# Cargo.toml, which the sdist carries; without the directory no build from
+# the sdist resolves. Change together.
+include = [
+    { path = "LICENSE", format = "sdist" },
+    { path = "vendor/atomic-wait/**/*", format = "sdist" },
+]

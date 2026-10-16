@@ -1,14 +1,14 @@
 //! `pls1_fit` fixture cases.
 
 use crate::cases::{
-    faer_col_to_array, manifest_case, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64,
-    scalar_i64, synth_data, CasePaths, Xyw,
+    CasePaths, Xyw, faer_col_to_array, manifest_case, ndarray_to_faer_col, ndarray_to_faer_mat,
+    scalar_f64, scalar_i64, synth_data,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
-use anyhow::{bail, Result};
+use crate::npz::{NpzWriter, sha256_of_file};
+use anyhow::{Result, bail};
 
-use plskit::{pls1_find_k_sequence, pls1_fit, FindKSequenceOpts, FitOpts, KSpec};
+use plskit::{FindKSequenceOpts, FitOpts, KSpec, pls1_find_k_sequence, pls1_fit};
 use std::path::Path;
 
 /// Synth parameters for a fixed-k `pls1_fit` case.
@@ -184,7 +184,9 @@ pub fn small_n50_d10_sequence(root: &Path) -> Result<Case> {
     )?;
 
     if seq.k_star == 0 {
-        bail!("pls1_find_k_sequence rejected no components (k_star == 0) — unexpected for this seed/parameters");
+        bail!(
+            "pls1_find_k_sequence rejected no components (k_star == 0) — unexpected for this seed/parameters"
+        );
     }
 
     let name = "pls1_fit_small_n50_d10_sequence".to_string();

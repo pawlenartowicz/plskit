@@ -4,7 +4,7 @@
 use faer::{Col, ColRef};
 use rand::seq::SliceRandom;
 
-use crate::rng::{child_rng, child_seeds, Rng};
+use crate::rng::{Rng, child_rng, child_seeds};
 
 /// Compute `(n_train, n_test)` for a 50/50 split-half given `(n, k)`.
 /// Split fraction is hardcoded — NB calibration assumes balanced halves.
@@ -58,10 +58,38 @@ pub(crate) fn map_indexed<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> V
     (0..n).into_par_iter().map(&f).collect()
 }
 
-/// Bytes of an `f64` copy of `rows × cols` values, `rows·cols·8`,
-/// saturating. The usual term of a `unit_bytes` estimate.
+/// Bytes of an owned `f64` matrix of `rows × cols`, saturating: faer stores
+/// each column of an owned `Mat<f64>` in a multiple of 8 rows (64-byte
+/// aligned columns), so this is `⌈rows / 8⌉·8 · cols · 8`
+/// (`copy_bytes_is_what_an_owned_mat_allocates` checks it against faer).
+/// The usual term of a `unit_bytes` estimate. A value held as two matrices,
+/// such as the halves of a split, is two calls: the padding is per matrix.
+/// Mirrored by `copy` in `tests/memory_budget_parity.rs` (change together).
 pub(crate) fn copy_bytes(rows: usize, cols: usize) -> usize {
-    rows.saturating_mul(cols).saturating_mul(8)
+    rows.checked_next_multiple_of(8)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(cols)
+        .saturating_mul(8)
+}
+
+/// Bytes of the two blocks a loop holds for one unit, `cols` columns each,
+/// the most over `units`, which gives each unit's row counts `(n_a, n_b)`
+/// (a split's training and test rows, a fold's training and validation
+/// rows). They are two matrices, each padded as [`copy_bytes`] counts, so
+/// the sum is taken per unit.
+pub(crate) fn pair_blocks_bytes(units: impl Iterator<Item = (usize, usize)>, cols: usize) -> usize {
+    units
+        .map(|(n_a, n_b)| copy_bytes(n_a, cols).saturating_add(copy_bytes(n_b, cols)))
+        .max()
+        .unwrap_or(0)
+}
+
+/// [`pair_blocks_bytes`] for the folds of a fold loop (`folds` a partition
+/// of `0..n`): one block on the training rows and one on the fold's rows.
+/// Mirrored by the `fold_blocks` closure in `tests/memory_budget_parity.rs`
+/// (change together).
+pub(crate) fn fold_blocks_bytes(n: usize, folds: &[Vec<usize>], cols: usize) -> usize {
+    pair_blocks_bytes(folds.iter().map(|f| (n - f.len(), f.len())), cols)
 }
 
 /// How many of `n_units` units a loop runs at once: `budget / unit_bytes`
@@ -412,7 +440,23 @@ mod tests {
         });
         crate::fit::with_budget(0, || assert_eq!(units_at_once(10, 1), 1));
         assert_eq!(copy_bytes(usize::MAX, 2), usize::MAX);
-        assert_eq!(copy_bytes(3, 4), 96);
+        assert_eq!(copy_bytes(3, 4), 256);
+    }
+
+    /// `copy_bytes` is what an owned faer `Mat<f64>` of that shape
+    /// allocates: faer pads each column to a multiple of 8 rows.
+    #[test]
+    fn copy_bytes_is_what_an_owned_mat_allocates() {
+        for rows in [0, 1, 7, 8, 9, 20, 41, 48] {
+            for cols in [0, 1, 3] {
+                let m = faer::Mat::<f64>::zeros(rows, cols);
+                assert_eq!(
+                    copy_bytes(rows, cols),
+                    m.col_stride().unsigned_abs() * cols * 8,
+                    "{rows} x {cols}"
+                );
+            }
+        }
     }
 
     #[test]

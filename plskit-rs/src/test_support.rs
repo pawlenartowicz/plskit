@@ -194,7 +194,7 @@ pub(crate) fn linear_y(x: &Mat<f64>, noise: f64, seed: u64) -> Col<f64> {
 /// then scaled by `fit_row_scale` of those weights.
 pub(crate) fn prepared(x: &Mat<f64>, y: &Col<f64>, w: Option<&Col<f64>>) -> (Mat<f64>, Col<f64>) {
     use crate::linalg::{
-        normalize_weights, standardize, standardize1, standardize1_weighted, standardize_weighted,
+        normalize_weights, standardize, standardize_weighted, standardize1, standardize1_weighted,
     };
     match w {
         None => {
@@ -493,7 +493,9 @@ pub(crate) enum Agree {
     /// `1e-14` in `assert_agree`: change together). For the entries that form their
     /// products in X's own layout and so agree across layouts only to
     /// rounding (`pls1_fit` / `spls1_fit`, which form products in X's own
-    /// layout, and what reads them: `pls1_predict`, `pls1_rotation_stability`). Lengths are
+    /// layout, and what reads them: `pls1_predict`, `pls1_rotation_stability`,
+    /// and the selections in `pls1_find_k_optimal`, `spls1_find_k_optimal`
+    /// and `spls1_find_keep_optimal`). Lengths are
     /// still exact, and an integer (a count, `k_used`) that differs by one
     /// fails any `atol` below 1.
     Corpus(f64),
@@ -614,8 +616,8 @@ pub(crate) fn assert_families_layout_invariant<T>(
 /// layout tables pass vacuously.
 mod helper_controls {
     use super::{
-        assert_agree, assert_families_layout_invariant, assert_layout_agree,
-        assert_layout_invariant, signal_data, Agree,
+        Agree, assert_agree, assert_families_layout_invariant, assert_layout_agree,
+        assert_layout_invariant, signal_data,
     };
 
     #[test]

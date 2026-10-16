@@ -5,16 +5,16 @@ use std::path::Path;
 
 use anyhow::Result;
 use plskit::{
-    pls3_confirmatory_test, pls3_fit, pls3_transform, ConfirmatoryArgs, Pls3ConfirmatoryTestOpts,
-    Pls3FitOpts, TransformWhich,
+    ConfirmatoryArgs, Pls3ConfirmatoryTestOpts, Pls3FitOpts, TransformWhich,
+    pls3_confirmatory_test, pls3_fit, pls3_transform,
 };
 
 use crate::cases::{
-    faer_col_to_array, faer_mat_to_array, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_xy,
-    CasePaths,
+    CasePaths, faer_col_to_array, faer_mat_to_array, ndarray_to_faer_mat, scalar_f64, scalar_i64,
+    synth_xy,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
+use crate::npz::{NpzWriter, sha256_of_file};
 
 /// Shared signal strength and factor count for every PLS3 fixture.
 const SYNTH_K_SIGNAL: usize = 2;

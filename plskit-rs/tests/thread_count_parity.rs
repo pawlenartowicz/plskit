@@ -41,12 +41,12 @@ use std::fmt::Debug;
 use common::{perm_opts, synth};
 use faer::{Col, Mat, MatRef};
 use plskit::{
+    CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
+    FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, PermNullOpts, Pls3ConfirmatoryTestOpts,
+    Pls3FitOpts, RotationStabilityMethod, RotationStabilityOpts, Selector, VarimaxArgs,
     pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_alpha,
     pls1_perm_null, pls1_rotation_stability, pls3_confirmatory_test, pls3_fit, split_nb_gate,
-    spls1_find_k_sequence, spls1_fit, spls3_fit, CIOpts, ConfirmatoryArgs, ConfirmatoryMethod,
-    ConfirmatoryTestInput, ConfirmatoryTestOpts, FindKOptimalOpts, FindKSequenceOpts, FitOpts,
-    KSpec, PermNullOpts, Pls3ConfirmatoryTestOpts, Pls3FitOpts, RotationStabilityMethod,
-    RotationStabilityOpts, Selector, VarimaxArgs,
+    spls1_find_k_sequence, spls1_fit, spls3_fit,
 };
 
 const POOL_SIZES: [usize; 3] = [1, 3, 5];
@@ -639,6 +639,7 @@ fn perm_alpha_is_pool_size_invariant() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn find_k_and_rotation_stability_are_pool_size_invariant() {
     let mut c = Checker::default();
     // Pool: the BIC sweep's full fit and its scoring run on the fixed split.
@@ -652,6 +653,45 @@ fn find_k_and_rotation_stability_are_pool_size_invariant() {
             FindKOptimalOpts {
                 selector: Selector::Bic,
                 seed: Some(1),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    });
+    // Pool: each fold's fit on X in place and its one validation product
+    // run on the fixed split (n·d·k = 2000·600·3 >= 1e6).
+    c.check("find_k_optimal r2_se 2000x600", || {
+        pls1_find_k_optimal(
+            xt.as_ref(),
+            yt.as_ref(),
+            3,
+            None,
+            FindKOptimalOpts {
+                selector: Selector::R2Se,
+                seed: Some(3),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    });
+    // Pool: the fit on a row-major X in place, and the row gather of its
+    // validation rows.
+    let mut xt_row_major: Vec<f64> = Vec::with_capacity(2000 * 600);
+    for i in 0..2000 {
+        for j in 0..600 {
+            xt_row_major.push(xt[(i, j)]);
+        }
+    }
+    let xt_row_view = MatRef::from_row_major_slice(&xt_row_major, 2000, 600);
+    c.check("find_k_optimal r2_se 2000x600 row-major", || {
+        pls1_find_k_optimal(
+            xt_row_view,
+            yt.as_ref(),
+            3,
+            None,
+            FindKOptimalOpts {
+                selector: Selector::R2Se,
+                seed: Some(3),
                 ..Default::default()
             },
         )

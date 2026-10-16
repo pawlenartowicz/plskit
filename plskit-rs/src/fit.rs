@@ -327,7 +327,7 @@ pub(crate) fn with_thread_limit<T: Send>(
         Err(std::env::VarError::NotUnicode(raw)) => {
             return Err(PlsKitError::InvalidArgument(format!(
                 "{NUM_THREADS_ENV} must be a positive integer or 0, got {raw:?}"
-            )))
+            )));
         }
     };
     match std::env::var(MEMORY_BUDGET_ENV) {
@@ -719,7 +719,7 @@ pub(crate) fn pls1_fit_impl(
     // weights is Some. The standardized X itself is written only when its
     // columns' means are too large for the implicit products (below).
     let mut fx: Option<crate::linalg::FitX> =
-        (!opts.pre_standardized).then(|| crate::linalg::fit_x_moments(x, wref, fit_par));
+        (!opts.pre_standardized).then(|| crate::linalg::fit_x_moments(x, None, wref, fit_par));
     let (ys_owned, y_mean, y_scale) = if opts.pre_standardized {
         (None, 0.0, 1.0)
     } else {
@@ -797,6 +797,7 @@ pub(crate) fn pls1_fit_impl(
                     opts.par,
                     x_fro,
                     ratio,
+                    n_samples,
                 )
             }
         }
@@ -961,9 +962,13 @@ pub(crate) fn pls1_fit_prepared_fro(
 
 /// [`pls1_fit_prepared_fro`] on `Xs = diag(sqw)·(x − 1·mean')·diag(1/scale)`
 /// through [`ImplicitXBackend`], without writing `Xs`. `x_fro` is `‖Xs‖_F`;
-/// `mean_ratio` is `max_j |mean_j| / scale_j`. `None` when a component's
-/// stop decision falls in the backend's rounding band; the caller then fits
-/// the standardized copy.
+/// `mean_ratio` is `max_j |mean_j| / scale_j`; `n_rows` is the row count
+/// the truncation floor takes: `x.nrows()` for a fit of all of X, a fold's
+/// training rows (zero-weight rows included) for a cross-validation fold,
+/// which passes all of X with `sqw` 0 on its validation rows. A row whose
+/// `sqw` is 0 is a zero row of `Xs` (while `x·u` is finite there). `None`
+/// when a component's stop decision falls in the backend's rounding band;
+/// the caller then fits the standardized copy.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pls1_fit_implicit(
     x: MatRef<'_, f64>,
@@ -976,9 +981,10 @@ pub(crate) fn pls1_fit_implicit(
     par: ParChoice,
     x_fro: f64,
     mean_ratio: f64,
+    n_rows: usize,
 ) -> Option<PreparedFit> {
     let par = resolve_par(par, x.nrows(), x.ncols(), k);
-    let w_floor = w_rel_floor(x.nrows(), x.ncols(), x_fro, ys.norm_l2());
+    let w_floor = w_rel_floor(n_rows, x.ncols(), x_fro, ys.norm_l2());
     let mut backend = ImplicitXBackend {
         x,
         ys,
@@ -1269,6 +1275,8 @@ fn rotation(w: &Col<f64>, r_mat: &Mat<f64>, p_mat: &Mat<f64>, a: usize) -> Col<f
 /// component whose selection stops the loop; a `tt` stop is preceded by
 /// `gate_tt` at that same `a`; after either gate returns `Unresolved`, no
 /// backend method is called for the rest of the fit.
+///
+/// `pls1_fit_bytes` counts what this allocates (change together).
 #[allow(clippy::many_single_char_names, clippy::similar_names)]
 pub(crate) fn pls1_component_loop<B: ComponentBackend>(
     backend: &mut B,
@@ -1348,6 +1356,20 @@ pub(crate) fn pls1_component_loop<B: ComponentBackend>(
             q: Col::<f64>::from_fn(k_actual, |i| q_vec[i]),
         }
     }
+}
+
+/// Bytes of the large buffers one PLS1 fit on `p` columns to `k`
+/// components holds at once in [`pls1_component_loop`]: `r_mat`, `p_mat`
+/// and `w_mat` (`p × k` each), the copies of `p_mat` and `w_mat` it
+/// returns when it stops short of `k`, and one component's p-vectors `s`,
+/// `w`, `r` and the loading. Mirrors `pls1_component_loop` (change
+/// together). Mirrored by `pls1_fit_bytes` in `tests/memory_budget_parity.rs`
+/// (change together). The scores (`n × k`) and the `k`-vectors are not counted.
+pub(crate) fn pls1_fit_bytes(p: usize, k: usize) -> usize {
+    use crate::resample::copy_bytes;
+    copy_bytes(p, k)
+        .saturating_mul(5)
+        .saturating_add(copy_bytes(p, 1).saturating_mul(4))
 }
 
 /// `alpha·Xs'·v`, `(d,)`. A row-major `Xs` at least
@@ -1948,7 +1970,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(m3.w_star[(2, 0)] != 0.0, "col 2 (higher |w|-rank than its duplicate at idx 3 via index tie-break path) must survive");
+        assert!(
+            m3.w_star[(2, 0)] != 0.0,
+            "col 2 (higher |w|-rank than its duplicate at idx 3 via index tie-break path) must survive"
+        );
         assert_eq!(m3.w_star[(3, 0)], 0.0, "col 3 loses the tie against col 2");
     }
 
@@ -2356,11 +2381,11 @@ mod kernel_tests;
 mod boundary_tests {
     use super::*;
     use crate::linalg::{
-        normalize_weights, standardize1, standardize1_weighted, standardize_weighted,
+        normalize_weights, standardize_weighted, standardize1, standardize1_weighted,
     };
     use crate::test_support::{
-        assert_agree, assert_bits_eq, assert_layout_agree, col_vals, copy_free_families, mat_vals,
-        signal_data, Agree, Family,
+        Agree, Family, assert_agree, assert_bits_eq, assert_layout_agree, col_vals,
+        copy_free_families, mat_vals, signal_data,
     };
 
     /// Layouts of X agree to rounding, not bit for bit: `pls1_fit` forms its
@@ -2496,7 +2521,7 @@ mod boundary_tests {
         let (x, y) = signal_data(203, 2100, 10);
         let x = offset(&x, 2e3);
         let x_t = x.transpose().to_owned();
-        let mut fx = crate::linalg::fit_x_moments(x_t.transpose(), None, Par::Seq);
+        let mut fx = crate::linalg::fit_x_moments(x_t.transpose(), None, None, Par::Seq);
         assert!(
             fx.max_mean_ratio() > IMPLICIT_MAX_MEAN_RATIO,
             "203x2100 + 2e3: left the standardized copy"
@@ -2540,7 +2565,8 @@ mod boundary_tests {
         for (f, c, implicit) in [(&fams[0], 300.0, true), (&fams[1], 1e6, false)] {
             let x = offset(&f.x, c);
             let w = f.w.as_ref().map(Col::as_ref);
-            let ratio = crate::linalg::fit_x_moments(x.as_ref(), w, Par::Seq).max_mean_ratio();
+            let ratio =
+                crate::linalg::fit_x_moments(x.as_ref(), None, w, Par::Seq).max_mean_ratio();
             let what = format!("{} + {c:e} (ratio {ratio:.0})", f.name);
             assert_eq!(
                 ratio > 100.0 && ratio < IMPLICIT_MAX_MEAN_RATIO,
@@ -2943,15 +2969,15 @@ mod boundary_tests {
         confirmatory: &[crate::signal_test::ConfirmatoryArgs],
     ) -> Vec<(String, String)> {
         use crate::find_k::{
-            pls1_find_k_optimal, pls1_find_k_sequence, spls1_find_keep_optimal, FindKOptimalOpts,
-            FindKSequenceOpts, FindKeepOptimalOpts, Selector,
+            FindKOptimalOpts, FindKSequenceOpts, FindKeepOptimalOpts, Selector,
+            pls1_find_k_optimal, pls1_find_k_sequence, spls1_find_keep_optimal,
         };
-        use crate::perm_null::{pls1_perm_null, PermNullOpts};
+        use crate::perm_null::{PermNullOpts, pls1_perm_null};
         use crate::rotation_stability::{
-            pls1_rotation_stability, RotationStabilityMethod, RotationStabilityOpts,
+            RotationStabilityMethod, RotationStabilityOpts, pls1_rotation_stability,
         };
         use crate::signal_test::{
-            pls1_confirmatory_test, ConfirmatoryTestInput, ConfirmatoryTestOpts,
+            ConfirmatoryTestInput, ConfirmatoryTestOpts, pls1_confirmatory_test,
         };
         fn show<T: std::fmt::Debug>(r: PlsKitResult<T>) -> String {
             match r {
@@ -3116,7 +3142,7 @@ mod boundary_tests {
 
     /// The public entries that take X, besides the PLS1 fits, the PLS3
     /// family (`pls3::tests::pls3_family_agrees_across_layouts`) and the
-    /// engines whose own tests pin layout bit-identity. The
+    /// engines whose own tests pin layout agreement. The
     /// Python wrapper hands each its X in place (C or F order).
     /// `preprocess` / `preprocess_block` and the `split_nb` gate give the
     /// same bits on every layout. `pls1_predict` and
@@ -3125,10 +3151,10 @@ mod boundary_tests {
     #[test]
     fn x_taking_entries_agree_across_layouts() {
         use crate::preprocess::{
-            preprocess, preprocess_block, PreprocessBlockInput, PreprocessInput,
+            PreprocessBlockInput, PreprocessInput, preprocess, preprocess_block,
         };
         use crate::rotation_stability::{
-            pls1_rotation_stability, RotationStabilityMethod, RotationStabilityOpts,
+            RotationStabilityMethod, RotationStabilityOpts, pls1_rotation_stability,
         };
         use crate::signal_test::split_nb_gate;
         let agree = Agree::Corpus(FIT_LAYOUT_TOL);
@@ -3215,10 +3241,10 @@ mod boundary_tests {
     #[test]
     fn zero_count_is_invalid_argument_at_every_entry() {
         use crate::find_k::{
-            spls1_find_k_optimal, spls1_find_k_sequence, FindKOptimalOpts, FindKSequenceOpts,
+            FindKOptimalOpts, FindKSequenceOpts, spls1_find_k_optimal, spls1_find_k_sequence,
         };
-        use crate::pls3::{pls3_fit, plssvd_fit, spls3_fit, Pls3FitOpts};
-        use crate::pls3_signal_test::{pls3_confirmatory_test, Pls3ConfirmatoryTestOpts};
+        use crate::pls3::{Pls3FitOpts, pls3_fit, plssvd_fit, spls3_fit};
+        use crate::pls3_signal_test::{Pls3ConfirmatoryTestOpts, pls3_confirmatory_test};
         use crate::signal_test::ConfirmatoryArgs;
         fn show<T>(r: PlsKitResult<T>) -> String {
             match r {

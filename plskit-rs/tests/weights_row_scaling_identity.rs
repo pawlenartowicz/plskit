@@ -10,8 +10,8 @@
 #![allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
 
 use faer::{Col, Mat};
-use plskit::fit::{pls1_fit, FitOpts, KSpec};
-use plskit::preprocess::{preprocess, PreprocessInput};
+use plskit::fit::{FitOpts, KSpec, pls1_fit};
+use plskit::preprocess::{PreprocessInput, preprocess};
 
 #[test]
 fn cache_pattern_round_trip_parity() {

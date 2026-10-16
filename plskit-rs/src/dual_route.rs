@@ -31,13 +31,13 @@
 // The n-space PLS1 route for k ≥ 1 lives in `dual_route/multi_k.rs`; its
 // items are re-exported below, so their paths are `crate::dual_route::…`.
 mod multi_k;
-pub(crate) use multi_k::{
-    fold_column_nspace, nspace_eligible_perm_null, nspace_eligible_raw_perm,
-    nspace_eligible_split_exact, nspace_perm_row, pls1_nspace_kernel, split_columns_r_nspace,
-    NspaceFold, NspaceGram, NspaceOutcome, NspaceSplit, NSPACE_BATCH,
-};
 #[cfg(test)]
-pub(crate) use multi_k::{nspace_blocks_built, K_DUAL_MAX};
+pub(crate) use multi_k::{K_DUAL_MAX, nspace_blocks_built};
+pub(crate) use multi_k::{
+    NSPACE_BATCH, NspaceFold, NspaceGram, NspaceOutcome, NspaceSplit, fold_column_nspace,
+    nspace_eligible_perm_null, nspace_eligible_raw_perm, nspace_eligible_split_exact,
+    nspace_perm_row, pls1_nspace_kernel, split_columns_r_nspace,
+};
 
 /// Hard cap on the training-set size the dual route will accept.
 ///
@@ -208,8 +208,8 @@ pub(crate) const SCORE_BAND: f64 = 1e-3;
 /// `‖X̃_tr‖_F` comes from the column moments of the same standardization, equal
 /// to the primal route's `norm_l2` to rounding, except when a finite `x`
 /// overflows in standardization: the moments' norm then stays finite and
-/// `norm_l2` does not, but `G` is not finite either, so the column fails the
-/// gates below and takes the fallback. The quantity compared against the
+/// `norm_l2` does not, but the first pass fails such a fold with
+/// `NonFiniteInput` before any gate. The quantity compared against the
 /// floor is not: `z'Gz` is formed from a rounded `G`, and its absolute error
 /// is bounded by
 /// `(p + 2·n_tr)·ε·‖z‖²·‖X̃‖_F²`, so `√(z'Gz)` resolves `‖X̃'z‖` only down to
@@ -269,7 +269,9 @@ pub(crate) const SCORE_BAND: f64 = 1e-3;
 /// `NonFiniteInput` when a fold's standardized training y of column 0 is
 /// not finite (a finite y near `±f64::MAX` can overflow in `y − mean`). A
 /// null column that fails the same way is NaN instead, as in
-/// `signal_test::pooled_cv_r2_columns` (change together).
+/// `signal_test::pooled_cv_r2_columns` (change together). Also
+/// `NonFiniteInput` when a fold's standardized training block of X is not
+/// finite, as on the primal route.
 ///
 /// # Panics
 /// Never (all indexing is over caller-supplied fold index vectors).
@@ -281,9 +283,9 @@ pub(crate) fn pls1_cv_r2_columns(
     y_mat: MatRef<'_, f64>,
     folds: &[Vec<usize>],
 ) -> crate::error::PlsKitResult<Vec<f64>> {
-    use crate::linalg::{standardize1, standardize_apply_rows, standardize_rows};
-    use faer::linalg::matmul::matmul;
+    use crate::linalg::{standardize_apply_rows, standardize_rows, standardize1};
     use faer::Accum;
+    use faer::linalg::matmul::matmul;
 
     type Contrib = crate::error::PlsKitResult<(f64, f64)>;
 
@@ -332,6 +334,7 @@ pub(crate) fn pls1_cv_r2_columns(
         let bpar = crate::fit::par_fixed();
         let mut g = Mat::<f64>::zeros(n_tr, n_tr);
         let mut m = Mat::<f64>::zeros(n_val, n_tr);
+        let mut tr_finite = true;
         let x_fro = crate::linalg::standardized_blocks(
             x,
             &train_idx,
@@ -339,12 +342,22 @@ pub(crate) fn pls1_cv_r2_columns(
             None,
             None,
             None,
+            // The width linalg::stream_blocks_bytes counts (change together).
             crate::linalg::stream_block_width(n_tr.max(n_val)),
             |_, a, c| {
+                tr_finite &= a.is_all_finite();
                 matmul(g.as_mut(), Accum::Add, a, a.transpose(), 1.0, bpar);
                 matmul(m.as_mut(), Accum::Add, c, a.transpose(), 1.0, bpar);
             },
         );
+        // The primal fold's X check (`check_finite_mat(xs_tr)` in
+        // `signal_test::prepare_cv_fold`; change together): a non-finite
+        // standardized training block fails every column of the fold.
+        if !tr_finite {
+            return (0..n_cols)
+                .map(|_| Some(Err(crate::error::PlsKitError::NonFiniteInput)))
+                .collect();
+        }
         let fro2 = x_fro * x_fro;
         #[allow(clippy::cast_precision_loss)]
         let (num_err, den_err) = (
@@ -398,26 +411,34 @@ pub(crate) fn pls1_cv_r2_columns(
         })
     };
 
-    // Folds in batches of `resample::map_units`, each counted as `G` and `M`
-    // (`n_tr · n` values at the largest training set) plus the two stream
-    // blocks of `standardized_blocks`; the columns of a fold map in parallel.
+    // Folds in batches of `resample::map_units`, each counted as `G`
+    // (`n_tr × n_tr`) and `M` (`n_val × n_tr`) at the largest training set
+    // plus the two stream blocks of `standardized_blocks`; the columns of a
+    // fold map in parallel.
     let n = y_mat.nrows();
     let n_tr_max = n - folds.iter().map(Vec::len).min().unwrap_or(0);
-    let gram_unit = crate::resample::copy_bytes(n_tr_max, n)
-        .saturating_add(2 * crate::linalg::STREAM_BLOCK_BYTES);
+    let gram_unit = crate::resample::fold_blocks_bytes(n, folds, n_tr_max).saturating_add(
+        folds
+            .iter()
+            .map(|f| crate::linalg::stream_blocks_bytes(n - f.len(), f.len()))
+            .max()
+            .unwrap_or(0),
+    );
     let rows: Vec<Vec<Option<Contrib>>> =
         crate::resample::map_units(folds.len(), gram_unit, decide_fold);
 
     // Pass 2: the folds with pending columns run in batches of
-    // `resample::map_units`, one standardized copy of X counted per fold.
-    // The columns left pending get the primal fold fit, bit for bit as in
-    // `signal_test::cv_fold_contribution` (change together), on the primal
-    // route's own blocks and its own `‖X̃_tr‖_F`, call for call as
-    // `signal_test::prepare_cv_fold` builds them without weights (change
-    // together).
+    // `resample::map_units`, the fold's blocks of X and one fit per running
+    // column counted per fold. The columns left pending get the primal fold
+    // fit, bit for bit as in `signal_test::cv_fold_contribution` (change
+    // together), on the primal route's own blocks and its own `‖X̃_tr‖_F`,
+    // call for call as `signal_test::prepare_cv_fold` builds them without
+    // weights (change together).
     let rows = crate::resample::fill_pending(
         rows,
-        crate::resample::copy_bytes(x.nrows(), x.ncols()),
+        crate::resample::fold_blocks_bytes(x.nrows(), folds, x.ncols()).saturating_add(
+            crate::signal_test::columns_bytes(crate::fit::pls1_fit_bytes(x.ncols(), 1), n_cols),
+        ),
         |fi, pending| {
             let val_idx = folds[fi].as_slice();
             let train_idx = train_rows(fi);
@@ -531,8 +552,9 @@ pub(crate) fn pls1_cv_r2_columns(
 /// as on the primal route, and `‖X̃_tr‖_F` comes from the column moments of
 /// the same standardization, equal to the primal route's `norm_l2` to
 /// rounding, with the exception "Truncation" on [`pls1_cv_r2_columns`]
-/// names (a finite `x` that overflows in standardization). Unlike there, a
-/// non-finite `G` can pass the gates here: with a positive relative floor,
+/// names (a finite `x` that overflows in standardization). A split whose
+/// `G` or `M` is not finite goes to the primal before the gates, which a
+/// non-finite product could pass: with a positive relative floor,
 /// `λ_max = +inf` clears each of them. The quantity compared against the
 /// floor is not: `λ_max` is an eigenvalue of a rounded `C`, and bounding
 /// the rounding of each entry `ỹ_j'Gỹ_k` as `pls1_cv_r2_columns` bounds
@@ -767,8 +789,8 @@ pub(crate) fn pls3_split_zbars_columns(
 
     let per_split = |sp: &crate::signal_test::SplitIdx| -> Vec<Option<f64>> {
         let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
-        use faer::linalg::matmul::matmul;
         use faer::Accum;
+        use faer::linalg::matmul::matmul;
 
         let (n_tr, n_te) = (tr.len(), te.len());
         // Built once per split; neither carries p into the replicate loop.
@@ -786,12 +808,20 @@ pub(crate) fn pls3_split_zbars_columns(
             None,
             None,
             None,
+            // The width linalg::stream_blocks_bytes counts (change together).
             crate::linalg::stream_block_width(n_tr.max(n_te)),
             |_, a, c| {
                 matmul(g.as_mut(), Accum::Add, a, a.transpose(), 1.0, bpar);
                 matmul(m.as_mut(), Accum::Add, c, a.transpose(), 1.0, bpar);
             },
         );
+        // A non-finite `G` or `M` (a non-finite standardized half, or a
+        // product that overflows) sends every column to the primal in pass
+        // 2: the gates below can pass on one. `C = [+∞]` clears every `>=`
+        // floor, and an all-zero `X̃_tr` reads `0 >= 0` beside a NaN `M`.
+        if !(g.is_all_finite() && m.is_all_finite()) {
+            return vec![None; n_cols];
+        }
         #[allow(clippy::cast_precision_loss)]
         let lam_err_x = ((p + 2 * n_tr + q) as f64) * f64::EPSILON * x_fro * x_fro;
 
@@ -805,6 +835,12 @@ pub(crate) fn pls3_split_zbars_columns(
             let y_te = Mat::<f64>::from_fn(n_te, q, |i, j| y[(row_of(te[i]), j)]);
             let (ys_tr, y_mean, y_scale) = standardize(y_tr.as_ref());
             let ys_te = standardize_apply(y_te.as_ref(), y_mean.as_ref(), y_scale.as_ref());
+            // A non-finite held-out Y block gives the primal's value, 0
+            // (`pls3_signal_test::pls3_split_columns_z_primal`; change
+            // together).
+            if crate::fit::check_finite_mat(ys_te.as_ref()).is_err() {
+                return Some(0.0);
+            }
 
             // C = Ỹ_tr' G Ỹ_tr  (q × q), formed as Ỹ'(GỸ) so the
             // n_tr × n_tr Gram is applied, never squared. Seq inside the
@@ -980,23 +1016,26 @@ pub(crate) fn pls3_split_zbars_columns(
     };
 
     // Pass 1. Splits in batches of `resample::map_units`, each counted as
-    // `G` and `M` (`n_tr · n` values) plus the two stream blocks of
+    // `G` (`n_tr × n_tr`) and `M` (`n_te × n_tr`) plus the two stream blocks of
     // `standardized_blocks`; the columns of a split map in parallel.
     // Nothing the size of X is written. Every split has the same training
     // size (the split sizes depend on `n` and `k` only), so the first
     // split's stands for all.
     let n_tr = splits.first().map_or(0, |sp| sp.tr.len());
-    let gram_unit = crate::resample::copy_bytes(n_tr, x.nrows())
-        .saturating_add(2 * crate::linalg::STREAM_BLOCK_BYTES);
+    let gram_unit = crate::signal_test::split_blocks_bytes(splits, n_tr).saturating_add(
+        splits.first().map_or(0, |sp| {
+            crate::linalg::stream_blocks_bytes(sp.tr.len(), sp.te.len())
+        }),
+    );
     let rows: Vec<Vec<Option<f64>>> =
         crate::resample::map_units(splits.len(), gram_unit, |j| per_split(&splits[j]));
     // Pass 2: the splits with pending columns run in batches of
-    // `resample::map_units`, one standardized copy of X counted per split.
-    // The columns left pending are the primal route's, on halves
-    // materialized once per split.
+    // `resample::map_units`, the halves of X and one LV1 fit per running
+    // column counted per split. The columns left pending are the primal
+    // route's, on halves materialized once per split.
     let rows = crate::resample::fill_pending(
         rows,
-        crate::resample::copy_bytes(x.nrows(), x.ncols()),
+        crate::pls3_signal_test::primal_split_unit_bytes(splits, x.ncols(), y.ncols(), n_cols),
         |j, pending| {
             crate::pls3_signal_test::pls3_split_columns_z_primal(
                 x, y, &splits[j], perms, None, keep_y, max_iter, tol, pending,
@@ -1037,6 +1076,145 @@ fn restricted_sweeps(c: MatRef<'_, f64>, v: &Col<f64>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The PLS3 Gram route gives the primal's value, 0, on one split where
+    /// `G = X̃_tr X̃_tr'` or `M = X̃_te X̃_tr'` is not finite: (a) q = 1 and a
+    /// training block with an infinite entry (rows 0 and 1 of column 0 at
+    /// `f64::MAX`, row 2 at `-f64::MAX`) and a training y whose signs
+    /// follow the standardized column (`+, +, −, −, −, −`), so that
+    /// `C = [+∞]` passes every truncation gate; (b) an exactly constant
+    /// training X (`X̃_tr = 0`) and a held-out half at `±f64::MAX`, which
+    /// overflows, so that `M = ∞·0 = NaN` while the gates read `0 >= 0`;
+    /// (c) a held-out half that overflows under a training scale below 1.
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn pls3_gram_route_gives_the_primal_value_on_non_finite_products() {
+        use crate::signal_test::SplitIdx;
+        let sp = SplitIdx {
+            tr: (0..6).collect(),
+            te: (6..12).collect(),
+        };
+        let fit = crate::pls3::Pls3FitOpts::default();
+        let (x0, _) = crate::test_support::signal_data(12, 3, 5);
+
+        let mut xa = x0.clone();
+        xa[(0, 0)] = f64::MAX;
+        xa[(1, 0)] = f64::MAX;
+        xa[(2, 0)] = -f64::MAX;
+        let ya = Mat::<f64>::from_fn(12, 1, |i, _| {
+            if i < 2 {
+                1.0 + 0.1 * i as f64
+            } else if i < 6 {
+                -(1.0 + 0.1 * i as f64)
+            } else {
+                x0[(i, 1)]
+            }
+        });
+
+        let xb = Mat::<f64>::from_fn(12, 3, |i, j| {
+            if i < 6 {
+                -1e308
+            } else if (i + j) % 2 == 0 {
+                f64::MAX
+            } else {
+                -f64::MAX
+            }
+        });
+        let yb = Mat::<f64>::from_fn(12, 2, |i, j| x0[(i, j)]);
+
+        let mut xc = x0.clone();
+        for i in 0..6 {
+            xc[(i, 0)] *= 1e-3;
+        }
+        for i in 6..12 {
+            xc[(i, 0)] = if i % 2 == 0 { 1.7e308 } else { -1.7e308 };
+        }
+        let yc = Mat::<f64>::from_fn(12, 2, |i, j| x0[(i, 1)] + x0[(i, j)]);
+
+        for (label, x, y) in [("a", &xa, &ya), ("b", &xb, &yb), ("c", &xc, &yc)] {
+            let gram = pls3_split_zbars_columns(
+                x.as_ref(),
+                y.as_ref(),
+                std::slice::from_ref(&sp),
+                &[],
+                None,
+                fit.max_iter,
+                fit.tol,
+            );
+            let primal = crate::pls3_signal_test::pls3_split_columns_z_primal(
+                x.as_ref(),
+                y.as_ref(),
+                &sp,
+                &[],
+                None,
+                None,
+                fit.max_iter,
+                fit.tol,
+                &[0],
+            );
+            assert_eq!(
+                primal[0].to_bits(),
+                0.0_f64.to_bits(),
+                "{label}: primal {}",
+                primal[0]
+            );
+            assert_eq!(
+                gram[0].to_bits(),
+                primal[0].to_bits(),
+                "{label}: gram {}",
+                gram[0]
+            );
+        }
+    }
+
+    /// Through `pls3_confirmatory_test` on a shape that takes the Gram
+    /// route, both overflowing inputs give a finite statistic, on the dense
+    /// arm and on the sparse Y arm.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn pls3_split_exact_on_the_gram_route_stays_finite_when_x_overflows() {
+        let (n, p, q, n_perm) = (40, 200, 3, 19);
+        let (n_tr, _) = crate::resample::split_sizes(n, 1);
+        assert!(
+            use_dual_route(n_tr, p, n_perm + 1, q),
+            "premise: Gram route"
+        );
+        let (x0, _) = crate::test_support::signal_data(n, p, 11);
+        let y = Mat::<f64>::from_fn(n, q, |i, j| x0[(i, j + 1)] + x0[(i, j + 2)]);
+        let mut held_out = x0.clone();
+        for i in 0..n {
+            held_out[(i, 0)] *= 1e-3;
+        }
+        held_out[(0, 0)] = 1e306;
+        let mut centering = x0.clone();
+        centering[(0, 0)] = f64::MAX;
+        centering[(1, 0)] = f64::MAX;
+        centering[(2, 0)] = -f64::MAX;
+        for (label, x) in [("held-out", &held_out), ("centering", &centering)] {
+            for keep_y in [None, Some(1)] {
+                let r = crate::pls3_confirmatory_test(
+                    x.as_ref(),
+                    y.as_ref(),
+                    1,
+                    crate::Pls3ConfirmatoryTestOpts {
+                        args: crate::signal_test::ConfirmatoryArgs::SplitExact {
+                            n_perm,
+                            n_splits: 6,
+                        },
+                        keep_y,
+                        seed: Some(7),
+                        ..Default::default()
+                    },
+                )
+                .expect("a result");
+                assert!(
+                    r.statistic.is_finite(),
+                    "{label} {keep_y:?}: {}",
+                    r.statistic
+                );
+            }
+        }
+    }
 
     // Exact comparisons: diagonal blocks, whose eigenvalues and gaps are
     // exact small integers.

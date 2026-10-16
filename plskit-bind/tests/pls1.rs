@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use plskit_bind::{call, check_record, MatF64, Record, Value, VecF64};
+use plskit_bind::{MatF64, Record, Value, VecF64, call, check_record};
 
 fn fit(k: Value<'static>) -> plskit_bind::Outcome {
     let (x, y) = data(60, 6, 1);

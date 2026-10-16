@@ -83,29 +83,29 @@ pub use faer::{Col, ColRef, Mat, MatRef};
 
 pub use error::{PlsKitError, PlsKitResult};
 pub use find_k::{
-    pls1_find_k_optimal, pls1_find_k_sequence, spls1_find_k_optimal, spls1_find_k_sequence,
-    spls1_find_keep_optimal, FindKOptimalOpts, FindKOptimalOutput, FindKSequenceOpts,
-    FindKSequenceOutput, FindKeepOptimalOpts, FindKeepOptimalOutput, Selector,
+    FindKOptimalOpts, FindKOptimalOutput, FindKSequenceOpts, FindKSequenceOutput,
+    FindKeepOptimalOpts, FindKeepOptimalOutput, Selector, pls1_find_k_optimal,
+    pls1_find_k_sequence, spls1_find_k_optimal, spls1_find_k_sequence, spls1_find_keep_optimal,
 };
-pub use fit::{pls1_fit, spls1_fit, FitOpts, KSpec, ParChoice, Pls1Model};
-pub use perm_alpha::{pls1_perm_alpha, PermAlphaOutput};
-pub use perm_null::{pls1_perm_null, PermNullOpts, PermNullOutput};
+pub use fit::{FitOpts, KSpec, ParChoice, Pls1Model, pls1_fit, spls1_fit};
+pub use perm_alpha::{PermAlphaOutput, pls1_perm_alpha};
+pub use perm_null::{PermNullOpts, PermNullOutput, pls1_perm_null};
 pub use pls3::{
-    pls3_fit, pls3_transform, plssvd_fit, plssvd_transform, spls3_fit, Pls3FitOpts, Pls3Model,
-    Pls3Scores, TransformWhich,
+    Pls3FitOpts, Pls3Model, Pls3Scores, TransformWhich, pls3_fit, pls3_transform, plssvd_fit,
+    plssvd_transform, spls3_fit,
 };
-pub use pls3_signal_test::{pls3_confirmatory_test, Pls3ConfirmatoryTestOpts};
+pub use pls3_signal_test::{Pls3ConfirmatoryTestOpts, pls3_confirmatory_test};
 pub use predict::pls1_predict;
-pub use preprocess::{preprocess, PreprocessInput, PreprocessResult};
-pub use rotate::{rotate, RotateOutput, RotationMethod, VarimaxArgs};
+pub use preprocess::{PreprocessInput, PreprocessResult, preprocess};
+pub use rotate::{RotateOutput, RotationMethod, VarimaxArgs, rotate};
 pub use rotation_stability::{
-    pls1_rotation_stability, RotationStabilityMethod, RotationStabilityOpts,
-    RotationStabilityOutput,
+    RotationStabilityMethod, RotationStabilityOpts, RotationStabilityOutput,
+    pls1_rotation_stability,
 };
 pub use signal_test::{
-    pls1_confirmatory_test, split_nb_gate, CIOpts, ConfirmatoryArgs, ConfirmatoryMethod,
-    ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput, SplitNbGateOutput,
-    SPLIT_NB_REROUTE_N_PERM,
+    CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
+    ConfirmatoryTestOutput, SPLIT_NB_REROUTE_N_PERM, SplitNbGateOutput, pls1_confirmatory_test,
+    split_nb_gate,
 };
 // subsample is pub(crate) — only these two result types are on the public surface.
 // See subsample.rs module header for the full engine contract.

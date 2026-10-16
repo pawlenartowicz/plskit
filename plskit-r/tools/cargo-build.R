@@ -12,12 +12,14 @@
 # relaxed to "*" (a [patch] applies only when the patched version satisfies
 # the requirement), cargo builds that copy with --config <file>, and the
 # lock file is checked to confirm both crates came from the patch. The
-# committed rust/Cargo.toml is never edited. Without PLSKIT_CARGO_CONFIG
-# the build uses the committed rust/Cargo.lock with --locked.
+# committed rust/Cargo.toml is never edited. A checkout of main has no
+# rust/Cargo.lock, so it builds only in dev mode.
 #
-# Release mode: the release tarball (r-universe branch, CRAN) carries every
-# crate in rust/vendor.tar.xz, written by the vX.Y.Z-r release job. When
-# that file is present the build unpacks it and runs offline against it.
+# Release mode: the release tarball (r-universe branch, CRAN) carries
+# rust/Cargo.lock and every crate in rust/vendor.tar.xz, both written by
+# the vX.Y.Z-r release job. Without PLSKIT_CARGO_CONFIG the build uses that
+# lock with --locked; when vendor.tar.xz is present it unpacks it and runs
+# offline against it.
 
 args <- commandArgs(trailingOnly = TRUE)
 target <- sub("^--target=", "", grep("^--target=", args, value = TRUE))
@@ -33,12 +35,28 @@ target_dir <- file.path(crate_dir, "target")
 manifest <- file.path(crate_dir, "Cargo.toml")
 config <- Sys.getenv("PLSKIT_CARGO_CONFIG")
 
-cargo <- Sys.which("cargo")
-if (!nzchar(cargo)) {
+# Run cargo by name: Sys.which() needs a `which` program, which webR's build
+# R does not have.
+cargo <- "cargo"
+found <- tryCatch(
+  suppressWarnings(system2(cargo, "--version", stdout = FALSE, stderr = FALSE)),
+  error = function(e) 127L
+)
+if (!identical(found, 0L)) {
   home <- Sys.getenv(if (.Platform$OS.type == "windows") "USERPROFILE" else "HOME")
   exe <- if (.Platform$OS.type == "windows") "cargo.exe" else "cargo"
   cargo <- file.path(home, ".cargo", "bin", exe)
   if (!file.exists(cargo)) fail("cargo not found; install Rust from https://rustup.rs")
+}
+
+# webR's build R reports the WebAssembly platform it builds for, and the
+# Rust library must target it too. Panics abort there, the setting of
+# rextendr's webR template, so catch_unwind in the R glue cannot turn a
+# panic into an R error and a panic ends the R session.
+wasm <- length(target) == 0L && identical(R.version$platform, "wasm32-unknown-emscripten")
+if (wasm) {
+  target <- R.version$platform
+  Sys.setenv(CARGO_PROFILE_RELEASE_PANIC = "abort")
 }
 
 flags <- c(if (clippy) "clippy" else "build", "--lib", "--release", "--target-dir", target_dir)
@@ -91,9 +109,11 @@ if (nzchar(config)) {
 } else {
   if (!file.exists(file.path(crate_dir, "Cargo.lock"))) {
     fail(
-      "rust/Cargo.lock is not committed yet, so plskit builds only in dev ",
-      "mode: set PLSKIT_CARGO_CONFIG to a cargo config file that patches ",
-      "plskit and plskit-bind to a plskit checkout (see _docs/r/installation.md)"
+      "rust/Cargo.lock is missing: a checkout of main builds only in dev ",
+      "mode. Set PLSKIT_CARGO_CONFIG to a cargo config file that patches ",
+      "plskit and plskit-bind to a plskit checkout (see ",
+      "_docs/r/installation.md). Released versions install from r-universe ",
+      "or from the r-universe branch."
     )
   }
   flags <- c(flags, "--locked")
@@ -121,6 +141,15 @@ if (clippy) flags <- c(flags, "--", "-D", "warnings")
 
 status <- system2(cargo, flags)
 if (!identical(status, 0L)) fail("cargo ", flags[[1L]], " failed (status ", status, ")")
+
+# src/Makevars links rust/target/release/libplskit_r.a; a --target build
+# writes the library under rust/target/<target>/release/. Mirrors LIBDIR
+# in src/Makevars — change together.
+if (wasm && !clippy) {
+  built <- file.path(target_dir, target, "release", "libplskit_r.a")
+  dir.create(file.path(target_dir, "release"), showWarnings = FALSE)
+  if (!file.copy(built, file.path(target_dir, "release"), overwrite = TRUE)) fail("could not copy ", built)
+}
 
 if (nzchar(config)) {
   lock <- readLines(file.path(dirname(manifest), "Cargo.lock"))

@@ -133,7 +133,7 @@ pub(crate) fn confirmatory_args(
         (m, d) => {
             return Err(BindError::internal(format!(
                 "ConfirmatoryArgs::defaults_for({m:?}) returned {d:?}"
-            )))
+            )));
         }
     })
 }

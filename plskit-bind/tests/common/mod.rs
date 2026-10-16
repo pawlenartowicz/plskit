@@ -1,7 +1,7 @@
 //! Helpers shared by the integration tests.
 #![allow(dead_code, clippy::cast_precision_loss)]
 
-use plskit_bind::{call, BindError, MatF64, Outcome, Record, Value, VecF64};
+use plskit_bind::{BindError, MatF64, Outcome, Record, Value, VecF64, call};
 
 /// Deterministic pseudo-random numbers in [-1, 1) (xorshift64*), so the
 /// tests need no rand dependency.

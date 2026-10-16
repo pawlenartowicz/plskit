@@ -1,0 +1,55 @@
+name: Julia default install
+
+# Installs PLSKit.jl from the latest vX.Y.Z-jl tag the way a user does:
+# CondaPkg installs Python, nothing is pre-installed. A change on conda-forge
+# can break that install with no change in this repo, so it runs on a
+# schedule and on demand, not on every push. Between a version bump on main
+# and its vX.Y.Z-py release the pinned wheel is not on PyPI, so a push-time
+# run would fail with no fault in the tree. The release workflow runs the
+# same script on the tagged tree.
+
+on:
+  schedule:
+    - cron: '0 6 * * 0'   # weekly, Sunday 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  default-install:
+    name: ${{ matrix.os }}, Julia ${{ matrix.julia }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, julia: lts }
+          - { os: ubuntu-latest, julia: "1" }
+          - { os: macos-latest, julia: "1" }
+          - { os: windows-latest, julia: "1" }
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Latest Julia release tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG=$(git tag --list 'v*-jl' --sort=-v:refname | head -n 1)
+          if [ -z "$TAG" ]; then
+            echo "::error::no v*-jl tag found"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - name: Install ${{ steps.tag.outputs.tag }} and fit
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: julia --color=yes scripts/julia-default-install-smoke.jl rev "$TAG"

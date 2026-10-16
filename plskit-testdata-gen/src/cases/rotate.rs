@@ -1,13 +1,13 @@
 //! `rotate` fixture cases.
 
 use crate::cases::{
-    faer_mat_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64,
-    synth_data, CasePaths,
+    CasePaths, faer_mat_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64,
+    synth_data,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
+use crate::npz::{NpzWriter, sha256_of_file};
 use anyhow::Result;
-use plskit::{pls1_fit, rotate, FitOpts, KSpec, RotationMethod, VarimaxArgs};
+use plskit::{FitOpts, KSpec, RotationMethod, VarimaxArgs, pls1_fit, rotate};
 use std::path::Path;
 
 /// Case: varimax rotation of a `W*` matrix derived from a synthetic PLS1 fit.

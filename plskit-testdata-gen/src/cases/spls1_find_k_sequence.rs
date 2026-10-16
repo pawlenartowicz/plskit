@@ -5,12 +5,13 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::cases::{
-    case_files, ensure_moved, faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat,
-    scalar_f64, scalar_i64, synth_data, weighted_prestd_n80_d6, Xyw, WEIGHTED_PRESTD_N80_D6_INPUTS,
+    WEIGHTED_PRESTD_N80_D6_INPUTS, Xyw, case_files, ensure_moved, faer_col_to_array,
+    ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data,
+    weighted_prestd_n80_d6,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
-use plskit::{spls1_find_k_sequence, ConfirmatoryMethod, FindKSequenceOpts, FindKSequenceOutput};
+use crate::npz::{NpzWriter, sha256_of_file};
+use plskit::{ConfirmatoryMethod, FindKSequenceOpts, FindKSequenceOutput, spls1_find_k_sequence};
 
 /// Shared synth parameters. `n` varies between cases, and `e_keep3` lowers
 /// the SNR to `E_SNR`.

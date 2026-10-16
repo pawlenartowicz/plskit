@@ -5,10 +5,10 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::cases::pls1_find_k_optimal::write_btreemap;
-use crate::cases::{ndarray_to_faer_col, ndarray_to_faer_mat, scalar_i64, synth_data, CasePaths};
+use crate::cases::{CasePaths, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_i64, synth_data};
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
-use plskit::{spls1_find_keep_optimal, FindKeepOptimalOpts};
+use crate::npz::{NpzWriter, sha256_of_file};
+use plskit::{FindKeepOptimalOpts, spls1_find_keep_optimal};
 
 /// Case: keep sweep at fixed k=1 on (n=80, d=6), seed=42.
 ///

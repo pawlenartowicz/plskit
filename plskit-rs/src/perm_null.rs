@@ -125,9 +125,9 @@ pub(crate) fn perm_null_impl(
     seed: Option<u64>,
 ) -> PlsKitResult<PermNullOutput> {
     use crate::fit::{
-        fit_row_scale, pls1_fit_impl, scale_rows, validate_weights_for_k, FitOpts, KSpec,
+        FitOpts, KSpec, fit_row_scale, pls1_fit_impl, scale_rows, validate_weights_for_k,
     };
-    use crate::linalg::{standardize, standardize1, standardize1_weighted, standardize_weighted};
+    use crate::linalg::{standardize, standardize_weighted, standardize1, standardize1_weighted};
     use faer::{Col, Mat};
 
     opts.validate(k)?;
@@ -448,7 +448,7 @@ fn perm_row(
     k: usize,
     out: &mut [f64],
 ) -> PlsKitResult<()> {
-    use crate::fit::{pls1_fit_prepared_fro, scale_col, ParChoice};
+    use crate::fit::{ParChoice, pls1_fit_prepared_fro, scale_col};
     match block {
         &PermBlock::Primal { x_fro } => {
             let n = xs_fit.nrows();
@@ -797,7 +797,7 @@ mod tests_validation {
 #[allow(clippy::cast_precision_loss)]
 mod tests_nspace {
     use super::*;
-    use crate::dual_route::{nspace_blocks_built, K_DUAL_MAX};
+    use crate::dual_route::{K_DUAL_MAX, nspace_blocks_built};
     use crate::linalg::{standardize, standardize1};
     use crate::signal_test::with_gram_routes_disabled;
     use crate::test_support::{assert_rows_close, assert_summaries_close, bits, synth};
@@ -955,7 +955,7 @@ mod tests_nspace {
 #[cfg(test)]
 mod tests_gram_p {
     use super::*;
-    use crate::signal_test::{with_gram_routes_disabled, ReplicateRoute};
+    use crate::signal_test::{ReplicateRoute, with_gram_routes_disabled};
     use crate::test_support::{
         assert_rows_close, assert_summaries_close, bits, conditioned, gram_p_weights, linear_y,
         unif,
@@ -1042,11 +1042,12 @@ mod tests_gram_p {
             let g = call();
             let xr = with_gram_routes_disabled(call);
             // The observed fit stays on the Primal route on both runs.
-            assert!(g
-                .beta_ref
-                .iter()
-                .zip(&xr.beta_ref)
-                .all(|(a, b)| a.to_bits() == b.to_bits()));
+            assert!(
+                g.beta_ref
+                    .iter()
+                    .zip(&xr.beta_ref)
+                    .all(|(a, b)| a.to_bits() == b.to_bits())
+            );
             assert_summaries_close(&g, &xr, label);
             let (gm, xm) = (
                 g.beta_perm_matrix.as_deref().expect("matrix"),

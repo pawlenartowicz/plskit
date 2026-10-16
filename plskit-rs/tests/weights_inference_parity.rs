@@ -42,8 +42,8 @@ mod common;
 use common::duplicate_rows;
 use faer::{Col, Mat};
 use plskit::{
-    pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_null, ConfirmatoryMethod,
-    FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, PermNullOpts, Selector,
+    ConfirmatoryMethod, FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, PermNullOpts,
+    Selector, pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_null,
 };
 
 /// Seeded synthetic data with planted signal in the first feature.

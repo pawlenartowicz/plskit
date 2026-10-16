@@ -15,10 +15,12 @@ check fails when:
    plskit-r/DESCRIPTION's `Version:` (both are pinned to the R
    package version).
 
-Check 2 reads plskit-r/src/rust/Cargo.lock and is skipped when that
-file is absent. --r-lock names another lock file instead, e.g. the
-dev-mode one at plskit-r/src/rust/target/dev-crate/Cargo.lock. Plain
-python3 (3.11+, for tomllib), no dependencies.
+Check 2 compares the lock file named by --r-lock: the vX.Y.Z-r release
+job passes the one it writes in its staged copy of plskit-r, CI the
+dev-mode one at plskit-r/src/rust/target/dev-crate/Cargo.lock. Without
+--r-lock it reads plskit-r/src/rust/Cargo.lock, which main does not
+carry, and is skipped when that file is absent. Plain python3 (3.11+,
+for tomllib), no dependencies.
 """
 
 import argparse
@@ -134,7 +136,7 @@ def main() -> int:
     elif args.r_lock is not None:
         issues.append(f"{r_lock}: not found")
     else:
-        print(f"{R_LOCK} is not committed; lock check skipped")
+        print(f"{R_LOCK} is absent; lock check skipped")
 
     for line in issues:
         print(f"  {line}")

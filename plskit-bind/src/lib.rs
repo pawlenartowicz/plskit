@@ -38,6 +38,6 @@ mod value;
 mod warn;
 
 pub use error::BindError;
-pub use registry::{call, registry, registry_json, DefaultValue, FnSpec, Param, ParamKind};
-pub use types::{check_record, result_type, result_types, FieldSpec, ResultTypeSpec};
+pub use registry::{DefaultValue, FnSpec, Param, ParamKind, call, registry, registry_json};
+pub use types::{FieldSpec, ResultTypeSpec, check_record, result_type, result_types};
 pub use value::{MatF64, Outcome, Record, Value, VecF64};

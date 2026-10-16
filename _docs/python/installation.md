@@ -21,7 +21,7 @@ source distribution, which needs Rust 1.85 or later
 import numpy as np
 import plskit
 
-print(plskit.__version__)                    # 0.7.0
+print(plskit.__version__)                    # 0.7.1
 
 rng = np.random.default_rng(0)
 X = rng.standard_normal((40, 5))

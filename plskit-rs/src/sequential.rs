@@ -305,7 +305,7 @@ fn p_for_confirmatory_at_k(
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<f64> {
     use crate::signal_test::{
-        confirmatory_test_impl, ConfirmatoryTestInput, ConfirmatoryTestOpts, GateMode,
+        ConfirmatoryTestInput, ConfirmatoryTestOpts, GateMode, confirmatory_test_impl,
     };
     // One RNG draw is discarded per step: it is part of the fixed seed
     // stream that the testdata/ fixtures pin. The
@@ -349,7 +349,7 @@ fn sequence_inputs(
     weights: Option<ColRef<'_, f64>>,
     pre_standardized: bool,
 ) -> (Option<Mat<f64>>, Col<f64>) {
-    use crate::linalg::{standardize, standardize1, standardize1_weighted, standardize_weighted};
+    use crate::linalg::{standardize, standardize_weighted, standardize1, standardize1_weighted};
     if pre_standardized {
         (
             crate::linalg::col_major_or_copy(x),
@@ -377,7 +377,7 @@ fn p_for_incremental(
     opts: &IncrementalSequenceOpts,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<f64> {
-    use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
+    use crate::fit::{FitOpts, KSpec, pls1_fit_impl};
 
     let deflated: Option<(Mat<f64>, Col<f64>)> = if h == 1 {
         None
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn steps_never_re_gate() {
         use crate::signal_test::{
-            confirmatory_test_impl, ConfirmatoryTestInput, ConfirmatoryTestOpts, GateMode,
+            ConfirmatoryTestInput, ConfirmatoryTestOpts, GateMode, confirmatory_test_impl,
         };
         let (x, y) = synth(60, 5, 1, 4.0, 7);
         let r = confirmatory_test_impl(

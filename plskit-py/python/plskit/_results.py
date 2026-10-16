@@ -185,7 +185,7 @@ class FindKSequenceResult:
 class SplitNbGateResult:
     """Output of `split_nb_gate` — what the auto-gate sees on a design."""
     fires: bool               # True → an explicit "split_nb" request here reroutes to "split_exact"
-    stable_rank: float        # stable rank of the standardized X
+    stable_rank: float        # stable rank of the standardized X; NaN when its Gram matrix is not finite (the gate then fires)
     n_eff: float              # Kish's effective sample size; equals n for uniform/absent weights
 
 

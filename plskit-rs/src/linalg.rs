@@ -51,13 +51,15 @@ pub(crate) struct ThinSvd {
 }
 
 /// See [`ThinSvd`].
+///
+/// `pls3::lv1_bytes` counts what this allocates (change together).
 #[allow(clippy::many_single_char_names)]
 pub(crate) fn thin_svd(
     a: MatRef<'_, f64>,
     par: Par,
 ) -> Result<ThinSvd, faer::linalg::svd::SvdError> {
     use faer::dyn_stack::{MemBuffer, MemStack};
-    use faer::linalg::svd::{svd, svd_scratch, ComputeSvdVectors};
+    use faer::linalg::svd::{ComputeSvdVectors, svd, svd_scratch};
     let (m, n) = a.shape();
     let size = m.min(n);
     let mut u = Mat::<f64>::zeros(m, size);
@@ -96,7 +98,7 @@ pub(crate) fn self_adjoint_eigen(
     par: Par,
 ) -> Result<(Col<f64>, Mat<f64>), faer::linalg::evd::EvdError> {
     use faer::dyn_stack::{MemBuffer, MemStack};
-    use faer::linalg::evd::{self_adjoint_evd, self_adjoint_evd_scratch, ComputeEigenvectors};
+    use faer::linalg::evd::{ComputeEigenvectors, self_adjoint_evd, self_adjoint_evd_scratch};
     let n = a.nrows();
     let mut u = Mat::<f64>::zeros(n, n);
     let mut s = faer::diag::Diag::<f64>::zeros(n);
@@ -327,6 +329,21 @@ pub(crate) const STREAM_BLOCK_BYTES: usize = 2 << 20;
 pub(crate) fn stream_block_width(n_rows: usize) -> usize {
     let cols = STREAM_BLOCK_BYTES / (8 * n_rows.max(1));
     (cols / STD_BLOCK * STD_BLOCK).max(STD_BLOCK)
+}
+
+/// Bytes of the two blocks [`standardized_blocks`] holds at once for halves
+/// of `n_a` and `n_b` rows at width `stream_block_width(max(n_a, n_b))`,
+/// the width every batched loop passes it (change together): two owned
+/// matrices, each padded as `resample::copy_bytes` counts. A block can
+/// differ from [`STREAM_BLOCK_BYTES`]: the smaller half's is smaller, row
+/// padding can push a block slightly over it, and past 32,768 rows, where
+/// the width stays at [`STD_BLOCK`] columns, a block is larger. The full
+/// width is counted even when X has fewer columns. Mirrored by
+/// `stream_blocks` in `tests/memory_budget_parity.rs` (change together).
+pub(crate) fn stream_blocks_bytes(n_a: usize, n_b: usize) -> usize {
+    use crate::resample::copy_bytes;
+    let w = stream_block_width(n_a.max(n_b));
+    copy_bytes(n_a, w).saturating_add(copy_bytes(n_b, w))
 }
 
 /// `standardize_rows(x, tr, w_tr, sw_tr)` and
@@ -703,8 +720,12 @@ fn fro_term(m: &ScaledMoments, scale: f64) -> f64 {
 /// `√(Σ rⱼ²)` over the [`fro_term`]s, each divided by the largest `|rⱼ|`
 /// before it is squared, so that no `r²` can overflow (with scale 1, a
 /// constant column of large entries would give `r` near `1e285`).
-/// Non-finite when a term is.
+/// NaN when a term is NaN, otherwise `+∞` when a term is infinite.
 pub(crate) fn fro_from_terms(r: &[f64]) -> f64 {
+    // `f64::max` drops a NaN operand, so the fold below cannot carry one.
+    if r.iter().any(|v| v.is_nan()) {
+        return f64::NAN;
+    }
     let big = r.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
     if big == 0.0 || !big.is_finite() {
         return big;
@@ -821,66 +842,97 @@ impl FitX {
 }
 
 /// The moments of `standardize_weighted(x, weights)`: its `mean` and `scale`,
-/// bit for bit, and `fro`, with nothing written. `x` is read in strips of
-/// columns, and each strip's sweeps run while it is in cache. A column-major
-/// or strided `x` is read in strips of [`stream_block_width`]`(n)` columns,
-/// so `x` is read from memory once while a strip fits in
-/// [`STREAM_BLOCK_BYTES`], for `n` up to 32,768 (the width does not go below
-/// [`STD_BLOCK`] columns), through [`standardize_columns_terms`]. A
-/// row-major `x` (a C-ordered host array read in place) is read over the
-/// strip's segments of its contiguous rows ([`row_major_moments`]), in
-/// strips of [`row_major_strip_width`] columns: `stream_block_width(n)`
-/// while that is at least [`ROW_MAJOR_MIN_STRIP`] columns (`n` up to
-/// 1,024), otherwise wider strips, about one per thread the strips can use,
-/// so that each row segment stays long. Under `Par::Rayon` the strips map
-/// in parallel. Each column's sums run in row order whatever strip holds
-/// it, and `fro` is one [`fro_from_terms`] over every column's
-/// [`fro_term`] in column order, so no bit depends on the strips, on `par`
-/// or on the pool size.
-/// [`FitX::materialize`] then writes the standardized matrix in `x`'s layout
-/// when the caller needs it. The kernel's products round differently on the
-/// two layouts, so a fit's last bits depend on the layout of `x`, within the
-/// crate's tolerance.
+/// bit for bit, and `fro`, with nothing written. With `rows`, the moments are
+/// those of the listed rows in that order, the bits of [`standardize_rows`]'s,
+/// and `weights` is indexed by output row (length `rows.len()`); the strip
+/// widths count those rows. [`FitX::materialize`] writes `x`'s rows, so it
+/// takes only the moments of `rows = None`. `x` is read in strips of columns,
+/// and each strip's sweeps run while it is in cache. A column-major or strided
+/// `x` is read in strips of [`stream_block_width`]`(n)` columns, so `x` is read
+/// from memory once while a strip fits in [`STREAM_BLOCK_BYTES`], for `n` up to
+/// 32,768 (the width does not go below [`STD_BLOCK`] columns), through
+/// [`standardize_columns_terms`]. A row-major `x` (a C-ordered host array read
+/// in place) is read over the strip's segments of its contiguous rows
+/// ([`row_major_moments`]), in strips of [`row_major_strip_width`] columns:
+/// `stream_block_width(n)` while that is at least [`ROW_MAJOR_MIN_STRIP`]
+/// columns (`n` up to 1,024), otherwise wider strips, about one per thread the
+/// strips can use, so that each row segment stays long. Under `Par::Rayon` the
+/// strips map in parallel. Each column's sums run in row order whatever strip
+/// holds it, and `fro` is one [`fro_from_terms`] over every column's
+/// [`fro_term`] in column order, so no bit depends on the strips, on `par` or
+/// on the pool size. [`FitX::materialize`] then writes the standardized matrix
+/// in `x`'s layout when the caller needs it. The kernel's products round
+/// differently on the two layouts, so a fit's last bits depend on the layout of
+/// `x`, within the crate's tolerance.
 pub(crate) fn fit_x_moments(
     x: MatRef<'_, f64>,
+    rows: Option<&[usize]>,
     weights: Option<ColRef<'_, f64>>,
     par: Par,
 ) -> FitX {
     let w_prime: Option<Col<f64>> = weights.map(renormalize_mean_one);
     let w = w_prime.as_ref().map(owned_col_slice);
     let row_major = x.try_as_col_major().is_none() && x.try_as_row_major().is_some();
-    let (n, d) = (x.nrows(), x.ncols());
+    let (n, d) = (rows.map_or(x.nrows(), <[usize]>::len), x.ncols());
     let width = if row_major {
         row_major_strip_width(n, d, par)
     } else {
         stream_block_width(n)
     };
-    let starts: Vec<usize> = (0..d).step_by(width).collect();
     let strip = |j0: usize| {
         let xb = x.subcols(j0, width.min(d - j0));
         if row_major {
-            row_major_moments(xb, w)
+            row_major_moments(xb, rows, w)
         } else {
-            let (_, mean, scale, terms) = standardize_columns_terms(xb, None, w, None, false);
+            let (_, mean, scale, terms) = standardize_columns_terms(xb, rows, w, None, false);
             (mean, scale, terms)
         }
     };
-    let strips: Vec<(Col<f64>, Col<f64>, Vec<f64>)> = match par {
-        Par::Seq => starts.iter().map(|&j0| strip(j0)).collect(),
-        Par::Rayon(_) => {
-            use rayon::prelude::*;
-            starts.par_iter().map(|&j0| strip(j0)).collect()
-        }
-    };
+    // Each strip writes into the full-width outputs as soon as it is done,
+    // so at most one strip's results per thread are alive. Holding every
+    // strip's results to the end (47 small blocks at 200 × 60,000) pushed
+    // glibc's heap past its trim threshold: each fit then returned and
+    // page-faulted back about 2 MB, 8% of a 1-thread raw fit at that shape.
     let mut mean = Col::<f64>::zeros(d);
     let mut scale = Col::<f64>::zeros(d);
-    let mut terms = Vec::with_capacity(d);
-    for (&j0, (m, s, t)) in starts.iter().zip(&strips) {
-        for b in 0..m.nrows() {
-            mean[j0 + b] = m[b];
-            scale[j0 + b] = s[b];
+    let mut terms = vec![0.0_f64; d];
+    {
+        let ms = mean
+            .try_as_col_major_mut()
+            .expect("an owned Col is contiguous")
+            .as_slice_mut();
+        let ss = scale
+            .try_as_col_major_mut()
+            .expect("an owned Col is contiguous")
+            .as_slice_mut();
+        let fill = |c: usize, mo: &mut [f64], so: &mut [f64], to: &mut [f64]| {
+            let (sm, sc, st) = strip(c * width);
+            for b in 0..mo.len() {
+                mo[b] = sm[b];
+                so[b] = sc[b];
+            }
+            to.copy_from_slice(&st);
+        };
+        match par {
+            Par::Seq => {
+                for (c, ((mo, so), to)) in ms
+                    .chunks_mut(width)
+                    .zip(ss.chunks_mut(width))
+                    .zip(terms.chunks_mut(width))
+                    .enumerate()
+                {
+                    fill(c, mo, so, to);
+                }
+            }
+            Par::Rayon(_) => {
+                use rayon::prelude::*;
+                ms.par_chunks_mut(width)
+                    .zip(ss.par_chunks_mut(width))
+                    .zip(terms.par_chunks_mut(width))
+                    .enumerate()
+                    .for_each(|(c, ((mo, so), to))| fill(c, mo, so, to));
+            }
         }
-        terms.extend_from_slice(t);
     }
     FitX {
         storage: None,
@@ -973,11 +1025,15 @@ fn run_rows(rows: &[&[f64]], f: Option<&[f64]>, pass: &mut impl RowPass) {
     }
 }
 
-/// The contiguous rows of a row-major `x`, each `ncols` long.
-fn row_slices(x: MatRef<'_, f64>) -> Vec<&[f64]> {
+/// The contiguous rows of a row-major `x`, each `ncols` long: every row in
+/// order (`idx = None`), or the rows `idx` in that order.
+fn row_slices<'a>(x: MatRef<'a, f64>, idx: Option<&[usize]>) -> Vec<&'a [f64]> {
     let xr = x.try_as_row_major().expect("the caller checked the layout");
     let d = x.ncols();
-    (0..x.nrows()).map(|i| &xr.row(i).as_slice()[..d]).collect()
+    match idx {
+        None => (0..x.nrows()).map(|i| &xr.row(i).as_slice()[..d]).collect(),
+        Some(idx) => idx.iter().map(|&i| &xr.row(i).as_slice()[..d]).collect(),
+    }
 }
 
 /// `max |x|` per column. `f64::max` ignores a NaN operand, as the fold in
@@ -1081,19 +1137,23 @@ impl RowPass for CenteredSq<'_> {
     }
 }
 
-/// The row-major arm of [`fit_x_moments`] on one strip of columns (a
-/// row-major view, each row a contiguous segment): the columns' means,
-/// scales and [`fro_term`]s, in column order. The moments are those of
-/// [`scaled_moments_block`] (the same terms, in the same row order, from
-/// the same start, so the same bits), each column's sums advancing together
-/// over the rows ([`run_rows`]: blocks of [`ROW_BLOCK`] rows, on a strip of
-/// any width); change the two together. Three passes over the strip:
-/// `max |x|`, the mean sum and `Σu²` together, and `Σ(u − mean)²`, with
-/// `u = x·(1/s)`.
+/// The row-major arm of [`fit_x_moments`] on one strip of columns (a row-major
+/// view, each row a contiguous segment) and its rows `idx` (`None`: every row
+/// in order; `w` is indexed by those rows): the columns' means, scales and
+/// [`fro_term`]s, in column order. The moments are those of
+/// [`scaled_moments_block`] (the same terms, in the same row order, from the
+/// same start, so the same bits), each column's sums advancing together over
+/// the rows ([`run_rows`]: blocks of [`ROW_BLOCK`] rows, on a strip of any
+/// width); change the two together. Three passes over the strip: `max |x|`, the
+/// mean sum and `Σu²` together, and `Σ(u − mean)²`, with `u = x·(1/s)`.
 #[allow(clippy::cast_precision_loss, clippy::many_single_char_names)]
-fn row_major_moments(x: MatRef<'_, f64>, w: Option<&[f64]>) -> (Col<f64>, Col<f64>, Vec<f64>) {
-    let (n, d) = (x.nrows(), x.ncols());
-    let rows = row_slices(x);
+fn row_major_moments(
+    x: MatRef<'_, f64>,
+    idx: Option<&[usize]>,
+    w: Option<&[f64]>,
+) -> (Col<f64>, Col<f64>, Vec<f64>) {
+    let rows = row_slices(x, idx);
+    let (n, d) = (rows.len(), x.ncols());
     let zero = sum_start();
 
     let mut max_abs = vec![0.0_f64; d];
@@ -1205,7 +1265,7 @@ pub(crate) fn row_major_t_mul(
     if d < ROW_BLOCK_MIN_COLS || x.try_as_col_major().is_some() || x.try_as_row_major().is_none() {
         return None;
     }
-    let rows = row_slices(x);
+    let rows = row_slices(x, None);
     let t: Vec<f64> = (0..n).map(|i| t[i]).collect();
     let mut out = vec![0.0_f64; d];
     match par {
@@ -1591,7 +1651,8 @@ pub fn compute_n_eff(w: ColRef<'_, f64>) -> f64 {
 /// share — VE1 in Aquino, Fulcher, Parkes, Sabaroedin & Fornito, 2020,
 /// "Identifying and removing widespread signal deflections from fMRI data",
 /// NeuroImage 212:116614, doi:10.1016/j.neuroimage.2020.116614).
-/// Zero matrix (σ₁ = 0) returns 0.0.
+/// Zero matrix (σ₁ = 0) returns 0.0. NaN when the Gram matrix below is not
+/// finite: a non-finite entry of `a`, or a product that overflows.
 ///
 /// Computed from the Gram matrix on `a`'s shorter side (`AA'` or `A'A`),
 /// whose trace is `‖A‖²_F` and whose largest eigenvalue is `σ₁²`: it takes
@@ -1619,14 +1680,21 @@ pub fn stable_rank(a: MatRef<'_, f64>) -> f64 {
 }
 
 /// [`stable_rank`] of a matrix whose Gram matrix on its shorter side is
-/// `g`: `trace(g) / λ_max(g)`, `0.0` for an empty or non-positive `g`.
+/// `g`: `trace(g) / λ_max(g)`, `0.0` for an empty or non-positive `g`, NaN
+/// for a non-finite `g`.
 ///
 /// # Panics
-/// When the eigendecomposition fails to converge, as in [`stable_rank`].
+/// When the eigendecomposition fails to converge on a finite `g`, as in
+/// [`stable_rank`].
 pub(crate) fn stable_rank_from_gram(g: MatRef<'_, f64>) -> f64 {
     let d = g.nrows();
     if d == 0 {
         return 0.0;
+    }
+    // faer's eigendecomposition can fail to converge on a non-finite `g`,
+    // as it does on a standardized X whose centering overflows.
+    if !g.is_all_finite() {
+        return f64::NAN;
     }
     let (lam, _) = self_adjoint_eigen(g, crate::fit::par_fixed())
         .expect("eigendecomposition failed to converge");
@@ -1809,11 +1877,7 @@ pub fn t_sf(t_val: f64, df: f64) -> f64 {
     }
     let x_val = df / (df + t_val * t_val);
     let half_p = 0.5 * betainc(df / 2.0, 0.5, x_val);
-    if t_val > 0.0 {
-        half_p
-    } else {
-        1.0 - half_p
-    }
+    if t_val > 0.0 { half_p } else { 1.0 - half_p }
 }
 
 #[cfg(test)]
@@ -2339,9 +2403,9 @@ mod leverage_diag_tests {
     /// Textbook two-matmul reference for `diag(W (W'W)^-1 W')`.
     #[allow(clippy::many_single_char_names)]
     fn leverage_diag_naive(w: faer::MatRef<'_, f64>) -> Vec<f64> {
+        use faer::Accum;
         use faer::linalg::matmul::matmul;
         use faer::linalg::solvers::{PartialPivLu, Solve};
-        use faer::Accum;
         let n = w.nrows();
         let k = w.ncols();
         let mut wtw = Mat::<f64>::zeros(k, k);
@@ -2371,7 +2435,7 @@ mod leverage_diag_tests {
 
     #[test]
     fn leverage_diag_matches_naive_reference() {
-        use rand::{rngs::StdRng, RngExt, SeedableRng};
+        use rand::{RngExt, SeedableRng, rngs::StdRng};
         let mut rng = StdRng::seed_from_u64(42);
         let (n, k) = (20, 4);
         let w = Mat::<f64>::from_fn(n, k, |_, _| rng.random::<f64>() - 0.5);
@@ -2447,7 +2511,7 @@ mod empirical_quantile_tests {
 mod row_standardize_tests {
     use super::*;
     use crate::test_support::{
-        assert_bits_eq, assert_mat_bits_eq, col_vals, mat_vals, test_weights, unif, Layouts,
+        Layouts, assert_bits_eq, assert_mat_bits_eq, col_vals, mat_vals, test_weights, unif,
     };
 
     /// 24 × 5 with a constant column (2), a column constant on the even
@@ -2557,6 +2621,93 @@ mod row_standardize_tests {
         });
     }
 
+    /// `fro_from_terms` is NaN when a term is NaN, also when every term is:
+    /// `f64::max` drops a NaN, so the largest-term fold alone would read an
+    /// all-NaN slice as the zero norm.
+    /// `standardized_blocks` combines its block norms with it, so one
+    /// all-NaN block makes the whole norm NaN next to a finite block.
+    #[test]
+    #[allow(clippy::float_cmp, clippy::cast_precision_loss)]
+    fn fro_from_terms_is_nan_when_a_term_is_nan() {
+        assert!(fro_from_terms(&[f64::NAN, f64::NAN]).is_nan());
+        assert!(fro_from_terms(&[f64::NAN, 2.0]).is_nan());
+        assert!(fro_from_terms(&[f64::INFINITY, f64::NAN]).is_nan());
+        assert_eq!(fro_from_terms(&[f64::INFINITY, 2.0]), f64::INFINITY);
+        assert_eq!(fro_from_terms(&[3.0, 4.0]), 5.0);
+        assert_eq!(fro_from_terms(&[]), 0.0);
+
+        // Width 2: block 0 (columns 0 and 1) is all NaN, block 1 finite.
+        let x = Mat::<f64>::from_fn(6, 4, |i, j| {
+            if j < 2 {
+                f64::NAN
+            } else {
+                (i * (j + 1)) as f64
+            }
+        });
+        let rows: Vec<usize> = (0..6).collect();
+        let fro = standardized_blocks(x.as_ref(), &rows, &[], None, None, None, 2, |_, _, _| {});
+        assert!(fro.is_nan(), "fro = {fro}");
+    }
+
+    /// `fit_x_moments` over a list of rows gives the bits of
+    /// `standardize_rows_fro`'s mean, scale and `fro` for those rows, on
+    /// every layout (the row-major arm through `row_major_moments`, the
+    /// others through `standardize_columns_terms`), with and without
+    /// weights, under `Par::Seq` and the fixed split, over the copy-free
+    /// families and a 40 × 13,200 X whose 27 listed rows read two strips
+    /// of `stream_block_width(27)` columns, the last one partial.
+    #[test]
+    fn fit_x_moments_over_rows_matches_standardize_rows() {
+        use crate::test_support::{
+            Agree, Family, assert_agree, assert_layout_agree, copy_free_families, signal_data,
+            test_weights,
+        };
+        let (xs, ys) = signal_data(40, 13_200, 106);
+        let mut families = copy_free_families();
+        for (name, w) in [
+            ("strips", None),
+            ("weighted_strips", Some(test_weights(40))),
+        ] {
+            families.push(Family {
+                name,
+                x: xs.clone(),
+                y: ys.clone(),
+                w,
+            });
+        }
+        for f in families {
+            let n = f.x.nrows();
+            // Out of order, with rows left out, as a fold's training rows.
+            let idx: Vec<usize> = (0..n).rev().filter(|i| i % 3 != 1).collect();
+            if f.name.ends_with("strips") {
+                let width = stream_block_width(idx.len());
+                assert!(
+                    f.x.ncols() > width && f.x.ncols() < 2 * width && f.x.ncols() % width != 0,
+                    "{}: not two strips with a partial last one",
+                    f.name
+                );
+            }
+            let w_rows: Option<Col<f64>> =
+                f.w.as_ref()
+                    .map(|w| Col::<f64>::from_fn(idx.len(), |i| w[idx[i]]));
+            let wr = w_rows.as_ref().map(Col::as_ref);
+            let (_, mean, scale, fro) = standardize_rows_fro(f.x.as_ref(), &idx, wr, None);
+            let mut want: Vec<f64> = mean.iter().chain(scale.iter()).copied().collect();
+            want.push(fro);
+            for par in [Par::Seq, crate::fit::par_fixed()] {
+                let what = format!("{} {par:?}", f.name);
+                let got = assert_layout_agree(&f.x, &what, Agree::Bits, |xv| {
+                    let m = fit_x_moments(xv, Some(&idx), wr, par);
+                    let mut v: Vec<f64> = m.mean.iter().chain(m.scale.iter()).copied().collect();
+                    v.push(m.fro);
+                    Ok(v)
+                })
+                .unwrap();
+                assert_agree(&got, &want, Agree::Bits, &what);
+            }
+        }
+    }
+
     #[test]
     fn stream_block_width_is_a_multiple_of_the_moment_block() {
         for n in [1, 2, 127, 203, 254, 6000, 10_000_000] {
@@ -2569,6 +2720,29 @@ mod row_standardize_tests {
         }
         assert_eq!(stream_block_width(127), 2064);
         assert_eq!(stream_block_width(0), stream_block_width(1));
+    }
+
+    /// `stream_blocks_bytes` is the most the two blocks of
+    /// `standardized_blocks` allocate at the width the batched loops pass,
+    /// over a full block and a partial one: halves equal and unequal, not
+    /// multiples of 8, and past 32,768 rows, where the width stays at
+    /// `STD_BLOCK` columns.
+    #[test]
+    fn stream_blocks_bytes_is_what_standardized_blocks_allocates() {
+        let bytes = |m: MatRef<'_, f64>| m.col_stride().unsigned_abs() * m.ncols() * 8;
+        for (n_a, n_b) in [(20, 20), (21, 19), (32, 8), (127, 127), (40_000, 1)] {
+            let n = n_a + n_b;
+            let width = stream_block_width(n_a.max(n_b));
+            let p = width + 3;
+            let x = Mat::<f64>::from_fn(n, p, |i, j| ((i * 7 + j * 3) % 11) as f64);
+            let tr: Vec<usize> = (0..n_a).collect();
+            let te: Vec<usize> = (n_a..n).collect();
+            let mut most = 0;
+            standardized_blocks(x.as_ref(), &tr, &te, None, None, None, width, |_, a, c| {
+                most = most.max(bytes(a) + bytes(c));
+            });
+            assert_eq!(stream_blocks_bytes(n_a, n_b), most, "{n_a} + {n_b} rows");
+        }
     }
 
     #[test]
@@ -2689,7 +2863,7 @@ mod fast_standardize_tests {
         weights: Option<ColRef<'_, f64>>,
         row_scale: Option<ColRef<'_, f64>>,
     ) -> FitX {
-        let mut f = fit_x_moments(x, weights, Par::Seq);
+        let mut f = fit_x_moments(x, None, weights, Par::Seq);
         f.materialize(x, row_scale);
         f
     }
@@ -2957,7 +3131,7 @@ mod fast_standardize_tests {
                 for (view, xv) in lay.all(&x).into_iter().chain([("strided", strided)]) {
                     for par in [Par::Seq, crate::fit::par_fixed()] {
                         let what = format!("{n}x{p} {view} {label} {par:?}");
-                        let f = fit_x_moments(xv, wref, par);
+                        let f = fit_x_moments(xv, None, wref, par);
                         assert_moments_bits(&f, &mean, &scale, fro, &what);
                     }
                 }
@@ -3001,7 +3175,7 @@ mod fast_standardize_tests {
                             } else {
                                 assert_eq!(width, p, "{what}: not one strip");
                             }
-                            let f = fit_x_moments(xv, wref, par);
+                            let f = fit_x_moments(xv, None, wref, par);
                             assert_moments_bits(&f, &mean, &scale, fro, &what);
                         }
                     });
@@ -3046,12 +3220,16 @@ mod fast_standardize_tests {
             (203, 2100),
             (11, 40_000),
         ];
-        assert!(shapes
-            .iter()
-            .any(|&(_, d)| t_mul_chunk_width(d) == T_MUL_CHUNK));
-        assert!(shapes
-            .iter()
-            .any(|&(_, d)| t_mul_chunk_width(d) < T_MUL_CHUNK && d < T_MUL_CHUNK));
+        assert!(
+            shapes
+                .iter()
+                .any(|&(_, d)| t_mul_chunk_width(d) == T_MUL_CHUNK)
+        );
+        assert!(
+            shapes
+                .iter()
+                .any(|&(_, d)| t_mul_chunk_width(d) < T_MUL_CHUNK && d < T_MUL_CHUNK)
+        );
         let pools = pools();
         for (k, &(n, d)) in shapes.iter().enumerate() {
             let chunk = t_mul_chunk_width(d);

@@ -3,6 +3,7 @@ name: Release
 # Tag scheme:
 #   vX.Y.Z       → cargo publish plskit and plskit-bind; workspace version must equal X.Y.Z.
 #   vX.Y.Z-py    → PyPI publish (Python);   plskit-py version must equal X.Y.Z.
+#                  The Pyodide wheel goes to the GitHub release only.
 #   vX.Y.Z-r     → R tarball + r-universe branch; plskit-r DESCRIPTION:Version must equal X.Y.Z.
 #                  The crates are vendored from crates.io, so the vX.Y.Z release must
 #                  be published first. CRAN submit is manual via the CRAN web form (no API).
@@ -168,6 +169,62 @@ jobs:
         with:
           packages-dir: dist
 
+  # Pyodide (wasm32-unknown-emscripten) wheel, attached to the GitHub release
+  # and never sent to PyPI. It uploads no workflow artifact, because
+  # publish-py sends every artifact of the run to PyPI. Running after
+  # publish-py keeps the two jobs from creating the release at once.
+  build-py-pyodide:
+    name: Build Pyodide wheel (GH Release only)
+    needs: [publish-py]
+    if: endsWith(github.ref_name, '-py')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # softprops/action-gh-release attaches the wheel
+    env:
+      # The wheel's platform tag (pyemscripten_2026_0) ties it to this
+      # Pyodide release's ABI; 314.0.7 is the version it is built and
+      # smoke-tested against. To move it: set PYODIDE_VERSION to a release
+      # listed by `pyodide xbuildenv search`, PYODIDE_PYTHON to the Python
+      # it ships (`pyodide config get python_version` after `pyodide
+      # xbuildenv install`) and PYODIDE_BUILD to a pyodide-build that
+      # supports it, then build locally and run scripts/pyodide-smoke.mjs on
+      # the wheel before tagging. The Rust version follows the xbuildenv.
+      PYODIDE_VERSION: "314.0.7"
+      PYODIDE_PYTHON: "3.14.2"
+      PYODIDE_BUILD: "0.39.1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with: { python-version: "${{ env.PYODIDE_PYTHON }}" }
+      - uses: actions/setup-node@v7
+        with: { node-version: "22" }
+      - name: Install pyodide-build, the xbuildenv and Emscripten
+        run: |
+          set -euo pipefail
+          pip install "pyodide-build==$PYODIDE_BUILD"
+          pyodide xbuildenv install "$PYODIDE_VERSION"
+          pyodide xbuildenv install-emscripten
+      # RUSTUP_TOOLCHAIN overrides rust-toolchain.toml for the later steps.
+      - name: Install the xbuildenv's Rust toolchain
+        run: |
+          set -euo pipefail
+          RUST=$(pyodide config get rust_toolchain)
+          rustup toolchain install "$RUST" --profile minimal --target wasm32-unknown-emscripten
+          echo "RUSTUP_TOOLCHAIN=$RUST" >> "$GITHUB_ENV"
+      - name: Build the wheel
+        run: pyodide build --outdir pyodide-dist
+      - name: Smoke test under Node
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/smoke"
+          cd "$RUNNER_TEMP/smoke"
+          npm install --no-audit --no-fund "pyodide@$PYODIDE_VERSION"
+          node "$GITHUB_WORKSPACE/scripts/pyodide-smoke.mjs" "$GITHUB_WORKSPACE"/pyodide-dist/*.whl
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: pyodide-dist/*.whl
+
   # ─── vX.Y.Z-r (R) ───────────────────────────────────────────────────
   publish-r:
     name: Publish R (build tarball; CRAN submit manual)
@@ -188,21 +245,36 @@ jobs:
             echo "::error::tag $TAG_VER != plskit-r $R"
             exit 1
           fi
-      # The build users get (r-universe, CRAN): no dev patch, so cargo uses
-      # the committed rust/Cargo.lock with --locked against the published
-      # plskit / plskit-bind. Fails if the lock is missing or stale, or if
-      # the vX.Y.Z crates are not on crates.io yet.
-      - name: Lock file matches the workspace versions
-        run: python3 scripts/check-profile-sync.py
-      # A copy of plskit-r with every crate packed into src/rust/vendor.tar.xz,
-      # so the package builds offline (tools/cargo-build.R unpacks it). This
-      # tree is the release tarball and the r-universe branch below.
+      # A copy of plskit-r with its own rust/Cargo.lock and every crate packed
+      # into src/rust/vendor.tar.xz, so the package builds offline
+      # (tools/cargo-build.R unpacks it) with --locked against the published
+      # plskit / plskit-bind. This tree is the release tarball and the
+      # r-universe branch below; main carries no R lock file.
+      # The lock starts as a copy of the workspace Cargo.lock, and `cargo
+      # update --workspace` adds the plskit / plskit-bind pinned in the
+      # manifest with their crates.io checksums, keeping every other version
+      # as the workspace has it (a fresh `cargo generate-lockfile` would take
+      # the newest versions instead). It fails if the vX.Y.Z crates are not
+      # on crates.io yet. check-profile-sync.py then compares the finished
+      # lock to the workspace lock.
+      # The copy also carries vendor/atomic-wait, whose Emscripten module
+      # r-universe's webR build needs. A patch path must lie inside the
+      # package, so only the staged manifest gets the [patch.crates-io]
+      # entry, and `cargo update -p atomic-wait` moves that one lock entry
+      # to the path. Mirrors the [patch.crates-io] comment in the workspace
+      # Cargo.toml — change together.
       - name: Stage the vendored package
         run: |
           set -euo pipefail
           STAGE="$RUNNER_TEMP/plskit"
           cp -r plskit-r "$STAGE"
+          cp -r vendor/atomic-wait "$STAGE/src/rust/atomic-wait"
+          printf '\n[patch.crates-io]\natomic-wait = { path = "atomic-wait" }\n' >> "$STAGE/src/rust/Cargo.toml"
+          cp Cargo.lock "$STAGE/src/rust/Cargo.lock"
           cd "$STAGE/src/rust"
+          cargo update --workspace
+          cargo update -p atomic-wait
+          python3 "$GITHUB_WORKSPACE/scripts/check-profile-sync.py" --r-lock "$STAGE/src/rust/Cargo.lock"
           cargo vendor --locked vendor > /dev/null
           tar -cJf vendor.tar.xz vendor
           rm -rf vendor
@@ -275,5 +347,27 @@ jobs:
         env:
           PLSKIT_REQUIRE_CORPUS: "1"
         run: julia --color=yes --project=plskit-jl -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+      # The default install: CondaPkg installs Python, as `Pkg.add("PLSKit")`
+      # does for a user. The earlier steps export JULIA_PYTHONCALL_EXE and
+      # JULIA_CONDAPKG_BACKEND, so they are unset here, and the depot is
+      # empty so the cache action cannot hide a broken install. On Julia 1 the
+      # trailing ':' adds back Julia's bundled depot, as a user has; on Julia
+      # 1.10 (lts) it would also add ~/.julia, which the cache action filled,
+      # so the lts step has no ':'.
+      - name: Default install, Julia 1
+        env:
+          JULIA_DEPOT_PATH: "${{ runner.temp }}/smoke-depot-1:"
+        run: >-
+          env -u JULIA_PYTHONCALL_EXE -u JULIA_CONDAPKG_BACKEND
+          julia --color=yes scripts/julia-default-install-smoke.jl path plskit-jl
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "lts"
+      - name: Default install, Julia lts
+        env:
+          JULIA_DEPOT_PATH: ${{ runner.temp }}/smoke-depot-lts
+        run: >-
+          env -u JULIA_PYTHONCALL_EXE -u JULIA_CONDAPKG_BACKEND
+          julia --color=yes scripts/julia-default-install-smoke.jl path plskit-jl
       - run: |
           echo "::notice::Julia: comment '@JuliaRegistrator register subdir=\"plskit-jl\"' on the release commit."

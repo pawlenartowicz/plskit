@@ -67,14 +67,18 @@ fn all_cases_matches_the_committed_manifest() {
         .collect();
 
     let names = |m: &BTreeMap<String, Value>| m.keys().cloned().collect::<BTreeSet<_>>();
-    let (gen, com) = (names(&generated), names(&committed));
+    let (generated_names, committed_names) = (names(&generated), names(&committed));
     assert_eq!(
-        gen,
-        com,
+        generated_names,
+        committed_names,
         "the generator and testdata/manifest.json list different cases (manifest only: {:?}; \
          generator only: {:?}); regenerate: cargo run -p plskit-testdata-gen -- --testdata-root testdata",
-        com.difference(&gen).collect::<Vec<_>>(),
-        gen.difference(&com).collect::<Vec<_>>()
+        committed_names
+            .difference(&generated_names)
+            .collect::<Vec<_>>(),
+        generated_names
+            .difference(&committed_names)
+            .collect::<Vec<_>>()
     );
     for (name, entry) in &generated {
         assert_eq!(

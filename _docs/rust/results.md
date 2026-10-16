@@ -180,7 +180,7 @@ field semantics are identical to the Python counterpart; see
 | Field | Rust type | Notes |
 |---|---|---|
 | `fires` | `bool` | `true` → an explicit `split_nb` request on this `X` reroutes to `split_exact` |
-| `stable_rank` | `f64` | stable rank of the standardized `X` |
+| `stable_rank` | `f64` | stable rank of the standardized `X`. NaN when the Gram matrix of the standardized `X` is not finite. The gate then fires. |
 | `n_eff` | `f64` | Kish effective sample size; equals `n_samples` for uniform/absent weights |
 
 Every field is always populated. This is the same rule the test

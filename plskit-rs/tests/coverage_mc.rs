@@ -49,8 +49,8 @@
 
 use faer::{Col, Mat};
 use plskit::{
-    pls1_confirmatory_test, pls1_fit, CIOpts, ConfirmatoryArgs, ConfirmatoryTestInput,
-    ConfirmatoryTestOpts, FitOpts, KSpec,
+    CIOpts, ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, FitOpts, KSpec,
+    pls1_confirmatory_test, pls1_fit,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;

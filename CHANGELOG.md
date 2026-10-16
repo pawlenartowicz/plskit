@@ -4,6 +4,111 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-16
+
+- Added (Python): a wheel for Pyodide (`wasm32-unknown-emscripten`, built
+  and tested against Pyodide 314.0.7, platform tag `pyemscripten_2026_0`),
+  attached to each `vX.Y.Z-py` GitHub release. It is not uploaded to PyPI.
+  Results are unchanged; the testdata corpus is unchanged.
+- Added (CI): `scripts/julia-default-install-smoke.jl` installs PLSKit.jl
+  with no pre-installed Python (CondaPkg installs it) and fits once. The
+  `publish-jl` job runs it on Julia 1 and lts, and the new weekly
+  `julia-default-install.yml` workflow runs it on the latest `vX.Y.Z-jl`
+  tag.
+- Changed: the engine no longer hits a compile-time overflow on 32-bit
+  targets (checked on `wasm32-unknown-emscripten`); building the crates.io
+  crate for Emscripten still needs a patched `atomic-wait`. The Python
+  wheels and sdist build `atomic-wait` 1.1.0 from a copy in `vendor/` that
+  adds an Emscripten module; other targets compile the crates.io code
+  unchanged. On 32-bit targets `pls1_perm_alpha` accepts `n_features` up
+  to `usize::MAX / 8` (536,870,911), a whole float count too large for a
+  32-bit `usize` is rejected instead of saturating, and its error for too
+  large an `n_features` gives the bound as a number
+  (`9007199254740992` on 64-bit targets) instead of `2^53`. Results are
+  unchanged; the testdata corpus is unchanged.
+- Changed (memory, numerics): `selector="bic"` in `pls1_find_k_optimal`,
+  `spls1_find_k_optimal` and `pls1_fit(k="optimal")` fits `X` in place
+  instead of on a standardized copy, as does the check of the first
+  component that opens every selection by cross-validation
+  (`selector="r2_se"` or `"r2_max"`, and `spls1_find_keep_optimal`). BIC
+  selection holds a copy of `X` only where its fit falls back to one (a
+  column mean far from zero relative to its scale, or a component near the
+  truncation floor). `bic_scores` differ from 0.7.0, and between C and F
+  order of the same `X`, at rounding level, not to the bit. A near tie of
+  two BIC scores or a fit at its truncation floor can select another `k`,
+  and where the first component sits at its truncation floor a selection
+  by cross-validation can return `k_star` (or `keep_star`) 0 in one
+  release or layout and not in the other. The testdata corpus is
+  unchanged.
+- Changed (memory, numerics): the folds of the selections by
+  cross-validation (`selector="r2_se"` or `"r2_max"` in
+  `pls1_find_k_optimal`, `spls1_find_k_optimal` and
+  `pls1_fit(k="optimal")`, and `spls1_find_keep_optimal`) fit `X` in place
+  instead of on standardized copies of their training and validation rows.
+  A fold holds a copy only where its fit falls back to one (a column mean
+  far from zero relative to its scale, a component near the truncation
+  floor, or a non-finite result), so the folds of a wide `X` can run in
+  parallel at the default memory budget. `cv_scores` and `cv_scores_se`
+  differ from 0.7.0, and between C and F order of the same `X`, at
+  rounding level, not to the bit. A near tie (for `r2_se`, a score at the
+  one-SE threshold) or a fold fit at its truncation floor can select
+  another `k_star` or `keep_star`. The testdata corpus is unchanged.
+- Changed (performance): the fits on raw `X` keep at most one strip's
+  standardization moments per thread alive, which removes a 0.7.0 slowdown
+  of about 8% on one thread at 200 × 60,000 (heap memory returned and
+  page-faulted back on each fit). Results are unchanged to the bit.
+- Changed (R): the repository no longer carries
+  `plskit-r/src/rust/Cargo.lock`. The `vX.Y.Z-r` release job writes it in
+  the staged package from the workspace `Cargo.lock` against the published
+  `plskit` and `plskit-bind`, so `vX.Y.Z-r` can be tagged on the same
+  commit as `vX.Y.Z`. Install a release from r-universe
+  (`install.packages("plskit", repos = "https://pawlenartowicz.r-universe.dev")`)
+  or from the `r-universe` branch
+  (`devtools::install_github("pawlenartowicz/plskit", ref = "r-universe")`).
+  A checkout of `main` builds only in dev mode (`PLSKIT_CARGO_CONFIG`).
+- Fixed: a finite `X` with entries near `±f64::MAX`, whose
+  standardization overflows, no longer gives a NaN statistic or a panic
+  in `split_nb`, `split_exact` and `auto`. A split whose held-out half
+  overflows contributes `r = 0` to `split_nb` and `split_exact`
+  (`pls1_confirmatory_test` and `pls3_confirmatory_test`, every route), as
+  a split whose training half overflows already did. The `split_nb` gate
+  (`split_nb_gate`, and the gate inside `split_nb`, `auto` and the
+  `find_k` functions) reports `stable_rank = NaN` and fires when the Gram
+  matrix of the standardized `X` is not finite, where it could panic in
+  its eigendecomposition or report `fires = false`.
+  `linalg::stable_rank` returns NaN when the Gram matrix of its input is
+  not finite. `pls1_confirmatory_test` with `test_method="raw_perm"`
+  returns `non_finite_input` on its K = 1 Gram route when a training fold
+  of `X` overflows, as its other routes do. Two results change on input
+  whose standardization does not overflow: a weighted gate whose Gram
+  matrix overflows (a zero-weight row holding `1e200`) now fires, and a
+  PLS3 `split_exact` split on the Gram route whose held-out product
+  overflows gets the primal route's value. Results on other input are
+  unchanged to the bit. The testdata corpus is unchanged.
+- Fixed: the memory estimate behind `PLSKIT_MEMORY_BUDGET` counts what a
+  unit allocates: each copy of `X`, of a half of it or of a Gram matrix
+  with its rows padded to a multiple of 8, as the matrix library stores
+  it, and the two halves of a split or fold as two matrices; the blocks in
+  which `X` is read at their size; and the buffers of the per-split fits
+  of `pls3_confirmatory_test` (`split_nb` and `split_exact`), and, where a
+  split's or fold's permutations are fitted in parallel
+  (`pls1_confirmatory_test` with `raw_perm` or `split_exact`, and
+  `pls3_confirmatory_test` with `split_exact`), one fit per thread. Batch
+  sizes change with the estimate, mostly smaller, so the peak memory stays
+  nearer the budget. Results are unchanged to the bit.
+- Fixed (R): under webR's build R, `cargo-build.R` builds the Rust library
+  for `wasm32-unknown-emscripten` with panics set to abort, so a panic ends
+  the R session instead of raising `plskit_error` (untested on
+  r-universe); it finds `cargo` without `Sys.which()`, and the source
+  tarball carries an `atomic-wait` with Emscripten code.
+- Fixed (R): on Linux and macOS the build deletes the Rust static library
+  and the unpacked vendored crates once `plskit.so` is linked (Windows
+  removes only the unpacked crates), so `R CMD check` reports no `abort` or
+  `_exit` in the compiled code (checked on Linux; the warning appeared on
+  macOS).
+
+## [0.7.0] - 2026-10-11
+
 - Changed (performance): `pls1_fit`, `spls1_fit`, `pls3_fit`, `spls3_fit`
   and `plssvd_fit` on raw `X` read `X` in strips of columns for its
   standardization moments (2 MiB strips, so that each strip's sweeps run
@@ -373,7 +478,7 @@ All notable changes to this project will be documented here.
   differ in the last bits between C and F order; the same array in the same
   layout still gives byte-identical results across runs and thread counts.
   Julia arrays are column-major and now read in place, so Julia
-  `pls1_fit` / `spls1_fit` results can differ from 0.6.2 in the last bits
+  `pls1_fit` / `spls1_fit` results can differ from 0.6.1 in the last bits
   (they now match the Rust core's column-major bits).
 - Changed (performance): the permutation and split loops take `‖X̃‖_F` once
   per block instead of once per replicate on their primal route
@@ -425,7 +530,7 @@ All notable changes to this project will be documented here.
   about 13 ms (it was about 1.4x slower than its column-major copy, and is
   now no slower). Moments are
   bit-identical. Fits of such inputs that are not pre-standardized move in
-  the last bits, agreeing with 0.6.2 to corpus tolerance but not bit for
+  the last bits, agreeing with 0.6.1 to corpus tolerance but not bit for
   bit, and stay byte-identical across thread counts; for pre-standardized
   ones, see the entry on `pre_standardized` and C-ordered `X` above.
   Column-major `X` and narrower `X` are unchanged bit for bit by this
@@ -443,7 +548,7 @@ All notable changes to this project will be documented here.
   `split_exact` at 1600 × 640, k = 2, 199 permutations: about 1.2x faster
   on one M4 core). The
   coefficients were fitted on an Apple M4. No corpus fixture changes
-  route. On shapes that do, results agree with 0.6.2 to corpus tolerance
+  route. On shapes that do, results agree with 0.6.1 to corpus tolerance
   (observed at most 1.6e-14), not bit for bit.
 - Changed (performance): `split_exact` at k = 2 on the n-space Gram route
   (`p` well above the training size) runs its kernel over runs of 16

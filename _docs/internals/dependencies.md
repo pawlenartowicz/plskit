@@ -69,12 +69,12 @@ parallelism; `linalg::orthogonal_rotation` computes the same rotation on
 
 | Package | Depends on |
 |---|---|
-| `plskit-bind` | `plskit` at exactly the workspace version (`=0.7.0`), `faer` |
-| `plskit-py` (Rust side) | `plskit-bind`, `pyo3` 0.28 (`abi3-py311`), `numpy` 0.28, `faer`; built with `maturin` |
+| `plskit-bind` | `plskit` at exactly the workspace version (`=0.7.1`), `faer` |
+| `plskit-py` (Rust side) | `plskit-bind`, `pyo3` 0.29 (`abi3-py311`), `numpy` 0.29, `faer`; built with `maturin` |
 | `plskit` (Python package) | Python 3.11 or later, `numpy>=1.23` |
-| `plskit-r` (Rust side) | `extendr-api` 0.9, `plskit` and `plskit-bind` at `=0.7.0`; its own lock file, kept in step by `scripts/check-profile-sync.py` |
+| `plskit-r` (Rust side) | `extendr-api` 0.9, `plskit` and `plskit-bind` at `=0.7.1`; its own lock file, kept in step by `scripts/check-profile-sync.py` |
 | `plskit` (R package) | R 4.2 or later, Rust 1.85 or later to build; suggests `bit64`, `jsonlite`, `testthat` |
-| `PLSKit.jl` | Julia 1.10 or later, `PythonCall` 0.9.36; `CondaPkg.toml` pins `plskit==0.7.0` from PyPI |
+| `PLSKit.jl` | Julia 1.10 or later, `PythonCall` 0.9.36; `CondaPkg.toml` pins `plskit==0.7.1` from PyPI |
 | `plskit-testdata-gen` | the engine and `.npz` writers; never published |
 
 Python, R and Julia callers never see `faer`, `plskit-bind` or `pyo3`

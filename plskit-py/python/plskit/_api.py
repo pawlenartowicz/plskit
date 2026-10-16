@@ -761,6 +761,10 @@ def pls1_find_k_optimal(
         Maximum number of components to consider.
     selector : str, default 'r2_se'
         Selection criterion: ``'r2_se'`` (1-SE rule), ``'r2_max'``, or ``'bic'``.
+        ``'bic'`` counts each component as one degree of freedom. On wide X
+        (p much larger than n) the effective degrees of freedom of a PLS fit
+        are much larger, so BIC tends to select ``k_max``; ``'r2_se'`` is
+        recommended there.
     diagnostic : str | None, default None
         Optional same-sample sequential diagnostic to attach to K*. One of
         ``'raw_perm'`` / ``'split_nb'`` / ``'split_exact'`` / ``'e'``, or
@@ -966,6 +970,9 @@ def spls1_find_k_optimal(
     Note: ``selector='bic'`` reuses the dense complexity penalty (not a
     keep-aware sparse BIC) — it under-penalizes added components and biases
     the selected k upward under sparsity. Deliberate v1 simplification.
+    BIC also counts each component as one degree of freedom; on wide X
+    (p much larger than n) the effective degrees of freedom are much larger,
+    so BIC tends to select ``k_max``, and ``'r2_se'`` is recommended there.
     """
     return _call("spls1_find_k_optimal", X=X, y=y, k_max=k_max, keep=keep,
                  selector=selector, diagnostic=diagnostic, args=args,
@@ -1171,6 +1178,14 @@ __all__ = [
     "spls1_find_k_optimal",
     "spls1_find_k_sequence",
     "pls1_perm_null",
+    "pls1_perm_alpha",
     "pls1_rotation_stability",
     "rotate",
+    "pls3_fit",
+    "plssvd_fit",
+    "spls3_fit",
+    "pls3_transform",
+    "plssvd_transform",
+    "pls3_confirmatory_test",
+    "split_nb_gate",
 ]

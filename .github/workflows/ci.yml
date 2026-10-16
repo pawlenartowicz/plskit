@@ -120,8 +120,8 @@ jobs:
   # R package: R CMD check on Linux; macOS and Windows only install and
   # smoke-test. Builds in dev mode: a cargo config outside the package patches
   # plskit and plskit-bind to this checkout, so the package is checked against
-  # the crates of this commit, not the published ones in the committed R
-  # Cargo.lock.
+  # the crates of this commit, not the published ones a release build
+  # compiles.
   r-package:
     name: R package (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -185,21 +185,8 @@ jobs:
         with:
           working-directory: plskit-r
           args: 'c("--no-manual")'
-          error-on: '"error"'
+          error-on: '"warning"'
           check-dir: '"check"'
-      # error-on "error" lets WARNINGs through; the one accepted WARNING is
-      # "checking compiled code" (the Rust std library references _abort).
-      # Any other WARNING fails here.
-      - name: No R CMD check WARNING other than compiled code
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          log=plskit-r/check/plskit.Rcheck/00check.log
-          test -f "$log"
-          if grep -E '\.\.\. WARNING' "$log" | grep -v 'checking compiled code'; then
-            echo "::error::unexpected WARNING in $log"
-            exit 1
-          fi
       # Cross-wrapper bit canary, R half: R against the corpus at atol 0 on
       # the platform that generated the fixtures. Non-blocking.
       - name: Bit canary, R vs the corpus at atol 0 (Linux, non-blocking)

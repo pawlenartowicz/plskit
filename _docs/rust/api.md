@@ -82,6 +82,9 @@ pub fn spls1_find_k_optimal(
 ) -> PlsKitResult<FindKOptimalOutput>
 // Same result type as pls1_find_k_optimal.
 // selector="bic" reuses the dense penalty — upward k bias under sparsity (deliberate v1).
+// BIC counts each component as one degree of freedom. On wide X (p much larger
+// than n) the effective degrees of freedom of a PLS fit are much larger, so BIC
+// tends to select k_max. R2Se (the default) is recommended there.
 
 pub fn spls1_find_k_sequence(
     x: MatRef<f64>,

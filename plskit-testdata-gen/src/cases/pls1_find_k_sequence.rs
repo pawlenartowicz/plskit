@@ -4,13 +4,13 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use plskit::{pls1_find_k_sequence, ConfirmatoryMethod, FindKSequenceOpts};
+use plskit::{ConfirmatoryMethod, FindKSequenceOpts, pls1_find_k_sequence};
 
 use crate::cases::{
     faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
+use crate::npz::{NpzWriter, sha256_of_file};
 
 /// Shared synth parameters for all `pls1_find_k_sequence` cases.
 const SYNTH_N: usize = 80;

@@ -1,7 +1,7 @@
 //! [`plskit_testdata_gen::npz`]: the writer's bytes do not depend on the clock.
 
 use ndarray::array;
-use plskit_testdata_gen::npz::{sha256_of_file, NpzWriter};
+use plskit_testdata_gen::npz::{NpzWriter, sha256_of_file};
 use std::thread::sleep;
 use std::time::Duration;
 use tempfile::tempdir;

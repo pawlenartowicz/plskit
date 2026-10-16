@@ -244,7 +244,7 @@ fn mapping<'py>(map: &Bound<'py, PyMapping>, path: &str, depth: usize) -> PyResu
                             v.py(),
                             &child,
                             &format!("must be a number, got {}", describe(&v)),
-                        ))
+                        ));
                     }
                 };
                 pairs.push((key, x));
@@ -257,7 +257,7 @@ fn mapping<'py>(map: &Bound<'py, PyMapping>, path: &str, depth: usize) -> PyResu
                         "must have all string keys or all integer keys, got the key {}",
                         describe(&k)
                     ),
-                ))
+                ));
             }
         }
     }

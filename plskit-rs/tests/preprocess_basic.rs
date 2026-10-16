@@ -5,7 +5,7 @@
 use approx::assert_relative_eq;
 use faer::{Col, Mat};
 use plskit::error::PlsKitError;
-use plskit::preprocess::{preprocess, preprocess_block, PreprocessBlockInput, PreprocessInput};
+use plskit::preprocess::{PreprocessBlockInput, PreprocessInput, preprocess, preprocess_block};
 
 fn small() -> (Mat<f64>, Col<f64>, Col<f64>) {
     let x = Mat::from_fn(5, 3, |i, j| (i + j) as f64);

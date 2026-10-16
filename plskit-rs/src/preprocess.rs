@@ -10,7 +10,7 @@ use faer::{Col, ColRef, Mat, MatRef};
 
 use crate::error::{PlsKitError, PlsKitResult};
 use crate::linalg::{
-    compute_n_eff, normalize_weights, standardize1_weighted, standardize_weighted,
+    compute_n_eff, normalize_weights, standardize_weighted, standardize1_weighted,
 };
 
 /// Input for `preprocess`. All three fields are independently optional.

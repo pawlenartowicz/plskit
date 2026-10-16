@@ -6,9 +6,16 @@ LIBDIR = ./rust/target/$(TARGET)/release
 STATLIB = $(LIBDIR)/libplskit_r.a
 PKG_LIBS = -L$(LIBDIR) -lplskit_r -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll
 
+all: $(SHLIB) rust_clean
+
 .PHONY: $(STATLIB)
 
 $(SHLIB): $(STATLIB)
+
+# Deletes the crates unpacked from rust/vendor.tar.xz once the DLL is
+# linked; the reason is at rust_clean in src/Makevars — change together.
+rust_clean: $(SHLIB)
+	rm -Rf ./rust/vendor
 
 $(STATLIB):
 	"$(R_HOME)/bin$(R_ARCH_BIN)/Rscript.exe" ../tools/cargo-build.R --target=$(TARGET)

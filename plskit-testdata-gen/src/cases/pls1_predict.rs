@@ -1,13 +1,13 @@
 //! `pls1_predict` fixture cases.
 
 use crate::cases::{
-    faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64,
-    synth_data, CasePaths,
+    CasePaths, faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64,
+    synth_data,
 };
 use crate::manifest::{Case, Hashes};
-use crate::npz::{sha256_of_file, NpzWriter};
+use crate::npz::{NpzWriter, sha256_of_file};
 use anyhow::Result;
-use plskit::{pls1_fit, pls1_predict, FitOpts, KSpec};
+use plskit::{FitOpts, KSpec, pls1_fit, pls1_predict};
 use std::path::Path;
 
 /// Case: basic `pls1_predict` — fit on `(60, 6)` train data, predict on `(20, 6)` holdout.

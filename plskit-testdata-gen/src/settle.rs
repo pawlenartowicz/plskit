@@ -11,7 +11,7 @@
 //! never reaches the committed bytes. A case's input settles with its output
 //! (`settle_cases`): when the output moved, the staged input goes in too.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use ndarray::{ArrayD, IxDyn, OwnedRepr};
 use ndarray_npy::{NpzReader, ReadableElement};
 use std::collections::BTreeSet;

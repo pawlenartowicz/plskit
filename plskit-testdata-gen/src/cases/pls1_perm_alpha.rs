@@ -1,8 +1,8 @@
 //! `pls1_perm_alpha` fixture cases.
 
 use crate::cases::{
-    faer_mat_to_array, i64_vec, manifest_case, ndarray_to_faer_mat, scalar_i64, synth_data,
-    CasePaths,
+    CasePaths, faer_mat_to_array, i64_vec, manifest_case, ndarray_to_faer_mat, scalar_i64,
+    synth_data,
 };
 use crate::manifest::Case;
 use crate::npz::NpzWriter;

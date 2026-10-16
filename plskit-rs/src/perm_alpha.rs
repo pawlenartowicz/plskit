@@ -12,7 +12,7 @@
 use faer::{Col, Mat, MatRef};
 use rayon::prelude::*;
 
-use crate::dual_route::{pls1_nspace_kernel, NspaceGram, NspaceOutcome};
+use crate::dual_route::{NspaceGram, NspaceOutcome, pls1_nspace_kernel};
 use crate::error::{PlsKitError, PlsKitResult};
 use crate::fit::check_finite_mat;
 use crate::linalg::standardize1;
@@ -28,12 +28,19 @@ const GRAM_CHECK_BAND: f64 = 4.0;
 /// [`check_gram`]).
 const CENTRING_KAPPA: f64 = 1e6;
 
-/// Largest `n_features` accepted, `2^53`: every count up to it is exact in
-/// f64 (the bindings' `F64_EXACT_MAX`). It keeps the kernel's rounding
-/// bounds, computed in `usize` (`2·p + 3·n` in `nspace_base_bounds`), from
-/// overflowing. From about `2^50` the gates already leave every column
+/// Largest `n_features` accepted: `2^53`, or `usize::MAX / 8` where `usize`
+/// is narrower (32-bit targets such as wasm32). Every count up to `2^53` is
+/// exact in f64 (the bindings' `F64_EXACT_MAX`). It keeps the kernel's
+/// rounding bounds, computed in `usize` (`2·p + 3·n` in
+/// `nspace_base_bounds`), from overflowing. On 32-bit, `2·p` is at most
+/// `usize::MAX / 4`, and `n` is bounded by memory (8·n bytes per column),
+/// so the sum fits. From about `2^50` the gates already leave every column
 /// unresolved, so the cap rejects no usable input.
-const N_FEATURES_MAX: usize = 1 << 53;
+const N_FEATURES_MAX: usize = if usize::BITS > 53 {
+    1 << 53
+} else {
+    usize::MAX / 8
+};
 
 /// Output of [`pls1_perm_alpha`]. `m` is the number of columns of `y`.
 #[derive(Debug, Clone)]
@@ -86,7 +93,8 @@ pub struct PermAlphaOutput {
 /// - `k`: `1`
 ///
 /// # Errors
-/// - `PlsKitError::InvalidArgument` when `k == 0`, `k ≥ 2`, `n_features == 0` or `n_features > 2^53`
+/// - `PlsKitError::InvalidArgument` when `k == 0`, `k ≥ 2`, `n_features == 0`
+///   or `n_features > 2^53` (on 64-bit targets)
 /// - `PlsKitError::ShapeMismatch` when `gram` is not square or `y` has
 ///   another row count
 /// - `PlsKitError::KExceedsMax` when `k > n − 1`
@@ -206,7 +214,7 @@ fn check_args(
     }
     if n_features > N_FEATURES_MAX {
         return Err(PlsKitError::InvalidArgument(format!(
-            "n_features must be <= 2^53, got {n_features}"
+            "n_features must be <= {N_FEATURES_MAX}, got {n_features}"
         )));
     }
     let n = gram.nrows();
@@ -342,11 +350,11 @@ fn check_gram(g: MatRef<'_, f64>, n_features: usize) -> PlsKitResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fit::{par_fixed, pls1_fit, FitOpts, KSpec};
+    use crate::fit::{FitOpts, KSpec, par_fixed, pls1_fit};
     use crate::linalg::{mat_mul, standardize, standardize1};
     use crate::test_support::{
-        assert_bits_eq, assert_rows_close, bits, col_vals, mat_vals, orthogonal_y, synth, unif,
-        Layouts,
+        Layouts, assert_bits_eq, assert_rows_close, bits, col_vals, mat_vals, orthogonal_y, synth,
+        unif,
     };
     use faer::linalg::matmul::matmul;
     use faer::{Accum, ColMut, ColRef, Par};
@@ -709,7 +717,7 @@ mod tests {
         assert_eq!(
             error(pls1_perm_alpha(g_ref, y_ref, 1, usize::MAX)).to_string(),
             format!(
-                "invalid argument: n_features must be <= 2^53, got {}",
+                "invalid argument: n_features must be <= 9007199254740992, got {}",
                 usize::MAX
             )
         );

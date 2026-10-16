@@ -53,5 +53,5 @@ plskit is a Partial Least Squares (PLS) library built around four ideas:
 
 ## Status
 
-Version 0.7.0, running Python `plskit` 0.7.0. Not yet in the General
+Version 0.7.1, running Python `plskit` 0.7.1. Not yet in the General
 registry.

@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use plskit_bind::{check_record, Value, VecF64};
+use plskit_bind::{Value, VecF64, check_record};
 
 fn args(fields: Vec<(&str, Value<'static>)>) -> Value<'static> {
     Value::Record(rec(fields))

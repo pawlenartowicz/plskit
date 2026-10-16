@@ -6,11 +6,11 @@ use anyhow::Result;
 
 use crate::cases::pls1_find_k_optimal::write_find_k_optimal;
 use crate::cases::{
-    case_files, ensure_moved, synth_data, weighted_n80_d6, Xyw, WEIGHTED_N80_D6_INPUTS,
+    WEIGHTED_N80_D6_INPUTS, Xyw, case_files, ensure_moved, synth_data, weighted_n80_d6,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::sha256_of_file;
-use plskit::{spls1_find_k_optimal, FindKOptimalOpts, FindKOptimalOutput, Selector};
+use plskit::{FindKOptimalOpts, FindKOptimalOutput, Selector, spls1_find_k_optimal};
 
 /// Shared synth parameters (mirrors dense `pls1_find_k_optimal` cases).
 const SYNTH_N: usize = 80;

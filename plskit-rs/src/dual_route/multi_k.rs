@@ -29,11 +29,11 @@
 use faer::linalg::matmul::matmul;
 use faer::{Accum, Col, ColMut, ColRef, Mat, MatRef, Par};
 
-use super::{use_dual_route, ABS_BAND, RESOLVE_BAND, SCORE_BAND};
+use super::{ABS_BAND, RESOLVE_BAND, SCORE_BAND, use_dual_route};
 use crate::error::PlsKitResult;
-use crate::fit::{w_rel_floor, NIPALS_ABS_FLOOR};
+use crate::fit::{NIPALS_ABS_FLOOR, w_rel_floor};
 use crate::linalg::{scaled_moments, standardize1};
-use crate::signal_test::{cv_fold_contribution, pearson_scaled, CvFold, PreparedSplit, SplitIdx};
+use crate::signal_test::{CvFold, PreparedSplit, SplitIdx, cv_fold_contribution, pearson_scaled};
 
 /// Largest component count the n-space route serves. Chosen with
 /// `scripts/gate_feasibility.py`: the largest `k ≤ 10`
@@ -200,11 +200,7 @@ fn gram_norm_bound(g: MatRef<'_, f64>, x_fro: f64) -> f64 {
         }
     }
     let est = 2.0 * lam;
-    if est > 0.0 && est < fro2 {
-        est
-    } else {
-        fro2
-    }
+    if est > 0.0 && est < fro2 { est } else { fro2 }
 }
 
 /// What one n-space fit returns.

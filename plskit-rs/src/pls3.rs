@@ -20,7 +20,7 @@ use faer::{Accum, Col, ColRef, Mat, MatRef, Par};
 
 use crate::error::{PlsKitError, PlsKitResult};
 use crate::fit::{
-    check_finite_mat, resolve_par, select_and_normalize, ParChoice, IMPLICIT_MAX_MEAN_RATIO,
+    IMPLICIT_MAX_MEAN_RATIO, ParChoice, check_finite_mat, resolve_par, select_and_normalize,
 };
 use crate::linalg::owned_col_slice;
 
@@ -503,7 +503,7 @@ fn prepare(
             None,
         )
     } else {
-        let fx = crate::linalg::fit_x_moments(x, None, par);
+        let fx = crate::linalg::fit_x_moments(x, None, None, par);
         let ratio = fx.max_mean_ratio();
         // Written so that a NaN ratio takes the copy. So does `n - 1 < k`:
         // the dense fit then always truncates, and would be refitted on
@@ -628,6 +628,7 @@ pub(crate) fn pls3_lv1_prestd(
     if p == 0 || q == 0 {
         return Ok(None);
     }
+    // `lv1_bytes` counts this `A` (change together).
     let mut a = Mat::<f64>::zeros(p, q);
     matmul(
         a.as_mut(),
@@ -672,6 +673,34 @@ pub(crate) fn pls3_lv1_from_cross_cov(
         return Ok(None);
     }
     Ok(Some((v.col(0).to_owned(), sigma[0])))
+}
+
+/// Bytes of the large buffers one LV1 fit holds at once on a `p × q`
+/// cross-product, [`pls3_lv1_prestd`] or [`pls3_lv1_from_cross_cov`]: `A`
+/// (`p × q`) and what `linalg::thin_svd` allocates for it, `U`
+/// (`p × min(p, q)`), `V` (`q × min(p, q)`) and faer's scratch, which is
+/// about one more `p × q`. Mirrors the `A` of [`pls3_lv1_prestd`] and
+/// `linalg::thin_svd` (change together); the sparse path starts from the
+/// same SVD. The salience vectors and the sparse alternation's vectors are
+/// not counted. Mirrored by `lv1` in `tests/memory_budget_parity.rs`
+/// (change together).
+pub(crate) fn lv1_bytes(p: usize, q: usize) -> usize {
+    use crate::resample::copy_bytes;
+    use faer::linalg::svd::{ComputeSvdVectors, svd_scratch};
+    let r = p.min(q);
+    let scratch = svd_scratch::<f64>(
+        p,
+        q,
+        ComputeSvdVectors::Thin,
+        ComputeSvdVectors::Thin,
+        Par::Seq,
+        faer::Spec::default(),
+    )
+    .size_bytes();
+    copy_bytes(p, q)
+        .saturating_add(copy_bytes(p, r))
+        .saturating_add(copy_bytes(q, r))
+        .saturating_add(scratch)
 }
 
 /// Fit PLS3 / PLSSVD: SVD of the standardized cross-covariance `X̃'Ỹ`.
@@ -1410,19 +1439,11 @@ mod tests {
         let f: Vec<f64> = (0..n).map(|_| rng.random_range(-1.0..1.0)).collect();
         let x = Mat::<f64>::from_fn(n, p, |i, j| {
             let noise = rng.random_range(-0.3..0.3);
-            if j < 2 {
-                f[i] + noise
-            } else {
-                noise
-            }
+            if j < 2 { f[i] + noise } else { noise }
         });
         let y = Mat::<f64>::from_fn(n, q, |i, j| {
             let noise = rng.random_range(-0.3..0.3);
-            if j == 0 {
-                f[i] + noise
-            } else {
-                noise
-            }
+            if j == 0 { f[i] + noise } else { noise }
         });
         (x, y)
     }
@@ -2474,7 +2495,7 @@ mod tests {
     /// center (`+0.5`), where the mean correction of `X̃'Ỹ` does not vanish.
     #[test]
     fn offset_x_agrees_with_the_written_copy_on_both_routes() {
-        use crate::test_support::{assert_agree, col_vals, Agree};
+        use crate::test_support::{Agree, assert_agree, col_vals};
         let (x0, y) = shared_factor_data(60, 40, 5, 51);
         let (ys, _, _) = crate::linalg::standardize(y.as_ref());
         let y_off = Mat::<f64>::from_fn(60, 5, |i, j| y[(i, j)] + 0.5);
@@ -2536,7 +2557,7 @@ mod tests {
     /// blocks.
     #[test]
     fn truncating_fit_on_offset_x_is_the_written_copys() {
-        use crate::test_support::{assert_agree, Agree};
+        use crate::test_support::{Agree, assert_agree};
         let (x0, mut y) = shared_factor_data(200, 30, 5, 52);
         for i in 0..200 {
             y[(i, 4)] = (0..4).map(|j| y[(i, j)]).sum();
@@ -2691,7 +2712,7 @@ mod tests {
     /// agrees to the bit.
     #[test]
     fn pls3_family_agrees_across_layouts() {
-        use crate::test_support::{assert_layout_agree, mat_vals, Agree};
+        use crate::test_support::{Agree, assert_layout_agree, mat_vals};
         /// The fit inputs `(x, y)` with the varied side replaced by `v`.
         fn blocks<'a>(
             side: &str,
@@ -2803,6 +2824,34 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// `lv1_bytes` is `A` and what `linalg::thin_svd` allocates for it: `U`
+    /// and `V` as it returns them, and faer's scratch. Shapes with
+    /// `p ≥ q`, `p < q` (`U` is `p × p`) and rows that are not multiples
+    /// of 8.
+    #[test]
+    fn lv1_bytes_counts_a_and_the_thin_svd() {
+        use faer::linalg::svd::{ComputeSvdVectors, svd_scratch};
+        let bytes = |m: &Mat<f64>| m.col_stride().unsigned_abs() * m.ncols() * 8;
+        for (p, q) in [(9, 3), (41, 3), (3, 9), (1, 1), (400, 10)] {
+            let a = Mat::<f64>::from_fn(p, q, |i, j| ((i + 2 * j) % 5) as f64 + 1.0);
+            let svd = crate::linalg::thin_svd(a.as_ref(), Par::Seq).unwrap();
+            let scratch = svd_scratch::<f64>(
+                p,
+                q,
+                ComputeSvdVectors::Thin,
+                ComputeSvdVectors::Thin,
+                Par::Seq,
+                faer::Spec::default(),
+            )
+            .size_bytes();
+            assert_eq!(
+                lv1_bytes(p, q),
+                bytes(&a) + bytes(&svd.u) + bytes(&svd.v) + scratch,
+                "{p} x {q}"
+            );
         }
     }
 }

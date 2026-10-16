@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::dual_route::SCORE_BAND;
-use crate::fit::{pls1_fit_prepared_fro, ParChoice};
-use crate::linalg::{standardize, standardize1, standardize_apply};
+use crate::fit::{ParChoice, pls1_fit_prepared_fro};
+use crate::linalg::{standardize, standardize_apply, standardize1};
 use crate::test_support::{orthonormal_basis, project_off};
 use faer::{Col, Mat, Par};
 use rand::{RngExt, SeedableRng};

@@ -6,11 +6,11 @@
 //! byte-identical. `manifest.json` is rewritten with the settled
 //! files' hashes.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use plskit_testdata_gen::cases::all_cases;
 use plskit_testdata_gen::manifest::Manifest;
 use plskit_testdata_gen::npz::sha256_of_file;
-use plskit_testdata_gen::settle::{settle_cases, Outcome, Tolerance};
+use plskit_testdata_gen::settle::{Outcome, Tolerance, settle_cases};
 use std::path::PathBuf;
 
 fn main() -> Result<()> {

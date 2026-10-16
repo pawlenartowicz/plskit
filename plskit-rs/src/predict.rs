@@ -55,7 +55,7 @@ pub fn pls1_predict(model: &Pls1Model, x_new: MatRef<'_, f64>) -> PlsKitResult<C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fit::{pls1_fit, FitOpts, KSpec};
+    use crate::fit::{FitOpts, KSpec, pls1_fit};
     use approx::assert_relative_eq;
     use faer::Mat;
 

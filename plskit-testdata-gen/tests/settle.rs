@@ -1,9 +1,9 @@
 //! [`plskit_testdata_gen::settle`]: a regeneration keeps a committed fixture
 //! only when the fresh one matches it under the corpus tolerance.
 
-use ndarray::{array, ArrayD};
+use ndarray::{ArrayD, array};
 use plskit_testdata_gen::npz::NpzWriter;
-use plskit_testdata_gen::settle::{equivalent, settle_cases, settle_file, Outcome, Tolerance};
+use plskit_testdata_gen::settle::{Outcome, Tolerance, equivalent, settle_cases, settle_file};
 use std::path::Path;
 use tempfile::tempdir;
 

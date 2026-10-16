@@ -27,8 +27,8 @@ use faer::{Accum, Col, ColRef, Mat, MatRef, Par};
 
 use crate::dual_route::{ABS_BAND, RESOLVE_BAND};
 use crate::fit::{
-    pls1_coef_at_k, pls1_component_loop, resolve_par, w_rel_floor, ComponentBackend, Gate,
-    LoopOutcome, ParChoice, Scored, NIPALS_ABS_FLOOR,
+    ComponentBackend, Gate, LoopOutcome, NIPALS_ABS_FLOOR, ParChoice, Scored, pls1_coef_at_k,
+    pls1_component_loop, resolve_par, w_rel_floor,
 };
 
 /// Unit roundoff of f64, `2⁻⁵³`: the `u` of the rounding bounds in this
@@ -1003,7 +1003,7 @@ mod tests_block {
 #[cfg(test)]
 mod tests_kernel {
     use super::*;
-    use crate::fit::{pls1_fit_prepared_fro, ParChoice};
+    use crate::fit::{ParChoice, pls1_fit_prepared_fro};
     use crate::test_support::{linear_y, prepared, unif, unif_col};
     use faer::{Col, Mat};
 
@@ -1235,7 +1235,7 @@ mod tests_kernel {
 #[cfg(test)]
 mod tests_sweep {
     use super::*;
-    use crate::fit::{pls1_fit_prepared_fro, ParChoice};
+    use crate::fit::{ParChoice, pls1_fit_prepared_fro};
     use crate::test_support::{conditioned, linear_y, orthogonal_y, prepared, unif, unif_col};
     use std::collections::BTreeMap;
 
@@ -1724,7 +1724,7 @@ mod tests_site_route {
     };
     use crate::perm_null::perm_null_route;
     use crate::signal_test::{
-        raw_perm_route, split_exact_refit_route, with_gram_routes_disabled, ReplicateRoute,
+        ReplicateRoute, raw_perm_route, split_exact_refit_route, with_gram_routes_disabled,
     };
 
     #[test]
@@ -1850,7 +1850,7 @@ mod tests_site_route {
 #[cfg(test)]
 mod bench_work_floor {
     use super::*;
-    use crate::fit::{pls1_fit_prepared_fro, ParChoice};
+    use crate::fit::{ParChoice, pls1_fit_prepared_fro};
     use crate::test_support::{linear_y, prepared, unif};
     use std::hint::black_box;
     use std::time::Instant;

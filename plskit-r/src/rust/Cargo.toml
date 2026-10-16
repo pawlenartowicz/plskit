@@ -1,7 +1,7 @@
 [package]
 name = "plskit-r"
-version = "0.7.0"
-edition = "2021"
+version = "0.7.1"
+edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
 publish = false
@@ -13,16 +13,17 @@ crate-type = ["staticlib"]
 # The extendr crate of the R package. It is NOT a workspace member: R's
 # build runs cargo here on its own. Consequences:
 #  - plskit and plskit-bind come from crates.io, pinned to
-#    DESCRIPTION:Version, and the build uses the committed Cargo.lock
-#    with --locked. Dev mode (PLSKIT_CARGO_CONFIG, see
+#    DESCRIPTION:Version. The vX.Y.Z-r release job writes Cargo.lock in
+#    its staged copy, and the release build uses it with --locked; main
+#    carries no lock. Dev mode (PLSKIT_CARGO_CONFIG, see
 #    tools/cargo-build.R) patches in the in-repo crates instead.
 #  - the empty [workspace] table makes this manifest its own workspace
 #    root, and [profile.release] repeats the workspace block
 #    (scripts/check-profile-sync.py enforces both).
 [dependencies]
 extendr-api = "0.9"
-plskit = "=0.7.0"
-plskit-bind = "=0.7.0"
+plskit = "=0.7.1"
+plskit-bind = "=0.7.1"
 
 [workspace]
 

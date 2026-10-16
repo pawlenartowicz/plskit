@@ -5,12 +5,15 @@ use std::collections::BTreeMap;
 use rand::seq::SliceRandom;
 
 use crate::error::{PlsKitError, PlsKitResult};
-use crate::fit::{pls1_fit_impl, FitOpts, KSpec};
-use crate::linalg::{
-    col_row_subset, normalize_weights, standardize1_weighted, standardize_apply_rows,
-    standardize_rows, standardize_weighted,
+use crate::fit::{
+    FitOpts, IMPLICIT_MAX_MEAN_RATIO, KSpec, ParChoice, PreparedFit, check_fit_y_and_k,
+    pls1_fit_impl, pls1_fit_implicit,
 };
-use crate::sequential::{run_incremental_sequence, IncrementalSequenceOpts, SequentialArgs};
+use crate::linalg::{
+    col_row_subset, normalize_weights, standardize_apply_rows, standardize_rows,
+    standardize1_weighted,
+};
+use crate::sequential::{IncrementalSequenceOpts, SequentialArgs, run_incremental_sequence};
 use crate::signal_test::ConfirmatoryMethod;
 
 use faer::{Col, ColRef, Mat, MatRef};
@@ -23,7 +26,10 @@ pub enum Selector {
     /// Maximize CV R² without the 1-SE rule.
     R2Max,
     /// Minimize `BIC(k) = n_eff · log(SSR / n_eff) + k · log(n_eff)`
-    /// (`n_eff` is `n` without weights).
+    /// (`n_eff` is `n` without weights). BIC counts each component as one
+    /// degree of freedom. On wide `x` (p much larger than n) the effective
+    /// degrees of freedom of a PLS fit are much larger, so BIC tends to select
+    /// `k_max`. `R2Se` (the default) is recommended there.
     Bic,
 }
 
@@ -106,7 +112,8 @@ pub struct FindKOptimalOutput {
     /// Stable rank of the standardized X, as the sequence-level auto-gate saw
     /// it. `Some` whenever `diagnostic == Some(SplitNb)` — whether the gate
     /// fired or not, and also under `force`. `None` otherwise, including when
-    /// no diagnostic was requested.
+    /// no diagnostic was requested. NaN when the Gram matrix of the
+    /// standardized X is not finite; the gate then fires.
     pub stable_rank: Option<f64>,
 }
 
@@ -135,6 +142,11 @@ impl FindKOptimalOutput {
 /// Optimal-K selection on full data. Optionally attaches a same-sample
 /// sequential diagnostic when `diagnostic.is_some()` — selection and test
 /// share data, so the diagnostic pvalues are not honest inference.
+///
+/// `Selector::Bic` counts each component as one degree of freedom. On wide `x`
+/// (p much larger than n) the effective degrees of freedom of a PLS fit are
+/// much larger, so BIC tends to select `k_max`. `Selector::R2Se` (the default)
+/// is recommended there.
 ///
 /// # K-range cap (CV selectors)
 /// `R2Se` and `R2Max` evaluate components `k = 1..=max_comp` where
@@ -467,7 +479,8 @@ pub struct FindKSequenceOutput {
     /// it. `Some` on an explicit `split_nb` request, and on an `"auto"`
     /// request that reached the stable-rank check (p > 4, `n_eff` ≥ 250,
     /// and p ≤ 100·n without `keep`); `None` otherwise. On a `split_nb` request it is set
-    /// whether the gate fired or not, and also under `force`.
+    /// whether the gate fired or not, and also under `force`. NaN when the
+    /// Gram matrix of the standardized X is not finite; the gate then fires.
     pub stable_rank: Option<f64>,
 }
 
@@ -651,20 +664,42 @@ fn find_k_sequence_impl(
 // Internal selectors
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Per-fold standardized train/val slices shared by `select_cv` and
-/// `spls1_find_keep_optimal`. Train fold standardized with weighted
-/// moments; val fold standardized with the train fold's parameters.
-/// Per-fold weights re-normalized to mean 1; an unnormalizable slice
-/// yields `None` → that fold runs unweighted (kept rather than an
-/// explicit uniform fill, which would run the weighted code path and is not
-/// provably bit-identical to the unweighted path).
+/// One fold of `cv_select`, shared by `select_cv` and
+/// `spls1_find_keep_optimal`: the training rows' standardization moments
+/// (weighted) and the inputs of a fit on X in place
+/// ([`FoldData::fit_predict`]), the standardized `y` of both sides (the
+/// validation side with the training moments), and, in `cv_select`'s
+/// second pass, the standardized blocks. Per-fold weights are re-normalized to
+/// mean 1; an unnormalizable slice yields `None` → that fold runs
+/// unweighted (kept rather than an explicit uniform fill, which would run
+/// the weighted code path and is not provably bit-identical to the
+/// unweighted path).
 struct FoldData {
-    xs_tr: Mat<f64>,
+    train_idx: Vec<usize>,
+    val_idx: Vec<usize>,
+    /// The training rows' column means and scales, the bits of
+    /// `standardize_rows`'s, and `‖√w'·Xs_tr‖_F` from the same moments.
+    mean: Col<f64>,
+    scale: Col<f64>,
+    fro: f64,
+    /// `max_j |mean_j| / scale_j`: past `IMPLICIT_MAX_MEAN_RATIO` every fit
+    /// of the fold runs on the blocks.
+    mean_ratio: f64,
+    /// One factor per row of X: the `√w''` the fit on the training block
+    /// scales row `i` by (1 when the fold is unweighted), 0 on the
+    /// validation rows.
+    row_factor: Col<f64>,
+    /// `row_factor ⊙ ys` on the training rows, 0 on the validation rows.
+    ys_n: Col<f64>,
     ys_tr: Col<f64>,
-    xs_val: Mat<f64>,
     ys_val: Col<f64>,
     train_w: Option<Col<f64>>,
     val_w: Option<Col<f64>>,
+    /// The standardized training and validation blocks, written by the
+    /// first fit on them and kept for the fold's later fits.
+    blocks: Option<(Mat<f64>, Mat<f64>)>,
+    /// Set for `cv_select`'s second pass: every fit runs on the blocks.
+    on_blocks: bool,
 }
 
 #[allow(clippy::many_single_char_names)]
@@ -676,7 +711,7 @@ fn prep_fold(
     folds: &[Vec<usize>],
     fi: usize,
     val_idx: &[usize],
-) -> FoldData {
+) -> PlsKitResult<FoldData> {
     let train_idx: Vec<usize> = folds
         .iter()
         .enumerate()
@@ -701,19 +736,47 @@ fn prep_fold(
         .as_ref()
         .and_then(|w| normalize_weights(w.as_ref()));
 
-    let (xs_tr, x_mean, x_scale) = standardize_rows(x, &train_idx, train_wref, None);
-    let xs_val = standardize_apply_rows(x, val_idx, x_mean.as_ref(), x_scale.as_ref(), None);
+    let n_tr = train_idx.len();
+    let fx = crate::linalg::fit_x_moments(
+        x,
+        Some(&train_idx),
+        train_wref,
+        crate::fit::resolve_par(ParChoice::Auto, n_tr, x.ncols(), 1),
+    );
+    let mean_ratio = fx.max_mean_ratio();
     let (ys_tr, ym, ys) = standardize1_weighted(y_tr.as_ref(), train_wref);
     let ys_val = Col::<f64>::from_fn(nv, |i| (y_val[i] - ym) / ys);
 
-    FoldData {
-        xs_tr,
+    // The fit on the training block renormalizes the fold's weights (and
+    // takes all-equal ones as none) and scales its rows by their square
+    // roots; the fit on X in place takes the same factors, row by row.
+    let (w_fit, _) = crate::fit::validate_and_normalize_weights(train_wref, n_tr, 1)?;
+    let sqw = w_fit.as_ref().map(|w| crate::linalg::sqrt_col(w.as_ref()));
+    let n = x.nrows();
+    let mut row_factor = Col::<f64>::zeros(n);
+    let mut ys_n = Col::<f64>::zeros(n);
+    for (i, &r) in train_idx.iter().enumerate() {
+        let f = sqw.as_ref().map_or(1.0, |s| s[i]);
+        row_factor[r] = f;
+        ys_n[r] = f * ys_tr[i];
+    }
+
+    Ok(FoldData {
+        train_idx,
+        val_idx: val_idx.to_vec(),
+        mean: fx.mean,
+        scale: fx.scale,
+        fro: fx.fro,
+        mean_ratio,
+        row_factor,
+        ys_n,
         ys_tr,
-        xs_val,
         ys_val,
         train_w: train_w_norm,
         val_w: val_w_norm,
-    }
+        blocks: None,
+        on_blocks: false,
+    })
 }
 
 impl FoldData {
@@ -756,6 +819,161 @@ impl FoldData {
             0.0
         }
     }
+
+    /// Fits the training rows to `k` components (`keep` as in `pls1_fit`)
+    /// and returns the validation predictions of the coefficient vectors
+    /// `coefs` takes from the fit, one per vector.
+    ///
+    /// The fit runs on X in place ([`pls1_fit_implicit`] with
+    /// [`FoldData::row_factor`]): the validation rows of `Xs` are 0, so the
+    /// fit is the training rows' to rounding. A prediction is
+    /// `X_val·u − mean'u` with `u = c / scale` ([`FoldData::predict_in_place`]).
+    /// `None` leaves the fit to the standardized blocks: when the columns
+    /// sit past `IMPLICIT_MAX_MEAN_RATIO`, when the fit on X in place cannot
+    /// decide where to stop, or when a coefficient or a prediction is not
+    /// finite. With [`FoldData::on_blocks`] set, the fit runs on the blocks
+    /// ([`FoldData::fit_predict_on_copy`]) and is always `Some`.
+    fn fit_predict<F>(
+        &mut self,
+        x: MatRef<'_, f64>,
+        k: usize,
+        keep: Option<usize>,
+        coefs: F,
+    ) -> PlsKitResult<Option<Vec<Col<f64>>>>
+    where
+        F: Fn(&PreparedFit) -> Vec<Col<f64>>,
+    {
+        check_fit_y_and_k(x.ncols(), self.ys_tr.as_ref(), k, keep)?;
+        if self.on_blocks {
+            return self.fit_predict_on_copy(x, k, keep, coefs).map(Some);
+        }
+        let in_place = if self.mean_ratio <= IMPLICIT_MAX_MEAN_RATIO {
+            pls1_fit_implicit(
+                x,
+                self.ys_n.as_ref(),
+                crate::linalg::owned_col_slice(&self.mean),
+                crate::linalg::owned_col_slice(&self.scale),
+                Some(crate::linalg::owned_col_slice(&self.row_factor)),
+                k,
+                keep,
+                ParChoice::Auto,
+                self.fro,
+                self.mean_ratio,
+                self.train_idx.len(),
+            )
+        } else {
+            None
+        };
+        if let Some(fit) = in_place.filter(|f| f.coef.iter().all(|v| v.is_finite())) {
+            let par = crate::fit::resolve_par(ParChoice::Auto, x.nrows(), x.ncols(), k);
+            let preds = self.predict_in_place(x, &coefs(&fit), par);
+            if preds.iter().all(|p| p.iter().all(|v| v.is_finite())) {
+                return Ok(Some(preds));
+            }
+        }
+        Ok(None)
+    }
+
+    /// `Xs_val·c` for each `c` in `coefs`, from X in place: `Z = X_val·U`
+    /// with `U = [c / scale …]`, then `Z[i, c] − mean'u_c`. The validation
+    /// rows are copied into a block `linalg::stream_block_width(p)` rows at
+    /// a time (the rows [`cv_fold_bytes`] counts; change together) and each
+    /// block is one product at `par`, so nothing `n_val × p` is written.
+    fn predict_in_place(
+        &self,
+        x: MatRef<'_, f64>,
+        coefs: &[Col<f64>],
+        par: faer::Par,
+    ) -> Vec<Col<f64>> {
+        let d = x.ncols();
+        let nv = self.val_idx.len();
+        let u = Mat::<f64>::from_fn(d, coefs.len(), |j, c| coefs[c][j] / self.scale[j]);
+        let off: Vec<f64> = (0..coefs.len())
+            .map(|c| (0..d).map(|j| self.mean[j] * u[(j, c)]).sum())
+            .collect();
+        let mut preds: Vec<Col<f64>> = (0..coefs.len()).map(|_| Col::<f64>::zeros(nv)).collect();
+        let block = crate::linalg::stream_block_width(d);
+        for (b, rows) in self.val_idx.chunks(block).enumerate() {
+            let i0 = b * block;
+            let blk = crate::linalg::row_subset(x, rows);
+            let z = crate::linalg::mat_mul(blk.as_ref(), u.as_ref(), par);
+            for (c, pred) in preds.iter_mut().enumerate() {
+                for i in 0..rows.len() {
+                    pred[i0 + i] = z[(i, c)] - off[c];
+                }
+            }
+        }
+        preds
+    }
+
+    /// [`FoldData::fit_predict`] on the standardized blocks: the training
+    /// rows standardized with weighted moments, the validation rows with
+    /// the training rows' moments, written on the first call and kept for
+    /// the fold's later fits; then `pls1_fit_impl` on the training block
+    /// (`pre_standardized`, rows scaled by `√w''`) and the predictions
+    /// `xs_val·c`. The same bits on every layout of X.
+    fn fit_predict_on_copy<F>(
+        &mut self,
+        x: MatRef<'_, f64>,
+        k: usize,
+        keep: Option<usize>,
+        coefs: F,
+    ) -> PlsKitResult<Vec<Col<f64>>>
+    where
+        F: Fn(&PreparedFit) -> Vec<Col<f64>>,
+    {
+        let train_wref = self.train_w.as_ref().map(Col::as_ref);
+        let (xs_tr, xs_val) = self.blocks.get_or_insert_with(|| {
+            let (xs_tr, mean, scale) = standardize_rows(x, &self.train_idx, train_wref, None);
+            let xs_val =
+                standardize_apply_rows(x, &self.val_idx, mean.as_ref(), scale.as_ref(), None);
+            (xs_tr, xs_val)
+        });
+        let m = pls1_fit_impl(
+            xs_tr.as_ref(),
+            self.ys_tr.as_ref(),
+            KSpec::Fixed(k),
+            train_wref,
+            FitOpts {
+                pre_standardized: true,
+                // check_n_eff: false — per-fold slice may have low n_eff; let the math degrade
+                // and rely on the parent statistic to absorb noise.
+                check_n_eff: false,
+                // Auto: the fit picks its arm from its shape (`fit::resolve_par`),
+                // so the bits do not depend on the batch or the pool.
+                par: ParChoice::Auto,
+                keep,
+            },
+        )?;
+        let fit = PreparedFit {
+            t_scores: m.t_scores,
+            p_loadings: m.p_loadings,
+            w_star: m.w_star,
+            q_loadings: m.q_loadings,
+            coef: m.coef,
+            k_used: m.k_used,
+        };
+        Ok(coefs(&fit)
+            .iter()
+            .map(|c| crate::linalg::mat_vec(xs_val.as_ref(), c.as_ref(), faer::Par::Seq))
+            .collect())
+    }
+}
+
+/// The coefficient vectors of `fit` at `1..=k_used` components, whose
+/// validation predictions `select_cv` scores in each fold.
+fn sweep_coefs(fit: &PreparedFit) -> Vec<Col<f64>> {
+    (1..=fit.k_used)
+        .map(|k| {
+            crate::fit::pls1_coef_at_k(
+                &fit.w_star,
+                &fit.p_loadings,
+                &fit.q_loadings,
+                k,
+                faer::Par::Seq,
+            )
+        })
+        .collect()
 }
 
 /// Fold count the CV layer runs: the caller's `n_folds`, capped at `n − 2`
@@ -799,9 +1017,11 @@ fn reject_cv_leave_one_out(n: usize, requested: usize, effective: usize) -> PlsK
 /// The K-fold CV layer shared by `select_cv` (candidates are component
 /// counts `1..=max_comp`) and `spls1_find_keep_optimal` (candidates are the
 /// keep grid): shuffle, split into `n_folds` folds, run `fold_work` on each
-/// fold's standardized slices ([`prep_fold`]), and pick through
-/// [`aggregate_and_pick`]. `fold_work` returns one validation R² per
-/// candidate.
+/// fold ([`prep_fold`]; its fits read X in place, [`FoldData::fit_predict`]),
+/// and pick through [`aggregate_and_pick`]. `fold_work(fd, cells)` returns
+/// the validation R² of each candidate index in `cells`, in that order,
+/// `None` where its fit is left to the fold's standardized blocks; `fit_k`
+/// is the component count of its fits.
 ///
 /// # No extractable component
 /// Before any fold runs, it asks the full data whether a first component
@@ -815,14 +1035,19 @@ fn reject_cv_leave_one_out(n: usize, requested: usize, effective: usize) -> PlsK
 /// nothing from `rng`.
 ///
 /// Each fold is independent and RNG-free (the only RNG use is the shuffle).
-/// The folds run in batches of `resample::map_units` by the memory budget,
-/// one unit being the fold's standardized slices of X (`n × p` in all) plus,
-/// when weighted, the √w-scaled copy of the training slice that the
-/// weighted fit inside `fold_work` writes. The result does not depend on
-/// the batch size or on which worker runs which fold, and an error is the
-/// first in fold order.
+/// Two passes, both in batches of `resample::map_units` by the memory
+/// budget. The first runs every fold on X in place, one unit being one
+/// fold fit ([`cv_fold_bytes`] at `fit_k`). The second
+/// (`resample::fill_pending`) reruns the candidates the first left `None`
+/// on [`FoldData::on_blocks`], one unit adding the fold's two standardized
+/// blocks (`resample::fold_blocks_bytes`) and, when weighted, the √w-scaled
+/// copy of the training block the fit writes. A candidate's value is the
+/// one its fit gives on either pass, so the result does not depend on the
+/// batch size or on which worker runs which fold, and an error is the first
+/// in fold order.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
+#[allow(clippy::many_single_char_names)]
 fn cv_select<F>(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -830,36 +1055,87 @@ fn cv_select<F>(
     check_keep: Option<usize>,
     n_folds: usize,
     candidates: &[usize],
+    fit_k: usize,
     use_1se: bool,
     rng: &mut crate::rng::Rng,
     fold_work: F,
 ) -> PlsKitResult<(usize, BTreeMap<usize, f64>, BTreeMap<usize, f64>)>
 where
-    F: Fn(&FoldData) -> PlsKitResult<Vec<f64>> + Sync,
+    F: Fn(&mut FoldData, &[usize]) -> PlsKitResult<Vec<Option<f64>>> + Sync,
 {
+    use crate::resample::{copy_bytes, fill_pending, fold_blocks_bytes, map_units};
     if first_component_exhausted(x, y, weights, check_keep)? {
         return Ok((0, BTreeMap::new(), BTreeMap::new()));
     }
-    let n = x.nrows();
+    let (n, p) = (x.nrows(), x.ncols());
     let mut indices: Vec<usize> = (0..n).collect();
     indices.shuffle(rng);
     let folds = crate::linalg::fold_split(&indices, n_folds);
-    let run = |fi: usize, val_idx: &Vec<usize>| {
-        fold_work(&prep_fold(x, y, weights, &folds, fi, val_idx.as_slice()))
+    let run = |fi: usize, cells: &[usize], on_blocks: bool| {
+        let mut fd = prep_fold(x, y, weights, &folds, fi, folds[fi].as_slice())?;
+        fd.on_blocks = on_blocks;
+        fold_work(&mut fd, cells)
     };
-    let p = x.ncols();
+
+    // Pass 1: every candidate fit on X in place; an error stands for its
+    // fold.
+    let all: Vec<usize> = (0..candidates.len()).collect();
+    let n_val = folds.iter().map(Vec::len).max().unwrap_or(0);
+    let unit = cv_fold_bytes(p, fit_k, n_val);
+    let rows: Vec<Vec<Option<PlsKitResult<f64>>>> =
+        map_units(folds.len(), unit, |fi| match run(fi, &all, false) {
+            Ok(row) => row.into_iter().map(|v| v.map(Ok)).collect(),
+            Err(e) => vec![Some(Err(e))],
+        });
+
+    // Pass 2: the candidates left to the blocks. A failed fit fills the
+    // fold's first pending cell with its error, which aborts the selection
+    // before the other cells are read.
     let n_tr = n - folds.iter().map(Vec::len).min().unwrap_or(0);
     let fit_copy = if weights.is_some() {
-        crate::resample::copy_bytes(n_tr, p)
+        copy_bytes(n_tr, p)
     } else {
         0
     };
-    let unit = crate::resample::copy_bytes(n, p).saturating_add(fit_copy);
-    let r2_matrix: Vec<Vec<f64>> =
-        crate::resample::map_units(folds.len(), unit, |fi| run(fi, &folds[fi]))
-            .into_iter()
-            .collect::<PlsKitResult<Vec<_>>>()?;
+    let rows = fill_pending(
+        rows,
+        unit.saturating_add(fold_blocks_bytes(n, &folds, p))
+            .saturating_add(fit_copy),
+        |fi, pending| match run(fi, pending, true) {
+            Ok(vals) => vals
+                .into_iter()
+                .map(|v| Ok(v.expect("a fit on the blocks always predicts")))
+                .collect(),
+            Err(e) => std::iter::once(Err(e))
+                .chain(pending[1..].iter().map(|_| Ok(f64::NAN)))
+                .collect(),
+        },
+    );
+    let r2_matrix: Vec<Vec<f64>> = rows
+        .into_iter()
+        .map(|row| row.into_iter().collect::<PlsKitResult<Vec<f64>>>())
+        .collect::<PlsKitResult<Vec<_>>>()?;
     Ok(aggregate_and_pick(&r2_matrix, candidates, use_1se))
+}
+
+/// Bytes of the large buffers one fold of [`cv_select`] holds while it fits
+/// X in place: one fit to `fit_k` components ([`crate::fit::pls1_fit_bytes`];
+/// a fold runs its fits one after another, the keep grid's included), the
+/// `p × fit_k` coefficient matrix of [`FoldData::predict_in_place`] and the
+/// fold's column means and scales, and the block of validation rows
+/// `predict_in_place` copies, `linalg::stream_block_width(p)` rows (change
+/// together) but no more than `n_val`, the largest fold. The n-vectors are
+/// not counted. The second pass of `cv_select` counts the standardized
+/// blocks on top. Mirrored by `cv_fold` in `tests/memory_budget_parity.rs`
+/// (change together).
+fn cv_fold_bytes(p: usize, fit_k: usize, n_val: usize) -> usize {
+    use crate::resample::copy_bytes;
+    crate::fit::pls1_fit_bytes(p, fit_k)
+        .saturating_add(copy_bytes(p, fit_k.saturating_add(2)))
+        .saturating_add(copy_bytes(
+            crate::linalg::stream_block_width(p).min(n_val),
+            p,
+        ))
 }
 
 /// Aggregate per-fold R² rows into mean/SE maps keyed by `candidates`,
@@ -939,40 +1215,17 @@ fn select_cv(
     let max_comp = k_max.min(n.saturating_sub(n_folds + 2)).max(1);
 
     // row[k-1] = CV R² for this fold and k components.
-    let fold_work = |fd: &FoldData| -> PlsKitResult<Vec<f64>> {
-        let train_wref = fd.train_w.as_ref().map(Col::as_ref);
-        let m = pls1_fit_impl(
-            fd.xs_tr.as_ref(),
-            fd.ys_tr.as_ref(),
-            KSpec::Fixed(max_comp),
-            train_wref,
-            FitOpts {
-                pre_standardized: true,
-                // check_n_eff: false — per-fold slice may have low n_eff; let the math degrade
-                // and rely on the parent statistic to absorb noise.
-                check_n_eff: false,
-                // Auto: the fit picks its arm from its shape (`fit::resolve_par`),
-                // so the bits do not depend on the batch or the pool.
-                par: crate::fit::ParChoice::Auto,
-                keep,
-            },
-        )?;
-        let actual = m.w_star.ncols();
+    // One fit gives every candidate: `cells` is all of them on either pass.
+    let fold_work = |fd: &mut FoldData, cells: &[usize]| -> PlsKitResult<Vec<Option<f64>>> {
+        let Some(preds) = fd.fit_predict(x, max_comp, keep, sweep_coefs)? else {
+            return Ok(vec![None; cells.len()]);
+        };
         let ss_tot = fd.ss_tot();
         let mut row = vec![f64::NAN; max_comp];
-        for k in 1..=actual {
-            let coef_k = crate::fit::pls1_coef_at_k(
-                &m.w_star,
-                &m.p_loadings,
-                &m.q_loadings,
-                k,
-                faer::Par::Seq,
-            );
-            let y_pred =
-                crate::linalg::mat_vec(fd.xs_val.as_ref(), coef_k.as_ref(), faer::Par::Seq);
-            row[k - 1] = fd.r2(&y_pred, ss_tot);
+        for (k, y_pred) in preds.iter().enumerate() {
+            row[k] = fd.r2(y_pred, ss_tot);
         }
-        Ok(row)
+        Ok(cells.iter().map(|&c| Some(row[c])).collect())
     };
 
     let candidates: Vec<usize> = (1..=max_comp).collect();
@@ -983,6 +1236,7 @@ fn select_cv(
         keep,
         n_folds,
         &candidates,
+        max_comp,
         use_1se,
         rng,
         fold_work,
@@ -994,14 +1248,16 @@ fn select_cv(
     ))
 }
 
-/// The BIC selector: one fit to `k_max` on the standardized copy of X
-/// (weighted moments, whatever `pre_standardized` says, as
-/// [`first_component_exhausted`] standardizes), then
+/// The BIC selector: one fit to `k_max` on X in its own layout, which forms
+/// the weighted standardization moments itself (whatever `pre_standardized`
+/// says, as [`first_component_exhausted`] does) and writes a standardized
+/// copy only where it falls back to one; then
 /// `BIC(k) = n_eff · ln(SSR_k / n_eff) + k · ln(n_eff)` for each
 /// `k ≤ k_used`. `SSR_k` is the squared norm of the outcome the fit worked
 /// on less its first `k` score columns times their y-loadings: the weighted
 /// residual sum of squares of the `k`-component model, with no pass over X.
-/// No component kept gives `k_star = 0` and no scores.
+/// No component kept gives `k_star = 0` and no scores. Two layouts of the
+/// same X agree to rounding, not to the bit.
 #[allow(clippy::many_single_char_names)]
 fn select_bic(
     x: MatRef<'_, f64>,
@@ -1011,15 +1267,13 @@ fn select_bic(
     n_eff: f64,
     keep: Option<usize>,
 ) -> PlsKitResult<(usize, BTreeMap<usize, f64>)> {
-    let (xs, _, _) = standardize_weighted(x, weights);
-    let (ys, _, _) = standardize1_weighted(y, weights);
     let m = pls1_fit_impl(
-        xs.as_ref(),
-        ys.as_ref(),
+        x,
+        y,
         KSpec::Fixed(k_max),
         weights,
         FitOpts {
-            pre_standardized: true,
+            pre_standardized: false,
             // check_n_eff: false: the BIC sweep below iterates 1..=k_used and
             // is truncation-tolerant by design (rank-deficient X just shortens
             // the sweep); n_eff was already validated at the top-level entry.
@@ -1033,10 +1287,12 @@ fn select_bic(
     if m.w_star.ncols() == 0 {
         return Ok((0, BTreeMap::new()));
     }
-    // The outcome the fit worked on, `√w''·ys` (`m.weights` holds the
-    // weights it normalized and row-scaled with; `ys` when there are none),
-    // and its residual after each component, `e ← e − q_k·t_k`, in
-    // ascending `i`.
+    // The outcome the fit worked on, `√w''·ys`, and its residual after each
+    // component, `e ← e − q_k·t_k`, in ascending `i`. `m.weights` holds the
+    // weights the fit normalized and standardized `y` with (`None` when
+    // there are none or all are equal), so `ys` has the bits of the fit's
+    // standardized `y`.
+    let (ys, _, _) = standardize1_weighted(y, m.weights.as_ref().map(Col::as_ref));
     let mut e: Col<f64> = match m.weights.as_ref() {
         Some(w) => crate::fit::scale_col(ys.as_ref(), crate::linalg::sqrt_col(w.as_ref()).as_ref()),
         None => ys.clone(),
@@ -1064,24 +1320,25 @@ fn select_bic(
 
 /// Whether the full-data fit truncates at the first component: `y` constant,
 /// or orthogonal to the columns of `X` up to rounding, which `pls1_fit`
-/// returns as the `k_used = 0` zero model. Standardizes exactly as
-/// `select_bic` does (weighted moments, whatever `pre_standardized` says) and
-/// threads `keep`, so the sparse entry points ask the sparse fit.
+/// returns as the `k_used = 0` zero model. Fits X in its own layout exactly
+/// as `select_bic` does (weighted moments, whatever `pre_standardized` says)
+/// and threads `keep`, so the sparse entry points ask the sparse fit. When
+/// the first weight norm sits within the truncation floor's band, the fit
+/// falls back to a standardized copy in X's layout, so there the answer can
+/// differ between layouts.
 fn first_component_exhausted(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
     weights: Option<ColRef<'_, f64>>,
     keep: Option<usize>,
 ) -> PlsKitResult<bool> {
-    let (xs, _, _) = standardize_weighted(x, weights);
-    let (ys, _, _) = standardize1_weighted(y, weights);
     let m = pls1_fit_impl(
-        xs.as_ref(),
-        ys.as_ref(),
+        x,
+        y,
         KSpec::Fixed(1),
         weights,
         FitOpts {
-            pre_standardized: true,
+            pre_standardized: false,
             // check_n_eff: false: the truncation is the answer sought here,
             // not an error, and n_eff was validated at the entry.
             check_n_eff: false,
@@ -1226,38 +1483,24 @@ pub(crate) fn find_keep_optimal_impl(
     reject_cv_leave_one_out(n, opts.n_folds, n_folds)?;
     let wref = w_norm.as_ref().map(Col::as_ref);
 
-    let fold_work = |fd: &FoldData| -> PlsKitResult<Vec<f64>> {
-        let train_wref = fd.train_w.as_ref().map(Col::as_ref);
+    let fold_work = |fd: &mut FoldData, cells: &[usize]| -> PlsKitResult<Vec<Option<f64>>> {
         let ss_tot = fd.ss_tot();
-        let mut row = vec![f64::NAN; grid.len()];
-        for (gi, &kp) in grid.iter().enumerate() {
-            let m = pls1_fit_impl(
-                fd.xs_tr.as_ref(),
-                fd.ys_tr.as_ref(),
-                KSpec::Fixed(k),
-                train_wref,
-                FitOpts {
-                    pre_standardized: true,
-                    check_n_eff: false,
-                    // Auto: the fit picks its arm from its shape (`fit::resolve_par`),
-                    // so the bits do not depend on the batch or the pool.
-                    par: crate::fit::ParChoice::Auto,
-                    keep: Some(kp),
-                },
-            )?;
-            let y_pred =
-                crate::linalg::mat_vec(fd.xs_val.as_ref(), m.coef.as_ref(), faer::Par::Seq);
-            row[gi] = fd.r2(&y_pred, ss_tot);
-        }
-        Ok(row)
+        cells
+            .iter()
+            .map(|&gi| {
+                let preds = fd.fit_predict(x, k, Some(grid[gi]), |fit| vec![fit.coef.clone()])?;
+                Ok(preds.map(|p| fd.r2(&p[0], ss_tot)))
+            })
+            .collect()
     };
 
     // The first-component check runs at the dense endpoint: selection only
     // shrinks the first weight vector (`‖select(X'y)‖ ≤ ‖X'y‖`), so a `y` the
     // dense fit cannot extract a component from gives none at any keep, and
     // one it can gives a component at the dense endpoint of the grid.
-    let (keep_star, cv_scores, cv_scores_se) =
-        cv_select(x, y, wref, None, n_folds, &grid, true, &mut rng, fold_work)?;
+    let (keep_star, cv_scores, cv_scores_se) = cv_select(
+        x, y, wref, None, n_folds, &grid, k, true, &mut rng, fold_work,
+    )?;
     // Nothing was swept when there is no first component (`keep_star = 0`).
     let grid = if keep_star == 0 { Vec::new() } else { grid };
 
@@ -1276,6 +1519,7 @@ pub(crate) fn find_keep_optimal_impl(
 mod tests {
     use super::*;
     use crate::fit::pls1_fit;
+    use crate::linalg::standardize_weighted;
     use crate::test_support::synth;
     use faer::Mat;
     use rand::SeedableRng;
@@ -2154,16 +2398,11 @@ mod tests {
         assert!(matches!(e, Err(PlsKitError::KExceedsMax { .. })));
     }
 
-    /// Layout invariance: every `find_k` entry copies X column-major
-    /// before it computes (CV folds through `prep_fold`, BIC and the gate
-    /// through `standardize_weighted`, sequence steps through `standardize` /
-    /// `col_major_or_copy`), so padded, row-major and reversed-column views
-    /// give bit-identical results to the owned matrix, over the copy-free
-    /// families (weighted and wide included) with and without
-    /// `pre_standardized`.
-    #[test]
+    /// A `find_k_optimal` result as flat values for the layout tests:
+    /// `k_star`, `n_eff`, `stable_rank` (NaN when absent), each score map as
+    /// its length then its values (`-1` when absent), then the p-values.
     #[allow(clippy::cast_precision_loss)]
-    fn find_k_entries_are_layout_invariant() {
+    fn push_optimal(v: &mut Vec<f64>, r: &FindKOptimalOutput) {
         fn push_map(v: &mut Vec<f64>, m: Option<&BTreeMap<usize, f64>>) {
             match m {
                 Some(m) => {
@@ -2173,54 +2412,81 @@ mod tests {
                 None => v.push(-1.0),
             }
         }
-        fn push_optimal(v: &mut Vec<f64>, r: &FindKOptimalOutput) {
-            v.extend([r.k_star as f64, r.n_eff, r.stable_rank.unwrap_or(f64::NAN)]);
-            push_map(v, r.cv_scores.as_ref());
-            push_map(v, r.cv_scores_se.as_ref());
-            push_map(v, r.bic_scores.as_ref());
-            if let Some(p) = &r.pvalues {
-                v.extend((0..p.nrows()).map(|i| p[i]));
-            }
+        v.extend([r.k_star as f64, r.n_eff, r.stable_rank.unwrap_or(f64::NAN)]);
+        push_map(v, r.cv_scores.as_ref());
+        push_map(v, r.cv_scores_se.as_ref());
+        push_map(v, r.bic_scores.as_ref());
+        if let Some(p) = &r.pvalues {
+            v.extend((0..p.nrows()).map(|i| p[i]));
         }
-        crate::test_support::assert_families_layout_invariant(
-            "find_k",
-            |c| {
-                let mut v = Vec::new();
+    }
+
+    /// The selections fit X in its own layout (BIC selection on the full
+    /// data, the selections by cross-validation in each fold), so padded,
+    /// row-major and reversed-column views agree with the owned matrix to
+    /// the corpus tolerance, with the same `k_star` / `keep_star` and the
+    /// same number of scores and p-values, over the copy-free families with
+    /// and without `pre_standardized`: BIC and `r2_se` selection, each with
+    /// and without a diagnostic, on `pls1_find_k_optimal` and
+    /// `spls1_find_k_optimal`, and `spls1_find_keep_optimal`. The diagnostic
+    /// sequence after selection keeps its bits on every layout
+    /// (`sequential::incremental_sequence_is_layout_invariant`).
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::many_single_char_names)]
+    fn selection_agrees_across_layouts() {
+        use crate::test_support::{Agree, assert_layout_agree, copy_free_families};
+        for f in copy_free_families() {
+            let w = f.w.as_ref().map(Col::as_ref);
+            for pre in [false, true] {
+                let (x, y) = f.inputs(pre);
                 for (selector, diagnostic) in [
-                    (Selector::R2Se, None),
                     (Selector::Bic, None),
-                    (Selector::R2Se, Some(ConfirmatoryMethod::SplitNb)),
                     (Selector::Bic, Some(ConfirmatoryMethod::SplitExact)),
+                    (Selector::R2Se, None),
+                    (Selector::R2Se, Some(ConfirmatoryMethod::SplitNb)),
                 ] {
                     let opts = FindKOptimalOpts {
                         selector,
                         diagnostic,
                         n_perm: 49,
                         n_splits: 10,
-                        pre_standardized: c.pre,
+                        pre_standardized: pre,
                         seed: Some(7),
                         ..Default::default()
                     };
-                    push_optimal(&mut v, &pls1_find_k_optimal(c.x, c.y, 3, c.w, opts)?);
-                    push_optimal(&mut v, &spls1_find_k_optimal(c.x, c.y, 3, 3, c.w, opts)?);
+                    let what = format!("{selector:?} {} pre={pre} {diagnostic:?}", f.name);
+                    assert_layout_agree(&x, &what, Agree::Corpus(1e-10), |xv| {
+                        let mut v = Vec::new();
+                        push_optimal(&mut v, &pls1_find_k_optimal(xv, y.as_ref(), 3, w, opts)?);
+                        push_optimal(
+                            &mut v,
+                            &spls1_find_k_optimal(xv, y.as_ref(), 3, 3, w, opts)?,
+                        );
+                        Ok(v)
+                    })
+                    .unwrap();
                 }
-                let r = spls1_find_keep_optimal(
-                    c.x,
-                    c.y,
-                    2,
-                    c.w,
-                    FindKeepOptimalOpts {
-                        seed: Some(7),
-                        ..Default::default()
-                    },
-                )?;
-                v.extend([r.keep_star as f64, r.n_eff]);
-                v.extend(r.cv_scores.values());
-                v.extend(r.cv_scores_se.values());
-                Ok(v)
-            },
-            Vec::clone,
-        );
+                let what = format!("keep_optimal {} pre={pre}", f.name);
+                assert_layout_agree(&x, &what, Agree::Corpus(1e-10), |xv| {
+                    let r = spls1_find_keep_optimal(
+                        xv,
+                        y.as_ref(),
+                        2,
+                        w,
+                        FindKeepOptimalOpts {
+                            seed: Some(7),
+                            ..Default::default()
+                        },
+                    )?;
+                    let mut v = vec![r.keep_star as f64, r.n_eff];
+                    v.extend(r.cv_scores.values());
+                    v.extend(r.cv_scores_se.values());
+                    Ok(v)
+                })
+                .unwrap();
+            }
+        }
     }
 
     /// The `r2_se` selection gives the same bits with its folds one at a
@@ -2275,14 +2541,15 @@ mod tests {
                         None,
                         5,
                         &[1],
+                        1,
                         false,
                         &mut rng,
-                        |_| {
+                        |_, cells| {
                             peak.fetch_max(live.fetch_add(1, SeqCst) + 1, SeqCst);
                             // Hold the fold open so that folds run together overlap.
                             std::thread::sleep(std::time::Duration::from_millis(5));
                             live.fetch_sub(1, SeqCst);
-                            Ok(vec![0.0])
+                            Ok(vec![Some(0.0); cells.len()])
                         },
                     )
                 })
@@ -2294,14 +2561,61 @@ mod tests {
         assert!(peak_at(u64::MAX) >= 2);
     }
 
-    /// The BIC sweep agrees, to the corpus array tolerance, with the BIC of
-    /// the predictions `xs·coef_k` of the same fit to `k_max` on the same
-    /// standardized copy, weighted by `w`, and picks the same `k`. Dense,
+    /// A fold of `cv_select` counts one fit to `fit_k` components, its
+    /// `p × (fit_k + 2)` buffers and its block of validation rows
+    /// ([`cv_fold_bytes`]): a budget of two such units runs two of the four
+    /// folds at once. The second pass, which refits the folds left to the
+    /// blocks, adds the fold's standardized blocks and, weighted, the
+    /// √w-scaled copy of the training block to the unit.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn cv_select_counts_one_fold_fit() {
+        let (n, p) = (16_usize, 7_usize);
+        let (x, y) = crate::test_support::signal_data(n, p, 101);
+        let w = crate::test_support::test_weights(n);
+        let unit = cv_fold_bytes(p, 1, n / 4);
+        let folds = crate::linalg::fold_split(&(0..n).collect::<Vec<_>>(), 4);
+        let blocks = crate::resample::fold_blocks_bytes(n, &folds, p);
+        for weights in [None, Some(w.as_ref())] {
+            let fit_copy = if weights.is_some() {
+                crate::resample::copy_bytes(n - n / 4, p)
+            } else {
+                0
+            };
+            let unit2 = unit + blocks + fit_copy;
+            let (_, mut rng) = crate::rng::resolve_seed(Some(7)).unwrap();
+            let (_, log) = crate::resample::with_batch_log(|| {
+                crate::fit::with_budget(u64::try_from(2 * unit2).unwrap(), || {
+                    cv_select(
+                        x.as_ref(),
+                        y.as_ref(),
+                        weights,
+                        None,
+                        4,
+                        &[1],
+                        1,
+                        false,
+                        &mut rng,
+                        |fd, cells| Ok(vec![fd.on_blocks.then_some(0.0); cells.len()]),
+                    )
+                    .unwrap()
+                })
+            });
+            let first = (2 * unit2 / unit).min(4);
+            crate::resample::assert_batches(&log, 4, first, 1);
+            crate::resample::assert_batches(&log, 4, 2, 1);
+        }
+    }
+
+    /// The BIC sweep of `select_bic` (a fit to `k_max` on raw X) agrees, to
+    /// the corpus array tolerance, with the BIC of the predictions
+    /// `xs·coef_k` of a fit to `k_max` on the standardized copy `xs`,
+    /// weighted by `w`, and picks the same `k`. Dense,
     /// weighted (zero weights included), wide and weighted wide, and a rank-two
     /// X on which the fit stops before `k_max`; dense and `keep = 3`.
     #[test]
     fn bic_sweep_matches_the_prediction_sweep() {
-        use crate::test_support::{assert_agree, copy_free_families, signal_data, Agree, Family};
+        use crate::test_support::{Agree, Family, assert_agree, copy_free_families, signal_data};
         // Every column a combination of the same two: rank two.
         let (b, yb) = signal_data(40, 2, 103);
         let xb = Mat::<f64>::from_fn(40, 6, |i, j| {
@@ -2371,6 +2685,165 @@ mod tests {
                     .min_by(|a, b| a.1.total_cmp(b.1))
                     .map_or(0, |(i, _)| i + 1);
                 assert_eq!(k_star, argmin, "{what}");
+            }
+        }
+    }
+
+    /// A finite X whose standardization overflows (rows 0 and 1 of column 0
+    /// at `f64::MAX`, row 2 at `-f64::MAX`) fails every selection by
+    /// cross-validation with `NonFiniteInput`, on 40 × 6 and 40 × 200: a
+    /// fold whose fit on X in place gives a non-finite coefficient or
+    /// prediction refits on its standardized blocks, which hold the
+    /// overflow.
+    #[test]
+    fn cv_selection_rejects_x_that_overflows_in_standardization() {
+        for p in [6_usize, 200] {
+            let (mut x, y) = crate::test_support::signal_data(40, p, 105);
+            x[(0, 0)] = f64::MAX;
+            x[(1, 0)] = f64::MAX;
+            x[(2, 0)] = -f64::MAX;
+            let opts = FindKOptimalOpts {
+                selector: Selector::R2Se,
+                seed: Some(7),
+                ..Default::default()
+            };
+            let r = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, None, opts);
+            assert!(
+                matches!(r, Err(PlsKitError::NonFiniteInput)),
+                "pls1 40x{p}: {r:?}"
+            );
+            let r = spls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, 3, None, opts);
+            assert!(
+                matches!(r, Err(PlsKitError::NonFiniteInput)),
+                "spls1 40x{p}: {r:?}"
+            );
+            let r = spls1_find_keep_optimal(
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                None,
+                FindKeepOptimalOpts {
+                    seed: Some(7),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                matches!(r, Err(PlsKitError::NonFiniteInput)),
+                "keep 40x{p}: {r:?}"
+            );
+        }
+    }
+
+    /// Each fold's R² row from `fit_predict` on X in place agrees, to the
+    /// corpus tolerance, with the row from its standardized blocks
+    /// ([`FoldData::fit_predict_on_copy`]): the `r2_se` sweep to `k = 3`,
+    /// which must fit X in place, and every keep of the grid at `k = 2`,
+    /// where a sparse fit may fall back, over five folds of the copy-free
+    /// families and of a 60 × 2100 C-ordered X (a row-major view at least
+    /// `ROW_BLOCK_MIN_COLS` wide, whose `Xs'·t` reads its rows in blocks).
+    /// Prints the largest difference and the number of keep-grid fits that
+    /// fell back.
+    #[test]
+    fn cv_fold_scores_match_the_copy() {
+        use crate::test_support::{Agree, assert_agree, copy_free_families, signal_data};
+        let mut largest = 0.0_f64;
+        let mut fell_back = 0_usize;
+        let mut check = |name: &str, x: MatRef<'_, f64>, y: &Col<f64>, w: Option<&Col<f64>>| {
+            let (n, p) = (x.nrows(), x.ncols());
+            let (w_norm, _) =
+                crate::fit::validate_and_normalize_weights(w.map(Col::as_ref), n, 1).unwrap();
+            let wr = w_norm.as_ref().map(Col::as_ref);
+            let (_, mut rng) = crate::rng::resolve_seed(Some(7)).unwrap();
+            let mut idx: Vec<usize> = (0..n).collect();
+            idx.shuffle(&mut rng);
+            let folds = crate::linalg::fold_split(&idx, 5);
+            let mut sweeps: Vec<(usize, Option<usize>)> = vec![(3, None)];
+            sweeps.extend(keep_grid(p).into_iter().map(|kp| (2, Some(kp))));
+            for fi in 0..folds.len() {
+                for &(k, keep) in &sweeps {
+                    let what = format!("{name} fold {fi} k={k} keep={keep:?}");
+                    let mut fd = prep_fold(x, y.as_ref(), wr, &folds, fi, &folds[fi]).unwrap();
+                    let Some(got) = fd.fit_predict(x, k, keep, sweep_coefs).unwrap() else {
+                        assert!(
+                            keep.is_some(),
+                            "{what}: the dense sweep fell back to the blocks"
+                        );
+                        fell_back += 1;
+                        continue;
+                    };
+                    let want = fd.fit_predict_on_copy(x, k, keep, sweep_coefs).unwrap();
+                    let ss_tot = fd.ss_tot();
+                    let g: Vec<f64> = got.iter().map(|p| fd.r2(p, ss_tot)).collect();
+                    let v: Vec<f64> = want.iter().map(|p| fd.r2(p, ss_tot)).collect();
+                    assert_agree(&g, &v, Agree::Corpus(1e-10), &what);
+                    largest = g
+                        .iter()
+                        .zip(&v)
+                        .fold(largest, |m, (a, b)| m.max((a - b).abs()));
+                }
+            }
+        };
+        for f in copy_free_families() {
+            check(f.name, f.x.as_ref(), &f.y, f.w.as_ref());
+        }
+        let (x, y) = signal_data(60, 2100, 104);
+        let x_t = x.transpose().to_owned();
+        check("wide_row_major", x_t.transpose(), &y, None);
+        eprintln!(
+            "cv_fold_scores_match_the_copy: largest |difference| {largest:e}, \
+             keep-grid fits on the blocks {fell_back}"
+        );
+    }
+
+    /// A fold leaves its fit to the standardized blocks, and on them
+    /// ([`FoldData::on_blocks`]) fits, where the fit on X in
+    /// place cannot run or cannot decide: columns past
+    /// `IMPLICIT_MAX_MEAN_RATIO` (`offset`: the weighted dense family plus
+    /// 1e6), and a fit that stops on the weight floor before `k` (`rank_two`:
+    /// every column a combination of the same two, `k = 4`).
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn cv_fold_falls_back_to_the_blocks() {
+        use crate::test_support::{copy_free_families, signal_data};
+        let fams = copy_free_families();
+        let offset = Mat::<f64>::from_fn(fams[1].x.nrows(), fams[1].x.ncols(), |i, j| {
+            fams[1].x[(i, j)] + 1e6
+        });
+        let (b, yb) = signal_data(40, 2, 103);
+        let rank_two = Mat::<f64>::from_fn(40, 6, |i, j| {
+            (j + 1) as f64 * b[(i, j % 2)] - b[(i, 1 - j % 2)]
+        });
+        for (name, x, y, w, k) in [
+            (
+                "offset",
+                offset.as_ref(),
+                &fams[1].y,
+                fams[1].w.as_ref(),
+                3_usize,
+            ),
+            ("rank_two", rank_two.as_ref(), &yb, None, 4),
+        ] {
+            let n = x.nrows();
+            let (w_norm, _) =
+                crate::fit::validate_and_normalize_weights(w.map(Col::as_ref), n, 1).unwrap();
+            let wr = w_norm.as_ref().map(Col::as_ref);
+            let folds = crate::linalg::fold_split(&(0..n).collect::<Vec<_>>(), 5);
+            let mut fd = prep_fold(x, y.as_ref(), wr, &folds, 0, &folds[0]).unwrap();
+            if name == "offset" {
+                assert!(
+                    fd.mean_ratio > IMPLICIT_MAX_MEAN_RATIO,
+                    "offset: ratio {}",
+                    fd.mean_ratio
+                );
+            }
+            assert!(
+                fd.fit_predict(x, k, None, sweep_coefs).unwrap().is_none(),
+                "{name}: did not fall back"
+            );
+            fd.on_blocks = true;
+            let got = fd.fit_predict(x, k, None, sweep_coefs).unwrap().unwrap();
+            if name == "rank_two" {
+                assert!(got.len() < k, "{name}: k_used {}", got.len());
             }
         }
     }
