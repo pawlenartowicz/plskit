@@ -200,7 +200,9 @@ jobs:
   # PLSKit.jl runs the Python package through PythonCall.jl, so this job
   # builds plskit-py into a virtualenv and points PythonCall at it, with
   # CondaPkg switched off. Pkg.test() runs on Linux; macOS and Windows only
-  # install and smoke-test.
+  # install and smoke-test. Coverage comes from the Linux julia 1 leg only.
+  # The Codecov upload needs the CODECOV_TOKEN secret (fork PRs upload
+  # without it); a failed upload does not fail the job.
   julia-tests:
     name: Julia (${{ matrix.os }}, julia ${{ matrix.julia }})
     runs-on: ${{ matrix.os }}
@@ -260,7 +262,17 @@ jobs:
         shell: bash
         env:
           PLSKIT_REQUIRE_CORPUS: "1"
-        run: julia --color=yes --project=plskit-jl -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+        run: julia --color=yes --project=plskit-jl -e 'using Pkg; Pkg.instantiate(); Pkg.test(coverage=${{ matrix.julia == '1' }})'
+      - uses: julia-actions/julia-processcoverage@v1
+        if: runner.os == 'Linux' && matrix.julia == '1'
+        with:
+          directories: plskit-jl/src
+      - uses: codecov/codecov-action@v7
+        if: runner.os == 'Linux' && matrix.julia == '1'
+        with:
+          files: lcov.info
+          flags: julia
+          token: ${{ secrets.CODECOV_TOKEN }}
       - name: Smoke test (macOS, Windows)
         if: runner.os != 'Linux'
         shell: bash

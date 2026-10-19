@@ -1,6 +1,7 @@
 # PLSKit.jl
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](../LICENSE)
+[![Coverage](https://img.shields.io/codecov/c/github/pawlenartowicz/plskit?flag=julia&label=coverage)](https://app.codecov.io/gh/pawlenartowicz/plskit?flags%5B0%5D=julia)
 
 Julia package for [plskit](https://github.com/pawlenartowicz/plskit):
 Partial Least Squares with modern inference, running the Python package.
