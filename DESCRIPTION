@@ -1,0 +1,23 @@
+Package: plskit
+Type: Package
+Title: PLS Regression with Modern Inference
+Version: 0.7.2
+Authors@R: person("Paweł", "Lenartowicz", role = c("aut", "cre"),
+                  email = "6quarg@gmail.com")
+Description: PLS regression with modern inference: the 'split_exact'
+    and 'split_nb' confirmatory tests and rotation-invariant
+    subsampling confidence intervals. R wrapper around the Rust
+    'plskit' engine via 'extendr'.
+License: GPL (>= 3)
+Encoding: UTF-8
+Depends: R (>= 4.2)
+SystemRequirements: Cargo (>= 1.85), rustc
+Suggests:
+    bit64,
+    jsonlite,
+    testthat (>= 3.1.5)
+Config/testthat/edition: 3
+URL: https://github.com/pawlenartowicz/plskit
+BugReports: https://github.com/pawlenartowicz/plskit/issues
+RoxygenNote: 7.3.3
+Roxygen: list(markdown = TRUE)

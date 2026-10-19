@@ -1,0 +1,37 @@
+[package]
+name = "plskit-r"
+version = "0.7.2"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "plskit_r"
+crate-type = ["staticlib"]
+
+# The extendr crate of the R package. It is NOT a workspace member: R's
+# build runs cargo here on its own. Consequences:
+#  - plskit and plskit-bind come from crates.io, pinned to
+#    DESCRIPTION:Version. The vX.Y.Z-r release job writes Cargo.lock in
+#    its staged copy, and the release build uses it with --locked; main
+#    carries no lock. Dev mode (PLSKIT_CARGO_CONFIG, see
+#    tools/cargo-build.R) patches in the in-repo crates instead.
+#  - the empty [workspace] table makes this manifest its own workspace
+#    root, and [profile.release] repeats the workspace block
+#    (scripts/check-profile-sync.py enforces both).
+[dependencies]
+extendr-api = "0.9"
+plskit = "=0.7.2"
+plskit-bind = "=0.7.2"
+
+[workspace]
+
+[profile.release]
+opt-level = 3
+codegen-units = 1               # determinism: single codegen unit (bit-near contract, not bit-exact)
+lto = "thin"                    # cross-crate inlining
+panic = "unwind"                # default; pinned for determinism
+
+[patch.crates-io]
+atomic-wait = { path = "atomic-wait" }
