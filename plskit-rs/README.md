@@ -136,7 +136,7 @@ The environment variable `PLSKIT_NUM_THREADS` caps the thread count, and
 A `faer` minor bump is a `plskit` major bump. Function names, argument
 names and output fields are stable across versions, but defaults,
 algorithms and implementation details may shift numbers between
-releases: pin the version (`plskit = "=0.7.1"`) if you need numerical
+releases: pin the version (`plskit = "=0.7.2"`) if you need numerical
 reproducibility. The [root README](../README.md#versioning) explains how
 the engine and wrapper versions relate.
 

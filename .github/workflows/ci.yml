@@ -268,3 +268,47 @@ jobs:
           julia --color=yes --project=plskit-jl -e 'using Pkg; Pkg.instantiate();
           using PLSKit; X = randn(40, 5); y = randn(40);
           @assert pls1_fit(X, y; k=2).k_used == 2'
+
+  # Pkg.test() with CondaPkg left on, the install every registry user takes:
+  # CondaPkg (pixi by default) resolves Python from conda-forge and installs
+  # the pinned plskit from PyPI. Between a version bump and its vX.Y.Z-py
+  # release the pin is not on PyPI, so in source mode the wheel is built from
+  # this checkout and the runner's copy of CondaPkg.toml pins that file
+  # instead (`"@ file:///…"`, which CondaPkg passes to pixi as a path
+  # dependency); everything else still comes from conda-forge and PyPI. Pixi
+  # solves the PyPI requirements itself, so pip/uv find-links variables do
+  # not reach it. No julia-actions/cache, so a cached depot cannot hide a
+  # broken install.
+  julia-condapkg:
+    name: Julia (ubuntu-latest, julia 1, CondaPkg)
+    runs-on: ubuntu-latest
+    needs: checks
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Choose the plskit-py the Julia tests run against
+        id: pypin
+        run: python scripts/julia-python-pin.py >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.pypin.outputs.mode == 'source'
+      - uses: Swatinem/rust-cache@v2
+        if: steps.pypin.outputs.mode == 'source'
+        with:
+          save-if: false
+      - name: Build the plskit wheel and pin it in CondaPkg.toml
+        if: steps.pypin.outputs.mode == 'source'
+        run: |
+          set -euo pipefail
+          pip wheel . --no-deps -w "$RUNNER_TEMP/wheels"
+          WHEEL=$(ls "$RUNNER_TEMP"/wheels/plskit-*.whl)
+          sed -i -E "s|^plskit = \"==[^\"]+\"|plskit = \"@ file://$WHEEL\"|" plskit-jl/CondaPkg.toml
+          grep -q "^plskit = \"@ file://" plskit-jl/CondaPkg.toml
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1"
+      - name: Pkg.test() with CondaPkg
+        env:
+          PLSKIT_REQUIRE_CORPUS: "1"
+        run: julia --color=yes --project=plskit-jl -e 'using Pkg; Pkg.instantiate(); Pkg.test()'

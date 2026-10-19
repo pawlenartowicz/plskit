@@ -13,7 +13,7 @@ you need to reproduce numbers (see
 
 ```toml
 [dependencies]
-plskit = "=0.7.1"
+plskit = "=X.Y.Z"
 ```
 
 - The crate has no feature flags.
@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`cargo run --release` prints `plskit 0.7.1, k_used = 1`. Use release mode:
+`cargo run --release` prints `plskit X.Y.Z, k_used = 1`, with your version. Use release mode:
 the numerical kernels are far slower under the dev profile.
 
 ## From a checkout

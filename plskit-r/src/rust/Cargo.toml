@@ -1,6 +1,6 @@
 [package]
 name = "plskit-r"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
@@ -22,8 +22,8 @@ crate-type = ["staticlib"]
 #    (scripts/check-profile-sync.py enforces both).
 [dependencies]
 extendr-api = "0.9"
-plskit = "=0.7.1"
-plskit-bind = "=0.7.1"
+plskit = "=0.7.2"
+plskit-bind = "=0.7.2"
 
 [workspace]
 

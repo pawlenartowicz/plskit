@@ -4,6 +4,39 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-19
+
+No engine code changes: results are unchanged; the testdata corpus is
+unchanged.
+
+- Added (docs): the user-facing docs are published at
+  https://pawlenartowicz.pl/plskit/. The `_docs/` directory is renamed to
+  `docs/`, and every path that pointed at it (docstrings, comments, this
+  changelog, scripts) is updated. The new `docs.yml` workflow publishes
+  `docs/` untagged on every push to `main` that touches it (the site's
+  "latest (live)" version) and tagged `vX.Y.Z` on every engine tag. It is
+  separate from `release.yml`, so a docs failure does not block a release.
+- Added (tests): the code examples in the READMEs run as tests, in Python
+  (`plskit-py/tests/test_readme.py`), R (`tests/testthat/test-readme.R`)
+  and Julia (`test/readme.jl`). The READMEs are rewritten to run as written.
+- Changed (tests): the Python corpus test reads the corpus from
+  `$PLSKIT_TESTDATA` when set, and fails instead of skipping when the
+  corpus is missing and `PLSKIT_REQUIRE_CORPUS` is set, which the Linux CI
+  job does. R and Julia already used the same variables.
+- Changed (tests): the `ParChoice::Seq` vs `Auto` check for `spls3_fit`
+  moves from `byte_parity.rs` into `thread_count_parity.rs`, which runs it
+  in every thread pool. `memory_budget_parity.rs` drops its ignored bits
+  probe.
+- Added (CI): a `julia-condapkg` job in `ci.yml` runs the Julia
+  `Pkg.test()` on every push with CondaPkg left on, so CondaPkg resolves
+  Python from conda-forge as it does for a user. Until the pinned
+  `plskit` is on PyPI, the job pins a wheel built from the checkout instead.
+- Removed (CI): the non-blocking R bit canary (R against the corpus at
+  `atol` 0), with its `PLSKIT_CORPUS_EXACT` switch in `test-corpus.R`.
+- Removed (R): the registry test of result field order, and the per-type
+  field lists it read from the internal registry.
+- Changed (R): `Suggests` needs `testthat (>= 3.1.5)`.
+
 ## [0.7.1] - 2026-10-16
 
 - Added (Python): a wheel for Pyodide (`wasm32-unknown-emscripten`, built

@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Output (plskit 0.7.0, Linux x86-64; other platforms can differ in the last
+Output (Linux x86-64; other platforms can differ in the last
 printed digits):
 
 ```text

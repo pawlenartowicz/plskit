@@ -3,7 +3,7 @@
 
 # The Python plskit version this PLSKit.jl release runs. Equals the
 # `version` in Project.toml and the pin in CondaPkg.toml.
-const PLSKIT_PY_VERSION = "0.7.1"
+const PLSKIT_PY_VERSION = "0.7.2"
 
 const _plskit = PythonCall.pynew()
 const _np = PythonCall.pynew()

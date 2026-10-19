@@ -1,14 +1,17 @@
 name: Docs
 
-# Publishes docs/ to the Leyline vault `plskit` (pawlenartowicz.pl/plskit/)
-# on every push to main that touches it, without a tag. That moves the
-# vault's HEAD, which the site lists as "latest (live)". release.yml's
-# publish-docs job publishes the same tree tagged vX.Y.Z on engine tags.
+# Publishes docs/ to the Leyline vault `plskit` (pawlenartowicz.pl/plskit/).
+# A push to main that touches docs/ publishes it untagged, which moves the
+# vault's HEAD, listed on the site as "latest (live)". An engine tag vX.Y.Z
+# (no -py/-r/-jl suffix) publishes it tagged vX.Y.Z. This is its own workflow
+# so a docs failure never blocks a release. GitHub does not apply `paths` to
+# tag pushes, so every engine tag publishes.
 # Needs the variable LEYLINE_HOST and the secret LEYLINE_DOCS_KEY.
 
 on:
   push:
     branches: [main]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
     paths: ['docs/**']
   workflow_dispatch:
 
@@ -21,19 +24,24 @@ concurrency:
 
 jobs:
   publish:
-    name: Publish docs (pawlenartowicz.pl/plskit, live)
+    name: Publish docs (pawlenartowicz.pl/plskit)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      # Mirrors publish-docs in release.yml (which adds ?tag=) — change together.
       - name: Publish docs vault
         env:
           LEYLINE_HOST: ${{ vars.LEYLINE_HOST }}
           LEYLINE_KEY: ${{ secrets.LEYLINE_DOCS_KEY }}
         run: |
           set -euo pipefail
+          if [ -z "$LEYLINE_HOST" ]; then
+            echo "::error::repository variable LEYLINE_HOST is not set"
+            exit 1
+          fi
+          query=""
+          if [ "$GITHUB_REF_TYPE" = tag ]; then query="?tag=$GITHUB_REF_NAME"; fi
           tar czf - -C docs . \
            | curl -fsS -X POST \
-             "https://$LEYLINE_HOST/_leyline/api/v1/plskit/publish" \
+             "https://$LEYLINE_HOST/_leyline/api/v1/plskit/publish$query" \
              -H "Authorization: Bearer $LEYLINE_KEY" \
              -H "Content-Type: application/gzip" --data-binary @-
