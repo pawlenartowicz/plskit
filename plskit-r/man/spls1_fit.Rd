@@ -15,5 +15,5 @@ A list of class \code{c("pls1_result", "plskit_result")}.
 \description{
 R binding of \code{spls1_fit}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
-"2b.1 Sparse fit" of \url{https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md}.
+"2b.1 Sparse fit" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }

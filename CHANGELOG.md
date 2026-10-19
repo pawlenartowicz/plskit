@@ -178,7 +178,7 @@ All notable changes to this project will be documented here.
   about `X` plus one copy.
   The budget is an estimate of the large buffers, not an exact ceiling.
   Results do not depend on it. See
-  [Memory budget](_docs/concepts/threads.md#memory-budget).
+  [Memory budget](docs/concepts/threads.md#memory-budget).
 - Changed (numerics): for shapes with `n·d·k` at or above 1,000,000 (`n`
   training rows, `d` columns, `k` components), the PLS1 fits inside
   `pls1_confirmatory_test`'s `split_nb` and `split_exact` (the per-split
@@ -333,7 +333,7 @@ All notable changes to this project will be documented here.
   codes. It passes the shared `testdata/` corpus. Until `plskit-bind` is
   on crates.io it builds only from a checkout, with `PLSKIT_CARGO_CONFIG`
   naming a cargo config that patches in the in-repo crates
-  (`_docs/r/installation.md`). The package version moves from 0.0.1 to
+  (`docs/r/installation.md`). The package version moves from 0.0.1 to
   0.7.0, the engine version. The placeholder `version()` export, which
   masked `base::version`, is removed.
 - Added (Julia): the Julia package `PLSKit.jl` (`plskit-jl/`) with the

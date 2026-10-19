@@ -13,4 +13,5 @@ include("helpers.jl")
     @testset "round trip and seeds" include("roundtrip.jl")
     @testset "warnings" include("warnings.jl")
     @testset "corpus" include("corpus.jl")
+    @testset "README examples" include("readme.jl")
 end

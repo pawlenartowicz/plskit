@@ -8,14 +8,9 @@
 # `{field}_{point|lower|upper|sd}` (`{field}_k{i}_{part}` for list items)
 # encode CIScalars.
 
-# PLSKIT_CORPUS_EXACT=1 compares with atol 0 (an exact-equality
-# canary): values are compared with `==`, so -0 equals 0 and NaN payload
-# bits are not compared. This is not a bit-identity check, and it is only
-# meaningful on Linux x86_64, the host the fixtures come from.
-EXACT <- env_flag("PLSKIT_CORPUS_EXACT")
-ATOL_SCALAR <- if (EXACT) 0 else 1e-12
-ATOL_ARRAY <- if (EXACT) 0 else 1e-10
-RTOL <- if (EXACT) 0 else 1e-14
+ATOL_SCALAR <- 1e-12
+ATOL_ARRAY <- 1e-10
+RTOL <- 1e-14
 
 describes_data <- function(fn, key) {
   key %in% c("d", "n", "n_new", "n_train", "seed_new", "seed_train") ||

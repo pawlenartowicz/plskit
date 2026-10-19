@@ -25,5 +25,5 @@ A list of class \code{c("perm_null_result", "plskit_result")}.
 \description{
 R binding of \code{pls1_perm_null}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
-"3.3 Permutation-null engine" of \url{https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md}.
+"3.3 Permutation-null engine" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }

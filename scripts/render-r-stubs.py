@@ -4,7 +4,7 @@
 One exported R function per registry entry: formals in registry order with
 the registry defaults, a body that forwards every formal to .plskit_call(),
 and a short roxygen block that links to the canonical Python API entry
-(_docs/python/api.md). Plain python3, no dependencies.
+(docs/python/api.md). Plain python3, no dependencies.
 
     python3 scripts/render-r-stubs.py                   # dump via cargo, write
     python3 scripts/render-r-stubs.py --dump reg.json   # use a saved dump
@@ -20,8 +20,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 STUBS = ROOT / "plskit-r" / "R" / "stubs.R"
-API_MD = ROOT / "_docs" / "python" / "api.md"
-API_URL = "https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md"
+API_MD = ROOT / "docs" / "python" / "api.md"
+API_URL = "https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md"
 
 # Rd titles. A registry function missing here fails the render, so a new
 # function cannot ship without one.

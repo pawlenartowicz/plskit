@@ -42,11 +42,11 @@ use common::{perm_opts, synth};
 use faer::{Col, Mat, MatRef};
 use plskit::{
     CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
-    FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, PermNullOpts, Pls3ConfirmatoryTestOpts,
-    Pls3FitOpts, RotationStabilityMethod, RotationStabilityOpts, Selector, VarimaxArgs,
-    pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_alpha,
-    pls1_perm_null, pls1_rotation_stability, pls3_confirmatory_test, pls3_fit, split_nb_gate,
-    spls1_find_k_sequence, spls1_fit, spls3_fit,
+    FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, ParChoice, PermNullOpts,
+    Pls3ConfirmatoryTestOpts, Pls3FitOpts, RotationStabilityMethod, RotationStabilityOpts,
+    Selector, VarimaxArgs, pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence,
+    pls1_fit, pls1_perm_alpha, pls1_perm_null, pls1_rotation_stability, pls3_confirmatory_test,
+    pls3_fit, split_nb_gate, spls1_find_k_sequence, spls1_fit, spls3_fit,
 };
 
 const POOL_SIZES: [usize; 3] = [1, 3, 5];
@@ -274,6 +274,34 @@ fn pls3_fits_auto_are_pool_size_invariant() {
     c.check("pls3_fit 200x2000x6 k=3", || {
         pls3_fit(x.as_ref(), y.as_ref(), 3, None, Pls3FitOpts::default()).unwrap()
     });
+    // `Pls3FitOpts::par` must not change the bits: the sequential arm is the
+    // reference for the `Auto` fits (which take the Rayon arm at this shape)
+    // in every pool.
+    let spls3 = |par| {
+        spls3_fit(
+            x.as_ref(),
+            y.as_ref(),
+            3,
+            25,
+            3,
+            None,
+            Pls3FitOpts {
+                par,
+                ..Pls3FitOpts::default()
+            },
+        )
+        .unwrap()
+    };
+    let seq = spls3(ParChoice::Seq);
+    // A fit with no components would render identically in both arms.
+    assert_eq!(seq.k_used, 3, "seq.k_used");
+    c.check("spls3_fit 200x2000x6 k=3 keep=25,3", || {
+        spls3(ParChoice::Auto)
+    });
+    if format!("{:?}", spls3(ParChoice::Auto)) != format!("{seq:?}") {
+        c.failures
+            .push("spls3_fit 200x2000x6 k=3 keep=25,3: Auto differs from Seq".to_owned());
+    }
     // Pool: sparse PLS3 needs a parallel split inside the alternation's
     // `A v` products, i.e. `p·q >= 256²` for the p x q cross-covariance
     // (20000·4 here); at 200x2000x6 `spls3_fit` stays below that

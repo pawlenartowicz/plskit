@@ -15,5 +15,5 @@ A list of class \code{c("split_nb_gate_result", "plskit_result")}.
 \description{
 R binding of \code{split_nb_gate}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
-"3.2 Auto-gate query" of \url{https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md}.
+"3.2 Auto-gate query" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }

@@ -125,18 +125,9 @@ pub(crate) fn registry_list() -> Robj {
     let types: Vec<Robj> = result_types()
         .iter()
         .map(|t| {
-            let fields: Vec<Robj> = t
-                .fields
-                .iter()
-                .map(|f| named_list(vec!["name".into()], vec![Robj::from(f.name)]))
-                .collect();
             named_list(
-                vec!["name".into(), "r_class".into(), "fields".into()],
-                vec![
-                    Robj::from(t.name),
-                    Robj::from(t.r_class),
-                    List::from_values(fields).into(),
-                ],
+                vec!["name".into(), "r_class".into()],
+                vec![Robj::from(t.name), Robj::from(t.r_class)],
             )
         })
         .collect();

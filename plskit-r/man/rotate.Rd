@@ -15,5 +15,5 @@ A list of class \code{c("rotate_result", "plskit_result")}, or \code{c("pls1_res
 \description{
 R binding of \code{rotate}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
-"4.1 Rotation" of \url{https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md}.
+"4.1 Rotation" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }

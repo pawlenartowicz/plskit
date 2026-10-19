@@ -78,7 +78,7 @@ mod test_support;
 /// Downstream users can `use plskit::{Mat, Col}` instead of adding faer
 /// to their `Cargo.toml`. The R, Python, and Julia wrappers translate
 /// these types to their host array representations at the FFI seam; see
-/// `_docs/rust/api.md`.
+/// `docs/rust/api.md`.
 pub use faer::{Col, ColRef, Mat, MatRef};
 
 pub use error::{PlsKitError, PlsKitResult};

@@ -6,7 +6,7 @@ replays the corpus and compares its own results with the stored ones. That
 is how the repository checks that Rust, Python, R and Julia return the
 same numbers.
 
-[`testdata/README.md`](../../testdata/README.md) describes the file
+[`testdata/README.md`](https://github.com/pawlenartowicz/plskit/blob/main/testdata/README.md) describes the file
 layout, the regeneration command, settle mode and the tolerances. This
 page covers how the test suites use the corpus and how to add to it.
 
@@ -33,7 +33,7 @@ live.
 
 Each suite makes the call the generator made, with the options from the
 case's `kwargs`, and compares every stored field at the corpus tolerances
-(["Tolerance"](../../testdata/README.md#tolerance)). Julia runs one case
+(["Tolerance"](https://github.com/pawlenartowicz/plskit/blob/main/testdata/README.md#tolerance)). Julia runs one case
 per function because its numbers are the Python wheel's; its test checks
 the conversion.
 
@@ -82,7 +82,7 @@ Guards against a fixture that nothing checks:
 - Outputs change only by running the generator. It rewrites a file only
   when the result moved beyond the tolerance, so unrelated fixtures stay
   byte-identical
-  (["Regenerating: settle mode"](../../testdata/README.md#regenerating-settle-mode)).
+  (["Regenerating: settle mode"](https://github.com/pawlenartowicz/plskit/blob/main/testdata/README.md#regenerating-settle-mode)).
 - Regeneration goes through a pull request, and the commit must say why.
 - `scripts/diff_corpus.py REFERENCE CANDIDATE` compares two corpus trees
   field by field and prints the largest difference per field.

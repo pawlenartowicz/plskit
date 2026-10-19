@@ -1,5 +1,5 @@
 //! Declared shape of every result type: field names in `to_record()`
-//! order (which is `_docs/python/results.md` order), a type code per
+//! order (which is `docs/python/results.md` order), a type code per
 //! field, and nullability. The registry dump publishes this table;
 //! `scripts/render-jl-stubs.py` generates the Julia result structs from it.
 

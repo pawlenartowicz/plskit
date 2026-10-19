@@ -23,5 +23,5 @@ A list of class \code{c("find_keep_optimal_result", "plskit_result")}.
 \description{
 R binding of \code{spls1_find_keep_optimal}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
-"2b.2 Keep-count tuning" of \url{https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md}.
+"2b.2 Keep-count tuning" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }

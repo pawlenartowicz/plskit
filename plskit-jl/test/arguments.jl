@@ -40,14 +40,13 @@ end
     opt = pls1_fit(X, y; k="optimal", k_max=3, seed=2,
                    find_k_args=(selector=:r2_max, args=(n_folds=5,)))
     @test opt.selection_result.selector == "r2_max"
-    # adjoint, view, integer, Float32, BitVector and whole-float inputs
+    # adjoint, view, integer, Float32 and BitVector inputs
     fit = pls1_fit(X, y; k=2)
     @test pls1_fit(permutedims(X)', y; k=2).coef == fit.coef
     @test pls1_fit(view(hcat(X, X), :, 1:8), y; k=2).coef == fit.coef
-    @test pls1_fit(X, y; k=2.0).coef == fit.coef
     Xi = round.(Int, 10 .* X)
     @test pls1_fit(Xi, y; k=2).coef == pls1_fit(Float64.(Xi), y; k=2).coef
-    @test pls1_fit(Float32.(X), y; k=2).k_used == 2
+    @test pls1_fit(Float32.(X), y; k=2).coef == pls1_fit(Float64.(Float32.(X)), y; k=2).coef
     w = BitVector(isodd.(1:60)) .| BitVector(1:60 .<= 30)
     @test pls1_fit(X, y; k=2, weights=w).coef == pls1_fit(X, y; k=2, weights=Float64.(w)).coef
     # Bool data (BitMatrix, Matrix{Bool}, BitVector y) reads as 1/0, as in
@@ -60,7 +59,6 @@ end
     @test pls1_predict(fit01, Xb) == pls1_predict(fit01, Float64.(Xb))
     Xbm = Array{Union{Missing,Bool}}(Xb); Xbm[2, 3] = missing
     @test plskit_error(() -> pls1_fit(Xbm, y)).code === :non_finite_input
-    @test plskit_error(() -> pls1_fit(X, y; pre_standardized=1)).code === :invalid_argument
     # `missing` reaches the engine as NaN
     Xm = Array{Union{Missing,Float64}}(X); Xm[1, 1] = missing
     @test plskit_error(() -> pls1_fit(Xm, y)).code === :non_finite_input

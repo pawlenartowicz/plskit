@@ -97,7 +97,7 @@ pub struct FitOpts {
     /// (non-uniform weights) or `InvalidArgument` (uniform or absent weights)
     /// if `n_eff < k + 1`. Set to false for per-iteration internal calls (CV folds,
     /// bootstrap subsamples) where the upstream accumulator handles degeneracy.
-    /// See `_docs/internals/n-eff-check.md`.
+    /// See `docs/internals/n-eff-check.md`.
     pub check_n_eff: bool,
     /// Parallelism strategy for the fit's pass over `X` (the standardization
     /// moments or the sum of squares) and the PLS1 kernel. See `ParChoice`.
@@ -448,7 +448,7 @@ pub(crate) fn validate_and_normalize_weights(
     }
     let wn = crate::linalg::normalize_weights(w)
         .ok_or(PlsKitError::InvalidWeights { reason: "all_zero" })?;
-    let _ = k_requested; // the n_eff check lives in validate_weights_for_k; see _docs/internals/n-eff-check.md
+    let _ = k_requested; // the n_eff check lives in validate_weights_for_k; see docs/internals/n-eff-check.md
     if weights_all_equal(wn.as_ref()) {
         #[allow(clippy::cast_precision_loss)]
         return Ok((None, n as f64));
@@ -548,7 +548,7 @@ pub(crate) fn check_finite_col(y: ColRef<'_, f64>) -> PlsKitResult<()> {
 /// `Err(InvalidArgument)` — no weights are in play, so the failure is a plain
 /// data-size problem, not a weights problem (callers branch on `code()`).
 /// Reached only through `validate_weights_for_k`, which derives `weighted`
-/// from the normalized vector; see `_docs/internals/n-eff-check.md`.
+/// from the normalized vector; see `docs/internals/n-eff-check.md`.
 ///
 /// # Errors
 /// `InvalidWeights { reason: "insufficient_effective_n" }` (non-uniform
@@ -1876,7 +1876,7 @@ mod tests {
 
     #[test]
     fn spls1_keep_eq_n_features_is_bit_identical_to_dense() {
-        // THE bit-parity tripwire (`_docs/rust/api.md`): keep = n_features must be a literal
+        // THE bit-parity tripwire (`docs/rust/api.md`): keep = n_features must be a literal
         // skip — exact equality, not approx.
         let (x, y) = linear_data(50, 8, 3, 1);
         let dense = pls1_fit(
@@ -2410,7 +2410,7 @@ mod boundary_tests {
     /// Layouts of X agree to rounding, not bit for bit: `pls1_fit` forms its
     /// products from X in X's own layout (CHANGELOG 0.6.1), so each layout
     /// sums in its own order. `Agree::Corpus(1e-10)` is the corpus array
-    /// tolerance, `1e-10 + 1e-14 · |value|`, which `_docs/python/api.md`
+    /// tolerance, `1e-10 + 1e-14 · |value|`, which `docs/python/api.md`
     /// (Conventions) promises across layouts.
     const FIT_LAYOUT_TOL: f64 = 1e-10;
 

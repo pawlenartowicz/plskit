@@ -510,7 +510,7 @@ pub struct ConfirmatoryCI {
     /// that carries the without-replacement finite-population correction
     /// and the shrinkage factor `κ̂` of the subsample fits (see
     /// `reduce_beta`). Length D. Approximately half-normal when the
-    /// population `β[j]` is 0 (K = 1; see `_docs/python/results.md`,
+    /// population `β[j]` is 0 (K = 1; see `docs/python/results.md`,
     /// "Per-variable readouts", for the calibration range); does not grow
     /// with `n_boot`. NaN when the subsample spread of `β_b[j]` is zero or
     /// undefined and `β_ref[j] ≠ 0`.
@@ -538,7 +538,7 @@ pub struct ConfirmatoryCI {
     /// finite-population rate `√(m/(n − m))` (see `reduce_beta`), so the
     /// shrinkage of the subsample fits neither moves the midpoint nor
     /// narrows the interval. Calibrated at `K = 1`; at `K ≥ 2` a directional
-    /// sanity check. `(−∞, +∞)` when `κ̂ = 0`. See `_docs/python/results.md`
+    /// sanity check. `(−∞, +∞)` when `κ̂ = 0`. See `docs/python/results.md`
     /// ("Per-coordinate β CIs — diagnostic, with caveats") for the full caveats.
     pub beta_ci_lower: Vec<f64>,
     /// Per-coordinate β CI upper bound. Length D. See `beta_ci_lower`.

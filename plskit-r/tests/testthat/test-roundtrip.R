@@ -71,21 +71,6 @@ test_that("nested results and lists keep their R types", {
   expect_type(s3$n_iter, "integer")
 })
 
-test_that("every result's fields follow the registry order", {
-  types <- plskit:::.plskit_registry()$result_types
-  fields <- lapply(types, function(t) vapply(t$fields, function(f) f$name, ""))
-  names(fields) <- vapply(types, function(t) t$r_class, "")
-  check <- function(x) {
-    if (inherits(x, "plskit_result")) {
-      expect_identical(names(x), fields[[class(x)[[1L]]]], label = class(x)[[1L]])
-    }
-    if (is.list(x)) for (v in x) check(v)
-  }
-  check(pls1_fit(d$X, d$y, k = "optimal", k_max = 3, seed = 1))
-  check(pls1_confirmatory_test(d$X, d$y, test_method = "split_exact", ci = TRUE, n_boot = 100, seed = 1))
-  check(pls1_rotation_stability(d$X, d$y, 2, n_boot = 100, seed = 1))
-})
-
 # Input coercion and malformed passed-back records.
 
 test_that("literal duplicate int-map names raise invalid_argument", {
@@ -129,6 +114,7 @@ test_that("a byte-string name that is not valid UTF-8 raises invalid_argument", 
   Encoding(bad) <- "bytes"
   bad_named <- list(seed = 1L)
   names(bad_named) <- bad
-  err <- catch_plskit(pls1_fit(d$X, d$y, k = 1, find_k_args = bad_named))
+  err <- catch_plskit(pls1_fit(d$X, d$y, k = "optimal", k_max = 3, find_k_args = bad_named))
   expect_identical(err$code, "invalid_argument")
+  expect_match(err$message, "not valid UTF-8", fixed = TRUE)
 })

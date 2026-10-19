@@ -1,7 +1,7 @@
 # Contributing
 
 The contributor guide is the top-level
-[CONTRIBUTING.md](../../CONTRIBUTING.md). It says where pull requests and
+[CONTRIBUTING.md](https://github.com/pawlenartowicz/plskit/blob/main/CONTRIBUTING.md). It says where pull requests and
 issues go, how versions and release tags work, and which slow test to run
 before a release. This page points to the rest.
 
@@ -27,7 +27,7 @@ Run these from the workspace root before opening a pull request:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --release
-python3 scripts/check-docs-drift.py      # exported names and result fields against _docs/
+python3 scripts/check-docs-drift.py      # exported names and result fields against docs/
 python3 scripts/check_corpus_hash.py     # testdata/ files against manifest.json
 ```
 

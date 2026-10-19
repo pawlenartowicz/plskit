@@ -8,7 +8,7 @@
 \description{
 R wrapper of the Rust plskit engine. Every function has the name and the
 arguments of its Python counterpart; the canonical reference is
-\url{https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md}.
+\url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 Results are named lists with an S3 class (\code{c("pls1_result", "plskit_result")}, ...); errors are conditions of class \code{plskit_error}.
 }
 \seealso{

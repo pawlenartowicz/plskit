@@ -9,14 +9,14 @@ This is the extended companion to `fit_and_ci.py`. Where that example
 demonstrates a single recommended test + CI, this one walks the full
 omnibus method axis on the same data so the methods can be compared
 side by side, including the score/split_exact complementarity
-(`_docs/python/api.md` §3.1).
+(`docs/python/api.md` §3.1).
 
 Pipeline:
 
   1. Generate synthetic data with a known PLS1 signal in the first two
      of D=8 columns (everything else is noise). y depends on X through a
      single direction, so the signal is concentrated.
-  2. Fit PLS1 at K=1 (the recommended omnibus K, `_docs/python/api.md`
+  2. Fit PLS1 at K=1 (the recommended omnibus K, `docs/python/api.md`
      §3.1 "default `k=1`"; this design has no reason to fix K higher).
   3. Run every omnibus method on the same X, y, k, seed and tabulate
      p-value + statistic + per-method workload knobs:
@@ -30,13 +30,13 @@ Pipeline:
        * e:           universal inference (split-LR e-value,
                       calibration-free, non-asymptotic α bound)
      Reporting `score` and `split_exact` side-by-side is the canonical
-     pattern (`_docs/python/api.md` §3.1): they complement rather than
+     pattern (`docs/python/api.md` §3.1): they complement rather than
      replace each other. `score` wins on signal diffuse across many
      directions, `split_exact` on signal concentrated in a few, as here.
      `split_exact`'s p-value is floored at 1/(n_perm+1); the closed-form
      and asymptotic p-values are not, so compare them against α, not
      against each other.
-     `raw_perm` is legacy (`_docs/concepts/PLS1/fit-and-predict.md`) and
+     `raw_perm` is legacy (`docs/concepts/PLS1/fit-and-predict.md`) and
      is omitted here.
   4. Re-run the recommended test (`split_exact`) with `ci=True` to attach
      a bootstrap CI bundle, then print:
@@ -51,9 +51,9 @@ Pipeline:
          shrinkage of subsample fits; at k=1 roughly N(0, 1) when the
          population coefficient is 0, so noise coords mostly stay
          below 1.96 and signal coords land far above it; does not grow
-         with n_boot; see `_docs/python/results.md`),
+         with n_boot; see `docs/python/results.md`),
        * per-coordinate β CIs (regression-style diagnostic; see
-         `_docs/python/results.md` caveats; the midpoint is *not* guaranteed to
+         `docs/python/results.md` caveats; the midpoint is *not* guaranteed to
          bracket the full-data β_ref under PLS shrinkage on small m),
        * engine diagnostic counters.
 
@@ -70,7 +70,7 @@ import numpy as np
 import plskit
 
 
-# args required by each omnibus method (`_docs/python/api.md` §3.1,
+# args required by each omnibus method (`docs/python/api.md` §3.1,
 # "args by method").
 # `score` and `e` take no method-specific kwargs.
 _OMNIBUS_ARGS: dict[str, dict] = {
@@ -188,7 +188,7 @@ def main() -> None:
     # The calibrated readouts are `holdout_corr` and, at k=1, `beta_sign_z`;
     # the CI below omits the SE corrections that `beta_sign_z` applies.
     # Centered-scaled CIs may be biased by PLS shrinkage on small m; see
-    # `_docs/python/results.md` caveats; the midpoint is *not* guaranteed to bracket
+    # `docs/python/results.md` caveats; the midpoint is *not* guaranteed to bracket
     # the full-data β_ref.
     print("\nper-coordinate β CI (level=0.95, on the same scale as β_ref):")
     print(f"  {'':<7} {'β_ref':>9}  {'CI lower':>9}  {'CI upper':>9}  {'SE':>7}")

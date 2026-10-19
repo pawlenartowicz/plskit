@@ -76,7 +76,7 @@ class ConfirmatoryCI:
     leverage_ci_lower: np.ndarray      # shape (D,); h − Φ⁻¹(1−α/2)·leverage_se, clamped to [0, 1]
     leverage_ci_upper: np.ndarray      # shape (D,); h + Φ⁻¹(1−α/2)·leverage_se, clamped to [0, 1]
     leverage_se: np.ndarray            # shape (D,); sd of leverage over n-out-of-n bootstrap refits
-    beta_ci_lower: np.ndarray          # shape (D,); per-coordinate CI, shrinkage-corrected and FPC-scaled (PLS1 only; calibrated at K = 1), see _docs/python/results.md caveats
+    beta_ci_lower: np.ndarray          # shape (D,); per-coordinate CI, shrinkage-corrected and FPC-scaled (PLS1 only; calibrated at K = 1), see docs/python/results.md caveats
     beta_ci_upper: np.ndarray          # shape (D,)
     beta_se: np.ndarray                # shape (D,); = √(m/(n − m)) · sd(β_b[j]) / κ̂
 

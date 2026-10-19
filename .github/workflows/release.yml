@@ -2,6 +2,8 @@ name: Release
 
 # Tag scheme:
 #   vX.Y.Z       → cargo publish plskit and plskit-bind; workspace version must equal X.Y.Z.
+#                  Then docs/ is published to pawlenartowicz.pl/plskit/ (Leyline vault
+#                  `plskit`), tagged vX.Y.Z.
 #   vX.Y.Z-py    → PyPI publish (Python);   plskit-py version must equal X.Y.Z.
 #                  The Pyodide wheel goes to the GitHub release only.
 #   vX.Y.Z-r     → R tarball + r-universe branch; plskit-r DESCRIPTION:Version must equal X.Y.Z.
@@ -25,6 +27,9 @@ name: Release
 # One-time setup required: configure Trusted Publishing on PyPI's project
 # settings page (https://pypi.org/manage/project/plskit/settings/publishing/)
 # with this repo and the publish-py job name before the first release.
+#
+# The docs publish needs the repository variable LEYLINE_HOST (the Leyline
+# sync server) and the secret LEYLINE_DOCS_KEY (an admin key on vault plskit).
 
 on:
   push:
@@ -94,6 +99,32 @@ jobs:
               cargo publish -p "$crate" --locked
             fi
           done
+
+  # ─── vX.Y.Z (engine) → docs site ────────────────────────────────────
+  publish-docs:
+    name: Publish docs (pawlenartowicz.pl/plskit)
+    needs: rust-publish
+    if: >-
+      ${{ !endsWith(github.ref_name, '-py')
+       && !endsWith(github.ref_name, '-r')
+       && !endsWith(github.ref_name, '-jl') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      # Mirrors the publish step in docs.yml (which has no ?tag=) — change together.
+      - name: Publish docs vault
+        env:
+          LEYLINE_HOST: ${{ vars.LEYLINE_HOST }}
+          LEYLINE_KEY: ${{ secrets.LEYLINE_DOCS_KEY }}
+        run: |
+          set -euo pipefail
+          tar czf - -C docs . \
+           | curl -fsS -X POST \
+             "https://$LEYLINE_HOST/_leyline/api/v1/plskit/publish?tag=$GITHUB_REF_NAME" \
+             -H "Authorization: Bearer $LEYLINE_KEY" \
+             -H "Content-Type: application/gzip" --data-binary @-
 
   # ─── vX.Y.Z-py (Python) ─────────────────────────────────────────────
   build-py-wheels:

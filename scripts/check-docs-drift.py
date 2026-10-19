@@ -9,7 +9,7 @@ Two checks per language; Rust and Python are compared with their own docs:
 
 R and Julia have no API pages of their own (the Python reference is
 canonical), so they get a name check only (no field check): R's NAMESPACE
-exports against _docs/python/api.md, Julia's `export`s against the Python
+exports against docs/python/api.md, Julia's `export`s against the Python
 code surface (functions plus result dataclasses).
 
 Exit 0 when every checked language is clean, 1 with a per-language report
@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 # Single constant so a docs-directory rename stays a one-line edit.
-DOCS_DIRNAME = "_docs"
+DOCS_DIRNAME = "docs"
 
 # --- doc-side patterns -------------------------------------------------
 # api.md: "**function:** `name`" — one per documented function (Python only;
@@ -373,7 +373,7 @@ def check_python(root: Path, docs_dir: Path) -> list[str]:
 
 
 def check_r(root: Path, docs_dir: Path) -> list[str]:
-    """R NAMESPACE exports vs the functions in _docs/python/api.md (names
+    """R NAMESPACE exports vs the functions in docs/python/api.md (names
     must be identical; R has no API page of its own)."""
     namespace = root / "plskit-r" / "NAMESPACE"
     exported = set(RE_R_EXPORT.findall(namespace.read_text(encoding="utf-8")))

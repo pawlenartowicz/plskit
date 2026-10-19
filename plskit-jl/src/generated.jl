@@ -12,7 +12,7 @@ export PreprocessResult, PLS1Result, PLS3Result, PLS3Scores, FindKOptimalResult,
        PermNullResult, PermAlphaResult, CIScalar, ConfirmatoryCI, RotateResult,
        RotationStabilityResult, RotationSpec
 
-# Field order of every result type, as in _docs/python/results.md.
+# Field order of every result type, as in docs/python/results.md.
 const _RESULT_FIELDS = Dict{Symbol,Vector{Symbol}}(
     :PreprocessResult => [:X_std, :X_mean, :X_scale, :Y_std, :Y_mean, :Y_scale, :weights_normalized, :n_eff],
     :PLS1Result => [:T, :P, :W, :Q, :coef, :beta, :intercept, :k_used, :pre_standardized, :weights, :n_eff, :rotation_spec, :selection_result, :keep],
@@ -37,7 +37,7 @@ const _RESULT_FIELDS = Dict{Symbol,Vector{Symbol}}(
 
 `PlsKitResult{:PreprocessResult}`, the Julia form of Python's `plskit.PreprocessResult`.
 Fields: `X_std`, `X_mean`, `X_scale`, `Y_std`, `Y_mean`, `Y_scale`, `weights_normalized`, `n_eff`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const PreprocessResult = PlsKitResult{:PreprocessResult}
 
@@ -46,7 +46,7 @@ const PreprocessResult = PlsKitResult{:PreprocessResult}
 
 `PlsKitResult{:PLS1Result}`, the Julia form of Python's `plskit.PLS1Result`.
 Fields: `T`, `P`, `W`, `Q`, `coef`, `beta`, `intercept`, `k_used`, `pre_standardized`, `weights`, `n_eff`, `rotation_spec`, `selection_result`, `keep`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const PLS1Result = PlsKitResult{:PLS1Result}
 
@@ -55,7 +55,7 @@ const PLS1Result = PlsKitResult{:PLS1Result}
 
 `PlsKitResult{:PLS3Result}`, the Julia form of Python's `plskit.PLS3Result`.
 Fields: `U`, `V`, `singular_values`, `x_scores`, `y_scores`, `X_mean`, `X_scale`, `Y_mean`, `Y_scale`, `k_used`, `pre_standardized_X`, `pre_standardized_Y`, `keep_X`, `keep_Y`, `converged`, `n_iter`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const PLS3Result = PlsKitResult{:PLS3Result}
 
@@ -64,7 +64,7 @@ const PLS3Result = PlsKitResult{:PLS3Result}
 
 `PlsKitResult{:PLS3Scores}`, the Julia form of Python's `plskit.PLS3Scores`.
 Fields: `x_scores`, `y_scores`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const PLS3Scores = PlsKitResult{:PLS3Scores}
 
@@ -73,7 +73,7 @@ const PLS3Scores = PlsKitResult{:PLS3Scores}
 
 `PlsKitResult{:FindKOptimalResult}`, the Julia form of Python's `plskit.FindKOptimalResult`.
 Fields: `k_star`, `selector`, `cv_scores`, `cv_scores_se`, `bic_scores`, `pvalues`, `diagnostic`, `seed`, `n_eff`, `stable_rank`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const FindKOptimalResult = PlsKitResult{:FindKOptimalResult}
 
@@ -82,7 +82,7 @@ const FindKOptimalResult = PlsKitResult{:FindKOptimalResult}
 
 `PlsKitResult{:FindKSequenceResult}`, the Julia form of Python's `plskit.FindKSequenceResult`.
 Fields: `k_star`, `pvalues`, `test_method`, `alpha`, `seed`, `n_eff`, `stable_rank`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const FindKSequenceResult = PlsKitResult{:FindKSequenceResult}
 
@@ -91,7 +91,7 @@ const FindKSequenceResult = PlsKitResult{:FindKSequenceResult}
 
 `PlsKitResult{:FindKeepOptimalResult}`, the Julia form of Python's `plskit.FindKeepOptimalResult`.
 Fields: `keep_star`, `k`, `cv_scores`, `cv_scores_se`, `keep_grid`, `seed`, `n_eff`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const FindKeepOptimalResult = PlsKitResult{:FindKeepOptimalResult}
 
@@ -100,7 +100,7 @@ const FindKeepOptimalResult = PlsKitResult{:FindKeepOptimalResult}
 
 `PlsKitResult{:ConfirmatoryTestResult}`, the Julia form of Python's `plskit.ConfirmatoryTestResult`.
 Fields: `pvalue`, `statistic`, `test_method`, `k`, `n_perm`, `n_splits`, `seed`, `n_eff`, `rho_hat`, `stable_rank`, `ci`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const ConfirmatoryTestResult = PlsKitResult{:ConfirmatoryTestResult}
 
@@ -109,7 +109,7 @@ const ConfirmatoryTestResult = PlsKitResult{:ConfirmatoryTestResult}
 
 `PlsKitResult{:SplitNbGateResult}`, the Julia form of Python's `plskit.SplitNbGateResult`.
 Fields: `fires`, `stable_rank`, `n_eff`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const SplitNbGateResult = PlsKitResult{:SplitNbGateResult}
 
@@ -118,7 +118,7 @@ const SplitNbGateResult = PlsKitResult{:SplitNbGateResult}
 
 `PlsKitResult{:PermNullResult}`, the Julia form of Python's `plskit.PermNullResult`.
 Fields: `n_perm`, `k`, `seed`, `beta_ref`, `beta_perm_mean`, `beta_perm_sd`, `beta_perm_z`, `beta_perm_matrix`, `n_eff`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const PermNullResult = PlsKitResult{:PermNullResult}
 
@@ -127,7 +127,7 @@ const PermNullResult = PlsKitResult{:PermNullResult}
 
 `PlsKitResult{:PermAlphaResult}`, the Julia form of Python's `plskit.PermAlphaResult`.
 Fields: `alpha`, `k_used`, `resolved`, `k`, `n_features`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const PermAlphaResult = PlsKitResult{:PermAlphaResult}
 
@@ -136,7 +136,7 @@ const PermAlphaResult = PlsKitResult{:PermAlphaResult}
 
 `PlsKitResult{:CIScalar}`, the Julia form of Python's `plskit.CIScalar`.
 Fields: `point`, `lower`, `upper`, `sd`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const CIScalar = PlsKitResult{:CIScalar}
 
@@ -145,7 +145,7 @@ const CIScalar = PlsKitResult{:CIScalar}
 
 `PlsKitResult{:ConfirmatoryCI}`, the Julia form of Python's `plskit.ConfirmatoryCI`.
 Fields: `n_boot`, `m`, `m_rate`, `level`, `beta_sign_z`, `beta_sign_z_signed`, `leverage_ci_lower`, `leverage_ci_upper`, `leverage_se`, `beta_ci_lower`, `beta_ci_upper`, `beta_se`, `holdout_corr`, `n_boot_finite`, `n_boot_finite_holdout_corr`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const ConfirmatoryCI = PlsKitResult{:ConfirmatoryCI}
 
@@ -154,7 +154,7 @@ const ConfirmatoryCI = PlsKitResult{:ConfirmatoryCI}
 
 `PlsKitResult{:RotateResult}`, the Julia form of Python's `plskit.RotateResult`.
 Fields: `W_rot`, `spec`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const RotateResult = PlsKitResult{:RotateResult}
 
@@ -163,7 +163,7 @@ const RotateResult = PlsKitResult{:RotateResult}
 
 `PlsKitResult{:RotationStabilityResult}`, the Julia form of Python's `plskit.RotationStabilityResult`.
 Fields: `method`, `n_boot`, `m`, `m_rate`, `level`, `seed`, `variance_ratio`, `variance_ratio_per_axis`, `variance_unrot`, `variance_rot`, `variance_unrot_per_axis`, `variance_rot_per_axis`, `degenerate_baseline`, `n_boot_finite`, `n_eff`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const RotationStabilityResult = PlsKitResult{:RotationStabilityResult}
 
@@ -172,7 +172,7 @@ const RotationStabilityResult = PlsKitResult{:RotationStabilityResult}
 
 `PlsKitResult{:RotationSpec}`, the Julia form of Python's `plskit.RotationSpec`.
 Fields: `method`, `args`, `R`, `sweeps`, `V_converged`, `L_was_provided`.
-Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const RotationSpec = PlsKitResult{:RotationSpec}
 
@@ -180,8 +180,8 @@ const RotationSpec = PlsKitResult{:RotationSpec}
     preprocess(; X=nothing, Y=nothing, weights=nothing) -> PreprocessResult
 
 Call Python's `plskit.preprocess` with the same arguments and defaults.
-Reference: [`preprocess` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`preprocess` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function preprocess(; X=nothing, Y=nothing, weights=nothing)
     _call(:preprocess; X, Y, weights)
@@ -191,8 +191,8 @@ end
     pls1_fit(X, y; k=1, k_max=nothing, find_k_args=nothing, pre_standardized=false, seed=nothing, weights=nothing) -> PLS1Result
 
 Call Python's `plskit.pls1_fit` with the same arguments and defaults.
-Reference: [`pls1_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`pls1_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function pls1_fit(X, y; k=1, k_max=nothing, find_k_args=nothing, pre_standardized=false, seed=nothing, weights=nothing)
     _call(:pls1_fit; X, y, k, k_max, find_k_args, pre_standardized, seed, weights)
@@ -202,8 +202,8 @@ end
     pls1_predict(model, X_new) -> Vector{Float64}
 
 Call Python's `plskit.pls1_predict` with the same arguments and defaults.
-Reference: [`pls1_predict` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`pls1_predict` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function pls1_predict(model, X_new)
     _call(:pls1_predict; model, X_new)
@@ -213,8 +213,8 @@ end
     pls1_find_k_optimal(X, y, k_max; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKOptimalResult
 
 Call Python's `plskit.pls1_find_k_optimal` with the same arguments and defaults.
-Reference: [`pls1_find_k_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`pls1_find_k_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function pls1_find_k_optimal(X, y, k_max; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
     _call(:pls1_find_k_optimal; X, y, k_max, selector, diagnostic, args, pre_standardized, seed, verbose, weights)
@@ -224,8 +224,8 @@ end
     pls1_find_k_sequence(X, y, k_max; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKSequenceResult
 
 Call Python's `plskit.pls1_find_k_sequence` with the same arguments and defaults.
-Reference: [`pls1_find_k_sequence` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`pls1_find_k_sequence` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function pls1_find_k_sequence(X, y, k_max; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
     _call(:pls1_find_k_sequence; X, y, k_max, test_method, alpha, args, pre_standardized, seed, verbose, weights)
@@ -235,8 +235,8 @@ end
     spls1_fit(X, y, k, keep; pre_standardized=false, weights=nothing) -> PLS1Result
 
 Call Python's `plskit.spls1_fit` with the same arguments and defaults.
-Reference: [`spls1_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`spls1_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function spls1_fit(X, y, k, keep; pre_standardized=false, weights=nothing)
     _call(:spls1_fit; X, y, k, keep, pre_standardized, weights)
@@ -246,8 +246,8 @@ end
     spls1_find_keep_optimal(X, y, k; args=nothing, seed=nothing, verbose=false, weights=nothing) -> FindKeepOptimalResult
 
 Call Python's `plskit.spls1_find_keep_optimal` with the same arguments and defaults.
-Reference: [`spls1_find_keep_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`spls1_find_keep_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function spls1_find_keep_optimal(X, y, k; args=nothing, seed=nothing, verbose=false, weights=nothing)
     _call(:spls1_find_keep_optimal; X, y, k, args, seed, verbose, weights)
@@ -257,8 +257,8 @@ end
     spls1_find_k_optimal(X, y, k_max, keep; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKOptimalResult
 
 Call Python's `plskit.spls1_find_k_optimal` with the same arguments and defaults.
-Reference: [`spls1_find_k_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`spls1_find_k_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function spls1_find_k_optimal(X, y, k_max, keep; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
     _call(:spls1_find_k_optimal; X, y, k_max, keep, selector, diagnostic, args, pre_standardized, seed, verbose, weights)
@@ -268,8 +268,8 @@ end
     spls1_find_k_sequence(X, y, k_max, keep; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKSequenceResult
 
 Call Python's `plskit.spls1_find_k_sequence` with the same arguments and defaults.
-Reference: [`spls1_find_k_sequence` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`spls1_find_k_sequence` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function spls1_find_k_sequence(X, y, k_max, keep; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
     _call(:spls1_find_k_sequence; X, y, k_max, keep, test_method, alpha, args, pre_standardized, seed, verbose, weights)
@@ -279,8 +279,8 @@ end
     pls3_fit(X, Y; k=1, pre_standardized_X=false, pre_standardized_Y=false, weights=nothing) -> PLS3Result
 
 Call Python's `plskit.pls3_fit` with the same arguments and defaults.
-Reference: [`pls3_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`pls3_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function pls3_fit(X, Y; k=1, pre_standardized_X=false, pre_standardized_Y=false, weights=nothing)
     _call(:pls3_fit; X, Y, k, pre_standardized_X, pre_standardized_Y, weights)
@@ -290,8 +290,8 @@ end
     plssvd_fit(X, Y; k=1, pre_standardized_X=false, pre_standardized_Y=false, weights=nothing) -> PLS3Result
 
 Call Python's `plskit.plssvd_fit` with the same arguments and defaults.
-Reference: [`plssvd_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`plssvd_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function plssvd_fit(X, Y; k=1, pre_standardized_X=false, pre_standardized_Y=false, weights=nothing)
     _call(:plssvd_fit; X, Y, k, pre_standardized_X, pre_standardized_Y, weights)
@@ -301,8 +301,8 @@ end
     pls3_transform(model; X_new=nothing, Y_new=nothing, which="both") -> PLS3Scores
 
 Call Python's `plskit.pls3_transform` with the same arguments and defaults.
-Reference: [`pls3_transform` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`pls3_transform` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function pls3_transform(model; X_new=nothing, Y_new=nothing, which="both")
     _call(:pls3_transform; model, X_new, Y_new, which)
@@ -312,8 +312,8 @@ end
     plssvd_transform(model; X_new=nothing, Y_new=nothing, which="both") -> PLS3Scores
 
 Call Python's `plskit.plssvd_transform` with the same arguments and defaults.
-Reference: [`plssvd_transform` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`plssvd_transform` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function plssvd_transform(model; X_new=nothing, Y_new=nothing, which="both")
     _call(:plssvd_transform; model, X_new, Y_new, which)
@@ -323,8 +323,8 @@ end
     spls3_fit(X, Y, k, keep_X, keep_Y; pre_standardized_X=false, pre_standardized_Y=false, max_iter=nothing, tol=nothing, weights=nothing) -> PLS3Result
 
 Call Python's `plskit.spls3_fit` with the same arguments and defaults.
-Reference: [`spls3_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`spls3_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function spls3_fit(X, Y, k, keep_X, keep_Y; pre_standardized_X=false, pre_standardized_Y=false, max_iter=nothing, tol=nothing, weights=nothing)
     _call(:spls3_fit; X, Y, k, keep_X, keep_Y, pre_standardized_X, pre_standardized_Y, max_iter, tol, weights)
@@ -334,8 +334,8 @@ end
     pls1_confirmatory_test(X, y; k=1, test_method="auto", args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing) -> ConfirmatoryTestResult
 
 Call Python's `plskit.pls1_confirmatory_test` with the same arguments and defaults.
-Reference: [`pls1_confirmatory_test` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`pls1_confirmatory_test` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function pls1_confirmatory_test(X, y; k=1, test_method="auto", args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing)
     _call(:pls1_confirmatory_test; X, y, k, test_method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, verbose, weights, max_skip_rate)
@@ -345,8 +345,8 @@ end
     split_nb_gate(X; weights=nothing) -> SplitNbGateResult
 
 Call Python's `plskit.split_nb_gate` with the same arguments and defaults.
-Reference: [`split_nb_gate` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`split_nb_gate` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function split_nb_gate(X; weights=nothing)
     _call(:split_nb_gate; X, weights)
@@ -356,8 +356,8 @@ end
     pls1_perm_null(X, y, k; n_perm=nothing, return_perm_matrix=false, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> PermNullResult
 
 Call Python's `plskit.pls1_perm_null` with the same arguments and defaults.
-Reference: [`pls1_perm_null` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`pls1_perm_null` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function pls1_perm_null(X, y, k; n_perm=nothing, return_perm_matrix=false, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
     _call(:pls1_perm_null; X, y, k, n_perm, return_perm_matrix, pre_standardized, seed, verbose, weights)
@@ -367,8 +367,8 @@ end
     pls3_confirmatory_test(X, Y; k=1, test_method="auto", args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, verbose=false) -> ConfirmatoryTestResult
 
 Call Python's `plskit.pls3_confirmatory_test` with the same arguments and defaults.
-Reference: [`pls3_confirmatory_test` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`pls3_confirmatory_test` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function pls3_confirmatory_test(X, Y; k=1, test_method="auto", args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, verbose=false)
     _call(:pls3_confirmatory_test; X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, verbose)
@@ -378,8 +378,8 @@ end
     pls1_perm_alpha(gram, Y; k=1, n_features) -> PermAlphaResult
 
 Call Python's `plskit.pls1_perm_alpha` with the same arguments and defaults.
-Reference: [`pls1_perm_alpha` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`pls1_perm_alpha` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function pls1_perm_alpha(gram, Y; k=1, n_features)
     _call(:pls1_perm_alpha; gram, Y, k, n_features)
@@ -389,8 +389,8 @@ end
     rotate(model_or_W; method="varimax", L=nothing, args=nothing) -> RotateResult or PLS1Result
 
 Call Python's `plskit.rotate` with the same arguments and defaults.
-Reference: [`rotate` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`rotate` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function rotate(model_or_W; method="varimax", L=nothing, args=nothing)
     _call(:rotate; model_or_W, method, L, args)
@@ -400,8 +400,8 @@ end
     pls1_rotation_stability(X, y, k; rotation_method="varimax", rotation_args=nothing, L=nothing, n_boot=nothing, m_rate=nothing, level=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing) -> RotationStabilityResult
 
 Call Python's `plskit.pls1_rotation_stability` with the same arguments and defaults.
-Reference: [`pls1_rotation_stability` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md);
-result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md).
+Reference: [`pls1_rotation_stability` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 function pls1_rotation_stability(X, y, k; rotation_method="varimax", rotation_args=nothing, L=nothing, n_boot=nothing, m_rate=nothing, level=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing)
     _call(:pls1_rotation_stability; X, y, k, rotation_method, rotation_args, L, n_boot, m_rate, level, pre_standardized, seed, verbose, weights, max_skip_rate)

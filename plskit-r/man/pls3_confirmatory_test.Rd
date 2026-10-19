@@ -25,5 +25,5 @@ A list of class \code{c("confirmatory_test_result", "plskit_result")}.
 \description{
 R binding of \code{pls3_confirmatory_test}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
-"3.4 Confirmatory PLS3 omnibus test" of \url{https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md}.
+"3.4 Confirmatory PLS3 omnibus test" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }

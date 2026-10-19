@@ -106,6 +106,8 @@ jobs:
         run: pip install . -v
       - name: Run pytest (Linux)
         if: runner.os == 'Linux'
+        env:
+          PLSKIT_REQUIRE_CORPUS: "1"
         run: |
           cd plskit-py
           pytest -v --tb=short
@@ -142,7 +144,7 @@ jobs:
       - name: Rust target for Rtools (Windows)
         if: runner.os == 'Windows'
         run: rustup target add x86_64-pc-windows-gnu
-      # Caches the Linux clippy build and the canary install; R CMD check
+      # Caches the Linux clippy build; R CMD check
       # itself compiles in a temporary copy of the package. When the pinned
       # plskit / plskit-bind version is not on crates.io, rust-cache's
       # `cargo metadata` cannot resolve it and logs an error; the step still
@@ -187,16 +189,6 @@ jobs:
           args: 'c("--no-manual")'
           error-on: '"warning"'
           check-dir: '"check"'
-      # Cross-wrapper bit canary, R half: R against the corpus at atol 0 on
-      # the platform that generated the fixtures. Non-blocking.
-      - name: Bit canary, R vs the corpus at atol 0 (Linux, non-blocking)
-        if: runner.os == 'Linux'
-        continue-on-error: true
-        env:
-          PLSKIT_CORPUS_EXACT: "1"
-        run: |
-          R CMD INSTALL plskit-r
-          Rscript -e 'testthat::test_file("plskit-r/tests/testthat/test-corpus.R", package = "plskit", load_package = "installed", reporter = "check")'
       - name: Install and smoke test (macOS, Windows)
         if: runner.os != 'Linux'
         # pwsh, the Windows default, aliases `R` to Invoke-History.

@@ -7,10 +7,6 @@ field names, so the canonical reference is the Python one:
 [API](../python/api.md) and [result objects](../python/results.md). These
 pages cover only what is specific to R.
 
-> Status: implemented, not yet released. Until the first release the
-> package builds from a checkout of the monorepo only; see
-> [Installation](installation.md).
-
 ## Pages
 
 - [Installation](installation.md): requirements and the dev-mode build

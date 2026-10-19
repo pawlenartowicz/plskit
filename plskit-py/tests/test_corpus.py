@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +13,12 @@ import pytest
 
 import plskit
 
-ROOT = Path(__file__).resolve().parents[2] / "testdata"
+# $PLSKIT_TESTDATA, else the monorepo's testdata/. A missing corpus skips the
+# module unless PLSKIT_REQUIRE_CORPUS is "1"/"true" (CI), which makes it an
+# error. Same variable names and semantics as helper-npz.R::corpus_root and
+# corpus.jl: change together.
+ROOT = Path(os.environ.get("PLSKIT_TESTDATA")
+            or Path(__file__).resolve().parents[2] / "testdata")
 MANIFEST = ROOT / "manifest.json"
 
 # Corpus tolerances (testdata/README.md "Tolerance"), numpy's rule
@@ -21,32 +29,26 @@ ATOL_SCALAR = 1e-12
 ATOL_ARRAY = 1e-10
 RTOL = 1e-14
 
+_MISSING = object()
+# Fields of a CIScalar that a fixture key can end in.
+CI_PARTS = ("point", "lower", "upper", "sd")
 
-def load_manifest():
-    if not MANIFEST.exists():
-        pytest.skip(
-            f"{MANIFEST} missing: from the workspace root, run "
-            f"`cargo run -p plskit-testdata-gen -- --testdata-root testdata`"
-        )
-    return json.loads(MANIFEST.read_text())["cases"]
+
+if not MANIFEST.exists():
+    _msg = (f"{MANIFEST} missing: from the workspace root, run "
+            f"`cargo run -p plskit-testdata-gen -- --testdata-root testdata`, "
+            f"or set PLSKIT_TESTDATA")
+    if os.environ.get("PLSKIT_REQUIRE_CORPUS", "").lower() in ("1", "true"):
+        pytest.fail(f"PLSKIT_REQUIRE_CORPUS is set but {_msg}", pytrace=False)
+    pytest.skip(_msg, allow_module_level=True)
+
+CASES = json.loads(MANIFEST.read_text())["cases"]
+assert CASES, f"{MANIFEST} lists no cases"
 
 
 def load_npz(rel_path: str) -> dict:
     with np.load(ROOT / rel_path, allow_pickle=False) as f:
         return {k: f[k] for k in f.files}
-
-
-class _ReadKeys(dict):
-    """Fixture outputs that remember which keys an arm read, so a key no arm
-    knows about fails instead of going unchecked."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.read = set()
-
-    def __getitem__(self, key):
-        self.read.add(key)
-        return super().__getitem__(key)
 
 
 def assert_close(actual, expected, name: str):
@@ -92,15 +94,92 @@ def _resolve_corpus_weights(case, kw, inputs):
     return kw
 
 
-@pytest.mark.parametrize("case", load_manifest(), ids=lambda c: c["name"])
+def _fields(rec):
+    if isinstance(rec, dict):
+        return rec
+    return {f.name: getattr(rec, f.name) for f in dataclasses.fields(rec)}
+
+
+def _is_record(v):
+    return dataclasses.is_dataclass(v) and not isinstance(v, type)
+
+
+def _lookup(rec, key):
+    """The field a fixture key names: exact, then ASCII case-insensitive, then
+    into nested result dataclasses, recursively. `_MISSING` if absent."""
+    fields = _fields(rec)
+    if key in fields:
+        return fields[key]
+    for name, v in fields.items():
+        if name.lower() == key.lower():
+            return v
+    for v in fields.values():
+        if _is_record(v):
+            found = _lookup(v, key)
+            if found is not _MISSING:
+                return found
+    return _MISSING
+
+
+def _resolve(rec, key, expected):
+    """The result value a fixture key names, or `_MISSING`. `{f}__keys` /
+    `{f}__values` encode an int-keyed dict field, `{f}_{point|lower|upper|sd}`
+    (`{f}_k{i}_{part}` for items of a list field) a CIScalar. Same encoding
+    and lookup order as resolve() in test-corpus.R and corpus.jl: change
+    together."""
+    if key.endswith("__keys"):
+        m = _lookup(rec, key[:-6])
+        return sorted(m) if isinstance(m, dict) else _MISSING
+    if key.endswith("__values"):
+        base = key[:-8]
+        m = _lookup(rec, base)
+        if not isinstance(m, dict):
+            return _MISSING
+        keys = [int(k) for k in expected[base + "__keys"].tolist()]
+        return [m[k] for k in keys] if all(k in m for k in keys) else _MISSING
+    found = _lookup(rec, key)
+    if found is not _MISSING:
+        return found
+    base, _, part = key.rpartition("_")
+    if part not in CI_PARTS:
+        return _MISSING
+    ci = _lookup(rec, base)
+    if ci is _MISSING:
+        m = re.fullmatch(r"(.*)_k([0-9]+)", base)
+        if not m:
+            return _MISSING
+        items = _lookup(rec, m[1])
+        i = int(m[2])
+        if not isinstance(items, (list, tuple)) or i >= len(items):
+            return _MISSING
+        # The fixture must hold every item, so an extra result item fails.
+        held = {int(j) for j in re.findall(rf"^{re.escape(m[1])}_k([0-9]+)_", "\n".join(expected), re.M)}
+        assert len(items) == len(held), f"{m[1]}: {len(items)} items, fixture holds {len(held)}"
+        ci = items[i]
+    return getattr(ci, part, _MISSING) if _is_record(ci) else _MISSING
+
+
+def _comparable(v):
+    """Bool results compare against the fixture's integer encoding; lists
+    (K grids, p-value lists) against its arrays."""
+    if isinstance(v, (bool, np.bool_)):
+        return int(v)
+    if isinstance(v, np.ndarray) and v.dtype == bool:
+        return v.astype(np.int64)
+    if isinstance(v, (list, tuple)):
+        return np.asarray(v)
+    return v
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
 def test_corpus_case(case):
     fn = case["function"]
     inputs = load_npz(case["inputs"])
-    expected = _ReadKeys(load_npz(case["outputs"]))
+    expected = load_npz(case["outputs"])
     assert expected, f"{case['name']}: fixture has no outputs"
     X = inputs.get("X")
     y = inputs.get("y")
-    kwargs = case["kwargs"]
+    kwargs = _resolve_corpus_weights(case, dict(case["kwargs"]), inputs)
 
     if fn == "pls1_fit":
         # Every manifest kwarg goes through, `seed` included: with a string
@@ -111,280 +190,84 @@ def test_corpus_case(case):
         # The generator refuses to write a "sequence" fixture whose
         # selection rejects no component, so a `sequence_no_rejection`
         # error here is a regression, not a stale fixture.
-        fit_kwargs = _resolve_corpus_weights(case, dict(kwargs), inputs)
-        r = plskit.pls1_fit(X, y, **fit_kwargs)
-        for field in ["coef", "beta", "intercept", "k_used"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+        r = plskit.pls1_fit(X, y, **kwargs)
     elif fn == "pls1_confirmatory_test":
-        kw = dict(kwargs); k = kw.pop("k")
-        kw = _resolve_corpus_weights(case, kw, inputs)
-        r = plskit.pls1_confirmatory_test(X, y, k, **kw)
-        for field in ["pvalue", "statistic", "test_method", "k", "n_perm", "n_splits", "seed", "stable_rank"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
-        # CI fixture: when ci=True kwarg is set, also pin the CI bundle.
-        if kw.get("ci"):
-            assert r.ci is not None, f"{case['name']}: ci=True but result.ci is None"
-            for ci_scalar_field in ["n_boot", "m", "m_rate", "level",
-                                    "n_boot_finite", "n_boot_finite_holdout_corr"]:
-                if ci_scalar_field in expected:
-                    assert_close(
-                        getattr(r.ci, ci_scalar_field),
-                        expected[ci_scalar_field],
-                        f"{case['name']}.ci.{ci_scalar_field}",
-                    )
-            for ci_arr_field in ["beta_sign_z", "beta_sign_z_signed",
-                                 "leverage_ci_lower", "leverage_ci_upper",
-                                 "leverage_se",
-                                 "beta_ci_lower", "beta_ci_upper", "beta_se"]:
-                if ci_arr_field in expected:
-                    assert_close(
-                        getattr(r.ci, ci_arr_field),
-                        expected[ci_arr_field],
-                        f"{case['name']}.ci.{ci_arr_field}",
-                    )
-            for composite in ["holdout_corr"]:
-                ci_obj = getattr(r.ci, composite)
-                for sub in ["point", "lower", "upper", "sd"]:
-                    key = f"{composite}_{sub}"
-                    if key in expected:
-                        assert_close(
-                            getattr(ci_obj, sub),
-                            expected[key],
-                            f"{case['name']}.ci.{composite}.{sub}",
-                        )
+        k = kwargs.pop("k")
+        r = plskit.pls1_confirmatory_test(X, y, k, **kwargs)
     elif fn == "pls1_find_k_optimal":
-        kw = _resolve_corpus_weights(case, dict(kwargs), inputs)
-        k_max = kw.pop("k_max")
-        r = plskit.pls1_find_k_optimal(X, y, k_max, **kw)
-        for field in ["k_star", "selector", "pvalues", "diagnostic", "seed"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
-        # cv_scores / cv_scores_se / bic_scores arrive as flattened keys/values
-        for d_field in ("cv_scores", "cv_scores_se", "bic_scores"):
-            keys_k = f"{d_field}__keys"
-            if keys_k in expected:
-                ks = expected[keys_k]
-                vs = expected[f"{d_field}__values"]
-                actual_dict = getattr(r, d_field)
-                assert actual_dict is not None, f"{case['name']}.{d_field}"
-                assert sorted(actual_dict) == sorted(ks.tolist()), f"{case['name']}.{d_field} keys"
-                for k_int, v_exp in zip(ks.tolist(), vs.tolist(), strict=True):
-                    np.testing.assert_allclose(actual_dict[int(k_int)], v_exp,
-                                               atol=ATOL_ARRAY, rtol=RTOL,
-                                               err_msg=f"{case['name']}.{d_field}[{k_int}]")
+        k_max = kwargs.pop("k_max")
+        r = plskit.pls1_find_k_optimal(X, y, k_max, **kwargs)
     elif fn == "pls1_find_k_sequence":
-        kw = dict(kwargs); k_max = kw.pop("k_max")
-        r = plskit.pls1_find_k_sequence(X, y, k_max, **kw)
-        for field in ["k_star", "pvalues", "test_method", "alpha", "seed"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+        k_max = kwargs.pop("k_max")
+        r = plskit.pls1_find_k_sequence(X, y, k_max, **kwargs)
     elif fn == "pls1_predict":
-        X_train = inputs["X_train"]
-        y_train = inputs["y_train"]
-        X_new = inputs["X_new"]
-        k = int(kwargs["k"])
-        model = plskit.pls1_fit(X_train, y_train, k=k)
-        y_pred = plskit.pls1_predict(model, X_new)
-        if "y_pred" in expected:
-            assert_close(y_pred, expected["y_pred"], f"{case['name']}.y_pred")
-        for field in ["coef", "beta", "intercept", "k_used"]:
-            if field in expected:
-                assert_close(getattr(model, field), expected[field], f"{case['name']}.{field}")
+        model = plskit.pls1_fit(inputs["X_train"], inputs["y_train"], k=int(kwargs["k"]))
+        r = {"y_pred": plskit.pls1_predict(model, inputs["X_new"]), "model": model}
     elif fn == "rotate":
-        k = int(kwargs["k"])
-        method = kwargs.get("method", "varimax")
-        model = plskit.pls1_fit(inputs["X"], inputs["y"], k=k)
-        r = plskit.rotate(model.W, method=method)
-        if "w_rot" in expected:
-            assert_close(r.W_rot, expected["w_rot"], f"{case['name']}.w_rot")
-        if "r" in expected:
-            assert_close(r.spec.R, expected["r"], f"{case['name']}.r")
-        if "sweeps" in expected:
-            assert_close(r.spec.sweeps, expected["sweeps"], f"{case['name']}.sweeps")
-        if "v_converged" in expected:
-            assert_close(r.spec.V_converged, expected["v_converged"], f"{case['name']}.v_converged")
+        model = plskit.pls1_fit(X, y, k=int(kwargs["k"]))
+        r = plskit.rotate(model.W, method=kwargs.get("method", "varimax"))
     elif fn == "preprocess":
-        r = plskit.preprocess(
-            X=inputs.get("X"),
-            Y=inputs.get("y"),
-            weights=inputs.get("weights"),
-        )
-        # npz uses lowercase y_std/y_mean/y_scale; PreprocessResult uses uppercase Y_*
-        field_map = [
-            ("X_std", "X_std"), ("X_mean", "X_mean"), ("X_scale", "X_scale"),
-            ("Y_std", "y_std"), ("Y_mean", "y_mean"), ("Y_scale", "y_scale"),
-            ("weights_normalized", "weights_normalized"), ("n_eff", "n_eff"),
-        ]
-        for attr, key in field_map:
-            if key in expected:
-                assert_close(getattr(r, attr), expected[key], f"{case['name']}.{key}")
+        r = plskit.preprocess(X=X, Y=y, weights=kwargs.get("weights"))
     elif fn == "pls1_perm_null":
         # `d` / `n` describe the generated data, not the call. Everything
         # else goes through, so a kwarg this arm does not know about fails
         # the call instead of being dropped.
-        kw = {k: v for k, v in kwargs.items() if k not in ("d", "n")}
-        kw = _resolve_corpus_weights(case, kw, inputs)
-        k = int(kw.pop("k"))
-        kw["n_perm"] = int(kw["n_perm"])
-        r = plskit.pls1_perm_null(inputs["X"], inputs["y"], k, **kw)
-        for field in ["beta_ref", "beta_perm_mean", "beta_perm_sd", "beta_perm_z",
-                      "n_perm", "k", "seed", "n_eff", "beta_perm_matrix"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+        for key in ("d", "n"):
+            kwargs.pop(key, None)
+        k = int(kwargs.pop("k"))
+        kwargs["n_perm"] = int(kwargs["n_perm"])
+        r = plskit.pls1_perm_null(X, y, k, **kwargs)
     elif fn == "pls1_perm_alpha":
         r = plskit.pls1_perm_alpha(
             inputs["gram"], inputs["Y"], k=kwargs["k"], n_features=kwargs["n_features"]
         )
-        for field in ["alpha", "k_used", "k", "n_features"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
-        if "resolved" in expected:
-            assert_close(
-                r.resolved.astype(np.int64), expected["resolved"],
-                f"{case['name']}.resolved",
-            )
     elif fn == "pls1_rotation_stability":
         # As for pls1_perm_null: only the data-shape keys are dropped.
-        kw = {k: v for k, v in kwargs.items() if k not in ("d", "n")}
-        kw = _resolve_corpus_weights(case, kw, inputs)
-        k = int(kw.pop("k"))
+        for key in ("d", "n"):
+            kwargs.pop(key, None)
+        k = int(kwargs.pop("k"))
         for key, conv in (("n_boot", int), ("m_rate", float), ("level", float)):
-            if key in kw:
-                kw[key] = conv(kw[key])
-        r = plskit.pls1_rotation_stability(inputs["X"], inputs["y"], k, **kw)
-        # CIScalar bundle for variance_ratio (overall)
-        for sub in ["point", "lower", "upper", "sd"]:
-            key = f"variance_ratio_{sub}"
-            if key in expected:
-                assert_close(getattr(r.variance_ratio, sub), expected[key],
-                             f"{case['name']}.{key}")
-        # CIScalar per-axis bundles encoded as variance_ratio_per_axis_k{i}_{sub}
-        assert len(r.variance_ratio_per_axis) == k, case["name"]
-        for i, ci_scalar in enumerate(r.variance_ratio_per_axis):
-            for sub in ["point", "lower", "upper", "sd"]:
-                key = f"variance_ratio_per_axis_k{i}_{sub}"
-                if key in expected:
-                    assert_close(getattr(ci_scalar, sub), expected[key],
-                                 f"{case['name']}.{key}")
-        for field in ["variance_unrot", "variance_rot",
-                      "variance_unrot_per_axis", "variance_rot_per_axis",
-                      "n_boot", "m", "seed", "m_rate", "level", "n_boot_finite"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
-        if "degenerate_baseline" in expected:
-            assert bool(r.degenerate_baseline) == bool(int(expected["degenerate_baseline"])), \
-                f"{case['name']}.degenerate_baseline mismatch"
+            if key in kwargs:
+                kwargs[key] = conv(kwargs[key])
+        r = plskit.pls1_rotation_stability(X, y, k, **kwargs)
     elif fn == "spls1_fit":
         # `seed` here is the data-generation seed: spls1_fit is deterministic
         # and takes none (the Rust corpus arm ignores it too).
-        kw = {k: v for k, v in kwargs.items() if k not in ("seed",)}
-        kw = _resolve_corpus_weights(case, kw, inputs)
-        k_int = int(kw.pop("k"))
-        keep = int(kw.pop("keep"))
-        r = plskit.spls1_fit(X, y, k_int, keep, **kw)
-        for field in ["coef", "beta", "intercept", "k_used", "keep"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+        kwargs.pop("seed", None)
+        k = int(kwargs.pop("k"))
+        keep = int(kwargs.pop("keep"))
+        r = plskit.spls1_fit(X, y, k, keep, **kwargs)
     elif fn == "spls1_find_keep_optimal":
-        kw = _resolve_corpus_weights(case, dict(kwargs), inputs)
-        k_int = int(kw.pop("k"))
-        r = plskit.spls1_find_keep_optimal(X, y, k_int, **kw)
-        for field in ["keep_star", "k", "seed"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
-        if "keep_grid" in expected:
-            assert r.keep_grid == [int(v) for v in expected["keep_grid"].tolist()], \
-                f"{case['name']}.keep_grid"
-        for d_field in ("cv_scores", "cv_scores_se"):
-            keys_k = f"{d_field}__keys"
-            if keys_k in expected:
-                ks = expected[keys_k]
-                vs = expected[f"{d_field}__values"]
-                actual_dict = getattr(r, d_field)
-                assert sorted(actual_dict) == sorted(ks.tolist()), f"{case['name']}.{d_field} keys"
-                for k_int2, v_exp in zip(ks.tolist(), vs.tolist(), strict=True):
-                    np.testing.assert_allclose(actual_dict[int(k_int2)], v_exp,
-                                               atol=ATOL_ARRAY, rtol=RTOL,
-                                               err_msg=f"{case['name']}.{d_field}[{k_int2}]")
+        k = int(kwargs.pop("k"))
+        r = plskit.spls1_find_keep_optimal(X, y, k, **kwargs)
     elif fn == "spls1_find_k_optimal":
-        kw = _resolve_corpus_weights(case, dict(kwargs), inputs)
-        k_max = kw.pop("k_max")
-        keep = int(kw.pop("keep"))
-        r = plskit.spls1_find_k_optimal(X, y, k_max, keep, **kw)
-        for field in ["k_star", "selector", "pvalues", "diagnostic", "seed"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
-        for d_field in ("cv_scores", "cv_scores_se", "bic_scores"):
-            keys_k = f"{d_field}__keys"
-            if keys_k in expected:
-                ks = expected[keys_k]
-                vs = expected[f"{d_field}__values"]
-                actual_dict = getattr(r, d_field)
-                assert actual_dict is not None, f"{case['name']}.{d_field}"
-                assert sorted(actual_dict) == sorted(ks.tolist()), f"{case['name']}.{d_field} keys"
-                for k_int2, v_exp in zip(ks.tolist(), vs.tolist(), strict=True):
-                    np.testing.assert_allclose(actual_dict[int(k_int2)], v_exp,
-                                               atol=ATOL_ARRAY, rtol=RTOL,
-                                               err_msg=f"{case['name']}.{d_field}[{k_int2}]")
+        k_max = kwargs.pop("k_max")
+        keep = int(kwargs.pop("keep"))
+        r = plskit.spls1_find_k_optimal(X, y, k_max, keep, **kwargs)
     elif fn == "spls1_find_k_sequence":
-        kw = _resolve_corpus_weights(case, dict(kwargs), inputs)
-        k_max = kw.pop("k_max")
-        keep = int(kw.pop("keep"))
-        r = plskit.spls1_find_k_sequence(X, y, k_max, keep, **kw)
-        for field in ["k_star", "pvalues", "test_method", "alpha", "seed"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+        k_max = kwargs.pop("k_max")
+        keep = int(kwargs.pop("keep"))
+        r = plskit.spls1_find_k_sequence(X, y, k_max, keep, **kwargs)
     elif fn == "pls3_fit":
-        kw = dict(kwargs)
-        k = kw.pop("k")
-        kw.pop("seed", None)          # data-generation seed; pls3_fit takes none
-        r = plskit.pls3_fit(X, inputs["Y"], k, **kw)
-        for field in ["U", "V", "singular_values", "x_scores", "y_scores", "k_used"]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+        k = kwargs.pop("k")
+        kwargs.pop("seed", None)          # data-generation seed; pls3_fit takes none
+        r = plskit.pls3_fit(X, inputs["Y"], k, **kwargs)
     elif fn == "pls3_transform":
-        k = kwargs["k"]
-        which = kwargs["which"]
-        m = plskit.pls3_fit(X, inputs["Y"], k)
-        sc = plskit.pls3_transform(m, inputs["X_new"], inputs["Y_new"], which=which)
-        for field in ["x_scores", "y_scores"]:
-            if field in expected:
-                assert_close(getattr(sc, field), expected[field], f"{case['name']}.{field}")
+        m = plskit.pls3_fit(X, inputs["Y"], kwargs["k"])
+        r = plskit.pls3_transform(m, inputs["X_new"], inputs["Y_new"], which=kwargs["which"])
     elif fn == "spls3_fit":
-        kw = dict(kwargs)
-        k = kw.pop("k")
-        keep_X = kw.pop("keep_X")
-        keep_Y = kw.pop("keep_Y")
-        r = plskit.spls3_fit(X, inputs["Y"], k, keep_X=keep_X, keep_Y=keep_Y, **kw)
-        for field in [
-            "U", "V", "singular_values", "x_scores", "y_scores", "k_used",
-            "keep_X", "keep_Y",
-        ]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
-        if "converged" in expected:
-            assert_close(
-                r.converged.astype(np.int64), expected["converged"],
-                f"{case['name']}.converged",
-            )
-        if "n_iter" in expected:
-            assert_close(
-                r.n_iter.astype(np.int64), expected["n_iter"],
-                f"{case['name']}.n_iter",
-            )
+        k = kwargs.pop("k")
+        keep_X = kwargs.pop("keep_X")
+        keep_Y = kwargs.pop("keep_Y")
+        r = plskit.spls3_fit(X, inputs["Y"], k, keep_X=keep_X, keep_Y=keep_Y, **kwargs)
     elif fn == "pls3_confirmatory_test":
-        kw = dict(kwargs)
-        k = kw.pop("k")
-        r = plskit.pls3_confirmatory_test(X, inputs["Y"], k, **kw)
-        for field in [
-            "pvalue", "statistic", "test_method", "k", "n_perm", "n_splits",
-            "n_eff", "seed", "stable_rank",
-        ]:
-            if field in expected:
-                assert_close(getattr(r, field), expected[field], f"{case['name']}.{field}")
+        k = kwargs.pop("k")
+        r = plskit.pls3_confirmatory_test(X, inputs["Y"], k, **kwargs)
     else:
         pytest.fail(f"{case['name']}: no Python arm for manifest function {fn!r}")
-    unread = sorted(set(expected) - expected.read)
-    assert not unread, f"{case['name']}: fixture keys no arm reads: {unread}"
+
+    for key in sorted(expected):
+        found = _resolve(r, key, expected)
+        if found is _MISSING:
+            pytest.fail(f"{case['name']}.{key}: no matching result field", pytrace=False)
+        assert_close(_comparable(found), expected[key], f"{case['name']}.{key}")

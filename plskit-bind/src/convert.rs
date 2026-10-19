@@ -200,7 +200,7 @@ fn confirmatory_ci(ci: ConfirmatoryCI) -> Value<'static> {
     )
 }
 
-/// `ConfirmatoryTestResult`, fields in `_docs/python/results.md` order.
+/// `ConfirmatoryTestResult`, fields in `docs/python/results.md` order.
 pub(crate) fn confirmatory_test(r: ConfirmatoryTestOutput) -> Record<'static> {
     Record::typed("ConfirmatoryTestResult")
         .field("pvalue", Value::F64(r.pvalue))

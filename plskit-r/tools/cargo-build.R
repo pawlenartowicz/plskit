@@ -112,7 +112,7 @@ if (nzchar(config)) {
       "rust/Cargo.lock is missing: a checkout of main builds only in dev ",
       "mode. Set PLSKIT_CARGO_CONFIG to a cargo config file that patches ",
       "plskit and plskit-bind to a plskit checkout (see ",
-      "_docs/r/installation.md). Released versions install from r-universe ",
+      "docs/r/installation.md). Released versions install from r-universe ",
       "or from the r-universe branch."
     )
   }

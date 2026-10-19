@@ -254,7 +254,7 @@ def preprocess(
     """Standardize X / Y and normalize weights using plskit's canonical recipe.
 
     All arguments optional; only the fields matching passed inputs are populated.
-    See _docs/concepts/preprocessing.md for the recipe and the cache pattern.
+    See docs/concepts/preprocessing.md for the recipe and the cache pattern.
     """
     return _call("preprocess", X=X, Y=Y, weights=weights)
 
@@ -296,7 +296,7 @@ def pls1_fit(
         Must be ``None`` when ``k`` is an int.
     pre_standardized : bool, default False
         If True, skip standardization — X and y are assumed already zero-mean,
-        unit-variance. See _docs/concepts/preprocessing.md (the
+        unit-variance. See docs/concepts/preprocessing.md (the
         ``pre_standardized`` decision table) and ``plskit.preprocess`` for the
         cache pattern.
     seed : int | None
@@ -305,7 +305,7 @@ def pls1_fit(
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
-        _docs/concepts/PLS1/weights.md.
+        docs/concepts/PLS1/weights.md.
 
     Returns
     -------
@@ -530,7 +530,7 @@ def pls3_confirmatory_test(
         ``'split_nb'``. Unlike ``pls1_confirmatory_test``, a very wide X does
         not pick ``'split_exact'``: in PLS3 it refits for every permutation,
         so there it costs more than ``'split_nb'``. The thresholds may change between versions. See
-        _docs/concepts/PLS1/inference.md.
+        docs/concepts/PLS1/inference.md.
 
         ``'split_exact'``: the p-value comes from
         a permutation reference built by shuffling the rows of Y against X,
@@ -642,7 +642,7 @@ def pls1_confirmatory_test(
         every permutation and costs more, so this clause does not apply);
         otherwise ``'split_nb'``. The
         thresholds may change between versions. See
-        _docs/concepts/PLS1/inference.md.
+        docs/concepts/PLS1/inference.md.
 
         ``'split_exact'``: a split-half test
         (statistic ``tanh(z̄)``, the mean Fisher-z of held-out correlations)
@@ -675,7 +675,7 @@ def pls1_confirmatory_test(
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
-        _docs/concepts/PLS1/weights.md.
+        docs/concepts/PLS1/weights.md.
     n_boot : int | None, default None
         Number of subsampling resamples for the ``ci`` branch. ``None`` uses
         the engine default, 1000. Inert when ``ci=False``.
@@ -691,7 +691,7 @@ def pls1_confirmatory_test(
         ``ci=False``.
     max_skip_rate : float | None, default None
         Subsample-loop skip threshold for the ``ci`` branch (see
-        _docs/concepts/effective-sample-size.md). ``None`` uses the engine
+        docs/concepts/effective-sample-size.md). ``None`` uses the engine
         default, 0.01. The CI loop fails with ``PlsKitResamplingDegenerate``
         if ``skipped / total > max_skip_rate``.
     pre_standardized : bool, default False
@@ -788,7 +788,7 @@ def pls1_find_k_optimal(
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
-        _docs/concepts/PLS1/weights.md.
+        docs/concepts/PLS1/weights.md.
 
     Returns
     -------
@@ -829,7 +829,7 @@ def pls1_find_k_sequence(
         Per-step test method: ``'auto'``, ``'raw_perm'``, ``'split_nb'``,
         ``'split_exact'``, or ``'e'``. ``'auto'``, the default, resolves once
         on the full X to ``'split_exact'`` or ``'split_nb'`` by the rule in
-        ``pls1_confirmatory_test`` (see _docs/concepts/PLS1/inference.md) and
+        ``pls1_confirmatory_test`` (see docs/concepts/PLS1/inference.md) and
         runs that method for every step; ``result.test_method`` says which.
         ``'split_exact'`` is permutation-calibrated and holds its level on any
         design; ``'split_nb'`` is the cheaper asymptotic alternative, meant
@@ -857,7 +857,7 @@ def pls1_find_k_sequence(
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
-        _docs/concepts/PLS1/weights.md.
+        docs/concepts/PLS1/weights.md.
 
     Returns
     -------
@@ -907,7 +907,7 @@ def spls1_fit(
     PLS1Result
         With ``keep`` set; each ``W`` column is zero outside its ``keep``
         selected rows. Per-coordinate β CIs are NOT offered under selection
-        (post-selection inference); see ``_docs/concepts/PLS1/sparse.md``.
+        (post-selection inference); see ``docs/concepts/PLS1/sparse.md``.
     """
     return _call("spls1_fit", X=X, y=y, k=k, keep=keep,
                  pre_standardized=pre_standardized, weights=weights)

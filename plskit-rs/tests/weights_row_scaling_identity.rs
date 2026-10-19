@@ -2,7 +2,7 @@
 //! weighted fit of the raw `(X, y)` and a weighted fit of `preprocess`'s
 //! standardized outputs with `pre_standardized = true` give the same
 //! standardized coefficients (the `preprocess` cache pattern; see
-//! `_docs/concepts/PLS1/weights.md`). At full rank the weighted fit is
+//! `docs/concepts/PLS1/weights.md`). At full rank the weighted fit is
 //! weighted least squares.
 
 #![allow(clippy::many_single_char_names)]

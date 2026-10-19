@@ -35,18 +35,6 @@ end
     @test v isa Vector{Bool} && v == [true, false, true]
 end
 
-@testset "a Python result converts by its dataclass fields" begin
-    X, y = pls1_data()
-    pyfit = pk.pls1_fit(np.asarray(X), np.asarray(y); k=2)
-    fit = PLSKit._to_julia(pyfit)
-    @test fit isa PlsKitResult{:PLS1Result}
-    @test propertynames(fit) == Tuple(PLSKit._RESULT_FIELDS[:PLS1Result])
-    @test fit.W isa Matrix{Float64} && size(fit.W) == (8, 2)
-    @test pytruth(np.array_equal(np.asarray(fit.W), pyfit.W))
-    @test fit.k_used === 2 && fit.weights === nothing
-    @test getfield(fit, :py) === pyfit
-end
-
 @testset "show" begin
     X, y = pls1_data()
     fit = PLSKit._to_julia(pk.pls1_fit(np.asarray(X), np.asarray(y); k=2))

@@ -455,7 +455,7 @@ static REGISTRY: &[FnSpec] = &[
     },
 ];
 
-/// Every public function, in `_docs/python/api.md` order.
+/// Every public function, in `docs/python/api.md` order.
 #[must_use]
 pub fn registry() -> &'static [FnSpec] {
     REGISTRY

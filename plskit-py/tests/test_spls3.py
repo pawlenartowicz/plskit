@@ -69,7 +69,7 @@ def test_weights_are_rejected():
 def test_keeps_are_positional_like_spls1_fit():
     # `keep_X` / `keep_Y` are positional, matching `spls1_fit`'s `keep`, the
     # Rust signature `spls3_fit(x, y, k, keep_x, keep_y, ...)` and the
-    # `**arguments:**` row in `_docs/python/api.md` §2c.3. Under a
+    # `**arguments:**` row in `docs/python/api.md` §2c.3. Under a
     # keyword-only spelling the first call below is a TypeError.
     X, Y = _blocks()
     positional = plskit.spls3_fit(X, Y, 2, 4, 2)

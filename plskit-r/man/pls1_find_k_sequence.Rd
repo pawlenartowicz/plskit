@@ -26,5 +26,5 @@ A list of class \code{c("find_k_sequence_result", "plskit_result")}.
 \description{
 R binding of \code{pls1_find_k_sequence}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
-"2.3 K-selection" of \url{https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md}.
+"2.3 K-selection" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }

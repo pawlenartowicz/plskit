@@ -15,5 +15,5 @@ A list of class \code{c("pls3_scores", "plskit_result")}.
 \description{
 R binding of \code{plssvd_transform}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
-"2c.2 Transform" of \url{https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md}.
+"2c.2 Transform" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }

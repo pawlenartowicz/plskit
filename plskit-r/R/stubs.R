@@ -6,7 +6,7 @@
 #'
 #' R binding of `preprocess`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "1. Preprocessing" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "1. Preprocessing" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,Y,weights See the canonical reference.
 #' @return A list of class `c("preprocess_result", "plskit_result")`.
@@ -27,7 +27,7 @@ preprocess <- function(
 #'
 #' R binding of `pls1_fit`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2.1 Fit" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2.1 Fit" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,y,k,k_max,find_k_args,pre_standardized,seed,weights See the canonical reference.
 #' @return A list of class `c("pls1_result", "plskit_result")`.
@@ -58,7 +58,7 @@ pls1_fit <- function(
 #'
 #' R binding of `pls1_predict`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2.2 Predict" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2.2 Predict" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param model,X_new See the canonical reference.
 #' @return A numeric vector.
@@ -77,7 +77,7 @@ pls1_predict <- function(
 #'
 #' R binding of `pls1_find_k_optimal`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2.3 K-selection" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2.3 K-selection" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,y,k_max,selector,diagnostic,args,pre_standardized,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("find_k_optimal_result", "plskit_result")`.
@@ -112,7 +112,7 @@ pls1_find_k_optimal <- function(
 #'
 #' R binding of `pls1_find_k_sequence`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2.3 K-selection" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2.3 K-selection" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,y,k_max,test_method,alpha,args,pre_standardized,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("find_k_sequence_result", "plskit_result")`.
@@ -147,7 +147,7 @@ pls1_find_k_sequence <- function(
 #'
 #' R binding of `spls1_fit`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2b.1 Sparse fit" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2b.1 Sparse fit" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,y,k,keep,pre_standardized,weights See the canonical reference.
 #' @return A list of class `c("pls1_result", "plskit_result")`.
@@ -174,7 +174,7 @@ spls1_fit <- function(
 #'
 #' R binding of `spls1_find_keep_optimal`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2b.2 Keep-count tuning" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2b.2 Keep-count tuning" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,y,k,args,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("find_keep_optimal_result", "plskit_result")`.
@@ -203,7 +203,7 @@ spls1_find_keep_optimal <- function(
 #'
 #' R binding of `spls1_find_k_optimal`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2b.3 K-selection at fixed keep" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2b.3 K-selection at fixed keep" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,y,k_max,keep,selector,diagnostic,args,pre_standardized,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("find_k_optimal_result", "plskit_result")`.
@@ -240,7 +240,7 @@ spls1_find_k_optimal <- function(
 #'
 #' R binding of `spls1_find_k_sequence`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2b.3 K-selection at fixed keep" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2b.3 K-selection at fixed keep" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,y,k_max,keep,test_method,alpha,args,pre_standardized,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("find_k_sequence_result", "plskit_result")`.
@@ -277,7 +277,7 @@ spls1_find_k_sequence <- function(
 #'
 #' R binding of `pls3_fit`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2c.1 Fit" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2c.1 Fit" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,Y,k,pre_standardized_X,pre_standardized_Y,weights See the canonical reference.
 #' @return A list of class `c("pls3_result", "plskit_result")`.
@@ -304,7 +304,7 @@ pls3_fit <- function(
 #'
 #' R binding of `plssvd_fit`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2c.1 Fit" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2c.1 Fit" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,Y,k,pre_standardized_X,pre_standardized_Y,weights See the canonical reference.
 #' @return A list of class `c("pls3_result", "plskit_result")`.
@@ -331,7 +331,7 @@ plssvd_fit <- function(
 #'
 #' R binding of `pls3_transform`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2c.2 Transform" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2c.2 Transform" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param model,X_new,Y_new,which See the canonical reference.
 #' @return A list of class `c("pls3_scores", "plskit_result")`.
@@ -354,7 +354,7 @@ pls3_transform <- function(
 #'
 #' R binding of `plssvd_transform`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2c.2 Transform" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2c.2 Transform" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param model,X_new,Y_new,which See the canonical reference.
 #' @return A list of class `c("pls3_scores", "plskit_result")`.
@@ -377,7 +377,7 @@ plssvd_transform <- function(
 #'
 #' R binding of `spls3_fit`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "2c.3 Sparse fit" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "2c.3 Sparse fit" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,Y,k,keep_X,keep_Y,pre_standardized_X,pre_standardized_Y,max_iter,tol,weights See the canonical reference.
 #' @return A list of class `c("pls3_result", "plskit_result")`.
@@ -412,7 +412,7 @@ spls3_fit <- function(
 #'
 #' R binding of `pls1_confirmatory_test`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "3.1 Confirmatory omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "3.1 Confirmatory omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,y,k,test_method,args,ci,n_boot,m_rate,level,max_failure_rate,pre_standardized,seed,verbose,weights,max_skip_rate See the canonical reference.
 #' @return A list of class `c("confirmatory_test_result", "plskit_result")`.
@@ -457,7 +457,7 @@ pls1_confirmatory_test <- function(
 #'
 #' R binding of `split_nb_gate`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "3.2 Auto-gate query" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "3.2 Auto-gate query" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,weights See the canonical reference.
 #' @return A list of class `c("split_nb_gate_result", "plskit_result")`.
@@ -476,7 +476,7 @@ split_nb_gate <- function(
 #'
 #' R binding of `pls1_perm_null`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "3.3 Permutation-null engine" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "3.3 Permutation-null engine" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,y,k,n_perm,return_perm_matrix,pre_standardized,seed,verbose,weights See the canonical reference.
 #' @return A list of class `c("perm_null_result", "plskit_result")`.
@@ -509,7 +509,7 @@ pls1_perm_null <- function(
 #'
 #' R binding of `pls3_confirmatory_test`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "3.4 Confirmatory PLS3 omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "3.4 Confirmatory PLS3 omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,Y,k,test_method,args,pre_standardized_X,pre_standardized_Y,seed,verbose See the canonical reference.
 #' @return A list of class `c("confirmatory_test_result", "plskit_result")`.
@@ -542,7 +542,7 @@ pls3_confirmatory_test <- function(
 #'
 #' R binding of `pls1_perm_alpha`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "3.5 Dual coefficients from a Gram matrix" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "3.5 Dual coefficients from a Gram matrix" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param gram,Y,k,n_features See the canonical reference.
 #' @return A list of class `c("perm_alpha_result", "plskit_result")`.
@@ -565,7 +565,7 @@ pls1_perm_alpha <- function(
 #'
 #' R binding of `rotate`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "4.1 Rotation" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "4.1 Rotation" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param model_or_W,method,L,args See the canonical reference.
 #' @return A list of class `c("rotate_result", "plskit_result")`, or `c("pls1_result", "plskit_result")`, depending on the input.
@@ -588,7 +588,7 @@ rotate <- function(
 #'
 #' R binding of `pls1_rotation_stability`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "4.2 Rotation-stability diagnostic" of <https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md>.
+#' "4.2 Rotation-stability diagnostic" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
 #' @param X,y,k,rotation_method,rotation_args,L,n_boot,m_rate,level,pre_standardized,seed,verbose,weights,max_skip_rate See the canonical reference.
 #' @return A list of class `c("rotation_stability_result", "plskit_result")`.

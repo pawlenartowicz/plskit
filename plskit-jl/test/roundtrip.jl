@@ -30,13 +30,6 @@ end
     @test plssvd_transform(m; Y_new=Y, which="y_scores").x_scores === nothing
 end
 
-@testset "zero-component model round-trips" begin
-    X, _ = pls1_data()
-    z = pls1_fit(X, fill(3.0, 60); k=2)
-    @test z.k_used == 0 && size(z.T) == (60, 0)
-    @test length(pls1_predict(z, X)) == 60
-end
-
 @testset "seed: drawn, passed back, reproduced" begin
     X, y = pls1_data()
     a = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,))

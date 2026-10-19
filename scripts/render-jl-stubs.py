@@ -4,7 +4,7 @@
 Reads the plskit-bind registry dump and writes
 `plskit-jl/src/generated.jl`: one stub per registry function, one
 `const <Type> = PlsKitResult{:<Type>}` alias per result type, the
-_docs/python/results.md field order the result conversion uses, and
+docs/python/results.md field order the result conversion uses, and
 the export list.
 
 Julia call rule: a parameter that is required and not
@@ -17,7 +17,7 @@ Usage (from the workspace root):
     python3 scripts/render-jl-stubs.py --dump reg.json [--check]
 
 `--check` also fails when the dumped result fields (names and order)
-differ from `_docs/python/results.md`. Plain python3, no deps.
+differ from `docs/python/results.md`. Plain python3, no deps.
 """
 
 import argparse
@@ -30,8 +30,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "plskit-jl" / "src" / "generated.jl"
-RESULTS_MD = ROOT / "_docs" / "python" / "results.md"
-DOCS_URL = "https://github.com/pawlenartowicz/plskit/blob/main/_docs/python"
+RESULTS_MD = ROOT / "docs" / "python" / "results.md"
+DOCS_URL = "https://github.com/pawlenartowicz/plskit/blob/main/docs/python"
 
 RE_DOC_TYPE_HEADER = re.compile(r"^##\s+`(\w+)`")
 RE_DOC_FIELD_ROW = re.compile(r"^\|\s*`(\w+)`\s*\|")
@@ -143,7 +143,7 @@ def render(dump):
         "# Do not edit by hand: re-run the script (CI fails on drift).\n",
         render_export([f["name"] for f in fns]),
         render_export([t["name"] for t in types]),
-        "# Field order of every result type, as in _docs/python/results.md.\n"
+        "# Field order of every result type, as in docs/python/results.md.\n"
         "const _RESULT_FIELDS = Dict{Symbol,Vector{Symbol}}(\n"
         + "".join(
             f"    :{t['name']} => [{', '.join(':' + f['name'] for f in t['fields'])}],\n"

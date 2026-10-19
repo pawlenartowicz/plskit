@@ -17,7 +17,7 @@
 //! enters here. Per-coordinate CIs would differ: a multi-column coefficient
 //! matrix inherits the rotation/sign indeterminacy and would need procrustes
 //! alignment per resample, which is why they are PLS1-only (see
-//! `_docs/python/results.md`, "Per-coordinate β CIs").
+//! `docs/python/results.md`, "Per-coordinate β CIs").
 //!
 //! # `split_nb` here versus for PLS1
 //! Both sides of the correlation are directions estimated on the training

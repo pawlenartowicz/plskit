@@ -6,7 +6,7 @@ wrapper:
     maturin develop --release
     python examples/fit_and_ci.py
 
-Demonstrates the recommended pipeline (`_docs/python/api.md` §3.1):
+Demonstrates the recommended pipeline (`docs/python/api.md` §3.1):
 
   1. Generate synthetic data with a known PLS1 signal in the first two
      of D=8 columns (everything else is noise).
@@ -19,7 +19,7 @@ Demonstrates the recommended pipeline (`_docs/python/api.md` §3.1):
   4. Print the headline test result, the holdout-correlation CI,
      the per-variable subsampling z for β, the per-coordinate β
      CIs (regression-style diagnostic; see the caveats under "Per-coordinate
-     β CIs" in `_docs/python/results.md`),
+     β CIs" in `docs/python/results.md`),
      and the engine's diagnostic counters.
 
 The CI bundle is computed in an independent subsampling pass that uses
@@ -91,7 +91,7 @@ def main() -> None:
     # The calibrated readouts are `holdout_corr` and, at k=1, `beta_sign_z`;
     # the CI below omits the SE corrections that `beta_sign_z` applies.
     # Centered-scaled CIs may be biased by PLS shrinkage on small m; see
-    # `_docs/python/results.md` caveats; the midpoint is *not* guaranteed to bracket
+    # `docs/python/results.md` caveats; the midpoint is *not* guaranteed to bracket
     # the full-data β_ref.
     print("\nper-coordinate β CI (level=0.95, on the same scale as β_ref):")
     print(f"  {'':<7} {'β_ref':>9}  {'CI lower':>9}  {'CI upper':>9}  {'SE':>7}")

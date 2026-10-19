@@ -15,5 +15,5 @@ A list of class \code{c("preprocess_result", "plskit_result")}.
 \description{
 R binding of \code{preprocess}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
-"1. Preprocessing" of \url{https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md}.
+"1. Preprocessing" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }

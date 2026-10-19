@@ -4,14 +4,8 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/plskit.svg)](https://pypi.org/project/plskit/)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](../LICENSE)
 
-Python wrapper for **plskit**: Partial Least Squares with modern
-inference (`split_exact` and `split_nb` tests, rotation-invariant
-subsampling CIs), backed
-by a Rust engine.
-
-> Part of the **[plskit project](https://github.com/pawlenartowicz/plskit)**:
-> the Rust core, sibling wrappers (R and Julia), shared test
-> corpus, issues, and PRs all live there.
+Python package for [plskit](https://github.com/pawlenartowicz/plskit):
+Partial Least Squares with modern inference, backed by a Rust engine.
 
 ## What is plskit?
 
@@ -30,7 +24,7 @@ plskit is a Partial Least Squares (PLS) library built around four ideas:
   gives the same results, within a bit-near tolerance, in every
   language and on every supported platform.
 - **Speed.** The engine is written in Rust and fits PLS1 with
-  [Improved Kernel PLS](https://github.com/pawlenartowicz/plskit/blob/main/_docs/concepts/PLS1/fit-and-predict.md#how-plskit-computes-it)
+  [Improved Kernel PLS](https://github.com/pawlenartowicz/plskit/blob/main/docs/concepts/PLS1/fit-and-predict.md#how-plskit-computes-it)
   (Dayal and MacGregor 1997), which makes plskit probably the fastest
   PLS package on a single core.
 - **Parallel and RAM-safe.** Inference runs efficiently in parallel
@@ -47,7 +41,7 @@ versions (`>=3.11`). When a wheel is unavailable for your platform,
 pip falls back to building from the source distribution, which
 requires a working Rust toolchain.
 
-## A 60-second look
+## Quickstart
 
 ```python
 import numpy as np
@@ -87,11 +81,8 @@ variant. PLS2 and multi-block PLS are planned.
   `split_nb_gate`, `pls1_perm_null`, `pls1_perm_alpha`.
 - **Interpretive:** `rotate`, `pls1_rotation_stability`.
 
-The [Python API reference](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/api.md)
-documents every function, and the
-[results reference](https://github.com/pawlenartowicz/plskit/blob/main/_docs/python/results.md)
-every result type. Results are frozen dataclasses and carry the inputs
-and seed that produced them.
+Results are frozen dataclasses and carry the inputs and seed that
+produced them.
 
 Errors raised by the Rust engine surface as `plskit.PlsKitError`
 (with `PlsKitInvalidWeights` and `PlsKitResamplingDegenerate`
@@ -103,6 +94,17 @@ All numerical work runs inside the `plskit` Rust crate. The Python
 package converts inputs to `f64`, calls the engine, and wraps the
 result. Bug reports and feature requests belong on the
 [monorepo issue tracker](https://github.com/pawlenartowicz/plskit/issues).
+
+## Documentation
+
+- [Python API reference](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md):
+  every function.
+- [Results reference](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md):
+  every result type.
+
+## License
+
+GPL-3.0-or-later.
 
 ## Citation
 
@@ -116,6 +118,5 @@ result. Bug reports and feature requests belong on the
 }
 ```
 
-## License
-
-GPL-3.0-or-later.
+---
+**Paweł Lenartowicz** — [Freestyler Scientist](https://freestylerscientist.pl) · [GitHub](https://github.com/pawlenartowicz/) · [ORCID](https://orcid.org/0000-0002-6906-7217)

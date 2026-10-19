@@ -181,7 +181,7 @@ pub fn pls1_find_k_optimal(
     crate::fit::with_thread_limit(|| find_k_optimal_impl(x, y, k_max, None, weights, opts))
 }
 
-/// Sparse counterpart of [`pls1_find_k_optimal`] (`_docs/python/api.md`
+/// Sparse counterpart of [`pls1_find_k_optimal`] (`docs/python/api.md`
 /// §2b.3): identical CV / selector machinery with the inner fitter swapped
 /// to the sparse fit at the caller's fixed `keep`. Same selectors, options,
 /// and output shape; `keep = n_features` reproduces the dense function
@@ -193,7 +193,7 @@ pub fn pls1_find_k_optimal(
 /// biases the selected `k` upward under sparsity. This is a deliberate
 /// simplification (not a consequence of `keep` being fixed); BIC values are
 /// not comparable across `keep`. See
-/// `_docs/concepts/PLS1/sparse.md` for the BIC bias.
+/// `docs/concepts/PLS1/sparse.md` for the BIC bias.
 ///
 /// # Errors
 /// Everything `pls1_find_k_optimal` returns, plus `InvalidArgument` for
@@ -529,7 +529,7 @@ pub fn pls1_find_k_sequence(
     crate::fit::with_thread_limit(|| find_k_sequence_impl(x, y, k_max, None, weights, opts))
 }
 
-/// Sparse counterpart of [`pls1_find_k_sequence`] (`_docs/python/api.md`
+/// Sparse counterpart of [`pls1_find_k_sequence`] (`docs/python/api.md`
 /// §2b.3): the same sequential closed test with the inner fitter swapped
 /// to the sparse fit at the caller's fixed `keep`. `keep` threads through
 /// BOTH per-step fit sites — the deflation fit and the per-component
@@ -1409,7 +1409,7 @@ pub struct FindKeepOptimalOutput {
     pub n_eff: f64,
 }
 
-/// Keep-count tuning at fixed `k` (`_docs/python/api.md` §2b.2): sweep a
+/// Keep-count tuning at fixed `k` (`docs/python/api.md` §2b.2): sweep a
 /// logged geometric keep grid over `[1, n_features]`, compute per-fold CV R²
 /// at each grid point, and return the sparsest keep whose mean CV R² is
 /// within 1 SE of the best. Sparsity is tuned inside the training split,

@@ -12,9 +12,8 @@
 //! kwargs and the output is byte-identical across thread counts for a fixed
 //! seed.
 //!
-//! Every arm checks every field its fixture holds, which is at least the
-//! field set the Python arm compares: [`Fixture::finish`] fails a case that
-//! leaves a stored field unchecked, so a field added to the generator
+//! Every arm checks every field its fixture holds: [`Fixture::finish`] fails
+//! a case that leaves a stored field unchecked, so a field added to the generator
 //! cannot go unverified on the Rust side. [`all_manifest_functions_are_covered`]
 //! fails when the manifest gains a function family with no arm here.
 
@@ -1257,11 +1256,9 @@ fn pls3_confirmatory_test_cases_match_corpus() {
         fx.int("k", r.k);
         fx.optional("n_perm", r.n_perm, |fx, v| fx.int("n_perm", v));
         fx.optional("n_splits", r.n_splits, |fx, v| fx.int("n_splits", v));
-        // The generator records `stable_rank` on the `split_nb` case only,
-        // so it is compared where the fixture stores it.
-        if fx.has("stable_rank") {
-            fx.scalar("stable_rank", r.stable_rank.expect("stable_rank"));
-        }
+        fx.optional("stable_rank", r.stable_rank, |fx, v| {
+            fx.scalar("stable_rank", v);
+        });
         fx.scalar("n_eff", r.n_eff);
         fx.int("seed", r.seed);
     });

@@ -229,7 +229,7 @@ impl PlsKitError {
 mod tests {
     use super::*;
 
-    /// Every variant's `code()` is the string documented in `_docs/python/api.md`
+    /// Every variant's `code()` is the string documented in `docs/python/api.md`
     /// ("All codes"); the Python wrapper stamps it on `PlsKitError.code`, so the
     /// strings are a cross-language contract. The index match has no wildcard:
     /// a new variant does not compile until it is given an index, and then fails

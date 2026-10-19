@@ -19,7 +19,7 @@
 //!  * **`leverage_ci_*` on each signal coordinate (`j < 2`) at
 //!    `k ≤ SIGNAL_RANK`.** The interval is a normal-theory bootstrap
 //!    interval centered on the full-data leverage (n-out-of-n refits; see
-//!    `_docs/python/results.md`, "Per-variable readouts"). Noise coordinates
+//!    `docs/python/results.md`, "Per-variable readouts"). Noise coordinates
 //!    and `k > SIGNAL_RANK` are printed but not asserted: a `k = 1` noise
 //!    coordinate's leverage is of order `1/n` and sits at the boundary (its
 //!    interval over-covers by construction), and at `k > SIGNAL_RANK` the

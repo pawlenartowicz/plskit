@@ -274,6 +274,9 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
                 r.n_splits.expect("split_exact reports n_splits"),
             )?),
         )?;
+        if let Some(sr) = r.stable_rank {
+            w.add_f64("stable_rank", &scalar_f64(sr))?;
+        }
         w.add_f64("n_eff", &scalar_f64(r.n_eff))?;
         // The resolved seed is part of the result and gets pinned, matching
         // `cases/pls1_confirmatory_test.rs`.

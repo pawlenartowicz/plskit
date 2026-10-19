@@ -3,18 +3,12 @@
 [![crates.io](https://img.shields.io/crates/v/plskit.svg)](https://crates.io/crates/plskit)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](../LICENSE)
 
-Rust crate for **plskit**: Partial Least Squares with modern
-inference (`split_exact` and `split_nb` tests, rotation-invariant
-subsampling CIs). This
-is the **canonical implementation**: every plskit language wrapper
-(Python, R, and Julia) runs on this crate.
-
-> Part of the **[plskit project](https://github.com/pawlenartowicz/plskit)**:
-> sibling wrappers, shared test corpus, issues, and PRs all live there.
+The Rust engine of [plskit](https://github.com/pawlenartowicz/plskit):
+Partial Least Squares with modern inference.
 
 ## What is plskit?
 
-plskit is a Partial Least Squares (PLS) library built around three ideas:
+plskit is a Partial Least Squares (PLS) library built around four ideas:
 
 - **Modern inference.** Confirmatory tests use split-half held-out
   prediction: `split_exact` is calibrated by permutation, and
@@ -28,8 +22,17 @@ plskit is a Partial Least Squares (PLS) library built around three ideas:
   wrapper runs the Python package, so a fixed `(version, seed, X, y)`
   gives the same results, within a bit-near tolerance, in every
   language and on every supported platform.
-- **Speed.** The engine is written in Rust with parallel resampling,
-  which makes plskit probably the fastest PLS package available.
+- **Speed.** The engine is written in Rust and fits PLS1 with
+  [Improved Kernel PLS](../docs/concepts/PLS1/fit-and-predict.md#how-plskit-computes-it)
+  (Dayal and MacGregor 1997), which makes plskit probably the fastest
+  PLS package on a single core.
+- **Parallel and RAM-safe.** Inference runs efficiently in parallel
+  without blowing up RAM.
+
+## Other languages
+
+The Python, R and Julia packages run on this crate; see the
+[root README](../README.md) for how to install them.
 
 ## Install
 
@@ -37,33 +40,49 @@ plskit is a Partial Least Squares (PLS) library built around three ideas:
 cargo add plskit
 ```
 
-Minimum supported Rust version: **1.85**.
+Minimum supported Rust version: **1.85**. Build in release mode
+(`cargo run --release`): the numerical kernels are far slower under the
+dev profile.
 
-## A 60-second look
+## Quickstart
 
 ```rust
-use plskit::{pls1_fit, Col, FitOpts, KSpec, Mat};
+use plskit::{
+    pls1_confirmatory_test, pls1_fit, pls1_predict, Col, ConfirmatoryArgs,
+    ConfirmatoryTestInput, ConfirmatoryTestOpts, FitOpts, KSpec, Mat, PlsKitError,
+};
 
-// Toy data: replace with your own (n × p) X and length-n y.
-let x = Mat::<f64>::from_fn(200, 20, |i, j| (i as f64).sin() + (j as f64).cos());
-let y = Col::<f64>::from_fn(200, |i| x[(i, 0)] + x[(i, 1)]);
+fn main() -> Result<(), PlsKitError> {
+    // Toy data: replace with your own (n × p) X and length-n y.
+    let noise = |i: usize, j: usize| ((i * 7919 + j * 104_729) as f64).sin();
+    let x = Mat::<f64>::from_fn(200, 20, |i, j| noise(i, j));
+    let y = Col::<f64>::from_fn(200, |i| x[(i, 0)] + x[(i, 1)] + 0.5 * noise(i, 99));
 
-let model = pls1_fit(
-    x.as_ref(),
-    y.as_ref(),
-    KSpec::Fixed(3),
-    None,                  // no observation weights
-    FitOpts::default(),
-)
-.expect("fit failed");
+    // Fit at a fixed number of components and predict.
+    let model = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(3), None, FitOpts::default())?;
+    let y_hat = pls1_predict(&model, x.as_ref())?;
+    println!("beta[0] = {:.3}, y_hat[0] = {:.3}", model.beta[0], y_hat[0]);
 
-println!("β = {:?}", model.beta);
+    // Confirmatory test for any signal; k = 1 with split_exact is recommended.
+    let test = pls1_confirmatory_test(
+        ConfirmatoryTestInput::Raw { x: x.as_ref(), y: y.as_ref(), k: 1, weights: None },
+        ConfirmatoryTestOpts {
+            args: ConfirmatoryArgs::SplitExact { n_perm: 1000, n_splits: 50 },
+            seed: Some(42),
+            ..ConfirmatoryTestOpts::default()
+        },
+    )?;
+    println!("{}: p = {:.4}", test.test_method, test.pvalue);
+    Ok(())
+}
 ```
 
-Confirmatory testing, K-selection, sparse fits, and rotation use the
-same input shape; the public surface is summarized below.
+## Calling convention and public surface
 
-## Public surface
+Every function takes its data as `MatRef<f64>` / `ColRef<f64>` (call
+`.as_ref()` on an owned `Mat` or `Col`), its settings as an options
+struct that implements `Default`, and returns
+`PlsKitResult<T>` with a plain output struct.
 
 Three model families: PLS1 (single continuous `y`), sparse PLS1, and
 PLS3 / PLSSVD (symmetric `X`/`Y` covariance analysis) with a sparse
@@ -80,18 +99,21 @@ variant. PLS2 and multi-block PLS are planned.
 - **Inference:** `pls1_confirmatory_test`, `pls3_confirmatory_test`,
   `split_nb_gate`, `pls1_perm_null`, `pls1_perm_alpha`.
 - **Interpretive:** `rotate`, `pls1_rotation_stability`.
-- **Errors:** `PlsKitError` (with a stable `.code()` for programmatic
-  handling) and the `PlsKitResult<T>` alias.
 
 Each function exports its own options and output types alongside it
 (`FitOpts`, `KSpec`, `Pls1Model`, `Pls3Model`, `ConfirmatoryArgs`,
-`RotateOutput`, ...). The
-[Rust API overview](https://github.com/pawlenartowicz/plskit/blob/main/_docs/rust/api.md)
-groups the surface the same way and shows side-by-side Rust / Python
-calls; [docs.rs/plskit](https://docs.rs/plskit) has every signature.
+`RotateOutput`, ...).
 
-These names mirror the Python, R, and Julia wrappers, so
-multi-language code is easy to read across the family.
+Every error is a `PlsKitError`. Its `.code()` is a stable string, the
+same one the other languages report:
+
+```rust
+match pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(500), None, FitOpts::default()) {
+    Err(e) if e.code() == "k_exceeds_max" => eprintln!("{e}"), // k=500 exceeds maximum 20
+    Err(e) => return Err(e),
+    Ok(model) => { /* ... */ }
+}
+```
 
 ## faer types in the public API
 
@@ -100,27 +122,34 @@ re-exports `Mat`, `MatRef`, `Col`, and `ColRef`, so downstream code can
 `use plskit::{Mat, Col}` without adding `faer` to its own
 `Cargo.toml`. A `faer` minor bump is treated as a `plskit` major bump.
 
-## Canonical implementation
+## Threads and memory
 
-All numerical computation, randomness, parallelism, and resampling
-loops live in this crate. The wrappers are thin FFI shells: they
-convert their language's array types to `f64` slices, call into the
-engine, and wrap the result. If you want bit-near identical results
-from Python, R, or Julia, this is what they are calling.
+plskit runs its parallel work on the caller's current Rayon pool, so a
+call made inside `rayon::ThreadPool::install` uses that pool's threads.
+The environment variable `PLSKIT_NUM_THREADS` caps the thread count, and
+`PLSKIT_MEMORY_BUDGET` sets the memory budget of the resampling loops
+(default 2 GiB). Results depend on neither. See
+[Threads and memory](../docs/concepts/threads.md).
 
 ## Versioning
 
-The engine and each language wrapper carry their own version number,
-and **the same version number always means the same features**:
-`plskit-rs 0.6.0` and `plskit (Python) 0.6.0` ship the same API. The
-Python, R, or Julia version may lag behind the Rust engine while its
-surface is being built out, but it can never run ahead of it. Releases
-use `vX.Y.Z` for the engine and `vX.Y.Z-py` / `-r` / `-jl` for the
-wrappers.
+A `faer` minor bump is a `plskit` major bump. Function names, argument
+names and output fields are stable across versions, but defaults,
+algorithms and implementation details may shift numbers between
+releases: pin the version (`plskit = "=0.7.1"`) if you need numerical
+reproducibility. The [root README](../README.md#versioning) explains how
+the engine and wrapper versions relate.
 
-API wiring (function names, argument names, result fields) is stable
-across versions; pin the version if you need numerical
-reproducibility.
+## Documentation
+
+- [docs.rs/plskit](https://docs.rs/plskit): every signature.
+- [Rust pages](../docs/rust/index.md): installation, quickstart, and an
+  [API overview](../docs/rust/api.md) that groups the surface as above
+  and shows side-by-side Rust / Python calls.
+
+## License
+
+GPL-3.0-or-later.
 
 ## Citation
 
@@ -134,6 +163,5 @@ reproducibility.
 }
 ```
 
-## License
-
-GPL-3.0-or-later.
+---
+**Paweł Lenartowicz** — [Freestyler Scientist](https://freestylerscientist.pl) · [GitHub](https://github.com/pawlenartowicz/) · [ORCID](https://orcid.org/0000-0002-6906-7217)

@@ -13,7 +13,7 @@
 //! single SVD, so it alternates per component with deflation between
 //! components. Its saliences are unit-norm but not orthogonal, and its
 //! `singular_values` are the per-component `u'Av` on the deflated `A`, not
-//! singular values of `X̃'Ỹ`. See `_docs/concepts/PLS3/sparse.md`.
+//! singular values of `X̃'Ỹ`. See `docs/concepts/PLS3/sparse.md`.
 
 use faer::linalg::matmul::matmul;
 use faer::{Accum, Col, ColRef, Mat, MatRef, Par};
@@ -725,11 +725,11 @@ pub(crate) fn lv1_bytes(p: usize, q: usize) -> usize {
 /// - `PlsKitError::DimensionMismatch` when `y.nrows() != x.nrows()`
 /// - `PlsKitError::InvalidArgument` when `k == 0`, or when `weights` is `Some`
 ///   (observation weights are not implemented for this family; see
-///   "Observation weights are refused" in `_docs/concepts/PLS3/fit-and-transform.md`)
+///   "Observation weights are refused" in `docs/concepts/PLS3/fit-and-transform.md`)
 /// - `PlsKitError::KExceedsMax` when `k > min(n_features, n_targets)`
 /// - `PlsKitError::InvalidArgument` when X and Y have zero rows (checked
 ///   after `k`; one row is not an error, see "Truncation" in
-///   `_docs/concepts/PLS3/fit-and-transform.md`)
+///   `docs/concepts/PLS3/fit-and-transform.md`)
 /// - `PlsKitError::NonFiniteInput` when X or Y contains NaN/inf
 /// - `PlsKitError::Internal` when faer's SVD fails to converge
 ///
@@ -1200,8 +1200,8 @@ fn sparse_components(
 /// `u_i σ_i v_i'`, and therefore `X'Y`, exactly where it was, and it negates
 /// both held-out score vectors at once, so the held-out LV correlation is
 /// unchanged and the confirmatory test needs no alignment step (see
-/// `_docs/concepts/PLS3/fit-and-transform.md` and
-/// `_docs/concepts/PLS3/inference.md`).
+/// `docs/concepts/PLS3/fit-and-transform.md` and
+/// `docs/concepts/PLS3/inference.md`).
 fn pin_component_signs(u: &mut Mat<f64>, v: &mut Mat<f64>) {
     for a in 0..u.ncols() {
         let mut best = 0usize;
@@ -1223,7 +1223,7 @@ fn pin_component_signs(u: &mut Mat<f64>, v: &mut Mat<f64>) {
 
 /// Alias for [`pls3_fit`] under the SVD-PLS name the chemometrics
 /// literature uses. Same function, same arguments, same result: documented
-/// as an alias in `_docs/python/api.md` §2c.1, mirroring how `spls1_fit` delegates to
+/// as an alias in `docs/python/api.md` §2c.1, mirroring how `spls1_fit` delegates to
 /// `pls1_fit` in `fit.rs`.
 ///
 /// # Errors
@@ -1288,7 +1288,7 @@ pub struct Pls3Scores {
 /// `pls1_predict` requires.
 ///
 /// PLS3 is symmetric, so there is no regression `predict` here: neither
-/// block is the outcome (see "No `predict`, by design" in `_docs/concepts/PLS3/index.md`).
+/// block is the outcome (see "No `predict`, by design" in `docs/concepts/PLS3/index.md`).
 ///
 /// # Shapes
 /// - `x_new`: `(n_new, n_features)` — `n_features` must equal `model.u_saliences.nrows()`
@@ -1416,7 +1416,7 @@ pub fn pls3_transform(
     Ok(Pls3Scores { x_scores, y_scores })
 }
 
-/// Alias for [`pls3_transform`] under the SVD-PLS name (`_docs/python/api.md` §2c.2).
+/// Alias for [`pls3_transform`] under the SVD-PLS name (`docs/python/api.md` §2c.2).
 ///
 /// # Errors
 /// Everything [`pls3_transform`] returns.
@@ -2215,7 +2215,7 @@ mod tests {
     }
 
     /// Rank-deficient Y (the second case in the "Truncation" section of
-    /// `_docs/concepts/PLS3/fit-and-transform.md`): a Y block holding
+    /// `docs/concepts/PLS3/fit-and-transform.md`): a Y block holding
     /// subscales plus their total has rank `q − 1`, so `k = q` asks for a
     /// component that does not exist. Its σ lands near `eps·σ₁` (above the
     /// absolute 1e-14 once `σ₁` is past ~50; 2.3e-13 here) and must be
@@ -2706,7 +2706,7 @@ mod tests {
     /// Layouts of a standardized X agree to rounding, not bit for bit: the
     /// fits form their products from X in X's own layout ("The implicit
     /// route" on `Prepared`). `Agree::Corpus(1e-10)` is the corpus array
-    /// tolerance, `1e-10 + 1e-14 · |value|`, which `_docs/python/api.md`
+    /// tolerance, `1e-10 + 1e-14 · |value|`, which `docs/python/api.md`
     /// (Conventions) promises across layouts.
     const X_LAYOUT_TOL: f64 = 1e-10;
 
@@ -2783,7 +2783,7 @@ mod tests {
     /// in `pls1_fit`, whose row-count check also comes last. One row is
     /// not an error: centering leaves `n − 1 = 0` dimensions, so the
     /// standardizing fit truncates to `k_used = 0` with finite moments
-    /// ("Truncation" in `_docs/concepts/PLS3/fit-and-transform.md`).
+    /// ("Truncation" in `docs/concepts/PLS3/fit-and-transform.md`).
     #[test]
     fn zero_rows_error_and_one_row_truncates() {
         type Fit =

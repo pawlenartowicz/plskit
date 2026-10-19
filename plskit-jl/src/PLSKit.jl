@@ -3,7 +3,7 @@
 
 Partial Least Squares with modern inference, from Julia. PLSKit runs the
 Python `plskit` package through PythonCall.jl: every function, argument
-name and result field is the Python one (see `_docs/julia/`).
+name and result field is the Python one (see `docs/julia/`).
 """
 module PLSKit
 

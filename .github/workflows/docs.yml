@@ -1,0 +1,39 @@
+name: Docs
+
+# Publishes docs/ to the Leyline vault `plskit` (pawlenartowicz.pl/plskit/)
+# on every push to main that touches it, without a tag. That moves the
+# vault's HEAD, which the site lists as "latest (live)". release.yml's
+# publish-docs job publishes the same tree tagged vX.Y.Z on engine tags.
+# Needs the variable LEYLINE_HOST and the secret LEYLINE_DOCS_KEY.
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish docs (pawlenartowicz.pl/plskit, live)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Mirrors publish-docs in release.yml (which adds ?tag=) — change together.
+      - name: Publish docs vault
+        env:
+          LEYLINE_HOST: ${{ vars.LEYLINE_HOST }}
+          LEYLINE_KEY: ${{ secrets.LEYLINE_DOCS_KEY }}
+        run: |
+          set -euo pipefail
+          tar czf - -C docs . \
+           | curl -fsS -X POST \
+             "https://$LEYLINE_HOST/_leyline/api/v1/plskit/publish" \
+             -H "Authorization: Bearer $LEYLINE_KEY" \
+             -H "Content-Type: application/gzip" --data-binary @-
