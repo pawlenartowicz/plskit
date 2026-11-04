@@ -2,16 +2,16 @@
 //! engine models (`from_record`).
 //!
 //! `from_record` reads only the fields the engine model needs and ignores
-//! the rest (a result also carries `selection_result`, `rotation_spec`,
+//! the rest (a result also carries `selection_result`,
 //! ...). A missing or mistyped needed field raises `invalid_argument`.
 
 use std::collections::BTreeMap;
 
 use faer::{Col, Mat};
 use plskit::{
-    CIScalar, ConfirmatoryCI, ConfirmatoryTestOutput, FindKOptimalOutput, FindKSequenceOutput,
-    FindKeepOptimalOutput, PermAlphaOutput, PermNullOutput, Pls1Model, Pls3Model, Pls3Scores,
-    RotationStabilityOutput,
+    CIScalar, ConfirmatoryCI, ConfirmatoryTestOutput, FactorsOutput, FindKOptimalOutput,
+    FindKSequenceOutput, FindKeepOptimalOutput, PcaBasisOutput, PermAlphaOutput, PermNullOutput,
+    Pls1Model, Pls3Model, Pls3Scores, ProfilesFindNOutput,
 };
 
 use crate::coerce;
@@ -34,12 +34,8 @@ pub(crate) fn opt<T>(o: Option<T>, f: impl FnOnce(T) -> Value<'static>) -> Value
     o.map_or(Value::Null, f)
 }
 
-/// `PLS1Result` from an engine model plus the two wrapper-level fields.
-pub(crate) fn pls1_model(
-    m: &Pls1Model,
-    rotation_spec: Value<'static>,
-    selection_result: Value<'static>,
-) -> Record<'static> {
+/// `PLS1Result` from an engine model plus the wrapper-level `selection_result`.
+pub(crate) fn pls1_model(m: &Pls1Model, selection_result: Value<'static>) -> Record<'static> {
     Record::typed("PLS1Result")
         .field("T", mat(&m.t_scores))
         .field("P", mat(&m.p_loadings))
@@ -52,7 +48,6 @@ pub(crate) fn pls1_model(
         .field("pre_standardized", Value::Bool(m.pre_standardized))
         .field("weights", opt(m.weights.as_ref(), col))
         .field("n_eff", Value::F64(m.n_eff))
-        .field("rotation_spec", rotation_spec)
         .field("selection_result", selection_result)
         .field("keep", opt(m.keep, count))
 }
@@ -82,17 +77,17 @@ pub(crate) fn model_record<'a>(
 pub(crate) fn need<'r, 'a>(r: &'r Record<'a>, key: &str) -> Result<&'r Value<'a>, BindError> {
     match r.get(key) {
         None => Err(BindError::invalid_argument(format!(
-            "model is missing field '{key}'"
+            "result is missing field '{key}'"
         ))),
         Some(Value::Null) => Err(BindError::invalid_argument(format!(
-            "model field '{key}' is null"
+            "result field '{key}' is null"
         ))),
         Some(v) => Ok(v),
     }
 }
 
 fn bad(key: &str, why: &str) -> BindError {
-    BindError::invalid_argument(format!("model field '{key}' {why}"))
+    BindError::invalid_argument(format!("result field '{key}' {why}"))
 }
 
 pub(crate) fn need_mat(r: &Record<'_>, key: &str) -> Result<Mat<f64>, BindError> {
@@ -275,32 +270,6 @@ pub(crate) fn perm_alpha(out: PermAlphaOutput) -> Record<'static> {
         .field("n_features", count(n_features))
 }
 
-/// `RotationStabilityResult`.
-pub(crate) fn rotation_stability(out: RotationStabilityOutput) -> Record<'static> {
-    Record::typed("RotationStabilityResult")
-        .field("method", Value::text(&out.method))
-        .field("n_boot", count(out.n_boot))
-        .field("m", count(out.m))
-        .field("m_rate", Value::F64(out.m_rate))
-        .field("level", Value::F64(out.level))
-        .field("seed", Value::U64(out.seed))
-        .field("variance_ratio", ci_scalar(&out.variance_ratio))
-        .field(
-            "variance_ratio_per_axis",
-            Value::List(out.variance_ratio_per_axis.iter().map(ci_scalar).collect()),
-        )
-        .field("variance_unrot", Value::F64(out.variance_unrot))
-        .field("variance_rot", Value::F64(out.variance_rot))
-        .field(
-            "variance_unrot_per_axis",
-            floats(out.variance_unrot_per_axis),
-        )
-        .field("variance_rot_per_axis", floats(out.variance_rot_per_axis))
-        .field("degenerate_baseline", Value::Bool(out.degenerate_baseline))
-        .field("n_boot_finite", count(out.n_boot_finite))
-        .field("n_eff", Value::F64(out.n_eff))
-}
-
 pub(crate) fn score_map(m: &BTreeMap<usize, f64>) -> Value<'static> {
     Value::IntMap(
         m.iter()
@@ -356,8 +325,8 @@ pub(crate) fn find_keep_optimal(r: &FindKeepOptimalOutput) -> Record<'static> {
         .field("n_eff", Value::F64(r.n_eff))
 }
 
-/// `PLS3Result`.
-pub(crate) fn pls3_model(m: &Pls3Model) -> Record<'static> {
+/// `PLS3Result`; `rotation_spec` is null until the model is rotated.
+pub(crate) fn pls3_model(m: &Pls3Model, rotation_spec: Value<'static>) -> Record<'static> {
     Record::typed("PLS3Result")
         .field("U", mat(&m.u_saliences))
         .field("V", mat(&m.v_saliences))
@@ -384,10 +353,11 @@ pub(crate) fn pls3_model(m: &Pls3Model) -> Record<'static> {
                 )
             }),
         )
+        .field("rotation_spec", rotation_spec)
 }
 
-/// `Pls3Model` from a `PLS3Result` record. `converged` / `n_iter` are not
-/// read: `pls3_transform`, the only consumer, never uses them.
+/// `Pls3Model` from a `PLS3Result` record. `rotation_spec`, `converged` and
+/// `n_iter` are not read.
 pub(crate) fn pls3_model_from_record(r: &Record<'_>) -> Result<Pls3Model, BindError> {
     Ok(Pls3Model {
         u_saliences: need_mat(r, "U")?,
@@ -414,4 +384,53 @@ pub(crate) fn pls3_scores(s: &Pls3Scores) -> Record<'static> {
     Record::typed("PLS3Scores")
         .field("x_scores", opt(s.x_scores.as_ref(), mat))
         .field("y_scores", opt(s.y_scores.as_ref(), mat))
+}
+
+/// `FactorsResult`; `rotation_spec` is null until the factors are rotated.
+pub(crate) fn factors(f: &FactorsOutput, rotation_spec: Value<'static>) -> Record<'static> {
+    Record::typed("FactorsResult")
+        .field("F", mat(&f.f))
+        .field("W", mat(&f.w))
+        .field("size", col(&f.size))
+        .field("coef", col(&f.coef))
+        .field("pre_standardized", Value::Bool(f.pre_standardized))
+        .field("rotation_spec", rotation_spec)
+}
+
+/// `FactorsOutput` from a `FactorsResult` record. `rotation_spec` is not read.
+pub(crate) fn factors_from_record(r: &Record<'_>) -> Result<FactorsOutput, BindError> {
+    Ok(FactorsOutput {
+        f: need_mat(r, "F")?,
+        w: need_mat(r, "W")?,
+        size: need_col(r, "size")?,
+        coef: need_col(r, "coef")?,
+        pre_standardized: need_bool(r, "pre_standardized")?,
+    })
+}
+
+/// `PCABasisResult`.
+pub(crate) fn pca_basis(out: &PcaBasisOutput) -> Record<'static> {
+    Record::typed("PCABasisResult")
+        .field("V", mat(&out.v))
+        .field("s", col(&out.s))
+}
+
+/// `ProfilesFindNResult`.
+pub(crate) fn profiles_find_n(out: &ProfilesFindNOutput) -> Record<'static> {
+    Record::typed("ProfilesFindNResult")
+        .field("n_star", count(out.n_star))
+        .field(
+            "n_grid",
+            Value::IntVec(
+                out.n_grid
+                    .iter()
+                    .map(|&v| i64::try_from(v).unwrap_or(i64::MAX))
+                    .collect(),
+            ),
+        )
+        .field("r2_mean", Value::Vec(VecF64::Owned(out.r2_mean.clone())))
+        .field("r2_se", Value::Vec(VecF64::Owned(out.r2_se.clone())))
+        .field("K_star", count(out.k_star))
+        .field("n_failed_folds", count(out.n_failed_folds))
+        .field("seed", Value::U64(out.seed))
 }

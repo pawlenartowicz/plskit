@@ -43,8 +43,7 @@ pub enum KSpec {
 /// `ConfirmatoryMethod::SplitNb` and `ConfirmatoryMethod::SplitExact`, the
 /// cross-validation fold fits of `pls1_find_k_optimal`,
 /// `spls1_find_k_optimal` and `spls1_find_keep_optimal`, and the subsample
-/// and bootstrap fits of the confirmatory CI (`ConfirmatoryTestOpts::ci`)
-/// and of `pls1_rotation_stability`. The fold fits of
+/// and bootstrap fits of the confirmatory CI (`ConfirmatoryTestOpts::ci`). The fold fits of
 /// `ConfirmatoryMethod::RawPerm`, the permutation refits of
 /// `pls1_perm_null` and the per-split fits of `pls3_confirmatory_test` are
 /// each sequential (the resamples themselves can still run in parallel).
@@ -54,8 +53,7 @@ pub enum KSpec {
 // `signal_test::SPLIT_FIT_PAR`, which also covers the second passes of the
 // K = 1 no-refit routes and the first step `ŝ₁ = Xs'ys` of `split_exact`'s
 // Gram-p arm (formed under the `Par` that fit resolves); the two
-// `find_k` fold fits; `subsample::fit_rows`;
-// `rotation_stability::fit_subsample`. `Seq`: the `raw_perm` fold fit
+// `find_k` fold fits; `subsample::fit_rows`. `Seq`: the `raw_perm` fold fit
 // (`signal_test::cv_fold_contribution`), its K = 1 Gram route's second
 // pass and the Gram-p arm's first step on its folds; the permutation
 // refits of `pls1_perm_null` and the Gram-p arm's first step there; the
@@ -2992,9 +2990,6 @@ mod boundary_tests {
             pls1_find_k_optimal, pls1_find_k_sequence, spls1_find_keep_optimal,
         };
         use crate::perm_null::{PermNullOpts, pls1_perm_null};
-        use crate::rotation_stability::{
-            RotationStabilityMethod, RotationStabilityOpts, pls1_rotation_stability,
-        };
         use crate::signal_test::{
             ConfirmatoryTestInput, ConfirmatoryTestOpts, pls1_confirmatory_test,
         };
@@ -3022,22 +3017,6 @@ mod boundary_tests {
                         ..Default::default()
                     },
                     seed,
-                )),
-            ),
-            (
-                "rotation_stability".to_owned(),
-                show(pls1_rotation_stability(
-                    x,
-                    y,
-                    k,
-                    RotationStabilityMethod::Varimax(crate::rotate::VarimaxArgs::default()),
-                    None,
-                    w,
-                    RotationStabilityOpts {
-                        n_boot: 100,
-                        seed,
-                        ..Default::default()
-                    },
                 )),
             ),
             (
@@ -3164,16 +3143,12 @@ mod boundary_tests {
     /// engines whose own tests pin layout agreement. The
     /// Python wrapper hands each its X in place (C or F order).
     /// `preprocess` / `preprocess_block` and the `split_nb` gate give the
-    /// same bits on every layout. `pls1_predict` and
-    /// `pls1_rotation_stability` (whose reference fits read X in place)
-    /// agree to `FIT_LAYOUT_TOL`.
+    /// same bits on every layout. `pls1_predict`, `factors`, `pca_basis` and
+    /// `profiles_find_n` agree to `FIT_LAYOUT_TOL`.
     #[test]
     fn x_taking_entries_agree_across_layouts() {
         use crate::preprocess::{
             PreprocessBlockInput, PreprocessInput, preprocess, preprocess_block,
-        };
-        use crate::rotation_stability::{
-            RotationStabilityMethod, RotationStabilityOpts, pls1_rotation_stability,
         };
         use crate::signal_test::split_nb_gate;
         let agree = Agree::Corpus(FIT_LAYOUT_TOL);
@@ -3222,28 +3197,30 @@ mod boundary_tests {
                 Ok(col_vals(crate::predict::pls1_predict(&model, xv)?.as_ref()))
             })
             .unwrap();
-            assert_layout_agree(&f.x, &what("pls1_rotation_stability"), agree, |xv| {
-                let r = pls1_rotation_stability(
-                    xv,
-                    f.y.as_ref(),
-                    2,
-                    RotationStabilityMethod::Varimax(crate::rotate::VarimaxArgs::default()),
-                    None,
-                    w,
-                    RotationStabilityOpts {
-                        n_boot: 100,
-                        seed: Some(5),
-                        ..Default::default()
-                    },
-                )?;
-                let ci = |c: &crate::subsample::CIScalar| [c.point, c.lower, c.upper, c.sd];
-                let mut v = ci(&r.variance_ratio).to_vec();
-                v.extend(r.variance_ratio_per_axis.iter().flat_map(ci));
-                v.extend([r.variance_unrot, r.variance_rot, r.n_eff]);
-                v.extend(&r.variance_unrot_per_axis);
-                v.extend(&r.variance_rot_per_axis);
+            assert_layout_agree(&f.x, &what("factors"), agree, |xv| {
+                let out = crate::factors::factors(model.coef.as_ref(), xv, 2, false)?;
+                let mut v = mat_vals(out.f.as_ref());
+                v.extend(col_vals(out.size.as_ref()));
+                Ok(v)
+            })
+            .unwrap();
+            assert_layout_agree(&f.x, &what("pca_basis"), agree, |xv| {
+                let out = crate::pca::pca_basis(xv, false)?;
+                let mut v = mat_vals(out.v.as_ref());
+                v.extend(col_vals(out.s.as_ref()));
+                Ok(v)
+            })
+            .unwrap();
+            assert_layout_agree(&f.x, &what("profiles_find_n"), agree, |xv| {
+                let opts = crate::factors::ProfilesFindNOpts {
+                    seed: Some(3),
+                    ..Default::default()
+                };
+                let out = crate::factors::profiles_find_n(xv, f.y.as_ref(), 1, 9, opts)?;
+                let mut v = out.r2_mean;
+                v.extend(out.r2_se);
                 #[allow(clippy::cast_precision_loss)]
-                v.push(r.n_boot_finite as f64);
+                v.extend([out.n_star as f64, out.k_star as f64]);
                 Ok(v)
             })
             .unwrap();

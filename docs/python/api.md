@@ -30,7 +30,7 @@ a function or read its result.
   corpus tolerance, `1e-10 + 1e-14·|value|`), not bit for bit, and a
   fit sitting on its truncation floor can stop at a different
   `k_used`. The last bits move with the layout in `pls1_fit`,
-  `spls1_fit`, `pls1_predict`, `pls1_rotation_stability`,
+  `spls1_fit`, `pls1_predict`,
   `pls1_confirmatory_test` with `ci`, `pls1_find_k_optimal` and
   `spls1_find_k_optimal` with every selector, `spls1_find_keep_optimal`,
   the `selection` of `pls1_fit(k="optimal")` and, without
@@ -103,6 +103,18 @@ forwarded to the k-selection call when `k` is a string);
 convergence tolerance or iteration cap to set: each component of the
 PLS1 (NIPALS) model comes from a single pass.
 Rotation is post-fit; see `rotate`.
+The columns of `W` are orthonormal only up to rounding, and the
+rounding grows with `k` on wide `X`, as in any Krylov method without
+reorthogonalization: on random data `max|WᵀW − I|` was about 5e-11 at
+`n = 100, D = 300, k = 20`, 2e-4 at `n = 100, D = 800, k = 25` and 5e-7 at
+`n = 300, D = 800, k = 40`. `coef`, `beta` and predictions are not
+affected (relative error within 2e-14 of an extended-precision fit in
+those cells). Reorthogonalizing would make `WᵀW = I` hold to 1e-15 but
+would not bring `W` closer to the exact one: at `D = 800, k = 25` it is
+off by 2e-5 to 4e-5 either way, because the late components are that
+sensitive to rounding. Leverage
+(`W(WᵀW)⁻¹Wᵀ`) does not assume `WᵀW = I`; anything that does, such as
+`rotate(m.W, ...)`, inherits the drift.
 **returns:** `PLS1Result`. When `k="sequence"` and
 `pls1_find_k_sequence` returns `k_star=0` (no component rejected at
 `alpha`), raises `PlsKitError(code="sequence_no_rejection")`. Callers
@@ -383,8 +395,9 @@ rotation-invariant CIs.
 - `ci` (bool, default `False`) — when `True`, runs an independent
   resampling pass after the headline test and populates `result.ci`.
   Each of the `n_boot` replicates refits on a size-`m` subsample (for
-  `holdout_corr` and β) and on an n-out-of-n bootstrap resample (for
-  leverage).
+  β), on an n-out-of-n bootstrap resample (for leverage) and on a
+  random half of the rows (for `holdout_corr`, scored on the other
+  half). Refused (`invalid_argument`) when `⌊n/2⌋ < k + 2`.
 - `n_boot` (int, default `None`: the engine default, `1000`; must be
   `≥ 100`); `m_rate` (float, default `None`: the engine default, `0.7`;
   `0.5 < m_rate < 0.95`); `level` (float, default `None`: the engine
@@ -440,7 +453,8 @@ same corrected replicates; at `k=1` it is roughly half-normal
 for a variable whose population PLS coefficient is 0, so it can be read
 against 1.96, without multiplicity correction. It is not calibrated at
 `k ≥ 2`; `pls1_perm_null` (§3.3) gives permutation-calibrated
-per-variable tests at any `k`. `leverage_ci_*` describes how much each
+per-variable tests at any `k` (at `k ≥ 2` conservative and low-powered
+on collinear `X`). `leverage_ci_*` describes how much each
 variable contributes to the fitted subspace; it brackets the expected
 leverage of a size-`n` fit, which at small `n/D` sits below the
 large-sample leverage of signal variables. See [results](results.md)
@@ -474,6 +488,9 @@ fMRI / NIRS scale.
 value, not `None`); `return_perm_matrix`
 (bool, default `False`); `pre_standardized`; `seed`;
 `verbose`; `weights`.
+At `k = 1` the per-variable null is that of `X_jᵀy` (see
+[results](results.md), `PermNullResult`); at `k ≥ 2` it is a refit on
+permuted `y`, which keeps its level but loses power on collinear `X`.
 **returns:** `PermNullResult`. Pair with
 `pls1_confirmatory_test(test_method="split_exact")` as an omnibus gate before
 spending the `n_perm` permutation budget.
@@ -636,58 +653,121 @@ not bit for bit.
 ### 4.1 Rotation
 
 **function:** `rotate`
-**need:** simple-structure rotation of `W`. Can be called on a fitted
-result to stamp a `RotationSpec`, or on a bare `W` matrix.
-**arguments:** `model_or_W` (a PLS1Result, or a 2-D `W` read like any
-other array argument: an `np.ndarray`, a nested list, ...)
-**options:** `method` (`"varimax"`; default `"varimax"`); `args` (dict
-of method-specific kwargs); `L` (loading basis on which simplicity is
-computed; default identity → varimax on `W` directly).
+**need:** rotate a `FactorsResult`, a `PLS3Result` or a bare matrix toward simple structure. See [Profiles](../concepts/PLS1/profiles.md) for factors and [PLS3 fit and transform](../concepts/PLS3/fit-and-transform.md#after-rotate) for a `PLS3Result`.
 
-**args by method:**
+| Argument | Type | Meaning |
+|---|---|---|
+| `model_or_W` | `FactorsResult`, `PLS3Result` or matrix | what gets rotated |
+| `X` | matrix, optional | the data that gives the target `L = Xs W`. For a `FactorsResult` it must be the rows the factors came from. For a `PLS3Result` it selects the fit's stored `x_scores` as the target |
+| `method` | `"varimax"` | the only method; default `"varimax"` |
+| `args` | dict | varimax settings: `max_iter` (default `50`), `tol` (default `1e-8`), `kaiser_normalize` (default `True`) |
+| `L` | matrix, optional | a target of your own |
+| `pre_standardized` | bool or `None` | how `X` is standardized. `None` follows the `FactorsResult`, or is `False` for a matrix. Refused for a `PLS3Result` |
 
-- `"varimax"` — `max_iter` (default `50`), `tol` (default `1e-8`),
-  `kaiser_normalize` (default `True`).
+With neither `X` nor `L`, the target is the weights themselves (`W`, or `U` of a `PLS3Result`).
 
-**Pluggable `L`:** the loading basis on which simple-structure is
-computed. Default identity rotates `W` directly; passing an alternative
-`L` is the strict-superset extension over SSD's `mpls_fit`.
+**returns:** `RotateResult` for a matrix. For a `FactorsResult` or a `PLS3Result`, a new result of the same type with `rotation_spec` set. See [results](results.md).
 
-**returns:** `RotateResult` when called on `np.ndarray`; a new
-`PLS1Result` (with `.rotation_spec` populated) when called on
-`PLS1Result`. Re-rotation of an already-rotated `PLS1Result` raises
-`PlsKitError(code="already_rotated")`; re-rotation is not supported.
+**refused:** `X` together with `L`, `pre_standardized` without `X`, and `pre_standardized` with a `PLS3Result` raise `invalid_argument`. A result that already has a `rotation_spec` raises `already_rotated`. A `PLS1Result` raises `invalid_argument`: use `profiles`, or `rotate(m.W, ...)` for the weights alone. `X` whose column count is not the row count of `W` raises `shape_mismatch`, and `X` with other rows than a `PLS3Result` was fit on raises `invalid_input`. A sparse `PLS3Result` raises a `UserWarning`.
 
-### 4.2 Rotation-stability diagnostic
+### 4.2 PCA basis
 
-**function:** `pls1_rotation_stability`
-**need:** standalone subsampling diagnostic: does rotating `W` make the
-axes more or less replicable across resamples? Each resample's `W`
-(unrotated, and rotated) is aligned to the full-data reference by a
-signed permutation of its columns, and the squared residuals give an
-axis variance `V_unrot` and `V_rot`. The headline is
-`variance_ratio = V_rot / V_unrot` (a `CIScalar` with a paired-bootstrap
-percentile CI), plus one ratio per axis in `variance_ratio_per_axis`.
-A ratio below 1 means rotation made the axes more stable.
-**arguments:** `X`, `y`, `k`
-**options:** `rotation_method` (`"varimax"`; default `"varimax"`);
-`rotation_args` (dict); `L` (loading basis; default identity);
-`n_boot` (int, default `None`: the engine default, `1000`, `≥ 100`);
-`m_rate` (float, default `None`: the engine default, `0.7`,
-`0.5 < m_rate < 0.95`); `level` (float, default `None`: the engine
-default, `0.95`, `0.5 ≤ level ≤ 0.99`); `pre_standardized`; `weights`;
-`max_skip_rate` (float, default `None`: the engine default, `0.01`);
-`seed`; `verbose`. `n_boot`, `m_rate` and
-`level` are recorded on the result as the resolved value, not `None`.
+**function:** `pca_basis`
+**need:** the right singular vectors of standardized `X`, as the basis that `factors` splits a coefficient vector in.
+**arguments:** `X`
+**options:** `pre_standardized` (default `False`; if `True`, `X` is used as given).
 
-**Constraints on k:** `2 ≤ k ≤ 7`. `k = 1` is rejected because
-rotation is the identity on a 1-D subspace, making the diagnostic
-meaningless. `k > 7` is rejected because the discrete
-signed-permutation alignment used internally enumerates `2^k * k!`
-candidates per replicate; at `k = 8` that is 10,321,920 candidates
-per replicate, which is not tractable within the bootstrap loop.
+It keeps the components with singular value `s > 1e-10 · s[0]`, so `V` has one column per unit of rank of `X`. Column signs are arbitrary, and `factors` does not depend on them. Non-finite values in `X`, every column of `X` constant (unless `pre_standardized`), or all singular values zero raise `invalid_input`.
 
-**returns:** `RotationStabilityResult`. See [results](results.md).
+**returns:** `PCABasisResult`. See [results](results.md).
+
+### 4.3 Factors
+
+**function:** `factors`
+**need:** split one PLS1 coefficient vector into `n` orthogonal parts that add up to it. See [Profiles](../concepts/PLS1/profiles.md).
+
+| Argument | Type | Meaning |
+|---|---|---|
+| `model_or_coef` | `PLS1Result` or vector `(D,)` | a fit from `pls1_fit` or `spls1_fit`, or `model.coef`. Not `model.beta` |
+| `X` | matrix `(N, D)` | the data the fit came from |
+| `n` | int | number of factors, from `1` to `K`, the rank of `X` after the variables with a zero `coef` are left out, plus one when `coef` has a part outside its row space (see below) |
+| `pre_standardized` | bool or `None` | `True` uses `X` as given, `False` standardizes it. `None` follows the fit, or is `False` for a vector |
+
+```python
+m = plskit.pls1_fit(X, y, k=3)
+f = plskit.factors(m, X, n=3)
+f = plskit.rotate(f, X)
+f.F.sum(axis=1)                  # equals m.coef
+```
+
+When `coef` has a part outside the row space of the standardized kept columns of `X` (for example a sparse fit with more kept columns than `N − 1`), `factors` appends that part, normalized, as one extra last direction of the basis, so it lands in the last factor.
+
+**returns:** `FactorsResult`, not rotated, in block order. See [results](results.md).
+
+**refused:** these raise `invalid_input`: non-finite values in `X` or `coef`; every kept column of `X` constant (unless `pre_standardized`); `n` outside `[1, K]`; a `coef` that is all zero; a `PLS1Result` with `weights`, with no component, or fitted on a different number of rows than `X` has; a block with no signal, where the message names the block's components. A `PLS3Result` raises `invalid_argument`. A `coef` whose length differs from the columns of `X` raises `shape_mismatch`.
+
+### 4.4 Choosing n
+
+**function:** `profiles_find_n`
+**need:** choose `n` by repeated cross-validation. See [Profiles](../concepts/PLS1/profiles.md#choosing-n).
+
+| Argument | Type | Meaning |
+|---|---|---|
+| `X`, `y` | matrix, vector | the data |
+| `k` | int | PLS components used in every fold |
+| `n_max` | int, default `9` | upper limit of the search, not of `n` |
+| `args` | dict | `n_folds` (default `5`), `n_repeats` (default `2`), `n_perm` (default `20`, shuffles for the parallel analysis) |
+| `pre_standardized` | bool, default `False` | use `X` as given |
+| `seed` | int or `None` | random seed |
+
+Parallel analysis on standardized `X` gives `K_star`, the number of leading eigenvalues above the 95th percentile of the shuffled ones. In each fold the leading `K_star` axes are rotated with varimax, ordered by their share of `coef`, and `y` is regressed on the top `j` of them for `j` from 1 to `min(K_star, n_max)`. `n_star` is the smallest `j` whose mean held-out R² is within 2 SE of the best, or `0` when the best is not above 0 by 2 SE.
+
+**returns:** `ProfilesFindNResult`. See [results](results.md).
+
+**refused:** fewer than two usable folds, or `n_max` below 1, raises `invalid_input`. Folds with a constant training column, or with no finite held-out R², are not used and are counted in `n_failed_folds`.
+
+### 4.5 Profiles
+
+**function:** `profiles`
+**need:** `factors`, then `rotate(f, X)`, then the scores `Xs F`, in one call. See [Profiles](../concepts/PLS1/profiles.md).
+
+| Argument | Type | Meaning |
+|---|---|---|
+| `model_or_coef`, `X`, `n`, `pre_standardized` | | as in `factors` |
+| `rotation` | `"varimax"` | passed to `rotate` as `method`. Any other value raises `rotation_method_not_implemented` |
+| `args` | dict | passed to `rotate` as `args` |
+
+```python
+r = plskit.profiles(m, X, n=3)
+r.factors.F.sum(axis=1)          # equals m.coef
+```
+
+**returns:** `ProfilesResult`. With a vector, `model` is `None`. See [results](results.md).
+
+**refused:** as `factors`.
+
+**function:** `profiles_search`
+**need:** choose `n` with `profiles_find_n`, run `profiles` at that `n`, and keep the search.
+
+| Argument | Type | Meaning |
+|---|---|---|
+| `model` | `PLS1Result` | a dense, unweighted fit, not a vector |
+| `X`, `y` | matrix, vector | the data of the fit |
+| `n_max` | int, default `9` | as in `profiles_find_n` |
+| `rotation`, `args` | | as in `profiles` |
+| `find_n_args` | dict | passed to `profiles_find_n` as `args` |
+| `seed` | int or `None` | random seed, kept on the result |
+
+The search runs at `k = model.k_used`. When it returns `n_star = 0`, `profiles` runs with `n = 1` and `n_search.n_star` stays `0`.
+
+```python
+r = plskit.profiles_search(m, X, y)
+r.n_search.r2_mean, r.n_search.r2_se, r.n_search.n_star
+```
+
+**returns:** `ProfilesSearchResult`. See [results](results.md).
+
+**refused:** a sparse fit (one with `keep`) raises `invalid_input`; otherwise as `factors`.
 
 ---
 
@@ -705,7 +785,10 @@ See [results](results.md) for full field shapes:
 - `PermNullResult`
 - `PermAlphaResult`
 - `RotateResult`, `RotationSpec`
-- `RotationStabilityResult`
+- `PCABasisResult`
+- `FactorsResult`
+- `ProfilesFindNResult`
+- `ProfilesResult`, `ProfilesSearchResult`
 - `CIScalar` — the rotation-invariant CI primitive used throughout
 
 ## Errors
@@ -725,7 +808,7 @@ confuse:
 
 - `invalid_args`: a method string (`method=`, `selector=`, `diagnostic=`,
   `test_method=`, `which=`) is unknown, or a method-specific args dict
-  (`args=`, `rotation_args=`, `find_k_args=`) had an unknown key, a
+  (`args=`, `find_k_args=`, `find_n_args=`) had an unknown key, a
   missing key, or a value of the wrong type or sign (a count that is
   negative or not a whole number, a non-number `tol`, a non-bool
   `force`). Raised when the extension parses the dict for the chosen
@@ -740,10 +823,10 @@ confuse:
   values), a `seed` outside
   `[0, 2^64)`, a non-number `level`, a flag such as `ci` or `verbose`
   that is not a bool, a method name that is not a string, an `args` /
-  `rotation_args` / `find_k_args` that is not a dict, an array with the
+  `find_k_args` / `find_n_args` that is not a dict, an array with the
   wrong number of dimensions, a `model` that is not the result type the
-  function takes, such as a `PLS3Result` passed to `pls1_predict` or
-  `rotate`, or `weights` passed to a PLS3 function).
+  function takes, such as a `PLS3Result` passed to `pls1_predict`,
+  a `PLS1Result` passed to `rotate`, or `weights` passed to a PLS3 function).
   `None` for an optional argument means its default.
 
 **All codes.** `PlsKitError.code` is one of:
@@ -759,7 +842,7 @@ confuse:
 | `invalid_input` | invalid input content (shape, finiteness, a `rotate` loadings matrix with no columns, ...) |
 | `shape_mismatch` | two arrays have incompatible shapes |
 | `rotation_method_not_implemented` | the requested rotation method does not exist in this version |
-| `already_rotated` | `rotate` was called on a `PLS1Result` that already has a `rotation_spec` |
+| `already_rotated` | `rotate` was called on a `PLS3Result` or `FactorsResult` that already has a `rotation_spec` |
 | `invalid_weights` | raised as `PlsKitInvalidWeights` |
 | `resampling_degenerate` | raised as `PlsKitResamplingDegenerate` |
 | `resample_failure_rate_exceeded` | the `ci=True` resampling pass had more failed replicates than `max_failure_rate` allows |

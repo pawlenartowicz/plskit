@@ -6,6 +6,11 @@
 //! different question (null distribution under permuted y, not sampling
 //! distribution under the true DGP) and different per-resample workload
 //! (full-size fit on permuted y, no procrustes alignment).
+//!
+//! At k = 1 a row is not a refit: β = c·X̃'ỹ, and the row holds `c` at its
+//! observed value (`c_ref·X̃'ỹ_p`), because a refit's `c` depends on how the
+//! permuted y lines up with X's spectrum and makes β non-pivotal (see
+//! `run_engine`).
 
 use faer::{ColRef, MatRef};
 
@@ -76,6 +81,9 @@ pub struct PermNullOutput {
     /// Full-data β reference. Length D.
     pub beta_ref: Vec<f64>,
     /// Mean of β under permuted y. Length D. ≈ 0 under H0 (calibration diagnostic).
+    /// At k = 1 "β under permuted y" is `c_ref·X̃'ỹ_p`, the permuted fit with
+    /// its scalar `c` held at the observed fit's (module docs); here and in
+    /// `beta_perm_sd`, `beta_perm_z` and `beta_perm_matrix`.
     pub beta_perm_mean: Vec<f64>,
     /// SD of β under permuted y. Length D.
     pub beta_perm_sd: Vec<f64>,
@@ -221,12 +229,7 @@ pub(crate) fn perm_null_impl(
 
     let (seed_used, mut rng) = crate::rng::resolve_seed(seed)?;
 
-    // Route choice: `perm_null_route` owns the rule. Decided here, on the
-    // calling thread, before any parallel work.
-    let route = perm_null_route(n, d, opts.n_perm, k, wref.is_some());
-
     run_engine(
-        route,
         xs_fit,
         ys,
         k,
@@ -252,7 +255,6 @@ pub(crate) fn perm_null_impl(
     clippy::many_single_char_names
 )]
 fn run_engine(
-    route: ReplicateRoute,
     xs_fit: MatRef<'_, f64>,
     ys: ColRef<'_, f64>,
     k: usize,
@@ -267,7 +269,14 @@ fn run_engine(
     let n = xs_fit.nrows();
     let d = xs_fit.ncols();
     let b = opts.n_perm;
-    let block = perm_block(route, xs_fit, crate::fit::par_fixed());
+    // The fit target X̃'s rows see: `ys` permuted by `perm`, `√w`-scaled when weighted.
+    let target = |perm: Option<&[usize]>| {
+        let y = faer::Col::<f64>::from_fn(n, |i| ys[perm.map_or(i, |p| p[i])]);
+        match sqw {
+            Some(s) => crate::fit::scale_col(y.as_ref(), s),
+            None => y,
+        }
+    };
 
     // One row per permutation, written in place into the single row-major
     // (B, D) buffer; a failed permutation leaves a NaN row (fail-soft), the
@@ -276,14 +285,46 @@ fn run_engine(
     // the fMRI target scale), held once: a deliberate
     // determinism-over-memory trade, since no streaming Welford accumulator
     // exists.
-    let flat = crate::resample::parallel_fill_rows_seeded(rng, b, d, |_, child, row| {
-        // The permutation is the first draw off the child stream, as in
-        // the replicate-by-replicate worker.
-        let perm = crate::resample::permute_indices(n, child);
-        if perm_row(&block, xs_fit, sqw, ys, &perm, k, row).is_err() {
-            row.fill(f64::NAN);
-        }
-    });
+    let flat = if k == 1 {
+        // At k = 1, β = c·X̃'ỹ with c = ỹ'Kỹ / ỹ'K²ỹ (K = X̃X̃'). A permuted y
+        // does not line up with the top of K's spectrum the way a real one
+        // can, so its c is larger and the null spread of β is too wide for
+        // the observed scale: β is not pivotal. Each row holds c at its
+        // observed value, `c_ref·X̃'ỹ_p`, so the null is that of X_j'y, the
+        // same null as β_j = 0 at k = 1.
+        let s_ref =
+            crate::linalg::mat_vec(xs_fit.transpose(), target(None).as_ref(), faer::Par::Seq);
+        let ss: f64 = (0..d).map(|j| s_ref[j] * s_ref[j]).sum();
+        let c_ref = if ss > 0.0 {
+            (0..d).map(|j| beta_ref[j] * s_ref[j]).sum::<f64>() / ss
+        } else {
+            0.0
+        };
+        crate::resample::parallel_fill_rows_seeded(rng, b, d, |_, child, row| {
+            let perm = crate::resample::permute_indices(n, child);
+            let s = crate::linalg::mat_vec(
+                xs_fit.transpose(),
+                target(Some(&perm)).as_ref(),
+                faer::Par::Seq,
+            );
+            for (j, v) in row.iter_mut().enumerate() {
+                *v = c_ref * s[j];
+            }
+        })
+    } else {
+        // Route choice: `perm_null_route` owns the rule. Decided here, on the
+        // calling thread, before any parallel work.
+        let route = perm_null_route(n, d, b, k, sqw.is_some());
+        let block = perm_block(route, xs_fit, crate::fit::par_fixed());
+        crate::resample::parallel_fill_rows_seeded(rng, b, d, |_, child, row| {
+            // The permutation is the first draw off the child stream, as in
+            // the replicate-by-replicate worker.
+            let perm = crate::resample::permute_indices(n, child);
+            if perm_row(&block, xs_fit, sqw, ys, &perm, k, row).is_err() {
+                row.fill(f64::NAN);
+            }
+        })
+    };
 
     // Two-pass per-column reduction.
     let (beta_perm_mean, beta_perm_sd) = reduce_two_pass(&flat, b, d);
@@ -360,9 +401,10 @@ fn signed_z(beta_ref: &[f64], sd: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// `pls1_perm_null`'s selector, called once per call on the calling thread
-/// before any parallel work. `Nspace` for dense, unweighted input the
-/// n-space rule admits (`dual_route::nspace_eligible_perm_null`), unless
+/// `pls1_perm_null`'s selector at `k ≥ 2` (`k = 1` has a closed form and no
+/// route), called once per call on the calling thread before any parallel
+/// work. `Nspace` for dense, unweighted input the n-space rule admits
+/// (`dual_route::nspace_eligible_perm_null`), unless
 /// `gram_routes_disabled()`. `GramP` when `gram_p::gram_p_eligible` admits
 /// the block (tried after `Nspace`: in the overlap band
 /// `n_tr < p < 1.54·n_tr` the n-space route is cheaper), unless
@@ -739,6 +781,45 @@ mod tests_calibration {
             "|z[0]|={} not larger than max |z[1..]|={}",
             abs_z[0],
             max_other,
+        );
+    }
+
+    /// y on the dominant factor of a collinear block (columns 0..10) and 10
+    /// independent columns. A β pivot puts the permuted fits' weaker
+    /// shrinkage into the null spread and loses the block (`docs/python/
+    /// results.md`, `PermNullResult`); the k = 1 null of `X_j'y` gives large
+    /// block z, and N(0, 1)-sized z on the independent columns.
+    #[test]
+    #[allow(clippy::many_single_char_names)] // n, d, f, x, y, z are the math names
+    fn k1_z_keeps_power_on_a_dominant_factor() {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(41);
+        let (n, d) = (200_usize, 20_usize);
+        let f = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
+        let x = Mat::<f64>::from_fn(n, d, |i, j| {
+            let e = rng.random_range(-1.0..1.0);
+            if j < 10 { 2.0 * f[i] + e } else { e }
+        });
+        let y = Col::<f64>::from_fn(n, |i| f[i] + 2.0 * rng.random_range(-1.0..1.0));
+        let opts = PermNullOpts {
+            n_perm: 500,
+            return_perm_matrix: false,
+            pre_standardized: false,
+            verbose: false,
+        };
+        let out = pls1_perm_null(x.as_ref(), y.as_ref(), 1, None, opts, Some(43)).unwrap();
+        let z = &out.beta_perm_z;
+        assert!(z[..10].iter().all(|v| *v > 3.0), "block z {:?}", &z[..10]);
+        assert!(
+            z[10..].iter().all(|v| v.abs() < 3.5),
+            "independent z {:?}",
+            &z[10..]
+        );
+        // Permuted rows center on 0: about a 5σ band, σ = sd/√B.
+        assert!(
+            out.beta_perm_mean
+                .iter()
+                .zip(&out.beta_perm_sd)
+                .all(|(m, s)| m.abs() < 0.25 * s)
         );
     }
 }

@@ -29,14 +29,18 @@ pub enum ParamKind {
     Bool,
     /// A string (method names, option values).
     Str,
-    /// An integer, or `"optimal"` / `"sequence"` (`pls1_fit`'s `k`).
+    /// An integer or a mode string (`pls1_fit`'s `k`: `"optimal"` / `"sequence"`).
     KOrMode,
-    /// A record of named values (`args`, `rotation_args`, `find_k_args`).
+    /// A record of named values (`args`, `find_k_args`, `find_n_args`).
     Args,
     /// A result record passed back (`model`).
     Model,
-    /// A `PLS1Result` record or a matrix (`rotate`'s first argument).
+    /// A `FactorsResult` or `PLS3Result` record, or a matrix (`rotate`'s first
+    /// argument).
     ModelOrMat,
+    /// A `PLS1Result` record or a coefficient vector (`factors`' and
+    /// `profiles`' first argument).
+    ModelOrVec,
 }
 
 impl ParamKind {
@@ -59,6 +63,7 @@ impl ParamKind {
             Self::Args => "args",
             Self::Model => "model",
             Self::ModelOrMat => "model_or_mat",
+            Self::ModelOrVec => "model_or_vec",
         }
     }
 }
@@ -119,7 +124,7 @@ pub struct FnSpec {
     /// Parameters in signature order.
     pub params: &'static [Param],
     /// Result type names it can return; empty for a plain array
-    /// (`pls1_predict`); two for `rotate`.
+    /// (`pls1_predict`); three for `rotate`.
     pub result_types: &'static [&'static str],
     run: RunFn,
 }
@@ -425,33 +430,73 @@ static REGISTRY: &[FnSpec] = &[
         name: "rotate",
         params: &[
             pos("model_or_W", K::ModelOrMat),
+            pos_d("X", K::Mat, N),
             kw("method", K::Str, S("varimax")),
             kw("L", K::Mat, N),
             kw("args", K::Args, N),
+            kw("pre_standardized", K::Bool, N),
         ],
-        result_types: &["RotateResult", "PLS1Result"],
+        result_types: &["RotateResult", "PLS3Result", "FactorsResult"],
         run: fns::rotate::rotate,
     },
     FnSpec {
-        name: "pls1_rotation_stability",
+        name: "factors",
+        params: &[
+            pos("model_or_coef", K::ModelOrVec),
+            pos("X", K::Mat),
+            pos("n", K::Int),
+            kw("pre_standardized", K::Bool, N),
+        ],
+        result_types: &["FactorsResult"],
+        run: fns::factors::factors,
+    },
+    FnSpec {
+        name: "pca_basis",
+        params: &[pos("X", K::Mat), kw("pre_standardized", K::Bool, B(false))],
+        result_types: &["PCABasisResult"],
+        run: fns::factors::pca_basis,
+    },
+    FnSpec {
+        name: "profiles_find_n",
         params: &[
             pos("X", K::Mat),
             pos("y", K::Vec),
             pos("k", K::Int),
-            kw("rotation_method", K::Str, S("varimax")),
-            kw("rotation_args", K::Args, N),
-            kw("L", K::Mat, N),
-            kw("n_boot", K::Int, N),
-            kw("m_rate", K::Float, N),
-            kw("level", K::Float, N),
+            pos_d("n_max", K::Int, I(9)),
+            kw("args", K::Args, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("verbose", K::Bool, B(false)),
-            kw("weights", K::Vec, N),
-            kw("max_skip_rate", K::Float, N),
         ],
-        result_types: &["RotationStabilityResult"],
-        run: fns::inference::pls1_rotation_stability,
+        result_types: &["ProfilesFindNResult"],
+        run: fns::factors::profiles_find_n,
+    },
+    FnSpec {
+        name: "profiles",
+        params: &[
+            pos("model_or_coef", K::ModelOrVec),
+            pos("X", K::Mat),
+            pos("n", K::Int),
+            kw("rotation", K::Str, S("varimax")),
+            kw("args", K::Args, N),
+            kw("pre_standardized", K::Bool, N),
+        ],
+        result_types: &["ProfilesResult"],
+        run: fns::factors::profiles,
+    },
+    FnSpec {
+        name: "profiles_search",
+        params: &[
+            pos("model", K::Model),
+            pos("X", K::Mat),
+            pos("y", K::Vec),
+            kw("n_max", K::Int, I(9)),
+            kw("rotation", K::Str, S("varimax")),
+            kw("args", K::Args, N),
+            kw("find_n_args", K::Args, N),
+            kw("seed", K::Seed, N),
+        ],
+        result_types: &["ProfilesSearchResult"],
+        run: fns::factors::profiles_search,
     },
 ];
 
@@ -643,7 +688,7 @@ mod tests {
                     ncols: 1,
                 })
             }
-            ParamKind::Vec => Value::Vec(VecF64::Owned(vec![1.0])),
+            ParamKind::Vec | ParamKind::ModelOrVec => Value::Vec(VecF64::Owned(vec![1.0])),
             ParamKind::Int | ParamKind::Seed | ParamKind::KOrMode => Value::I64(1),
             ParamKind::Float => Value::F64(0.5),
             ParamKind::Bool => Value::Bool(true),

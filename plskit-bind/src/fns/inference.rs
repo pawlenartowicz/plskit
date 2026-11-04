@@ -1,9 +1,8 @@
 //! Confirmatory tests, the `split_nb` gate, permutation null, dual
-//! coefficients from a Gram matrix (`pls1_perm_alpha`), rotation stability.
+//! coefficients from a Gram matrix (`pls1_perm_alpha`).
 
 use plskit::{
     CIOpts, ConfirmatoryTestInput, ConfirmatoryTestOpts, PermNullOpts, Pls3ConfirmatoryTestOpts,
-    RotationStabilityMethod, RotationStabilityOpts,
 };
 
 use crate::convert;
@@ -11,7 +10,7 @@ use crate::error::BindError;
 use crate::fns::{done, engine, pls3_y, with_warning};
 use crate::inputs::Inputs;
 use crate::methods;
-use crate::value::{MatF64, Outcome, Record, Value, VecF64};
+use crate::value::{Outcome, Record, Value, VecF64};
 use crate::warn;
 
 /// `split_nb_gate(X, *, weights=None)`.
@@ -175,53 +174,4 @@ pub(crate) fn pls1_perm_alpha(inp: &mut Inputs<'_>) -> Result<Outcome, BindError
         n_features,
     ))?;
     Ok(done(convert::perm_alpha(out)))
-}
-
-/// `pls1_rotation_stability(X, y, k, *, rotation_method="varimax",
-/// rotation_args=None, L=None, n_boot=None, m_rate=None, level=None,
-/// pre_standardized=False, seed=None,
-/// verbose=False, weights=None, max_skip_rate=None)`.
-pub(crate) fn pls1_rotation_stability(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
-    let x = inp.mat("X")?;
-    let y = inp.vec("y")?;
-    let k = inp.usize("k")?;
-    let rotation_method = inp.string("rotation_method")?;
-    let rotation_args = inp.opt_record("rotation_args")?;
-    let l = inp.opt_mat("L")?;
-    let n_boot = inp.opt_usize("n_boot")?;
-    let m_rate = inp.opt_f64("m_rate")?;
-    let level = inp.opt_f64("level")?;
-    let pre_standardized = inp.bool("pre_standardized")?;
-    let seed = inp.seed()?;
-    let verbose = inp.bool("verbose")?;
-    let w = inp.opt_vec("weights")?;
-    let max_skip_rate = inp.opt_f64("max_skip_rate")?;
-    inp.finish()?;
-    if rotation_method != "varimax" {
-        return Err(BindError::new(
-            "rotation_method_not_implemented",
-            format!("rotation_method '{rotation_method}' not implemented in v0.x"),
-        ));
-    }
-    let method = RotationStabilityMethod::Varimax(methods::varimax_args(rotation_args.as_ref())?);
-    let d = RotationStabilityOpts::default();
-    let opts = RotationStabilityOpts {
-        n_boot: n_boot.unwrap_or(d.n_boot),
-        m_rate: m_rate.unwrap_or(d.m_rate),
-        level: level.unwrap_or(d.level),
-        pre_standardized,
-        seed,
-        verbose,
-        max_skip_rate: max_skip_rate.unwrap_or(d.max_skip_rate),
-    };
-    let out = engine(plskit::pls1_rotation_stability(
-        x.as_mat(),
-        y.as_col(),
-        k,
-        method,
-        l.as_ref().map(MatF64::as_mat),
-        w.as_ref().map(VecF64::as_col),
-        opts,
-    ))?;
-    Ok(done(convert::rotation_stability(out)))
 }

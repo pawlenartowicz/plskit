@@ -5,6 +5,7 @@ use crate::manifest::Case;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+pub mod factors;
 pub mod pls1_confirmatory_test;
 pub mod pls1_find_k_optimal;
 pub mod pls1_find_k_sequence;
@@ -12,7 +13,6 @@ pub mod pls1_fit;
 pub mod pls1_perm_alpha;
 pub mod pls1_perm_null;
 pub mod pls1_predict;
-pub mod pls1_rotation_stability;
 pub mod pls3;
 pub mod preprocess;
 pub mod rotate;
@@ -403,6 +403,8 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
 
     cases.push(pls1_predict::basic_n80_d6_k2(root)?);
     cases.push(rotate::varimax_d6_k2(root)?);
+    cases.push(factors::pls1_n50_d10_k2_n3(root)?);
+    cases.push(factors::find_n_n100_d12_k2(root)?);
     cases.push(preprocess::n50_d10_with_weights(root)?);
     cases.push(pls1_perm_null::basic_n80_d6_k2(root)?);
     cases.push(pls1_perm_null::weighted_n80_d6_k2(root)?);
@@ -414,9 +416,6 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_perm_null::weighted_n40_d1_k1(root)?);
     cases.push(pls1_perm_null::weighted_prestd_n80_d6_k2(root)?);
     cases.push(pls1_perm_alpha::n40_p60_m4_k1(root)?);
-    cases.push(pls1_rotation_stability::n80_d6_k2(root)?);
-    cases.push(pls1_rotation_stability::weighted_n80_d6_k2(root)?);
-    cases.push(pls1_rotation_stability::weighted_prestd_n80_d6_k2(root)?);
 
     cases.push(spls1_fit::wide_n30_d100_k2_keep8(root)?);
     cases.push(spls1_fit::small_n50_d10_k2_keep3(root)?);

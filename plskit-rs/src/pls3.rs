@@ -19,10 +19,11 @@ use faer::linalg::matmul::matmul;
 use faer::{Accum, Col, ColRef, Mat, MatRef, Par};
 
 use crate::error::{PlsKitError, PlsKitResult};
+use crate::factors::{ORTHO_TOL, orthonormality_defect};
 use crate::fit::{
     IMPLICIT_MAX_MEAN_RATIO, ParChoice, check_finite_mat, resolve_par, select_and_normalize,
 };
-use crate::linalg::owned_col_slice;
+use crate::linalg::{mat_mul, owned_col_slice};
 
 /// Knobs for [`pls3_fit`].
 #[derive(Debug, Clone, Copy)]
@@ -83,7 +84,8 @@ pub struct Pls3Model {
     /// columns on a dense fit. A sparse fit (`spls3_fit`) normalizes each
     /// column but does not orthogonalize across columns: hard thresholding
     /// restricts each component to its own support, and two supports may
-    /// overlap.
+    /// overlap. After [`Pls3Model::rotated`] the columns of a sparse fit are
+    /// no longer unit-norm.
     pub u_saliences: Mat<f64>,
     /// Y-side saliences `V`; shape `(n_targets, k_used)`. Same
     /// dense-only orthonormality caveat as `u_saliences`.
@@ -92,7 +94,8 @@ pub struct Pls3Model {
     /// singular values of `X̃'Ỹ`, descending. On a sparse fit they are
     /// `σ_a = u_a' A_a v_a` on the deflated `A_a`, which is neither a
     /// singular value of `X̃'Ỹ` nor guaranteed descending, and
-    /// `Σσ² / ‖A‖_F²` is not an explained share.
+    /// `Σσ² / ‖A‖_F²` is not an explained share. After
+    /// [`Pls3Model::rotated`] they are `σ_rot`, not singular values.
     pub singular_values: Col<f64>,
     /// In-sample X-side LV scores `X̃·U`; shape `(n_samples, k_used)`.
     pub x_scores: Mat<f64>,
@@ -120,11 +123,112 @@ pub struct Pls3Model {
     /// Per-component convergence flag for the sparse alternation; length
     /// `k_used`. `None` for dense fits (one SVD, nothing to converge).
     /// `false` means `max_iter` was reached, which is a reported outcome,
-    /// not an error.
+    /// not an error. After [`Pls3Model::rotated`] the entries keep the fit's
+    /// order and no longer line up with the rotated columns.
     pub converged: Option<Vec<bool>>,
     /// Per-component alternation sweep count; length `k_used`. `None` for
-    /// dense fits.
+    /// dense fits. Same rotated-model caveat as `converged`.
     pub n_iter: Option<Vec<usize>>,
+}
+
+impl Pls3Model {
+    /// Apply one orthogonal `r` to both sides of the fit: `U R`, `V R`,
+    /// `x_scores R` and `y_scores R`. Returns the rotated model and the final
+    /// `R`, after sorting and sign pinning.
+    ///
+    /// With `S = diag(σ)`, the new values are
+    /// `σ_rot_j = (R' S R)_jj = Σ_i R_ij² σ_i`. They need no `X` or `Y`. Rows
+    /// of `R` are unit vectors, so `Σ_j σ_rot_j = Σ_i σ_i`. `R' S R` is not
+    /// diagonal, so the rotated pairs are not uncorrelated. On a dense fit
+    /// `U' A V = S`, so `σ_rot_j = u_j' A v_j`. On a sparse fit `U' A V` is
+    /// not `S`, so `σ_rot_j` is not `u' A v`. The rotated columns of a sparse
+    /// fit are not unit-norm, because its `U` is not orthogonal.
+    ///
+    /// Columns are sorted by `σ_rot` descending (stable), then signs follow
+    /// `pls3_fit`: the largest-magnitude entry of each `U` column is
+    /// positive, with `R` flipped along. `converged` and `n_iter` are
+    /// carried unchanged, without sorting. All other fields are cloned.
+    ///
+    /// # Shapes
+    /// - `r`: `(k_used, k_used)`, orthogonal to `1e-10`
+    /// - returns the model and `R` of shape `(k_used, k_used)`
+    ///
+    /// # Errors
+    /// - `PlsKitError::ShapeMismatch` when `r` is not `(k_used, k_used)`, or
+    ///   when `u_saliences`, `v_saliences`, `x_scores`, `y_scores` or
+    ///   `singular_values` disagree with `k_used`
+    /// - `PlsKitError::InvalidInput` when `k_used` is 0, `r` has non-finite
+    ///   entries, the model's saliences, scores or singular values are
+    ///   non-finite, or `r` is not orthogonal
+    pub fn rotated(&self, r: MatRef<'_, f64>) -> PlsKitResult<(Pls3Model, Mat<f64>)> {
+        let k = self.k_used;
+        let counts = [
+            ("u_saliences", "columns", self.u_saliences.ncols()),
+            ("v_saliences", "columns", self.v_saliences.ncols()),
+            ("x_scores", "columns", self.x_scores.ncols()),
+            ("y_scores", "columns", self.y_scores.ncols()),
+            ("singular_values", "entries", self.singular_values.nrows()),
+        ];
+        for (name, unit, n) in counts {
+            if n != k {
+                return Err(PlsKitError::ShapeMismatch(format!(
+                    "model {name} has {n} {unit}, k_used is {k}"
+                )));
+            }
+        }
+        if r.nrows() != k || r.ncols() != k {
+            return Err(PlsKitError::ShapeMismatch(format!(
+                "R has shape ({}, {}), expected ({k}, {k})",
+                r.nrows(),
+                r.ncols()
+            )));
+        }
+        if k == 0 {
+            return Err(PlsKitError::InvalidInput("model has k_used = 0".into()));
+        }
+        if !r.is_all_finite() {
+            return Err(PlsKitError::InvalidInput("R has non-finite values".into()));
+        }
+        let finite = self.u_saliences.as_ref().is_all_finite()
+            && self.v_saliences.as_ref().is_all_finite()
+            && self.x_scores.as_ref().is_all_finite()
+            && self.y_scores.as_ref().is_all_finite()
+            && self.singular_values.as_ref().is_all_finite();
+        if !finite {
+            return Err(PlsKitError::InvalidInput(
+                "model has non-finite values in U, V, the scores or singular_values".into(),
+            ));
+        }
+        let defect = orthonormality_defect(r);
+        if defect > ORTHO_TOL {
+            return Err(PlsKitError::InvalidInput(format!(
+                "R is not orthogonal: max|R'R - I| = {defect:e}"
+            )));
+        }
+
+        let sigma: Vec<f64> = (0..k)
+            .map(|j| {
+                (0..k)
+                    .map(|i| r[(i, j)] * r[(i, j)] * self.singular_values[i])
+                    .sum()
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..k).collect();
+        order.sort_by(|&a, &b| sigma[b].total_cmp(&sigma[a]));
+
+        let mut r_out = Mat::<f64>::from_fn(k, k, |i, j| r[(i, order[j])]);
+        let mut u = mat_mul(self.u_saliences.as_ref(), r_out.as_ref(), Par::Seq);
+        // Flips `u` and `r_out` columns together, so `r_out` ends as the final R.
+        pin_component_signs(&mut u, &mut r_out);
+
+        let mut out = self.clone();
+        out.u_saliences = u;
+        out.v_saliences = mat_mul(self.v_saliences.as_ref(), r_out.as_ref(), Par::Seq);
+        out.x_scores = mat_mul(self.x_scores.as_ref(), r_out.as_ref(), Par::Seq);
+        out.y_scores = mat_mul(self.y_scores.as_ref(), r_out.as_ref(), Par::Seq);
+        out.singular_values = Col::<f64>::from_fn(k, |j| sigma[order[j]]);
+        Ok((out, r_out))
+    }
 }
 
 /// Absolute floor on a retained singular value. Mirrors the `1e-14` norm
@@ -1454,6 +1558,250 @@ mod tests {
             if j == 0 { f[i] + noise } else { noise }
         });
         (x, y)
+    }
+
+    fn varimax_r(u: &Mat<f64>) -> Mat<f64> {
+        use crate::rotate::{RotationMethod, VarimaxArgs, rotate};
+        rotate(
+            u.as_ref(),
+            RotationMethod::Varimax(VarimaxArgs::default()),
+            None,
+        )
+        .unwrap()
+        .r
+    }
+
+    fn dense_fit() -> (Mat<f64>, Mat<f64>, Pls3Model) {
+        let (x, y) = shared_factor_data(60, 8, 4, 11);
+        let m = pls3_fit(x.as_ref(), y.as_ref(), 3, None, Pls3FitOpts::default()).unwrap();
+        (x, y, m)
+    }
+
+    fn sparse_fit() -> (Mat<f64>, Mat<f64>, Pls3Model) {
+        let (x, y) = shared_factor_data(60, 8, 4, 11);
+        let m = spls3_fit(
+            x.as_ref(),
+            y.as_ref(),
+            3,
+            4,
+            2,
+            None,
+            Pls3FitOpts::default(),
+        )
+        .unwrap();
+        (x, y, m)
+    }
+
+    fn max_diff(a: &Mat<f64>, b: &Mat<f64>) -> f64 {
+        let mut worst = 0.0_f64;
+        for j in 0..a.ncols() {
+            for i in 0..a.nrows() {
+                worst = worst.max((a[(i, j)] - b[(i, j)]).abs());
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn rotated_fields_are_the_fit_times_final_r() {
+        let (_, _, m) = dense_fit();
+        let r = varimax_r(&m.u_saliences);
+        let (rot, r_out) = m.rotated(r.as_ref()).unwrap();
+        let mm = |a: &Mat<f64>| mat_mul(a.as_ref(), r_out.as_ref(), Par::Seq);
+        assert!(max_diff(&mm(&m.u_saliences), &rot.u_saliences) < 1e-12);
+        assert!(max_diff(&mm(&m.v_saliences), &rot.v_saliences) < 1e-12);
+        assert!(max_diff(&mm(&m.x_scores), &rot.x_scores) < 1e-12);
+        assert!(max_diff(&mm(&m.y_scores), &rot.y_scores) < 1e-12);
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn rotated_singular_values_are_u_a_v() {
+        let (x, y, m) = dense_fit();
+        let r = varimax_r(&m.u_saliences);
+        let (rot, _) = m.rotated(r.as_ref()).unwrap();
+        let (xs, _, _) = crate::linalg::standardize(x.as_ref());
+        let (ys, _, _) = crate::linalg::standardize(y.as_ref());
+        let a = mat_mul(xs.transpose(), ys.as_ref(), Par::Seq);
+        for j in 0..rot.k_used {
+            let av = crate::linalg::mat_vec(a.as_ref(), rot.v_saliences.col(j), Par::Seq);
+            let uav: f64 = (0..av.nrows())
+                .map(|i| rot.u_saliences[(i, j)] * av[i])
+                .sum();
+            assert_relative_eq!(rot.singular_values[j], uav, max_relative = 1e-10);
+        }
+    }
+
+    #[test]
+    fn rotated_keeps_the_sum_and_descends() {
+        for (_, _, m) in [dense_fit(), sparse_fit()] {
+            let r = varimax_r(&m.u_saliences);
+            let (rot, _) = m.rotated(r.as_ref()).unwrap();
+            let before: f64 = (0..m.k_used).map(|i| m.singular_values[i]).sum();
+            let after: f64 = (0..m.k_used).map(|i| rot.singular_values[i]).sum();
+            assert_relative_eq!(after, before, max_relative = 1e-12);
+            for j in 1..rot.k_used {
+                assert!(rot.singular_values[j - 1] >= rot.singular_values[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn rotated_pins_signs_like_the_fit() {
+        let (_, _, m) = dense_fit();
+        let r = varimax_r(&m.u_saliences);
+        let (rot, _) = m.rotated(r.as_ref()).unwrap();
+        for a in 0..rot.k_used {
+            let mut best = 0;
+            for i in 1..rot.u_saliences.nrows() {
+                if rot.u_saliences[(i, a)].abs() > rot.u_saliences[(best, a)].abs() {
+                    best = i;
+                }
+            }
+            assert!(rot.u_saliences[(best, a)] > 0.0);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn transform_returns_the_rotated_scores() {
+        let (x, y, m) = dense_fit();
+        let r = varimax_r(&m.u_saliences);
+        let (rot, _) = m.rotated(r.as_ref()).unwrap();
+        let s = pls3_transform(
+            &rot,
+            Some(x.as_ref()),
+            Some(y.as_ref()),
+            TransformWhich::Both,
+        )
+        .unwrap();
+        assert!(max_diff(&s.x_scores.unwrap(), &rot.x_scores) < 1e-10);
+        assert!(max_diff(&s.y_scores.unwrap(), &rot.y_scores) < 1e-10);
+    }
+
+    #[test]
+    fn rotated_carries_converged_and_n_iter_unsorted() {
+        let (_, _, m) = sparse_fit();
+        let r = varimax_r(&m.u_saliences);
+        let (rot, _) = m.rotated(r.as_ref()).unwrap();
+        assert_eq!(rot.converged, m.converged);
+        assert_eq!(rot.n_iter, m.n_iter);
+    }
+
+    #[test]
+    fn one_component_is_unchanged() {
+        let (x, y) = shared_factor_data(60, 8, 4, 11);
+        let m = pls3_fit(x.as_ref(), y.as_ref(), 1, None, Pls3FitOpts::default()).unwrap();
+        let r = Mat::<f64>::from_fn(1, 1, |_, _| 1.0);
+        let (rot, r_out) = m.rotated(r.as_ref()).unwrap();
+        assert_eq!(r_out[(0, 0)].to_bits(), 1.0_f64.to_bits());
+        for (a, b) in [
+            (&m.u_saliences, &rot.u_saliences),
+            (&m.v_saliences, &rot.v_saliences),
+            (&m.x_scores, &rot.x_scores),
+            (&m.y_scores, &rot.y_scores),
+        ] {
+            for i in 0..a.nrows() {
+                assert_eq!(a[(i, 0)].to_bits(), b[(i, 0)].to_bits());
+            }
+        }
+        assert_eq!(
+            m.singular_values[0].to_bits(),
+            rot.singular_values[0].to_bits()
+        );
+    }
+
+    #[test]
+    fn negated_single_component_flips_back() {
+        let (x, y) = shared_factor_data(60, 8, 4, 11);
+        let m = pls3_fit(x.as_ref(), y.as_ref(), 1, None, Pls3FitOpts::default()).unwrap();
+        let r = Mat::<f64>::from_fn(1, 1, |_, _| -1.0);
+        let (rot, r_out) = m.rotated(r.as_ref()).unwrap();
+        assert_eq!(r_out[(0, 0)], 1.0);
+        assert_eq!(max_diff(&rot.u_saliences, &m.u_saliences), 0.0);
+        assert_eq!(max_diff(&rot.x_scores, &m.x_scores), 0.0);
+    }
+
+    #[test]
+    fn zero_components_is_invalid_input() {
+        let (x, _) = shared_factor_data(60, 8, 4, 11);
+        let y = Mat::<f64>::zeros(60, 4);
+        let m = pls3_fit(x.as_ref(), y.as_ref(), 2, None, Pls3FitOpts::default()).unwrap();
+        assert_eq!(m.k_used, 0);
+        let res = m.rotated(Mat::<f64>::zeros(0, 0).as_ref());
+        assert!(matches!(res, Err(PlsKitError::InvalidInput(_))), "{res:?}");
+    }
+
+    #[test]
+    fn signed_permutation_returns_the_fit() {
+        for (_, _, m) in [dense_fit(), sparse_fit()] {
+            let mut r = Mat::<f64>::zeros(3, 3);
+            r[(1, 0)] = -1.0;
+            r[(2, 1)] = 1.0;
+            r[(0, 2)] = -1.0;
+            let (rot, r_out) = m.rotated(r.as_ref()).unwrap();
+            assert_eq!(max_diff(&r_out, &Mat::<f64>::identity(3, 3)), 0.0);
+            assert_eq!(max_diff(&rot.u_saliences, &m.u_saliences), 0.0);
+            assert_eq!(max_diff(&rot.v_saliences, &m.v_saliences), 0.0);
+            assert_eq!(rot.n_iter, m.n_iter);
+            for j in 0..3 {
+                assert_eq!(rot.singular_values[j], m.singular_values[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn rotated_error_table() {
+        let (_, _, m) = dense_fit();
+        let r = varimax_r(&m.u_saliences);
+        let shape = |res: PlsKitResult<(Pls3Model, Mat<f64>)>| {
+            assert!(matches!(res, Err(PlsKitError::ShapeMismatch(_))), "{res:?}");
+        };
+        let bad_r = Mat::<f64>::identity(2, 2);
+        shape(m.rotated(bad_r.as_ref()));
+        let mut b = m.clone();
+        b.u_saliences = Mat::zeros(b.u_saliences.nrows(), 2);
+        shape(b.rotated(r.as_ref()));
+        let mut b = m.clone();
+        b.x_scores = Mat::zeros(b.x_scores.nrows(), 2);
+        shape(b.rotated(r.as_ref()));
+        let mut b = m.clone();
+        b.y_scores = Mat::zeros(b.y_scores.nrows(), 2);
+        shape(b.rotated(r.as_ref()));
+        let mut b = m.clone();
+        b.v_saliences = Mat::zeros(b.v_saliences.nrows(), 2);
+        shape(b.rotated(r.as_ref()));
+        let mut b = m.clone();
+        b.singular_values = Col::zeros(2);
+        shape(b.rotated(r.as_ref()));
+
+        let mut nan = r.clone();
+        nan[(0, 0)] = f64::NAN;
+        let res = m.rotated(nan.as_ref());
+        assert!(matches!(res, Err(PlsKitError::InvalidInput(_))), "{res:?}");
+        let scaled = Mat::<f64>::from_fn(3, 3, |i, j| 2.0 * r[(i, j)]);
+        let res = m.rotated(scaled.as_ref());
+        assert!(matches!(res, Err(PlsKitError::InvalidInput(_))), "{res:?}");
+
+        let invalid = |b: &Pls3Model| {
+            let res = b.rotated(r.as_ref());
+            assert!(matches!(res, Err(PlsKitError::InvalidInput(_))), "{res:?}");
+        };
+        let mut b = m.clone();
+        b.u_saliences[(0, 0)] = f64::NAN;
+        invalid(&b);
+        let mut b = m.clone();
+        b.v_saliences[(0, 0)] = f64::NAN;
+        invalid(&b);
+        let mut b = m.clone();
+        b.x_scores[(0, 0)] = f64::NAN;
+        invalid(&b);
+        let mut b = m.clone();
+        b.y_scores[(0, 0)] = f64::INFINITY;
+        invalid(&b);
+        let mut b = m.clone();
+        b.singular_values[0] = f64::NAN;
+        invalid(&b);
     }
 
     #[test]

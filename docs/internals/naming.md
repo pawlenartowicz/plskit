@@ -43,8 +43,8 @@ Format: `name` | description | functions where used.
 
 | name | description | functions |
 |---|---|---|
-| `X` | predictor matrix `(n, p)`, float64 | `pls1_fit`, `spls1_fit`, `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_rotation_stability`, `pls1_perm_null`, `split_nb_gate`, `preprocess`, `nested_cv_r2_ci`, `anisotropic_null`, `bootstrap_saliences`, `grassmannian_alignment_test` |
-| `y` | target vector `(n,)`, float64 | `pls1_fit`, `spls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_rotation_stability`, `pls1_perm_null`, `nested_cv_r2_ci`, `grassmannian_alignment_test` |
+| `X` | predictor matrix `(n, p)`, float64 | `pls1_fit`, `spls1_fit`, `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_perm_null`, `split_nb_gate`, `preprocess`, `nested_cv_r2_ci`, `anisotropic_null`, `bootstrap_saliences`, `grassmannian_alignment_test` |
+| `y` | target vector `(n,)`, float64 | `pls1_fit`, `spls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_perm_null`, `nested_cv_r2_ci`, `grassmannian_alignment_test` |
 | `Y` | target matrix `(n, q)` fitted jointly (PLS2/3), or `(n, m)` with one PLS1 outcome per column (`pls1_perm_alpha`), float64 | `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls3_confirmatory_test`, `preprocess`, `bootstrap_saliences` (PLS2/3 path), `pls1_perm_alpha` |
 | `gram` | Gram matrix `X̃ X̃'` `(n, n)` of a standardized block the caller holds, float64 | `pls1_perm_alpha` |
 | `n_features` | number of columns of `X̃` summed into `gram`, constant columns included | `pls1_perm_alpha` |
@@ -52,10 +52,12 @@ Format: `name` | description | functions where used.
 | `Y_new` | held-out Y for symmetric transform | `pls3_transform` |
 | `model` | fitted result object | `pls1_predict`, `pls2_predict`, `pls3_transform` |
 | `boot_cache` | aligned bootstrap cache | `percentile_ci`, `bsr` |
-| `model_or_W` | fitted `PLS1Result`, or a weight matrix `(p, k)` for standalone rotation | `rotate` |
-| `L` | loading basis on which simple-structure is computed (default identity) | `rotate`, `pls1_rotation_stability` |
+| `model_or_W` | a `PLS3Result`, a `FactorsResult`, or a weight matrix `(p, k)` for standalone rotation | `rotate` |
+| `model_or_coef` | a `PLS1Result`, or a coefficient vector `(p,)` on the standardized scale | `factors`, `profiles` |
+| `n` | number of factors to cut the coefficient into | `factors`, `profiles` |
+| `L` | loading basis on which simple-structure is computed (default identity) | `rotate` |
 | `v0` | target direction `(p,)` for direction-level test | `grassmannian_alignment_test` |
-| `weights` | length-n float64 vector; optional; default `None` = uniform; row-scales `(X, y/Y)` by `√w` (WLS-style precision/sampling weights) | `pls1_fit`, `spls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_rotation_stability`, `pls1_perm_null`, `split_nb_gate`, `preprocess`, `pls3_fit` and `spls3_fit` (accepted, must be `None`) |
+| `weights` | length-n float64 vector; optional; default `None` = uniform; row-scales `(X, y/Y)` by `√w` (WLS-style precision/sampling weights) | `pls1_fit`, `spls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_perm_null`, `split_nb_gate`, `preprocess`, `pls3_fit` and `spls3_fit` (accepted, must be `None`) |
 | `keep` | sparse keep-count (spls1 family): number of nonzero `\|w\|` coordinates retained per component, hard-thresholded; `keep = n_features` reproduces the dense fit bit-exactly | `spls1_fit`, `spls1_find_k_optimal`, `spls1_find_k_sequence` |
 | `keep_X` | sparse X-side keep-count (spls3 family): non-zeros per column of `U`; `keep_X = n_features` reproduces the dense fit bit-exactly | `spls3_fit` |
 | `keep_Y` | sparse Y-side keep-count (spls3 family): non-zeros per column of `V` | `spls3_fit` |
@@ -63,7 +65,7 @@ Format: `name` | description | functions where used.
 `split_nb_gate(X, weights=None)` is the one entry point that takes `X`
 without `y`: the `split_nb` auto-gate rule reads only the design.
 
-`pls1_perm_alpha(gram, Y, k=1, *, n_features)` is the one entry point that fits without `X` (the others that take no `X`, `pls1_predict`, `pls3_transform` / `plssvd_transform` and `rotate`, read a fitted `model` or `W`): the caller holds the block and passes its Gram matrix in place of `X`.
+`pls1_perm_alpha(gram, Y, k=1, *, n_features)` is the one entry point that fits without `X` (the others that take no `X`, `pls1_predict` and `pls3_transform` / `plssvd_transform`, read a fitted `model`): the caller holds the block and passes its Gram matrix in place of `X`.
 
 `pls1_confirmatory_test` takes `(X, y, k)` directly — there is no `model` overload (the test refuses to consume a model whose K was selected on the same data).
 
@@ -73,7 +75,7 @@ without `y`: the `split_nb` auto-gate rule reads only the design.
 
 | name | description | functions |
 |---|---|---|
-| `k` | number of components to fit/test, or `"optimal"` / `"sequence"` (string modes on `pls1_fit` only) | `pls1_fit`, `spls1_fit`, `pls2_fit`, `pls3_fit`, `spls3_fit`, `spls1_find_keep_optimal`, `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_rotation_stability`, `pls1_perm_null`, `pls1_perm_alpha` |
+| `k` | number of components to fit/test, or `"optimal"` / `"sequence"` (string modes on `pls1_fit` only) | `pls1_fit`, `spls1_fit`, `pls2_fit`, `pls3_fit`, `spls3_fit`, `spls1_find_keep_optimal`, `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_perm_null`, `pls1_perm_alpha` |
 | `k_max` | upper bound on k for K-selection | `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_fit(k="optimal" \| "sequence")`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `nested_cv_r2_ci` *(planned)* |
 
 ### 3. Resampling counts
@@ -82,8 +84,8 @@ without `y`: the `split_nb` auto-gate rule reads only the design.
 |---|---|---|
 | `n_perm` | permutations for `raw_perm` / `split_exact` / Grassmannian (in `pls1_find_k_optimal`, lives in the shared `args` dict and applies to the diagnostic) | `pls1_confirmatory_test`, `pls1_find_k_optimal` (diagnostic), `pls1_find_k_sequence`, `pls1_perm_null`, `grassmannian_alignment_test` |
 | `n_splits` | split-half repetitions for `split_nb` / `split_exact` (in `pls1_find_k_optimal`, lives in the shared `args` dict and applies to the diagnostic) | `pls1_confirmatory_test`, `pls1_find_k_optimal` (diagnostic), `pls1_find_k_sequence` |
-| `n_boot` | bootstrap / subsampling iterations | `bootstrap_saliences`, `pls1_confirmatory_test` (`ci=True`), `pls1_rotation_stability` |
-| `m_rate` | subsampling exponent: resolved subsample size is `m = ceil(n^m_rate)` (default `0.7`; must satisfy `0.5 < m_rate < 0.95`) | `pls1_confirmatory_test` (`ci=True`), `pls1_rotation_stability` |
+| `n_boot` | bootstrap / subsampling iterations | `bootstrap_saliences`, `pls1_confirmatory_test` (`ci=True`) |
+| `m_rate` | subsampling exponent: resolved subsample size is `m = ceil(n^m_rate)` (default `0.7`; must satisfy `0.5 < m_rate < 0.95`) | `pls1_confirmatory_test` (`ci=True`) |
 | `n_folds` | CV folds | `pls1_find_k_optimal` (`r2_se` / `r2_max`), `pls1_confirmatory_test` (`raw_perm`) |
 | `outer_folds` | outer CV folds for nested CV | `nested_cv_r2_ci` |
 | `inner_folds` | inner CV folds for nested CV | `nested_cv_r2_ci` |
@@ -94,8 +96,6 @@ without `y`: the `split_nb` auto-gate rule reads only the design.
 |---|---|---|
 | `method` | algorithm tag (string) | `rotate` |
 | `args` | method-specific kwargs (dict on the wrapper boundary, `enum` in Rust) | every method-axis function |
-| `rotation_method` | algorithm tag for the rotation applied inside the diagnostic (parallel to `method` for `rotate`) | `pls1_rotation_stability` |
-| `rotation_args` | method-specific kwargs for the inner rotation (parallel to `args` for `rotate`) | `pls1_rotation_stability` |
 | `find_k_args` | method-specific kwargs forwarded by `pls1_fit(k="optimal" \| "sequence")` to the underlying `pls1_find_k_*` call. Allowed keys are the public params of the target function except `seed` / `pre_standardized` / `weights`, which live on `pls1_fit`, and `verbose`, which the selection run inside `pls1_fit` does not take. Unknown keys raise `PlsKitError(code="invalid_args")` listing the allowed set. | `pls1_fit` |
 | `selector` | K-selection criterion (`"r2_se"` / `"r2_max"` / `"bic"`) | `pls1_find_k_optimal`, `spls1_find_k_optimal` |
 | `test_method` | the test to run (string): on the confirmatory tests, the test itself (`"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"` / `"auto"`; `pls3_confirmatory_test` takes `"split_exact"` / `"split_nb"` / `"auto"` only); on the sequence, the inner test of the closed-test path (same values, `"score"` rejected — no sequential variant) | `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_find_k_sequence`, `spls1_find_k_sequence` |
@@ -113,7 +113,7 @@ There is no `at` argument (legacy `"fitted_k"` / `"first_k"` / `"postselection"`
 |---|---|---|
 | `alpha` | significance threshold for the closed-test path | `pls1_find_k_sequence`, `spls1_find_k_sequence` |
 | `ci` | bool, default `False`; also compute the subsampling CIs | `pls1_confirmatory_test` |
-| `level` | CI confidence level (default 0.95) | `percentile_ci`, `nested_cv_r2_ci`, `pls1_confirmatory_test` (`ci=True`), `pls1_rotation_stability` |
+| `level` | CI confidence level (default 0.95) | `percentile_ci`, `nested_cv_r2_ci`, `pls1_confirmatory_test` (`ci=True`) |
 | `strata` | block labels for blocked resampling | `bootstrap_saliences` |
 
 `alpha` is also a result field of `PermAlphaResult`, the dual coefficients; the two never meet in one signature.
@@ -122,13 +122,13 @@ There is no `at` argument (legacy `"fitted_k"` / `"first_k"` / `"postselection"`
 
 | name | description | functions |
 |---|---|---|
-| `seed` | RNG seed; `None` → OS entropy, recorded as `result.seed` | `pls1_fit` (string modes of `k`), `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_rotation_stability`, `pls1_perm_null` |
+| `seed` | RNG seed; `None` → OS entropy, recorded as `result.seed` | `pls1_fit` (string modes of `k`), `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_perm_null` |
 
 ### 7. Pre-standardization flags
 
 | name | description | functions |
 |---|---|---|
-| `pre_standardized` | skip X+Y centering/scaling (unified PLS1 flag); weights are normalized either way | `pls1_fit`, `spls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_rotation_stability`, `pls1_perm_null` |
+| `pre_standardized` | skip X+Y centering/scaling (unified PLS1 flag); weights are normalized either way | `pls1_fit`, `spls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_perm_null`, `factors`, `profiles`, `rotate` |
 | `pre_standardized_X` | skip X centering/scaling | `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls3_confirmatory_test` (accepted, no effect) |
 | `pre_standardized_Y` | skip Y centering/scaling | `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls3_confirmatory_test` (accepted, no effect) |
 
@@ -146,7 +146,7 @@ There is no `at` argument (legacy `"fitted_k"` / `"first_k"` / `"postselection"`
 | name | description | functions |
 |---|---|---|
 | `verbose` | progress to stderr | every long-running core function |
-| `max_skip_rate` | float in [0, 1]; default `0.01`; subsample loop raises `PlsKitResamplingDegenerate` if the fraction of skipped resamples exceeds this threshold | `pls1_confirmatory_test(ci=True)`, `pls1_rotation_stability` |
+| `max_skip_rate` | float in [0, 1]; default `0.01`; subsample loop raises `PlsKitResamplingDegenerate` if the fraction of skipped resamples exceeds this threshold | `pls1_confirmatory_test(ci=True)` |
 | `max_failure_rate` | float in [0, 1]; default `0.01`; the `ci=True` pass raises `resample_failure_rate_exceeded` if the fraction of failed resamples exceeds this threshold | `pls1_confirmatory_test(ci=True)` |
 | `return_perm_matrix` | bool, default `False`; also return the full `(n_perm, p)` β matrix | `pls1_perm_null` |
 
@@ -159,16 +159,13 @@ the field. This applies to `n_boot`, `m_rate`, `level`, `max_skip_rate`,
 
 ### 10. Rotation-invariant resampling readouts (result-only; not args)
 
-These names appear only on result objects (`ConfirmatoryCI`,
-`RotationStabilityResult`); the user does not pass them in. They are
+These names appear only on result objects (`ConfirmatoryCI`); the user does not pass them in. They are
 listed here so language wrappers stay aligned on the names. These are
 computed in Rust core and surface verbatim across wrappers.
 
 | name | shape / type | description |
 |---|---|---|
 | `m` | `int` | resolved subsample size, `m = ceil(n^m_rate)` |
-| `variance_ratio` | `CIScalar` | rotation-stability headline: `V_rot / V_unrot` on signed-permutation-aligned weights, paired-bootstrap percentile CI |
-| `variance_ratio_per_axis` | list of `CIScalar` | per-axis version of `variance_ratio` |
 | `holdout_corr` | `CIScalar` | composite: Fisher-z NB-adjusted Wald CI on out-of-sample correlation |
 | `beta_sign_z` | `(D,)` array | per-variable: folded subsampling z for β, `\|β_ref\| / se` (finite-population and shrinkage corrected SE) |
 | `beta_sign_z_signed` | `(D,)` array | per-variable: signed z, `sign(β_ref) · beta_sign_z` |

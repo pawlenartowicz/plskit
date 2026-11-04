@@ -5,7 +5,7 @@
 //! [`Outcome`] (or [`BindError`]) back. Everything else is shared here, so no
 //! wrapper reimplements it: method-string parsing, strict `args` validation, engine
 //! default resolution, result records, the `split_nb` reroute warning
-//! text, `rotate(model)` composition and the error-code mapping.
+//! text, the composition of `rotate` on results and the error-code mapping.
 
 #![deny(missing_docs)]
 #![deny(clippy::all)]

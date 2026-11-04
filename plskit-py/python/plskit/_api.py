@@ -17,16 +17,20 @@ from plskit import _plskit, _results
 from plskit._errors import PlsKitError, PlsKitInvalidWeights, PlsKitResamplingDegenerate
 from plskit._results import (
     ConfirmatoryTestResult,
+    FactorsResult,
     FindKOptimalResult,
     FindKeepOptimalResult,
     FindKSequenceResult,
+    PCABasisResult,
     PermAlphaResult,
     PermNullResult,
     PLS1Result,
     PLS3Result,
     PLS3Scores,
     PreprocessResult,
-    RotationStabilityResult,
+    ProfilesFindNResult,
+    ProfilesResult,
+    ProfilesSearchResult,
     SplitNbGateResult,
 )
 
@@ -133,8 +137,8 @@ _KINDS = {
 }
 
 # Per array parameter kind: what a message calls the value, and the
-# dimensions it may have. The keys, and the `"model"` / `"model_or_mat"`
-# kinds `_call` tests, mirror `ParamKind::as_str` in plskit-bind's registry
+# dimensions it may have. The keys, and the `"model"` / `"model_or_mat"` /
+# `"model_or_vec"` kinds `_call` tests, mirror `ParamKind::as_str` in plskit-bind's registry
 # — change together.
 _ARRAY_KINDS = {
     "mat": ("matrix", "2-D"),
@@ -233,10 +237,12 @@ def _call(name: str, **arguments):
         kind = kinds[key]
         if value is None:
             continue
-        if kind in ("model", "model_or_mat") and _is_record(value):
+        if kind in ("model", "model_or_mat", "model_or_vec") and _is_record(value):
             arguments[key] = _aligned_model(value)
         elif kind == "model_or_mat":
             arguments[key] = _array_argument(value, key, "mat")
+        elif kind == "model_or_vec":
+            arguments[key] = _array_argument(value, key, "vec")
         elif kind in _ARRAY_KINDS:
             arguments[key] = _array_argument(value, key, kind)
     result, emitted = _plskit.call(name, arguments, _make_result)
@@ -437,10 +443,8 @@ def spls3_fit(
     ``singular_values`` on a sparse fit are ``u'Av`` on the deflated ``A``,
     not singular values of ``X'Y``. Do not read an explained-variance share
     off them. Rotating a sparse fit with ``rotate`` destroys the zeros:
-    choose sparsity or rotation, not both. That warning is reachable only
-    through ``rotate``'s array overload applied to ``U``; ``rotate``
-    refuses a ``PLS3Result`` outright (it takes a ``PLS1Result`` or an
-    ``np.ndarray``), so there is no model overload to guard.
+    choose sparsity or rotation, not both. ``rotate`` warns when it is
+    given a sparse ``PLS3Result``.
     """
     return _call("spls3_fit", X=X, Y=Y, k=k, keep_X=keep_X, keep_Y=keep_Y,
                  pre_standardized_X=pre_standardized_X,
@@ -680,8 +684,9 @@ def pls1_confirmatory_test(
         Number of subsampling resamples for the ``ci`` branch. ``None`` uses
         the engine default, 1000. Inert when ``ci=False``.
     m_rate : float | None, default None
-        Subsample-size exponent; ``m = ceil(n ** m_rate)``. ``None`` uses the
-        engine default, 0.7. Inert when ``ci=False``.
+        Subsample-size exponent for β; ``m = ceil(n ** m_rate)``.
+        ``holdout_corr`` uses half splits and does not depend on it. ``None``
+        uses the engine default, 0.7. Inert when ``ci=False``.
     level : float | None, default None
         Nominal CI level. ``None`` uses the engine default, 0.95. Inert when
         ``ci=False``.
@@ -1006,70 +1011,200 @@ def spls1_find_k_sequence(
 @_convert_errors
 def rotate(
     model_or_W,
+    X: np.ndarray | None = None,
     *,
     method: Literal["varimax"] = "varimax",
     L: np.ndarray | None = None,
     args: dict | None = None,
+    pre_standardized: bool | None = None,
 ):
-    return _call("rotate", model_or_W=model_or_W, method=method, L=L, args=args)
+    """Rotate a `FactorsResult`, a `PLS3Result` or a matrix.
+
+    Parameters
+    ----------
+    model_or_W : FactorsResult | PLS3Result | np.ndarray
+        What gets rotated. A `PLS1Result` is refused: use `profiles`, or
+        ``rotate(m.W, ...)`` for the weights alone.
+    X : np.ndarray, shape (n, d), optional
+        The data that gives the target: the row scores. Give `X` or `L`,
+        not both. For a `FactorsResult`, `X` must be the data it was made
+        from. An `X` with the right columns but other rows is not checked,
+        and the rotation is then wrong. For a `PLS3Result` the target is its
+        stored ``x_scores``; `X` is checked for its row count only.
+    method : str
+        Only ``'varimax'`` is implemented.
+    L : np.ndarray, optional
+        Any other target of the caller's.
+    args : dict | None
+        Options of the rotation method.
+    pre_standardized : bool | None
+        ``True`` uses `X` as given, ``False`` standardizes it. ``None``
+        follows the result, or is ``False`` for an array. A mismatch with
+        the fit is the caller's responsibility. Refused for a `PLS3Result`.
+
+    Returns
+    -------
+    FactorsResult | PLS3Result | RotateResult
+        The type follows the first argument. A sparse `PLS3Result` warns
+        that rotation spreads its zeros.
+    """
+    return _call("rotate", model_or_W=model_or_W, X=X, method=method, L=L,
+                 args=args, pre_standardized=pre_standardized)
 
 
 @_convert_errors
-def pls1_rotation_stability(
-    X: np.ndarray, y: np.ndarray, k: int,
+def pca_basis(X: np.ndarray, *, pre_standardized: bool = False) -> PCABasisResult:
+    """Right singular vectors and singular values of standardized `X`.
+
+    Keeps the components with ``s > 1e-10 * s[0]``, so ``V`` has shape
+    ``(D, K)`` with ``K`` the rank of `X`. Column signs are arbitrary, and
+    `factors` does not depend on them.
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (n, d)
+    pre_standardized : bool, default False
+        If True, `X` is used as given.
+    """
+    return _call("pca_basis", X=X, pre_standardized=pre_standardized)
+
+
+@_convert_errors
+def factors(
+    model_or_coef, X: np.ndarray, n: int,
     *,
-    rotation_method: Literal["varimax"] = "varimax",
-    rotation_args: dict | None = None,
-    L: np.ndarray | None = None,
-    n_boot: int | None = None,
-    m_rate: float | None = None,
-    level: float | None = None,
+    pre_standardized: bool | None = None,
+) -> FactorsResult:
+    """Split a coefficient vector into `n` orthogonal parts that sum to it.
+
+    A factor is a part of one coefficient vector. It is not a latent
+    variable, and `n` is not a count of dimensions.
+
+    Parameters
+    ----------
+    model_or_coef : PLS1Result | np.ndarray, shape (D,)
+        A fit from `pls1_fit` or `spls1_fit`, or a coefficient vector on the
+        standardized scale: ``model.coef``, not ``model.beta``. A weighted
+        fit is refused.
+    X : np.ndarray, shape (N, D)
+        The data that gives the basis. Variables whose `coef` is exactly
+        zero are left out.
+    n : int
+        Number of factors, ``1 <= n <= K``, with `K` the rank of `X` after
+        the variables are left out, plus one when `coef` has a part outside
+        its row space.
+    pre_standardized : bool | None
+        ``True`` uses `X` as given, ``False`` standardizes it. ``None``
+        follows the fit, or is ``False`` for a vector. A mismatch with the
+        fit is the caller's responsibility.
+
+    Returns
+    -------
+    FactorsResult
+        Not rotated, in block order. ``size`` is nonnegative.
+    """
+    return _call("factors", model_or_coef=model_or_coef, X=X, n=n,
+                 pre_standardized=pre_standardized)
+
+
+@_convert_errors
+def profiles_find_n(
+    X: np.ndarray, y: np.ndarray, k: int, n_max: int = 9,
+    *,
+    args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    verbose: bool = False,
-    weights: np.ndarray | None = None,
-    max_skip_rate: float | None = None,
-) -> RotationStabilityResult:
-    """PLS1 rotation-stability diagnostic.
+) -> ProfilesFindNResult:
+    """Choose the number of factors by repeated cross-validation.
 
     Parameters
     ----------
     X : np.ndarray, shape (n, d)
     y : np.ndarray, shape (n,)
     k : int
-        Number of components (2 ≤ k ≤ 7).
-    rotation_method : str
-        Rotation method; currently only ``"varimax"`` is implemented.
-    rotation_args : dict or None
-        Method-specific kwargs (e.g. ``{"max_iter": 100}`` for varimax).
-    L : np.ndarray or None
-        Optional fixed loading matrix for constrained rotation.
-    n_boot : int | None, default None
-        Number of subsampling resamples. ``None`` uses the engine default,
-        1000.
-    m_rate : float | None, default None
-        Subsample-size exponent; ``m = ceil(n ** m_rate)``. ``None`` uses the
-        engine default, 0.7.
-    level : float | None, default None
-        Nominal CI level (e.g. 0.95). ``None`` uses the engine default, 0.95.
+        PLS components used in every fold.
+    n_max : int, default 9
+        Upper limit of the search. It does not limit `n` in `profiles`.
+    args : dict | None
+        ``n_folds`` (default 5), ``n_repeats`` (default 2) and ``n_perm``
+        (default 20, shuffles for the parallel analysis). A fold with a
+        constant training column, or a held-out fold with no finite R², is
+        not used and is counted in ``n_failed_folds``. Fewer than two usable
+        folds raises ``invalid_input``.
     pre_standardized : bool
-        Set ``True`` when ``X`` is already column-standardized.
-    seed : int or None
-        RNG seed for reproducibility.
-    verbose : bool
-        Reserved for future progress reporting.
-    weights : np.ndarray or None, shape (n,)
-        Optional per-observation weights. ``None`` is equivalent to all-ones.
-    max_skip_rate : float | None, default None
-        Maximum fraction of subsamples that may be skipped (due to weight
-        degeneracy) before raising ``PlsKitResamplingDegenerate``. ``None``
-        uses the engine default, 0.01.
+        Whether the parallel analysis skips standardizing `X`.
+    seed : int | None
+        Recorded on the result.
     """
-    return _call("pls1_rotation_stability", X=X, y=y, k=k,
-                 rotation_method=rotation_method, rotation_args=rotation_args, L=L,
-                 n_boot=n_boot, m_rate=m_rate, level=level,
-                 pre_standardized=pre_standardized, seed=seed, verbose=verbose,
-                 weights=weights, max_skip_rate=max_skip_rate)
+    return _call("profiles_find_n", X=X, y=y, k=k, n_max=n_max, args=args,
+                 pre_standardized=pre_standardized, seed=seed)
+
+
+@_convert_errors
+def profiles(
+    model_or_coef, X: np.ndarray, n: int,
+    *,
+    rotation: Literal["varimax"] = "varimax",
+    args: dict | None = None,
+    pre_standardized: bool | None = None,
+) -> ProfilesResult:
+    """Split the coefficient vector of a fit into `n` factors and rotate them.
+
+    A factor is a part of one coefficient vector. It is not a latent
+    variable, and `n` is not a count of dimensions.
+
+    Parameters
+    ----------
+    model_or_coef : PLS1Result | np.ndarray, shape (D,)
+        A fit from `pls1_fit` or `spls1_fit`, or a coefficient vector on the
+        standardized scale: ``model.coef``, not ``model.beta``. A weighted
+        fit is refused. With a vector,
+        ``ProfilesResult.model`` is ``None``.
+    X : np.ndarray, shape (N, D)
+        The data of the fit.
+    n : int
+        Number of factors.
+    rotation : str
+        Passed to `rotate` as ``method``. Only ``'varimax'`` is implemented.
+    args : dict | None
+        Passed to `rotate`.
+    pre_standardized : bool | None
+        As in `factors`.
+    """
+    return _call("profiles", model_or_coef=model_or_coef, X=X, n=n,
+                 rotation=rotation, args=args,
+                 pre_standardized=pre_standardized)
+
+
+@_convert_errors
+def profiles_search(
+    model: PLS1Result, X: np.ndarray, y: np.ndarray,
+    *,
+    n_max: int = 9,
+    rotation: Literal["varimax"] = "varimax",
+    args: dict | None = None,
+    find_n_args: dict | None = None,
+    seed: int | None = None,
+) -> ProfilesSearchResult:
+    """`profiles` at the `n` chosen by `profiles_find_n`, with the search kept.
+
+    Parameters
+    ----------
+    model, X, rotation, args :
+        As in `profiles`.
+    y : np.ndarray, shape (n,)
+        The outcome of the fit.
+    n_max : int, default 9
+        Upper limit of the search.
+    find_n_args : dict | None
+        Passed to `profiles_find_n` as ``args``. Its ``k`` is
+        ``model.k_used``. When it returns ``n_star = 0``, this runs with
+        ``n = 1``.
+    seed : int | None
+        Recorded on the result.
+    """
+    return _call("profiles_search", model=model, X=X, y=y, n_max=n_max,
+                 rotation=rotation, args=args, find_n_args=find_n_args, seed=seed)
 
 
 @_convert_errors
@@ -1179,8 +1314,12 @@ __all__ = [
     "spls1_find_k_sequence",
     "pls1_perm_null",
     "pls1_perm_alpha",
-    "pls1_rotation_stability",
     "rotate",
+    "factors",
+    "pca_basis",
+    "profiles_find_n",
+    "profiles",
+    "profiles_search",
     "pls3_fit",
     "plssvd_fit",
     "spls3_fit",

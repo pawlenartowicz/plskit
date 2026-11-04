@@ -1,8 +1,7 @@
-//! Resampling engine for PLS1 inference: Politis–Romano subsampling for β
-//! and `holdout_corr`, and an n-out-of-n bootstrap for leverage. The engine
-//! entry points are internal (`pub(crate)`): callers are
-//! `signal_test::pls1_confirmatory_test(CI=Some)` and
-//! `rotation_stability::pls1_rotation_stability`. Only the result types
+//! Resampling engine for PLS1 inference: Politis–Romano subsampling for β,
+//! half splits for `holdout_corr`, and an n-out-of-n bootstrap for leverage. The engine
+//! entry points are internal (`pub(crate)`): the caller is
+//! `signal_test::pls1_confirmatory_test(CI=Some)`. Only the result types
 //! `CIScalar` and `ConfirmatoryCI` are public, re-exported from `lib.rs`.
 //!
 //! Reduction formulas are documented inline on `reduce_centered_scaled`
@@ -23,7 +22,8 @@
 /// r-scale; do not reconstruct it from `point ± sd`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CIScalar {
-    /// Full-data point estimate `θ̂_n`, on the natural scale of the statistic.
+    /// Point estimate on the natural scale of the statistic: the full-data
+    /// `θ̂_n`, or for `holdout_corr` the mean over the half splits.
     pub point: f64,
     /// Lower endpoint of the CI at `level`, on the natural scale.
     pub lower: f64,
@@ -154,14 +154,15 @@ fn reduce_leverage(samples_b: &[f64], point: f64, level: f64) -> CIScalar {
 }
 
 /// The confirmatory CI's subsample size on `n` rows, or `InvalidArgument`
-/// when it cannot serve a `k`-component CI: `m ≥ n` leaves no holdout, so
-/// every resample's holdout correlation is NaN, and `m < k + 2` is too small
-/// to fit `k` components and leave residual degrees of freedom.
+/// when it cannot serve a `k`-component CI: `m ≥ n` leaves no rows outside
+/// the subsample, so the β rate `√(m/(n − m))` is undefined, and `m < k + 2`
+/// (or a `holdout_train_size(n) < k + 2`) is too small to fit `k` components
+/// and leave residual degrees of freedom.
 pub(crate) fn resolve_ci_m(n: usize, k: usize, m_rate: f64) -> PlsKitResult<usize> {
     let m = resolve_m(n, m_rate);
     if m >= n {
         return Err(PlsKitError::InvalidArgument(format!(
-            "resolved m = {m} (from n={n}, m_rate={m_rate}) leaves no holdout; need m < n"
+            "resolved m = {m} (from n={n}, m_rate={m_rate}) leaves no rows outside the subsample; need m < n"
         )));
     }
     if m < k + 2 {
@@ -169,7 +170,20 @@ pub(crate) fn resolve_ci_m(n: usize, k: usize, m_rate: f64) -> PlsKitResult<usiz
             "resolved m = {m} (from n={n}, m_rate={m_rate}) is too small for k={k}; need m ≥ k+2"
         )));
     }
+    let m_h = holdout_train_size(n);
+    if m_h < k + 2 {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "the holdout_corr split trains on n/2 = {m_h} rows (n={n}), too few for k={k}; need n/2 ≥ k+2"
+        )));
+    }
     Ok(m)
+}
+
+/// Training rows of each replicate's `holdout_corr` split: `⌊n/2⌋`, the
+/// training size of the `split_exact` / `split_nb` statistic, so the
+/// interval and the test target the same held-out correlation.
+pub(crate) fn holdout_train_size(n: usize) -> usize {
+    n / 2
 }
 
 /// Resolve `m` from `(n, m_rate)`: `m = ceil(n^m_rate)`.
@@ -243,7 +257,8 @@ pub(crate) struct ConfirmatoryWorkerRow {
     /// leaves the hat matrix fixed), so computed on the unaligned `W_b`, with
     /// no procrustes alignment. Length D.
     pub leverage: Vec<f64>,
-    /// `corr(X[holdout] · β_b, y[holdout])`. NaN if undefined (e.g. constant holdout y).
+    /// `corr(X[holdout] · β_h, y[holdout])`, `β_h` fitted on the half split's
+    /// training rows. NaN if undefined (e.g. constant holdout y).
     pub holdout_corr: f64,
     /// Per-variable subsample regression coefficient `β_b`. Length D. PLS1-only:
     /// β is invariant under component sign flips and within-subspace rotations
@@ -346,16 +361,23 @@ fn fit_rows(
 }
 
 /// Run one confirmatory replicate: a size-`m` subsample (without
-/// replacement) for β and `holdout_corr`, and an n-out-of-n bootstrap
-/// resample (with replacement) for leverage. Both index sets come from the
-/// same child `rng`, subsample first, so the subsample draw does not depend
-/// on the bootstrap one. `pre_standardized_x` matches the user's flag.
+/// replacement) for β, an n-out-of-n bootstrap resample (with replacement)
+/// for leverage, and a half split (`holdout_train_size(n)` training rows,
+/// the rest held out) for `holdout_corr`. All three index sets come from
+/// the same child `rng` in that order, so the β and leverage draws do not
+/// depend on the half split. `pre_standardized_x` matches the user's flag.
 ///
 /// Leverage uses the bootstrap because its bias depends on the sample size
 /// (at small `n/D` a fit spreads leverage from signal onto noise
 /// variables, more so on fewer rows): a size-`m` fit measures the sampling
 /// distribution at the wrong size, while a size-`n` resample reproduces the
 /// spread of the full-data leverage. See `reduce_leverage`.
+///
+/// `holdout_corr` uses a half split, not the size-`m` subsample, because
+/// its target is the held-out correlation of a fit trained on that many
+/// rows: at `m = ⌊n/2⌋` it is the quantity the split tests estimate, and
+/// the NB factor `(n − m)/m` is about 1 (at `m = n^0.7` it is 2.8 at
+/// `n = 100`, and the interval nearly always covers).
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
 fn run_one_confirmatory(
@@ -370,14 +392,14 @@ fn run_one_confirmatory(
     let n = x.nrows();
     let d = x.ncols();
 
-    // 1. Index draws: subsample, then bootstrap resample.
-    let (sample_idx, holdout_idx) = subsample_indices(n, m, rng);
+    // 1. Index draws: subsample, bootstrap resample, then the half split.
+    let (sample_idx, _) = subsample_indices(n, m, rng);
     let boot_idx = bootstrap_indices(n, rng);
+    let (half_idx, holdout_idx) = subsample_indices(n, holdout_train_size(n), rng);
 
-    // 2. Subsample fit (β, holdout_corr) and bootstrap fit (leverage).
+    // 2. Subsample fit (β) and bootstrap fit (leverage).
     let RowFit {
         beta: beta_b,
-        x_mean,
         x_scale,
         y_scale,
         ..
@@ -389,49 +411,62 @@ fn run_one_confirmatory(
     // diag(W(WᵀW)⁻¹Wᵀ); W → W·R leaves the hat matrix fixed), so no
     // procrustes alignment is needed.
     let leverage = crate::linalg::leverage_diag(boot.w.as_ref());
+    drop(boot);
 
-    // 4. Holdout predictive correlation of the subsample fit.
+    // 4. Holdout predictive correlation of the half-split fit. A failed
+    // half-split fit costs the replicate its holdout_corr only (NaN), not its
+    // β and leverage rows.
     // Pre-standardized: the holdout rows are the block. Otherwise they are
-    // gathered and standardized with the subsample's moments in one pass.
-    let ys_h_owned = col_row_subset(y, &holdout_idx);
-    let xs_h = if pre_standardized_x {
-        row_subset(x, &holdout_idx)
-    } else {
-        crate::linalg::standardize_apply_rows(
-            x,
-            &holdout_idx,
-            x_mean.as_ref(),
-            x_scale.as_ref(),
-            None,
-        )
-    };
-
-    // Seq inside the replicate worker: outer Rayon owns the threadpool.
-    let y_pred = crate::linalg::mat_vec(xs_h.as_ref(), beta_b.as_ref(), faer::Par::Seq);
-    let n_h = ys_h_owned.nrows();
+    // gathered and standardized with the training half's moments in one pass.
     #[allow(clippy::cast_precision_loss)]
-    let holdout_corr = if n_h >= 2 {
-        let yp_mean: f64 = (0..n_h).map(|i| y_pred[i]).sum::<f64>() / n_h as f64;
-        let yh_mean: f64 = (0..n_h).map(|i| ys_h_owned[i]).sum::<f64>() / n_h as f64;
-        let mut s_pp = 0.0_f64;
-        let mut s_yy = 0.0_f64;
-        let mut s_py = 0.0_f64;
-        for i in 0..n_h {
-            #[allow(clippy::many_single_char_names)]
-            let dp = y_pred[i] - yp_mean;
-            #[allow(clippy::many_single_char_names)]
-            let dy = ys_h_owned[i] - yh_mean;
-            s_pp += dp * dp;
-            s_yy += dy * dy;
-            s_py += dp * dy;
+    let holdout_corr = match fit_rows(x, y, &half_idx, k, pre_standardized_x, weights) {
+        Err(_) => f64::NAN,
+        Ok(RowFit {
+            beta: beta_h,
+            x_mean,
+            x_scale: x_scale_h,
+            ..
+        }) => {
+            let ys_h_owned = col_row_subset(y, &holdout_idx);
+            let xs_h = if pre_standardized_x {
+                row_subset(x, &holdout_idx)
+            } else {
+                crate::linalg::standardize_apply_rows(
+                    x,
+                    &holdout_idx,
+                    x_mean.as_ref(),
+                    x_scale_h.as_ref(),
+                    None,
+                )
+            };
+
+            // Seq inside the replicate worker: outer Rayon owns the threadpool.
+            let y_pred = crate::linalg::mat_vec(xs_h.as_ref(), beta_h.as_ref(), faer::Par::Seq);
+            let n_h = ys_h_owned.nrows();
+            if n_h >= 2 {
+                let yp_mean: f64 = (0..n_h).map(|i| y_pred[i]).sum::<f64>() / n_h as f64;
+                let yh_mean: f64 = (0..n_h).map(|i| ys_h_owned[i]).sum::<f64>() / n_h as f64;
+                let mut s_pp = 0.0_f64;
+                let mut s_yy = 0.0_f64;
+                let mut s_py = 0.0_f64;
+                for i in 0..n_h {
+                    #[allow(clippy::many_single_char_names)]
+                    let dp = y_pred[i] - yp_mean;
+                    #[allow(clippy::many_single_char_names)]
+                    let dy = ys_h_owned[i] - yh_mean;
+                    s_pp += dp * dp;
+                    s_yy += dy * dy;
+                    s_py += dp * dy;
+                }
+                if s_pp > 1e-30 && s_yy > 1e-30 {
+                    (s_py / (s_pp * s_yy).sqrt()).clamp(-1.0, 1.0)
+                } else {
+                    f64::NAN
+                }
+            } else {
+                f64::NAN
+            }
         }
-        if s_pp > 1e-30 && s_yy > 1e-30 {
-            (s_py / (s_pp * s_yy).sqrt()).clamp(-1.0, 1.0)
-        } else {
-            f64::NAN
-        }
-    } else {
-        f64::NAN
     };
 
     // 5. Back-project β_b to the same scale as β_ref so deltas are meaningful.
@@ -489,6 +524,35 @@ mod tests_worker {
             "{res:?}"
         );
     }
+
+    /// A failed half-split fit costs the replicate its `holdout_corr` only.
+    /// `k = 55` is above the rank of a 50-row half split but not of the
+    /// 99-row subsample or of the bootstrap resample (about 63 distinct rows).
+    #[test]
+    #[allow(clippy::many_single_char_names)] // n, d, k, x, y are the math names
+    fn failed_half_split_keeps_beta_and_leverage() {
+        let (n, d, k) = (100, 80, 55);
+        let mut rng_data = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        let x = Mat::<f64>::from_fn(n, d, |_, _| rng_data.random_range(-1.0..1.0));
+        let y = Col::<f64>::from_fn(n, |_| rng_data.random_range(-1.0..1.0));
+
+        let (_, mut rng) = resolve_seed(Some(11)).unwrap();
+        let row =
+            run_one_confirmatory(x.as_ref(), y.as_ref(), k, 99, false, None, &mut rng).unwrap();
+        assert!(row.holdout_corr.is_nan());
+        assert!(row.beta.iter().chain(&row.leverage).all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn a_half_split_too_small_for_k_is_invalid_argument() {
+        // m = ⌈10^0.9⌉ = 8 passes m ≥ k + 2 = 6; the half split trains on 5 rows.
+        assert_eq!(resolve_m(10, 0.9), 8);
+        let r = resolve_ci_m(10, 4, 0.9);
+        assert!(
+            matches!(&r, Err(PlsKitError::InvalidArgument(m)) if m.contains("n/2 = 5")),
+            "{r:?}"
+        );
+    }
 }
 
 /// Output of the confirmatory subsampling engine. Marshalled into
@@ -496,10 +560,10 @@ mod tests_worker {
 #[derive(Debug, Clone)]
 pub struct ConfirmatoryCI {
     /// Number of resampling replicates. Each replicate draws one size-`m`
-    /// subsample (β, `holdout_corr`) and one n-out-of-n bootstrap resample
-    /// (leverage).
+    /// subsample (β), one n-out-of-n bootstrap resample (leverage) and one
+    /// half split of `⌊n/2⌋` training rows (`holdout_corr`).
     pub n_boot: usize,
-    /// Subsample size used for each subsample (β, `holdout_corr`).
+    /// Subsample size used for each β subsample.
     pub m: usize,
     /// Subsample rate `m_rate` such that `m = ceil(n^m_rate)`.
     pub m_rate: f64,
@@ -549,8 +613,8 @@ pub struct ConfirmatoryCI {
     /// Holdout predictive correlation. CI is built via Fisher z-transform
     /// (atanh) with NB inflation applied on the z-scale, then back-transformed
     /// via tanh; CI bounds are guaranteed in (−1, 1) and are asymmetric on the
-    /// r-scale. `point` is the subsample mean on the r-scale; `sd` is on the
-    /// z-scale (see `CIScalar` doc).
+    /// r-scale. `point` is the mean over the half splits on the r-scale; `sd`
+    /// is on the z-scale (see `CIScalar` doc).
     pub holdout_corr: CIScalar,
     /// Number of resamples whose worker fit succeeded (contributors to
     /// leverage, `beta_sign_z`). Equals `n_boot − n_worker_failed`.
@@ -567,8 +631,11 @@ pub struct ConfirmatoryCI {
 ///   Var_z = (1/B + (n − m)/m) · stddev²(ζ_b)
 ///   ci_z  = atanh(mean(r_b)) ± Φ⁻¹(1 − α/2) · sqrt(Var_z)
 ///   ci    = tanh(ci_z)        // bounds always in (−1, 1)
-/// `point` stays on the r-scale (subsample mean) — the unbiased plug-in estimate
-/// of ρ — while the CI center on the z-scale is `atanh(point)`. `sd` is the
+/// with `m` the training size of each split (`holdout_train_size(n)` from
+/// `reduce_confirmatory`). The target is ρ(m), the expected held-out
+/// correlation of a fit trained on `m` rows.
+/// `point` stays on the r-scale (mean over splits) — the plug-in estimate
+/// of ρ(m) — while the CI center on the z-scale is `atanh(point)`. `sd` is the
 /// z-scale SE; the r-scale CI is asymmetric and cannot be reconstructed from
 /// `point ± sd`.
 ///
@@ -974,12 +1041,12 @@ pub(crate) fn reduce_confirmatory(
     let beta = reduce_beta(rows, &beta_ref_vec, n, m, level);
     let beta_sign_z: Vec<f64> = beta.z_signed.iter().map(|z| z.abs()).collect();
 
-    // ── holdout_corr (NB-Wald CI) ──
+    // ── holdout_corr (NB-Wald CI, on the half splits) ──
     let mut hc_buf = vec![0.0_f64; b];
     for i in 0..b {
         hc_buf[i] = rows[i].holdout_corr;
     }
-    let holdout_corr = reduce_holdout_corr(&hc_buf, n, m, level);
+    let holdout_corr = reduce_holdout_corr(&hc_buf, n, holdout_train_size(n), level);
 
     ConfirmatoryCI {
         n_boot: b,
@@ -1617,8 +1684,9 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
     // The replicates run in batches by the memory budget. One replicate
     // holds at most two n-row copies of X at once: the bootstrap fit's
     // standardized rows and, when weighted, their √w-scaled copy (the
-    // subsample fit's copies, of m rows, and the n - m hold-out rows are
-    // smaller and not alive at the same time), and one fit's buffers. The
+    // subsample fit's copies, of m rows, the half split's, of n/2 rows, and
+    // its n - n/2 hold-out rows are smaller and not alive at the same
+    // time), and one fit's buffers. The
     // unit counts the two copies whether weighted or not.
     let unit = crate::resample::copy_bytes(n, x.ncols())
         .saturating_mul(2)
@@ -1740,6 +1808,17 @@ mod tests_engine {
         n_boot: usize,
         seed: u64,
     ) -> ConfirmatoryCI {
+        run_engine_at(x, y, k, n_boot, seed, 0.7)
+    }
+
+    fn run_engine_at(
+        x: &Mat<f64>,
+        y: &Col<f64>,
+        k: usize,
+        n_boot: usize,
+        seed: u64,
+        m_rate: f64,
+    ) -> ConfirmatoryCI {
         let fit = pls1_fit(
             x.as_ref(),
             y.as_ref(),
@@ -1751,7 +1830,7 @@ mod tests_engine {
         let leverage_ref = crate::linalg::leverage_diag(fit.w_star.as_ref());
         let opts = SubsampleOpts {
             n_boot,
-            m_rate: 0.7,
+            m_rate,
             level: 0.95,
             pre_standardized: false,
             max_failure_rate: 0.0,
@@ -1769,6 +1848,21 @@ mod tests_engine {
             &mut rng,
         )
         .unwrap()
+    }
+
+    /// `holdout_corr` is built on half splits, so its target, the held-out
+    /// correlation of a fit on `n/2` rows, does not move with `m_rate`: the
+    /// same seed gives the same interval at any `m_rate`, while β follows
+    /// its own size-`m` subsample.
+    #[test]
+    fn holdout_corr_does_not_depend_on_m_rate() {
+        let (x, y) = synth(120, 10, 2, 1.0, 31);
+        let lo = run_engine_at(&x, &y, 1, 100, 32, 0.6);
+        let hi = run_engine_at(&x, &y, 1, 100, 32, 0.9);
+        assert!((lo.m, hi.m) == (18, 75), "m = {}, {}", lo.m, hi.m);
+        assert_eq!(lo.holdout_corr, hi.holdout_corr);
+        assert!(lo.n_boot_finite_holdout_corr == 100 && lo.holdout_corr.sd > 0.0);
+        assert_ne!(lo.beta_se, hi.beta_se);
     }
 
     /// Under a pure null (y independent of X, K = 1) every population β[j]

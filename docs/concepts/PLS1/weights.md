@@ -38,7 +38,7 @@ weights through the `weights` argument.
 ## Which functions take them
 
 - Take `weights`: `pls1_fit`, `pls1_confirmatory_test`,
-  `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_rotation_stability`,
+  `pls1_find_k_optimal`, `pls1_find_k_sequence`,
   `pls1_perm_null`, `split_nb_gate`, `preprocess`, and the sparse
   `spls1_*` family. They thread the weights through fit, K-selection and
   inference consistently.

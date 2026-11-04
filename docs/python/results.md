@@ -4,7 +4,7 @@ User-facing field shapes for each public Python result class. All fields
 are immutable (`@dataclass(frozen=True)`), and field names match across
 language wrappers.
 
-## `PreprocessResult` — what `preprocess` returns
+## `PreprocessResult`, what `preprocess` returns
 
 | Field | Python type | Notes |
 |---|---|---|
@@ -17,7 +17,7 @@ language wrappers.
 | `weights_normalized` | `np.ndarray \| None` | weights normalized to mean 1; populated when `weights` was passed |
 | `n_eff` | `float \| None` | Kish's effective sample size; populated when `weights` was passed; exactly `n` when the weights are all equal, as every fit reports |
 
-## `PLS1Result` — what `pls1_fit` returns
+## `PLS1Result`, what `pls1_fit` returns
 
 | Python field | Rust core field | numpy type | Shape |
 |---|---|---|---|
@@ -32,15 +32,13 @@ language wrappers.
 | `pre_standardized` | `pre_standardized` | `bool` | scalar |
 | `weights` | `weights` | `np.ndarray \| None` | `(n,)` when present; `None` for uniform/absent weights |
 | `n_eff` | `n_eff` | `float` | scalar; Kish's effective sample size, equals `n` for uniform/absent weights |
-| `rotation_spec` | `rotation_spec` | `RotationSpec \| None` | — |
 | `selection_result` | — | `FindKOptimalResult \| FindKSequenceResult \| None` | `None` unless the model came from `pls1_fit(X, y, k="optimal" \| "sequence")` |
 | `keep` | — | `int \| None` | `int` for `spls1_fit`; `None` for `pls1_fit` |
 
 There is no `k_was_auto` flag and no `find_k_certificate` field. The
 2026-04 confirmatory-vs-exploratory overhaul moved K-selection
 diagnostics onto the K-selection result objects themselves, where
-they originate. `rotation_spec` is `None` until `rotate(model, ...)`
-stamps it onto a copy of the model.
+they originate.
 
 ## `PLS3Result`, what `pls3_fit` / `plssvd_fit` / `spls3_fit` returns
 
@@ -48,7 +46,7 @@ stamps it onto a copy of the model.
 |---|---|---|---|
 | `U` | `u_saliences` | `np.ndarray` | `(p, k_used)`; orthonormal columns on a dense fit, unit-norm but not orthogonal on an `spls3_fit` |
 | `V` | `v_saliences` | `np.ndarray` | `(q, k_used)`; same dense-only orthonormality condition |
-| `singular_values` | `singular_values` | `np.ndarray` | `(k_used,)`; singular values of `X̃'Ỹ`, descending, on a dense fit. On a sparse fit, `σ_a = u_a'A_a v_a` on the deflated `A_a`: not singular values, not ordered, and `Σσ²/‖A‖_F²` is not an explained share |
+| `singular_values` | `singular_values` | `np.ndarray` | `(k_used,)`; singular values of `X̃'Ỹ`, descending, on a dense fit. After `rotate`, `(R' S R)_jj` with `S = diag(σ)`, still descending and with the same sum. On a sparse fit, `σ_a = u_a'A_a v_a` on the deflated `A_a`: not singular values, not ordered, and `Σσ²/‖A‖_F²` is not an explained share. After `rotate` of a sparse fit, `σ` uses the same formula but is not `u' A v`, and the columns of `U` and `V` are not unit-norm |
 | `x_scores` | `x_scores` | `np.ndarray` | `(n, k_used)` |
 | `y_scores` | `y_scores` | `np.ndarray` | `(n, k_used)` |
 | `X_mean` | `x_mean` | `np.ndarray` | `(p,)` |
@@ -62,6 +60,7 @@ stamps it onto a copy of the model.
 | `keep_Y` | `keep_y` | `int \| None` | scalar; `None` on a dense fit |
 | `converged` | `converged` | `np.ndarray \| None` | `(k_used,)` bool; `None` on a dense fit |
 | `n_iter` | `n_iter` | `np.ndarray \| None` | `(k_used,)` int; `None` on a dense fit |
+| `rotation_spec` | — | `RotationSpec \| None` | `None` until `rotate(model, X)` or `rotate(model, L=...)` stamps it on a copy |
 
 PLS3 is symmetric, so there is no `coef`, no `beta`, no `intercept` and no
 `predict`. On a dense fit `U` and `V` have pinned signs (largest-magnitude
@@ -73,14 +72,14 @@ deflated `A`, not singular values of `X'Y`: they need not descend and
 their squares do not partition anything. Observation weights are not
 implemented for this family, so there is no `weights` and no `n_eff`.
 
-## `PLS3Scores` — what `pls3_transform` / `plssvd_transform` returns
+## `PLS3Scores`, what `pls3_transform` / `plssvd_transform` returns
 
 | Python field | Rust core field | numpy type | Shape |
 |---|---|---|---|
 | `x_scores` | `x_scores` | `np.ndarray \| None` | `(n_new, k_used)`; `None` when `which` did not ask for it |
 | `y_scores` | `y_scores` | `np.ndarray \| None` | `(n_new, k_used)`; `None` when `which` did not ask for it |
 
-## `FindKOptimalResult` — what `pls1_find_k_optimal` returns
+## `FindKOptimalResult`, what `pls1_find_k_optimal` returns
 
 | Field | Python type | When populated |
 |---|---|---|
@@ -111,7 +110,7 @@ recommending a component the fit cannot produce. A requested diagnostic
 runs no step: `pvalues` has shape `(0,)` and `diagnostic` names the
 method the auto-gate resolved to.
 
-## `FindKSequenceResult` — what `pls1_find_k_sequence` returns
+## `FindKSequenceResult`, what `pls1_find_k_sequence` returns
 
 | Field | Python type | When populated |
 |---|---|---|
@@ -133,7 +132,7 @@ undeflated `X`, so when `test_method` / `diagnostic` reads
 two numbers that explain why. Use `split_nb_gate` to get them without
 running a test.
 
-## `FindKeepOptimalResult` — what `spls1_find_keep_optimal` returns
+## `FindKeepOptimalResult`, what `spls1_find_keep_optimal` returns
 
 | Field | Python type | Notes |
 |---|---|---|
@@ -157,7 +156,7 @@ span `X`). `cv_scores`, `cv_scores_se` and `keep_grid` are then empty.
 This is the `k_star = 0` convention of `FindKOptimalResult`, and the same
 input gives `k_star = 0` from `spls1_find_k_optimal`.
 
-## `ConfirmatoryTestResult` — what `pls1_confirmatory_test` returns
+## `ConfirmatoryTestResult`, what `pls1_confirmatory_test` returns
 
 | Field | Python type | Notes |
 |---|---|---|
@@ -171,14 +170,14 @@ input gives `k_star = 0` from `spls1_find_k_optimal`.
 | `n_eff` | `float` | always; Kish effective sample size, equals `n` for uniform/absent weights |
 | `rho_hat` | `float \| None` | `split_nb` only, and only when unweighted (no weights, or all-equal weights) with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
 | `stable_rank` | `float \| None` | stable rank of the standardized `X`, as seen by the `split_nb` auto-gate; set on an explicit `"split_nb"` request (fired or not, including under `force`), and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff ≥ 250, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise |
-| `ci` | `ConfirmatoryCI \| None` | not None when called with `ci=True`; carries the rotation-invariant resampling CIs (subsampling for β and `holdout_corr`, bootstrap for leverage) |
+| `ci` | `ConfirmatoryCI \| None` | not None when called with `ci=True`; carries the rotation-invariant resampling CIs (subsampling for β, half splits for `holdout_corr`, bootstrap for leverage) |
 
 There is no `at` field (legacy concept dropped). There is no
 `null_distribution` or `split_mean_r` slot — those internals were
 dropped from the public surface; only the headline result and
 (optionally) the `ConfirmatoryCI` bundle survive.
 
-## `SplitNbGateResult` — what `split_nb_gate` returns
+## `SplitNbGateResult`, what `split_nb_gate` returns
 
 | Field | Python type | Notes |
 |---|---|---|
@@ -190,7 +189,7 @@ Every field is always populated. This is the same rule the test
 functions apply internally, evaluated on the same standardized `X` —
 querying it costs one SVD and no resampling.
 
-## `PermNullResult` — what `pls1_perm_null` returns
+## `PermNullResult`, what `pls1_perm_null` returns
 
 | Field | Python type | Notes |
 |---|---|---|
@@ -204,6 +203,34 @@ querying it costs one SVD and no resampling.
 | `beta_perm_matrix` | `np.ndarray \| None` | shape `(n_perm, D)` when `return_perm_matrix=True` |
 | `n_eff` | `float` | effective sample size; `nan` if unavailable |
 
+**What a permutation row is.** At `k = 1`, `β = c·X̃ᵀỹ` with one scalar
+`c = ỹᵀKỹ / ỹᵀK²ỹ` (`K = X̃X̃ᵀ`). A refit on permuted `y` changes `c`
+as well as `X̃ᵀỹ`, and a real `y` that lines up with the top of the
+spectrum of `K` has a smaller `c` than nearly every permutation of it, so the
+null spread of refitted β is too wide for the observed β and the test
+loses nearly all power on collinear `X`. So at `k = 1` each row is
+`c_ref·X̃ᵀỹ_p`: the permuted fit with `c` held at the observed fit's
+value. The per-variable null is then that of `X_jᵀy`, the marginal
+covariance, which is the same null as a zero population `k = 1`
+coefficient. A permutation p-value from `beta_perm_matrix`
+(`(1 + #{b: |row_b[j]| ≥ |beta_ref[j]|}) / (1 + n_perm)`) is the
+permutation p-value of the correlation of `X_j` with `y`. In simulation
+(`n = 200`, `D = 60` in two independent blocks of 30 with one factor
+each, `y` on 5 columns of the block with the stronger or with the weaker
+factor, 200 datasets per design, 999 permutations), the per-variable
+level on the other block was 0.048–0.049 and the power on the signal
+block 0.67 and 0.98; refitted β rows gave level 0.000 and power 0.010
+and 0.001 on the same designs. Under a global null both kept their level (0.051 and
+0.043).
+
+At `k ≥ 2` the rows are refits on permuted `y`, as above. They keep
+the level (0.006–0.033 on the same designs at `k = 2`) but have the same
+power loss on collinear `X` (0.01–0.03), and no pivot that keeps the
+level was found: dividing β by its projection on `X̃ᵀỹ` rejected 9–61%
+of null variables. A permutation of `y` tests that `y` is unrelated to
+all of `X`, so a per-variable claim at `k ≥ 2` from these rows is
+conservative.
+
 ## `PermAlphaResult`, what `pls1_perm_alpha` returns
 
 | Field | Python type | Notes |
@@ -214,26 +241,26 @@ querying it costs one SVD and no resampling.
 | `k` | `int` | as passed |
 | `n_features` | `int` | as passed |
 
-## `CIScalar` — scalar subsample CI
+## `CIScalar`, scalar CI
 
-Centered-scaled subsampling CI for a scalar functional, plus its SD.
+A CI for a scalar, plus its SD. Its one use is `ConfirmatoryCI.holdout_corr`.
 
 | Field | Python type | Notes |
 |---|---|---|
-| `point` | `float` | full-data point estimate of the functional |
+| `point` | `float` | point estimate; for `holdout_corr`, the mean over half splits |
 | `lower` | `float` | CI lower bound at the requested `level` |
 | `upper` | `float` | CI upper bound at the requested `level` |
-| `sd` | `float` | subsampling SD of the functional |
+| `sd` | `float` | SD on the scale the CI is built on; for `holdout_corr`, the Fisher z-scale |
 
-## `ConfirmatoryCI` — what `pls1_confirmatory_test(ci=True)` adds
+## `ConfirmatoryCI`, what `pls1_confirmatory_test(ci=True)` adds
 
 Rotation-invariant readouts only. Per-axis CIs are intentionally absent
 (see [api](api.md) §3.1).
 
 | Field | Python type | Shape | Description |
 |---|---|---|---|
-| `n_boot` | `int` | scalar | resolved resampling replicates (each: one size-`m` subsample and one n-out-of-n bootstrap resample) |
-| `m` | `int` | scalar | resolved subsample size, `m = ceil(n^m_rate)` |
+| `n_boot` | `int` | scalar | resolved resampling replicates (each: one size-`m` subsample, one n-out-of-n bootstrap resample and one half split) |
+| `m` | `int` | scalar | resolved subsample size for β, `m = ceil(n^m_rate)` |
 | `m_rate` | `float` | scalar | echoed from the input |
 | `level` | `float` | scalar | echoed from the input |
 | `beta_sign_z` | `np.ndarray` | `(D,)` | per-variable folded subsampling z for β_j, `|β_ref[j]| / se_j`; roughly half-normal when β_j = 0 at K = 1 (see below) |
@@ -244,16 +271,23 @@ Rotation-invariant readouts only. Per-axis CIs are intentionally absent
 | `beta_ci_lower` | `np.ndarray` | `(D,)` | per-coordinate subsampling CI on β, shrinkage-corrected and finite-population-scaled; PLS1-only, calibrated at K = 1 (see caveats below) |
 | `beta_ci_upper` | `np.ndarray` | `(D,)` | per-coordinate |
 | `beta_se` | `np.ndarray` | `(D,)` | `= √(m/(n − m)) · sd(β_b[j]) / κ̂`, the SE `beta_sign_z` divides by (see below) |
-| `holdout_corr` | `CIScalar` | scalar | Fisher z-transformed NB-Wald CI on out-of-sample predictive correlation |
+| `holdout_corr` | `CIScalar` | scalar | Fisher z-transformed NB-Wald CI on the held-out correlation of a fit trained on `⌊n/2⌋` rows, the quantity the split tests estimate; does not depend on `m_rate` (see below) |
 | `n_boot_finite` | `int` | scalar | resamples whose worker fit succeeded (≤ `n_boot`) |
 | `n_boot_finite_holdout_corr` | `int` | scalar | subset whose holdout_corr is finite (≤ `n_boot_finite`); resamples with `|r_b| ≥ 1` (degenerate) are also excluded from the Fisher pool |
 
-The `holdout_corr` CI is built on the variance-stabilized Fisher z-scale
-(`ζ = atanh(r)`), with the same NB inflation factor `(1/B + (n−m)/m)`
-applied to z-scale variance, then back-transformed via `tanh`. Bounds
+Each replicate's `holdout_corr` comes from its own half split: a fit on
+`m_h = ⌊n/2⌋` random rows, correlated with `y` on the other `n − m_h`.
+The target is ρ(`m_h`), the expected held-out correlation of a model
+trained on `⌊n/2⌋` rows, which is what the `split_exact` and `split_nb`
+statistics estimate, so the interval and the omnibus test speak about the
+same quantity. It is not the predictive correlation of the full-data
+fit, which is trained on `n` rows and is usually higher.
+The CI is built on the variance-stabilized Fisher z-scale
+(`ζ = atanh(r)`), with the NB inflation factor `(1/B + (n−m_h)/m_h)`
+(about 1) applied to z-scale variance, then back-transformed via `tanh`. Bounds
 are guaranteed to lie strictly in `(−1, 1)` and are **asymmetric** on the
-r-scale. `point` is the subsample mean on the r-scale (textbook plug-in
-estimate of ρ); `sd` is on the z-scale, so `point ± Φ⁻¹(1−α/2) · sd` does
+r-scale. `point` is the mean over splits on the r-scale (plug-in
+estimate of ρ(`m_h`)); `sd` is on the z-scale, so `point ± Φ⁻¹(1−α/2) · sd` does
 **not** reconstruct the CI — read the bounds directly. To recover the
 z-scale interval: `ci_z = (atanh(point) − Φ⁻¹(1−α/2)·sd, atanh(point) +
 Φ⁻¹(1−α/2)·sd)`; the reported bounds equal `tanh(ci_z)`.
@@ -381,7 +415,7 @@ Limits:
   exact error control, use `pls1_perm_null` (a permutation z per
   variable) after the omnibus test.
 
-### Per-coordinate β CIs — diagnostic, with caveats
+### Per-coordinate β CIs, diagnostic, with caveats
 
 `beta_ci_lower / beta_ci_upper / beta_se` are a **regression-style
 diagnostic for downstream pipelines** (one-line β_j ± SE tables in the
@@ -460,52 +494,74 @@ Memory: storing per-resample β adds `8 · D · n_boot_finite` bytes —
 scale). Brain-scale users typically reach for `pls1_perm_null` (sparse
 z-map output) instead of the confirmatory CI bundle.
 
-## `RotateResult` — what `rotate(W: np.ndarray, ...)` returns
+## `RotateResult`, what `rotate(W: np.ndarray, ...)` returns
 
 | Field | Python type | Notes |
 |---|---|---|
 | `W_rot` | `np.ndarray` | rotated weights `W @ R` |
 | `spec` | `RotationSpec` | the stamped rotation spec (method, args, `R`, sweeps, convergence value) |
 
-## `RotationStabilityResult` — what `pls1_rotation_stability` returns
+## `PCABasisResult`, what `pca_basis` returns
 
 | Field | Python type | Notes |
 |---|---|---|
-| `method` | `str` | the rotation method used (e.g. `"varimax"`) |
-| `n_boot` | `int` | resolved subsample iterations |
-| `m` | `int` | resolved subsample size |
-| `m_rate` | `float` | echoed from the input |
-| `level` | `float` | echoed from the input |
-| `seed` | `int` | always |
-| `variance_ratio` | `CIScalar` | headline aggregate variance ratio `ρ = V_rot / V_unrot` with paired-bootstrap percentile CI |
-| `variance_ratio_per_axis` | `list[CIScalar]` | per-axis ratio `ρ_k = V_rot,k / V_unrot,k`, length K, reference-axis order |
-| `variance_unrot` | `float` | aggregate `V_unrot = (1/B) Σ_b Σ_k α²_unrot,b,k` |
-| `variance_rot` | `float` | aggregate `V_rot = (1/B) Σ_b Σ_k α²_rot,b,k` |
-| `variance_unrot_per_axis` | `np.ndarray` | per-axis `V_unrot,k`, length K, reference-axis order |
-| `variance_rot_per_axis` | `np.ndarray` | per-axis `V_rot,k`, length K, reference-axis order |
-| `degenerate_baseline` | `bool` | `True` iff `V_unrot = 0` on the engine pass or more than 5% of bootstrap iterations had `V_unrot* = 0`; only the first trigger makes `variance_ratio.point` `NaN`, under the second alone the point stays the finite `V_rot / V_unrot` |
-| `n_boot_finite` | `int` | number of resamples that produced finite per-axis squared residuals (≤ `n_boot`) |
-| `n_eff` | `float` | effective sample size `(Σ wᵢ)² / Σ wᵢ²` from the full normalized weight vector; equals `n` for uniform weights |
+| `V` | `np.ndarray` `(D, K)` | right singular vectors of standardized `X` with `s > 1e-10 · s[0]`; orthonormal columns; signs arbitrary |
+| `s` | `np.ndarray` `(K,)` | the matching singular values, descending |
 
-Interpretation: ratio < 1 means rotation reduced axis variance
-(rotated axes are more replicable than unrotated ones); ratio ≈ 1
-means rotation did not change axis replicability; ratio > 1 means
-rotation increased axis variance (rotated axes are less replicable —
-suspect a local-optimum varimax convergence issue).
+## `FactorsResult`, what `factors` returns, and `rotate` on a `FactorsResult`
 
-## `RotationSpec` — stamped by `rotate(model, ...)`
+A factor is a part of one coefficient vector. It is not a latent variable, and `n` is not a count of dimensions.
+
+| Field | Python type | Notes |
+|---|---|---|
+| `F` | `np.ndarray` `(D, n)` | the factors; columns sum to `coef` |
+| `W` | `np.ndarray` `(D, n)` | unit directions, orthonormal; `F = W * size` |
+| `size` | `np.ndarray` `(n,)` | `‖F[:, i]‖`, nonnegative |
+| `coef` | `np.ndarray` `(D,)` | the input coefficient vector, carried for `rotate` |
+| `pre_standardized` | `bool` | the value `factors` used; `rotate(f, X)` follows it |
+| `rotation_spec` | `RotationSpec \| None` | `None` until rotated |
+
+From `factors` the columns are in block order, and a part of `coef` outside the row space of the standardized kept columns of `X` lands in the last factor (see [api](api.md#43-factors)). After `rotate` they are sorted by `size`, largest first, and every column of `W` is flipped so that its projection of `coef` is nonnegative. `Σ size² = ‖coef‖²`.
+
+## `ProfilesFindNResult`, what `profiles_find_n` returns
+
+| Field | Python type | Notes |
+|---|---|---|
+| `n_star` | `int` | the chosen `n`; `0` when the best held-out R² is not above 0 by 2 SE |
+| `n_grid` | `list[int]` | the values of `j` tried, `1 .. min(K_star, n_max)` |
+| `r2_mean` | `np.ndarray` | mean held-out R² at each `j` of `n_grid` |
+| `r2_se` | `np.ndarray` | SE of the held-out R² at each `j` (`sd / sqrt(folds)`, `ddof = 1`) |
+| `K_star` | `int` | components kept by the parallel analysis |
+| `n_failed_folds` | `int` | folds that were not used: a constant training column, or a held-out fold with no finite R² |
+| `seed` | `int` | the seed used |
+
+## `ProfilesResult`, what `profiles` returns
+
+| Field | Python type | Notes |
+|---|---|---|
+| `model` | `PLS1Result \| None` | the fit; `None` when `profiles` got a vector |
+| `factors` | `FactorsResult` | the rotated factors |
+| `scores` | `np.ndarray` `(N, n)` | `Xs F`, with `Xs` the standardized `X`; columns sum to the fit's score on `Xs` |
+
+## `ProfilesSearchResult`, what `profiles_search` returns
+
+| Field | Python type | Notes |
+|---|---|---|
+| `model` | `PLS1Result` | the fit |
+| `factors` | `FactorsResult` | the rotated factors at the chosen `n` |
+| `scores` | `np.ndarray` `(N, n)` | `Xs F`, with `Xs` the standardized `X`; columns sum to the fit's score on `Xs` |
+| `n_search` | `ProfilesFindNResult` | the search: held-out R², its SE and the chosen `n_star` |
+| `seed` | `int` | the seed used |
+
+## `RotationSpec`, stamped by `rotate` on a `FactorsResult` or a `PLS3Result`
 
 | Field | Python type | Notes |
 |---|---|---|
 | `method` | `str` | `"varimax"` today; future `"promax"` / `"oblimin"` / `"geomin"` |
 | `args` | `Mapping` (frozen via `MappingProxyType`) | method-specific kwargs as the engine resolved them (defaults filled, counts as `int`) |
-| `R` | `np.ndarray` `(K, K)` | rotation matrix; `W_rot = W @ R` |
+| `R` | `np.ndarray` `(K, K)` | rotation matrix; `W_rot = W @ R`. On a `FactorsResult` or a `PLS3Result` it is stored after sign pinning and sorting, so `W_after = W_before @ R` holds exactly |
 | `sweeps` | `int` | varimax iterations to convergence |
 | `V_converged` | `float` | final varimax criterion value |
-| `L_was_provided` | `bool` | whether caller passed a loading basis |
+| `L_was_provided` | `bool` | whether the caller passed a loading basis `L` or `X`, in `rotate` and in `profiles` |
 
-`rotation_spec` is `None` until `rotate(model, ...)` stamps it on a
-copy of the model. That copy carries the rotated `T`, `P`, `W` and `Q`;
-`beta`, `coef` and `intercept` are unchanged, so `pls1_predict` gives the
-same predictions before and after rotation. `pls1_predict` does not read
-`rotation_spec`.
+`rotation_spec` is `None` until `rotate` stamps it on a copy of the result.

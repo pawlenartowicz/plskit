@@ -33,7 +33,6 @@ from pathlib import Path
 # (call, n, p, B) for --table.
 TABLE = [
     ("perm", 100, 20000, 1000),
-    ("rotstab", 100, 100000, 200),
     ("pls3", 100, 100000, 0),
     ("ci", 200, 500, 200),
     ("perm_w", 100, 20000, 1000),
@@ -64,9 +63,6 @@ def calls(plskit, X, y, Y, w, b: int, k: int = 2, n_folds: int | None = None) ->
         ),
         "perm_mat": lambda: plskit.pls1_perm_null(
             X, y, k=k, n_perm=b, seed=1, return_perm_matrix=True
-        ),
-        "rotstab": lambda: plskit.pls1_rotation_stability(
-            X, y, k=k, n_boot=b, seed=1
         ),
         "ci": lambda: plskit.pls1_confirmatory_test(
             X, y, k=k, test_method="split_exact", ci=True, n_boot=b, seed=1

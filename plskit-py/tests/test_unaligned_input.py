@@ -97,8 +97,8 @@ def test_extension_refuses_a_misaligned_array(name):
     assert ei.value.code == "invalid_argument"
 
 
-# In every case the first array `mk` makes is X (`W`, or the model's `T`,
-# for `rotate`; `gram` for `pls1_perm_alpha`):
+# In every case the first array `mk` makes is X (`W` for `rotate`;
+# `gram` for `pls1_perm_alpha`):
 # `test_public_api_hands_the_extension_x_uncopied` looks for that one.
 def _public_cases():
     X, y, Y, w = _data()
@@ -117,7 +117,6 @@ def _public_cases():
         "preprocess": lambda mk: plskit.preprocess(mk(X), mk(Y), weights=mk(w)),
         "rotate": lambda mk: plskit.rotate(
             mk(np.asarray(m1.W)), method="varimax", L=mk(m1.P)),
-        "rotate_model": lambda mk: plskit.rotate(_with_arrays(m1, mk), method="varimax"),
         "split_nb_gate": lambda mk: plskit.split_nb_gate(mk(X), weights=mk(w)),
         "pls1_perm_null": lambda mk: plskit.pls1_perm_null(
             mk(X), mk(y), k=1, n_perm=100, seed=4, weights=mk(w)),
@@ -176,8 +175,8 @@ def test_aligned_f64_returns_aligned():
 @pytest.mark.parametrize("order", ["C", "F"])
 @pytest.mark.parametrize("name", list(_public_cases()))
 def test_public_api_hands_the_extension_x_uncopied(name, order, monkeypatch):
-    """The wrapper passes a contiguous float64 X (`W`, or the model's `T`,
-    for `rotate`) on in its own order: the array in the extension's
+    """The wrapper passes a contiguous float64 X (`W` for
+    `rotate`) on in its own order: the array in the extension's
     arguments is the caller's."""
     call = _public_cases()[name]
     seen = _record_extension_arrays(monkeypatch)
@@ -243,8 +242,6 @@ def _block_cases():
         "preprocess": (Y, lambda Yv: plskit.preprocess(X, Yv)),
         "rotate_W": (W, lambda Wv: plskit.rotate(Wv, method="varimax")),
         "rotate_L": (L, lambda Lv: plskit.rotate(W, method="varimax", L=Lv)),
-        "pls1_rotation_stability_L": (L, lambda Lv: plskit.pls1_rotation_stability(
-            X, y, 3, L=Lv, n_boot=100, seed=3)),
         "pls1_perm_alpha_gram": (G, lambda Gv: plskit.pls1_perm_alpha(Gv, Y, n_features=p)),
         "pls1_perm_alpha_Y": (Y, lambda Yv: plskit.pls1_perm_alpha(G, Yv, n_features=p)),
     }

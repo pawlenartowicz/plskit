@@ -152,3 +152,30 @@ fn transform_widens_scalar_moments() {
     );
     assert!(same(&before.result, &after.result));
 }
+
+#[test]
+fn pls3_transform_takes_a_rotated_result() {
+    let (x, y) = blocks();
+    let model = ok(
+        "pls3_fit",
+        vec![("X", x.clone()), ("Y", y.clone()), ("k", Value::I64(3))],
+    )
+    .result;
+    let rotated = ok("rotate", vec![("model_or_W", model), ("X", x.clone())]).result;
+    let t = ok(
+        "pls3_transform",
+        vec![("model", rotated.clone()), ("X_new", x), ("Y_new", y)],
+    );
+    let Value::Record(m) = &rotated else { panic!() };
+    for key in ["x_scores", "y_scores"] {
+        let want = floats(field(m, key));
+        let got = floats(field(record(&t), key));
+        let scale = want.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        assert!(
+            got.iter()
+                .zip(&want)
+                .all(|(a, b)| (a - b).abs() <= 1e-12 * scale),
+            "{key}"
+        );
+    }
+}

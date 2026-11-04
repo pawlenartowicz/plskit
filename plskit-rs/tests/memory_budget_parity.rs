@@ -23,8 +23,7 @@ use faer::{Col, Mat};
 use plskit::{
     CIOpts, ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput,
     FindKOptimalOpts, FindKeepOptimalOpts, FitOpts, KSpec, Pls3ConfirmatoryTestOpts, PlsKitError,
-    RotationStabilityMethod, RotationStabilityOpts, Selector, VarimaxArgs, pls1_confirmatory_test,
-    pls1_find_k_optimal, pls1_fit, pls1_rotation_stability, pls3_confirmatory_test,
+    Selector, pls1_confirmatory_test, pls1_find_k_optimal, pls1_fit, pls3_confirmatory_test,
     spls1_find_keep_optimal,
 };
 
@@ -57,7 +56,7 @@ const P_FOLD_TR: usize = 32;
 /// Splits and folds per case: five units, so a two-unit batch ends on a
 /// partial one.
 const P_UNITS: usize = 5;
-/// Resamples of the CI and of rotation stability (the floor of both).
+/// Resamples of the CI (the floor).
 const P_BOOT: usize = 100;
 /// Rows and columns of the case whose per-split fit is past the
 /// `ParChoice::Auto` threshold: halves of 100 rows, `100·6000·2 = 1.2e6`.
@@ -68,8 +67,6 @@ const AUTO_P: usize = 6000;
 const GRAM_P_N: usize = 2000;
 const GRAM_P_P: usize = 50;
 const P_M_RATE: f64 = 0.7;
-/// Rotation stability's subsample rows, `ceil(40^0.7)`.
-const P_ROT_M: usize = 14;
 
 /// Bytes of an owned `f64` matrix of `rows × cols`, as the loops count it:
 /// `resample::copy_bytes` (change together), the rows padded to a multiple
@@ -508,32 +505,6 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
                     "{:?}",
                     pls1_test(x, y, 2, None, ConfirmatoryArgs::Score, Some(ci), 30)
                 )
-            },
-        ),
-        // `rotation_stability_impl`: the m subsample rows of X and one PLS1
-        // fit.
-        case(
-            "pls1_rotation_stability k=2",
-            copy(P_ROT_M, PP) + pls1_fit_bytes(PP, 2),
-            3,
-            move || {
-                let out = pls1_rotation_stability(
-                    x.as_ref(),
-                    y.as_ref(),
-                    2,
-                    RotationStabilityMethod::Varimax(VarimaxArgs::default()),
-                    None,
-                    None,
-                    RotationStabilityOpts {
-                        n_boot: P_BOOT,
-                        m_rate: P_M_RATE,
-                        seed: Some(31),
-                        ..Default::default()
-                    },
-                )
-                .unwrap();
-                assert_eq!(out.m, P_ROT_M);
-                format!("{out:?}")
             },
         ),
     ]

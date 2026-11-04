@@ -69,5 +69,4 @@ disallowed-methods = [
     { path = "faer::linalg::solvers::DenseSolveCore::reconstruct", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
     { path = "faer::linalg::solvers::Svd::pseudoinverse", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
     { path = "faer::linalg::solvers::SelfAdjointEigen::pseudoinverse", reason = "reads faer's global parallelism; call the low-level faer routine with an explicit Par (see plskit-rs/src/linalg.rs)" },
-    { path = "procrustes::orthogonal", reason = "its SVD reads faer's global parallelism; use linalg::orthogonal_rotation" },
 ]

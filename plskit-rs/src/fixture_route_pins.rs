@@ -102,7 +102,6 @@ fn route_fixtures_take_their_routes() {
     for (name, route) in [
         // Wide (n 60, d 3000), dense and unweighted: generated on the
         // primal route, the n-space route's references.
-        ("pls1_perm_null_wide_n60_d3000_k1", Nspace),
         ("pls1_perm_null_wide_n60_d3000_k2", Nspace),
         ("pls1_confirmatory_raw_perm_wide_k2", Nspace),
         ("pls1_confirmatory_split_exact_wide_k2", Nspace),

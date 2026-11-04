@@ -3,7 +3,7 @@
 
 use plskit::{
     ConfirmatoryArgs, ConfirmatoryMethod, FindKOptimalOpts, FindKSequenceOpts, FindKeepOptimalOpts,
-    Selector, TransformWhich, VarimaxArgs,
+    ProfilesFindNOpts, Selector, TransformWhich, VarimaxArgs,
 };
 
 use crate::coerce;
@@ -154,7 +154,7 @@ pub(crate) fn pls3_confirmatory_args(
     confirmatory_args(method, args)
 }
 
-/// Varimax `args` / `rotation_args`.
+/// Varimax `args`.
 pub(crate) fn varimax_args(args: Option<&Record<'_>>) -> Result<VarimaxArgs, BindError> {
     let label = "method='varimax'";
     validate_keys(label, args, &["max_iter", "tol", "kaiser_normalize"])?;
@@ -293,6 +293,24 @@ pub(crate) fn keep_optimal_opts(
         n_folds: arg_usize(args, "method='keep_optimal'", "n_folds", d.n_folds)?,
         seed,
         verbose,
+    })
+}
+
+/// `args` for `profiles_find_n`.
+pub(crate) fn profiles_find_n_opts(
+    args: Option<&Record<'_>>,
+    pre_standardized: bool,
+    seed: Option<u64>,
+) -> Result<ProfilesFindNOpts, BindError> {
+    let label = "find_n_args";
+    validate_keys(label, args, &["n_folds", "n_repeats", "n_perm"])?;
+    let d = ProfilesFindNOpts::default();
+    Ok(ProfilesFindNOpts {
+        n_folds: arg_usize(args, label, "n_folds", d.n_folds)?,
+        n_repeats: arg_usize(args, label, "n_repeats", d.n_repeats)?,
+        n_perm: arg_usize(args, label, "n_perm", d.n_perm)?,
+        pre_standardized,
+        seed,
     })
 }
 

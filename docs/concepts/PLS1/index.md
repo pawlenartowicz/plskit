@@ -14,4 +14,4 @@ families `plskit` ships, alongside [sparse PLS1](sparse.md)
 - [Inference](inference.md): confirmatory tests (`split_exact`, `split_nb`, `score`, `e`, `raw_perm`) (*placeholder, paper-pending*)
 - [Confidence intervals](ci.md): rotation-invariant subsample CIs (`pls1_confirmatory_test(ci=True)`) (*placeholder, paper-pending*)
 - [Weights](weights.md): observation weights (WLS-style precision / sampling weights)
-- [Rotations and stability](rotations-and-stability.md): varimax, `pls1_rotation_stability` (*placeholder, paper-pending*)
+- [Profiles](profiles.md): `factors` and `profiles`, which split one coefficient vector into orthogonal factors

@@ -33,7 +33,7 @@ test_that("resampling_degenerate carries its counts", {
   y <- X[, 1] + 0.2 * stats::rnorm(60)
   w <- c(rep(1, 5), rep(1e-8, 55))
   e <- tryCatch(
-    pls1_rotation_stability(X, y, k = 3, weights = w, n_boot = 500, seed = 0),
+    pls1_confirmatory_test(X, y, k = 3, test_method = "raw_perm", args = list(n_perm = 200), ci = TRUE, weights = w, n_boot = 500, seed = 0),
     plskit_resampling_degenerate = function(e) e
   )
   expect_s3_class(e, "plskit_resampling_degenerate")

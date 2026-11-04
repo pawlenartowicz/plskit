@@ -1,5 +1,5 @@
-//! The `split_nb` reroute warning, rendered once so every language
-//! prints the same sentence.
+//! The `split_nb` reroute warning and the sparse-rotation warning, each
+//! rendered once so every language prints the same sentence.
 
 use crate::convert::{count, opt};
 use crate::fmt::g4;
@@ -47,6 +47,18 @@ pub(crate) fn rerouted(
             .field("n_eff", opt(n_eff, Value::F64))
             .field("message", Value::text(&message)),
     )
+}
+
+/// The warning for rotating a `PLS3Result` from a sparse fit.
+pub(crate) fn rotated_sparse() -> Record<'static> {
+    Record::new()
+        .field("kind", Value::text("rotated_sparse"))
+        .field(
+            "message",
+            Value::text(
+                "rotating a sparse PLS3Result spreads its zeros: a variable stays zero only if it was zero in every component",
+            ),
+        )
 }
 
 #[cfg(test)]

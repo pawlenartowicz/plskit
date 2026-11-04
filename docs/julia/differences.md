@@ -20,7 +20,7 @@ lists what looks different from Julia.
 
   Python's `pls3_transform(model, X_new)` is `pls3_transform(model; X_new=X_new)`
   in Julia.
-- **`args`, `find_k_args`, `rotation_args`** take a `NamedTuple` or a
+- **`args`, `find_k_args`, `find_n_args`** take a `NamedTuple` or a
   `Dict` with `Symbol` or `String` keys, nested like Python's dicts:
   `find_k_args=(selector=:r2_max, args=(n_folds=5,))`.
 - **String options** (`test_method`, `selector`, `which`, ...) take a `String`
@@ -49,12 +49,12 @@ lists what looks different from Julia.
 - Every result is a `PlsKitResult{T}`, where `T` is the Python type name.
   Each Python result type has an alias, `PLS1Result === PlsKitResult{:PLS1Result}`,
   so `fit isa PLS1Result` and dispatch on the alias work. Nested results
-  (`test.ci`, `test.ci.holdout_corr`, `fit.rotation_spec`,
-  `fit.selection_result`) are `PlsKitResult`s too.
+  (`test.ci`, `test.ci.holdout_corr`, `fit.selection_result`,
+  `f.rotation_spec` on a rotated `FactorsResult`) are `PlsKitResult`s too.
 - Fields read as properties (`fit.W`, `fit.seed`), in the order of the
   [results reference](../python/results.md); `propertynames(fit)` lists them.
 - **Fields are copies.** Editing `fit.W` in place changes your copy only:
-  `pls1_predict(fit, X)`, `rotate(fit)` and `pls3_transform(model; ...)`
+  `pls1_predict(fit, X)`, `rotate(f; X=X)` and `pls3_transform(model; ...)`
   hand Python the object the result holds, so they use the values the fit
   returned. `getfield(fit, :py)` is that Python object.
 - Type mapping:
@@ -100,7 +100,7 @@ lists what looks different from Julia.
   Python's `PlsKitInvalidWeights` and `PlsKitResamplingDegenerate`.
   `details` is empty for every other code. The code list is in the
   [Python API reference](../python/api.md#errors).
-- An argument of the wrong kind (a `PLS3Result` passed to `rotate`, a
+- An argument of the wrong kind (a `PLS1Result` passed to `rotate`, a
   string where an array belongs) raises `PlsKitError` with code
   `:invalid_argument`, and an unknown `test_method` or `selector` string one
   with code `:invalid_args`. Any other Python exception (one Python
@@ -109,13 +109,13 @@ lists what looks different from Julia.
 
 ## Warnings
 
-Python warnings raised during a call (the explicit `split_nb` reroute notice) are
+Python warnings raised during a call (the explicit `split_nb` reroute notice, and
+the `rotated_sparse` notice when `rotate` gets a sparse `PLS3Result`) are
 re-emitted with `@warn`, message verbatim, `_group=:plskit`, once per call.
 Silence them with Julia's logging (for example
 `Logging.with_logger(Logging.NullLogger()) do ... end`) or match them in
-tests with `@test_logs (:warn, r"rerouted", PLSKit, :plskit) ...`. The
-reroute notice has no structured fields: it is a plain `UserWarning` in
-Python.
+tests with `@test_logs (:warn, r"rerouted", PLSKit, :plskit) ...`. Neither
+notice has structured fields: each is a plain `UserWarning` in Python.
 
 ## The Python underneath
 

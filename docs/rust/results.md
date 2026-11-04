@@ -18,7 +18,7 @@ short-form matrix names (`T`, `P`, `W`, `Q`) at the user-facing boundary
 to match the standard PLS notation; the underlying field name is the
 long form below.
 
-## `PreprocessResult` — what `preprocess` returns
+## `PreprocessResult`, what `preprocess` returns
 
 | Field | Rust type | Notes |
 |---|---|---|
@@ -27,7 +27,7 @@ long form below.
 | `weights_normalized` | `Option<Col<f64>>` | `Some(w')` (normalized to mean 1, Σ = n) when weights were passed |
 | `n_eff` | `Option<f64>` | Kish's effective sample size, populated when weights were passed (exactly `n` when they are all equal, as every fit reports); `None` otherwise |
 
-## `Pls1Model` — what `pls1_fit` returns
+## `Pls1Model`, what `pls1_fit` returns
 
 | Field | Rust type | Shape |
 |---|---|---|
@@ -47,12 +47,10 @@ long form below.
 There is no `k_was_auto` flag and no `find_k_certificate` field. The
 2026-04 confirmatory-vs-exploratory overhaul moved K-selection
 diagnostics onto the K-selection result structs themselves, where
-they originate. Rotation is stamped in `plskit-bind`: the wrappers'
-`PLS1Result` carries a `rotation_spec` field that `rotate(model, ...)`
-sets on a copy of the model, but there is no Rust `RotationSpec` type
-and no `rotation_spec` field on the Rust `Pls1Model`.
+they originate. There is no Rust `RotationSpec` type and no
+`rotation_spec` field on the Rust `Pls1Model`.
 
-## `Pls3Model` — what `pls3_fit` / `plssvd_fit` returns
+## `Pls3Model`, what `pls3_fit` / `plssvd_fit` returns
 
 | Field | Rust type | Shape |
 |---|---|---|
@@ -77,7 +75,7 @@ There is no `beta`, no `coef` and no `intercept`: PLS3 is symmetric, so
 there is nothing to regress. There is no `weights` / `n_eff` pair either —
 observation weights are not implemented for this family.
 
-## `Pls3Scores` — what `pls3_transform` / `plssvd_transform` returns
+## `Pls3Scores`, what `pls3_transform` / `plssvd_transform` returns
 
 | Field | Rust type | When populated |
 |---|---|---|
@@ -91,7 +89,7 @@ test half has at least 4 rows; `stable_rank` is `Some` on an explicit `split_nb`
 request, and on an `"auto"` request that reached the stable-rank check
 (p > 4, n_eff ≥ 250); `None` otherwise.
 
-## `FindKOptimalOutput` — what `pls1_find_k_optimal` returns
+## `FindKOptimalOutput`, what `pls1_find_k_optimal` returns
 
 | Field | Rust type | When populated |
 |---|---|---|
@@ -121,7 +119,7 @@ instead of recommending a component the fit cannot produce. A requested
 diagnostic runs no step: `pvalues` is `Some` of a length-0 column and
 `diagnostic` names the method the auto-gate resolved to.
 
-## `FindKSequenceOutput` — what `pls1_find_k_sequence` returns
+## `FindKSequenceOutput`, what `pls1_find_k_sequence` returns
 
 | Field | Rust type | When populated |
 |---|---|---|
@@ -142,7 +140,7 @@ undeflated `X`, so when the reported method reads `"split_exact"`
 after an explicit `split_nb` request, it and `n_eff` are the two numbers that
 explain why. `split_nb_gate` returns them without running a test.
 
-## `FindKeepOptimalOutput` — what `spls1_find_keep_optimal` returns
+## `FindKeepOptimalOutput`, what `spls1_find_keep_optimal` returns
 
 | Field | Rust type | Notes |
 |---|---|---|
@@ -159,7 +157,7 @@ sparsest keep whose mean CV R² is within 1 SE of the maximum. The full
 field semantics are identical to the Python counterpart; see
 [Python results](../python/results.md).
 
-## `ConfirmatoryTestOutput` — what `pls1_confirmatory_test` returns
+## `ConfirmatoryTestOutput`, what `pls1_confirmatory_test` returns
 
 | Field | Rust type | Notes |
 |---|---|---|
@@ -175,7 +173,7 @@ field semantics are identical to the Python counterpart; see
 | `stable_rank` | `Option<f64>` | stable rank of the standardized `X`, as seen by the `split_nb` auto-gate; `Some` on an explicit `split_nb` request (fired or not, including under `force`), and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff ≥ 250, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise |
 | `ci` | `Option<ConfirmatoryCI>` | `Some` when called with `ci=true`; carries the rotation-invariant subsample CIs |
 
-## `SplitNbGateOutput` — what `split_nb_gate` returns
+## `SplitNbGateOutput`, what `split_nb_gate` returns
 
 | Field | Rust type | Notes |
 |---|---|---|
@@ -187,7 +185,7 @@ Every field is always populated. This is the same rule the test
 functions apply internally, on the same standardized `X` — querying it
 costs one SVD and no resampling.
 
-## `PermNullOutput` — what `pls1_perm_null` returns
+## `PermNullOutput`, what `pls1_perm_null` returns
 
 | Field | Rust type | Notes |
 |---|---|---|
@@ -201,6 +199,8 @@ costs one SVD and no resampling.
 | `beta_perm_z` | `Vec<f64>` | signed per-voxel z = β_ref / β_perm_sd; NaN where SD ≈ 0, length D |
 | `beta_perm_matrix` | `Option<Vec<f64>>` | optional `(n_perm, D)` β matrix, row-major; `Some` when `opts.return_perm_matrix == true` |
 
+At `k = 1` a row is `c_ref·X̃ᵀỹ_p`, the permuted fit with its scalar `c` held at the observed fit's value, so the per-variable null is that of `X_jᵀy`; at `k ≥ 2` it is a refit on permuted `y`. See the [Python results page](../python/results.md) (`PermNullResult`) for why and for the simulated level and power.
+
 ## `PermAlphaOutput`, what `pls1_perm_alpha` returns
 
 | Field | Rust type | Notes |
@@ -211,9 +211,9 @@ costs one SVD and no resampling.
 | `k` | `usize` | as passed |
 | `n_features` | `usize` | as passed |
 
-## `CIScalar` — scalar subsample CI
+## `CIScalar`, scalar CI
 
-Centered-scaled subsampling CI for a scalar functional, plus its SD.
+A CI for a scalar, plus its SD. Its one use is `ConfirmatoryCI::holdout_corr`, where `point` is the mean over half splits and `sd` is on the Fisher z-scale.
 
 | Field | Rust type |
 |---|---|
@@ -222,14 +222,14 @@ Centered-scaled subsampling CI for a scalar functional, plus its SD.
 | `upper` | `f64` |
 | `sd` | `f64` |
 
-## `ConfirmatoryCI` — what `pls1_confirmatory_test(ci=true)` adds
+## `ConfirmatoryCI`, what `pls1_confirmatory_test(ci=true)` adds
 
 Rotation-invariant readouts only.
 
 | Field | Rust type | Shape |
 |---|---|---|
-| `n_boot` | `usize` | scalar (resampling replicates; each draws one size-`m` subsample and one n-out-of-n bootstrap resample) |
-| `m` | `usize` | scalar (resolved subsample size, `m = ceil(n^m_rate)`) |
+| `n_boot` | `usize` | scalar (resampling replicates; each draws one size-`m` subsample, one n-out-of-n bootstrap resample and one half split) |
+| `m` | `usize` | scalar (resolved subsample size for β, `m = ceil(n^m_rate)`) |
 | `m_rate` | `f64` | scalar |
 | `level` | `f64` | scalar |
 | `beta_sign_z` | `Vec<f64>` | `(D,)` per-variable folded subsampling z for β_j, `|β_ref[j]| / se_j` |
@@ -240,7 +240,7 @@ Rotation-invariant readouts only.
 | `beta_ci_lower` | `Vec<f64>` | `(D,)` per-coordinate subsampling CI on β, shrinkage-corrected and finite-population-scaled; PLS1-only, calibrated at K = 1 |
 | `beta_ci_upper` | `Vec<f64>` | `(D,)` per-coordinate |
 | `beta_se` | `Vec<f64>` | `(D,)` `= √(m/(n − m)) · sd(β_b[j]) / κ̂`, the SE `beta_sign_z` divides by |
-| `holdout_corr` | `CIScalar` | scalar (Fisher z-transformed NB-Wald CI on out-of-sample predictive correlation) |
+| `holdout_corr` | `CIScalar` | scalar (Fisher z-transformed NB-Wald CI on the held-out correlation of a fit trained on `⌊n/2⌋` rows; does not depend on `m_rate`) |
 | `n_boot_finite` | `usize` | scalar; resamples whose worker fit succeeded (≤ `n_boot`) |
 | `n_boot_finite_holdout_corr` | `usize` | scalar; subset whose holdout_corr is finite |
 
@@ -261,7 +261,7 @@ the population `β_j` is 0 at `K = 1` (simulated null rejection 3.5–6.4%
 at nominal 5%), does not grow with `n_boot`, and is not calibrated at
 `K ≥ 2`.
 
-## `RotateOutput` — what `rotate` returns
+## `RotateOutput`, what `rotate` returns
 
 | Field | Rust type | Notes |
 |---|---|---|
@@ -270,31 +270,39 @@ at nominal 5%), does not grow with `n_boot`, and is not calibrated at
 | `sweeps` | `usize` | number of Kaiser sweeps actually run (≤ `args.max_iter`) |
 | `v_converged` | `f64` | final value of the varimax criterion `V = Σ_j Var(target[:, j]²)` |
 
-## `RotationStabilityOutput` — what `pls1_rotation_stability` returns
+## `FactorsOutput`, what `factors` and `FactorsOutput::rotated` return
 
 | Field | Rust type | Notes |
 |---|---|---|
-| `method` | `String` | the rotation method used |
-| `n_boot` | `usize` | resolved subsample iterations |
-| `m` | `usize` | resolved subsample size |
-| `m_rate` | `f64` | echoed from the input |
-| `level` | `f64` | echoed from the input |
-| `seed` | `u64` | always |
-| `variance_ratio` | `CIScalar` | headline aggregate variance ratio `ρ = V_rot / V_unrot` with paired-bootstrap percentile CI |
-| `variance_ratio_per_axis` | `Vec<CIScalar>` | per-axis ratio `ρ_k = V_rot,k / V_unrot,k`, length K, reference-axis order |
-| `variance_unrot` | `f64` | aggregate `V_unrot = (1/B) Σ_b Σ_k α²_unrot,b,k` |
-| `variance_rot` | `f64` | aggregate `V_rot = (1/B) Σ_b Σ_k α²_rot,b,k` |
-| `variance_unrot_per_axis` | `Vec<f64>` | per-axis `V_unrot,k`, length K, reference-axis order |
-| `variance_rot_per_axis` | `Vec<f64>` | per-axis `V_rot,k`, length K, reference-axis order |
-| `degenerate_baseline` | `bool` | `true` iff `V_unrot = 0` on the engine pass or more than 5% of bootstrap iterations had `V_unrot* = 0`; only the first trigger makes `variance_ratio.point` `NaN`, under the second alone the point stays the finite `V_rot / V_unrot` |
-| `n_boot_finite` | `usize` | number of resamples that produced finite per-axis squared residuals (≤ `n_boot`) |
-| `n_eff` | `f64` | effective sample size `(Σ wᵢ)² / Σ wᵢ²` from the full normalized weight vector; equals `n` for uniform weights |
+| `f` | `Mat<f64>` | factors, shape `(D, n)`; the columns sum to `coef` |
+| `w` | `Mat<f64>` | unit directions, shape `(D, n)`, orthonormal; `f = w * size` column-wise |
+| `size` | `Col<f64>` | `‖f[:, i]‖`, length `n`, nonnegative |
+| `coef` | `Col<f64>` | the input coefficient vector, length `D` |
+| `pre_standardized` | `bool` | whether `X` was taken as already standardized |
 
-`RotationSpec` (the record of a `rotate` call — method, args, `R`,
-sweeps, convergence value) exists only in the wrappers, as
-`RotateResult.spec` and `PLS1Result.rotation_spec`. There is no Rust
-`RotationSpec` type and no Rust counterpart on `Pls1Model` or
-`RotationStabilityOutput`; the Rust `rotate` function returns
-`RotateOutput` (`w_rot, r, sweeps, v_converged`), and `plskit-bind`
-assembles `RotationSpec` from that plus the method and the resolved
-args.
+`factors` returns the factors in block order. When `coef` has a part outside the row space of the standardized kept columns of `x` (for example a sparse fit with more kept columns than `N − 1`), `factors` appends that part, normalized, as one extra last direction of the basis, so it lands in the last factor. `FactorsOutput::rotated(r)` takes an orthogonal `R` of shape `(n, n)` and returns the rotated `FactorsOutput` together with the `R` after sign pinning and sorting, so the new `w` is the old `w` times that `R`. The columns of `f` still sum to `coef` for every orthogonal `R`.
+
+## `PcaBasisOutput`, what `pca_basis` returns
+
+| Field | Rust type | Notes |
+|---|---|---|
+| `v` | `Mat<f64>` | right singular vectors of standardized `X`, shape `(D, K)`, orthonormal columns; column signs are arbitrary |
+| `s` | `Col<f64>` | singular values, length `K`, non-increasing and positive |
+
+`K` is the rank of standardized `X`: singular values at or below `1e-10 s[0]` are dropped.
+
+## `ProfilesFindNOutput`, what `profiles_find_n` returns
+
+| Field | Rust type | Notes |
+|---|---|---|
+| `n_star` | `usize` | chosen number of factors; 0 when the best mean held-out R² minus two standard errors is at most zero |
+| `n_grid` | `Vec<usize>` | the `j` searched: `1 ..= min(k_star, n_max)` |
+| `r2_mean` | `Vec<f64>` | mean held-out R² over the usable folds at each `j`, length `n_grid.len()` |
+| `r2_se` | `Vec<f64>` | `sd / sqrt(folds)` (`ddof = 1`) of the held-out R² at each `j` |
+| `k_star` | `usize` | rotated components counted by the parallel analysis, capped at the smallest training-fold rank |
+| `n_failed_folds` | `usize` | folds not used: a constant training column, or a held-out `SST = 0` to rounding |
+| `seed` | `u64` | the seed used |
+
+At least two folds must be usable, because the standard error needs `ddof = 1`; otherwise `profiles_find_n` returns `InvalidInput`.
+
+`RotationSpec` (the record of a `rotate` call: method, args, `R`, sweeps, convergence value) exists only in the wrappers, as `RotateResult.spec` and on rotated `FactorsResult` and `PLS3Result`. There is no Rust `RotationSpec` type; the Rust `rotate` function returns `RotateOutput` (`w_rot, r, sweeps, v_converged`), and `plskit-bind` assembles `RotationSpec` from that plus the method and the resolved args.

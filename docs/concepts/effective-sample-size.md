@@ -29,7 +29,6 @@ errors before any fitting.
 | `pls1_fit`, `spls1_fit` | `k` |
 | `pls1_confirmatory_test` (every method, with or without `ci`) | `k` |
 | `pls1_perm_null` | `k` |
-| `pls1_rotation_stability` | `k` |
 | `spls1_find_keep_optimal` | `k` |
 | `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_k_optimal`, `spls1_find_k_sequence` | `k_max` |
 
@@ -56,13 +55,11 @@ loop treats it:
   do not check. The fit on a low-`n_eff` piece is overfit but valid, and
   its noise is absorbed by the statistic being averaged (a noisier fold
   R² or split correlation).
-- **Subsamples in the `ci` branch of `pls1_confirmatory_test` and in
-  `pls1_rotation_stability`** do check, per subsample. A subsample that
+- **Subsamples in the `ci` branch of `pls1_confirmatory_test`** do check, per subsample. A subsample that
   fails is skipped, and the skips are counted. If the fraction of skipped
   subsamples exceeds `max_skip_rate` (default `0.01`), the call errors
   with `ResamplingDegenerate` rather than return a CI built from the
-  surviving, unrepresentative draws. (In `pls1_rotation_stability`, any
-  failed subsample counts as a skip, not only an `n_eff` failure.)
+  surviving, unrepresentative draws.
 
 ## What users see
 
@@ -80,7 +77,7 @@ loop treats it:
   `n < k + 1`. Lower `k` or add observations.
 
 - **`PlsKitResamplingDegenerate`** (error code `resampling_degenerate`)
-  from `pls1_confirmatory_test(ci=True)` or `pls1_rotation_stability`:
+  from `pls1_confirmatory_test(ci=True)`:
   your weights are healthy on the full data, but too many subsamples
   failed individually (each subsample draws fewer rows, so its `n_eff` is
   smaller). The exception carries `skipped`, `total`, `skip_rate` and

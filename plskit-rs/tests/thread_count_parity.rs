@@ -43,10 +43,10 @@ use faer::{Col, Mat, MatRef};
 use plskit::{
     CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
     FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, ParChoice, PermNullOpts,
-    Pls3ConfirmatoryTestOpts, Pls3FitOpts, RotationStabilityMethod, RotationStabilityOpts,
-    Selector, VarimaxArgs, pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence,
-    pls1_fit, pls1_perm_alpha, pls1_perm_null, pls1_rotation_stability, pls3_confirmatory_test,
-    pls3_fit, split_nb_gate, spls1_find_k_sequence, spls1_fit, spls3_fit,
+    Pls3ConfirmatoryTestOpts, Pls3FitOpts, ProfilesFindNOpts, Selector, pls1_confirmatory_test,
+    pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_alpha, pls1_perm_null,
+    pls3_confirmatory_test, pls3_fit, profiles_find_n, split_nb_gate, spls1_find_k_sequence,
+    spls1_fit, spls3_fit,
 };
 
 const POOL_SIZES: [usize; 3] = [1, 3, 5];
@@ -668,7 +668,7 @@ fn perm_alpha_is_pool_size_invariant() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn find_k_and_rotation_stability_are_pool_size_invariant() {
+fn find_k_is_pool_size_invariant() {
     let mut c = Checker::default();
     // Pool: the BIC sweep's full fit and its scoring run on the fixed split.
     let (xt, yt) = synth(2000, 600, 1.0, 21);
@@ -743,23 +743,6 @@ fn find_k_and_rotation_stability_are_pool_size_invariant() {
         )
         .unwrap()
     });
-    // Pool: the reference fit runs under `ParChoice::Auto`.
-    c.check("rotation_stability 2000x600 k=2", || {
-        pls1_rotation_stability(
-            xt.as_ref(),
-            yt.as_ref(),
-            2,
-            RotationStabilityMethod::Varimax(VarimaxArgs::default()),
-            None,
-            None,
-            RotationStabilityOpts {
-                n_boot: 100,
-                seed: Some(4),
-                ..Default::default()
-            },
-        )
-        .unwrap()
-    });
     // Guard only: 60x3000 folds, halves and subsamples are under every
     // split.
     let (x, y) = synth(60, 3000, 1.0, 11);
@@ -795,16 +778,13 @@ fn find_k_and_rotation_stability_are_pool_size_invariant() {
         )
         .unwrap()
     });
-    c.check("rotation_stability 60x3000 k=2", || {
-        pls1_rotation_stability(
+    c.check("profiles_find_n 60x3000", || {
+        profiles_find_n(
             x.as_ref(),
             y.as_ref(),
             2,
-            RotationStabilityMethod::Varimax(VarimaxArgs::default()),
-            None,
-            None,
-            RotationStabilityOpts {
-                n_boot: 100,
+            9,
+            ProfilesFindNOpts {
                 seed: Some(19),
                 ..Default::default()
             },

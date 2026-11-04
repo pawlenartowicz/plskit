@@ -133,6 +133,10 @@ scores = plskit.pls3_transform(model, X_new, Y_new, which="both")
   `X_new` / `Y_new` first.
 - The column count must match the fit (`shape_mismatch` otherwise).
 
+## After `rotate`
+
+`rotate(model, X)` applies one orthogonal `R` to a `PLS3Result`. `X` selects the fit's stored `x_scores` as the varimax target, and `pre_standardized` is refused. It multiplies `U`, `V`, `x_scores` and `y_scores` by `R`. The new `singular_values` are the diagonal of `R' S R`, with `S = diag(σ)`, and their sum does not change. The columns are sorted by the new `singular_values`, largest first, and signs follow the rule of `pls3_fit`. `rotation_spec.R` holds `R` after the sorting and the sign pinning. The rotated score columns are no longer uncorrelated. On a sparse fit the rotated columns are not unit-norm.
+
 ## The sparse variant drops the orthogonality
 
 Everything above describes `pls3_fit`, which gets every component from one

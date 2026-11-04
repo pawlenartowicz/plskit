@@ -38,7 +38,7 @@ fn pls1_fit_returns_a_conforming_pls1_result() {
     assert_eq!(r.type_name(), Some("PLS1Result"));
     check_record(r).unwrap();
     assert_eq!(i(r, "k_used"), 2);
-    assert!(field(r, "rotation_spec").is_null());
+    assert!(r.get("rotation_spec").is_none());
     assert!(field(r, "selection_result").is_null());
     assert!(field(r, "keep").is_null());
     assert!(o.warnings.is_empty());

@@ -9,7 +9,6 @@ uses them. Shared version requirements are declared once, in
 | Crate | Requirement | Used for |
 |---|---|---|
 | `faer` | `0.24` | dense linear algebra |
-| `procrustes` | `0.1.0` | signed-permutation alignment in `pls1_rotation_stability` |
 | `rand`, `rand_chacha` | `0.10` | `ChaCha8Rng`, the one generator the engine uses |
 | `getrandom` | `0.4` | OS entropy when the caller passes no seed |
 | `rayon` | `1.8` | thread pools and parallel loops |
@@ -55,15 +54,6 @@ This is why a fixed seed gives the same bytes at any thread count
 ([Threads](../concepts/threads.md)). `tests/thread_count_parity.rs` runs
 the same calls in pools of 1, 3 and 5 threads and requires bitwise
 identical outputs.
-
-## procrustes
-
-`procrustes` is a separate crate, taken from crates.io. The engine uses
-`procrustes::signed_permutation` to align each resampled weight matrix to
-its reference in `rotation_stability.rs`. `procrustes::orthogonal` is on
-the clippy `disallowed-methods` list, because its SVD reads faer's global
-parallelism; `linalg::orthogonal_rotation` computes the same rotation on
-`Par::Seq`.
 
 ## Wrappers and tools
 

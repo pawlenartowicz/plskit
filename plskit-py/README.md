@@ -79,7 +79,7 @@ variant. PLS2 and multi-block PLS are planned.
   (alias `plssvd_transform`), sparse `spls3_fit` (new in 0.6.0).
 - **Inference:** `pls1_confirmatory_test`, `pls3_confirmatory_test`,
   `split_nb_gate`, `pls1_perm_null`, `pls1_perm_alpha`.
-- **Interpretive:** `rotate`, `pls1_rotation_stability`.
+- **Interpretive:** `rotate`, `factors`, `pca_basis`, `profiles_find_n`, `profiles`, `profiles_search`.
 
 Results are frozen dataclasses and carry the inputs and seed that
 produced them.
@@ -119,4 +119,4 @@ GPL-3.0-or-later.
 ```
 
 ---
-**Paweł Lenartowicz** — [Freestyler Scientist](https://freestylerscientist.pl) · [GitHub](https://github.com/pawlenartowicz/) · [ORCID](https://orcid.org/0000-0002-6906-7217)
+**Paweł Lenartowicz** — [Personal site](https://pawlenartowicz.pl) · [GitHub](https://github.com/pawlenartowicz/) · [ORCID](https://orcid.org/0000-0002-6906-7217)

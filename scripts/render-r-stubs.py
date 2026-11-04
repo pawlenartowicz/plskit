@@ -45,8 +45,12 @@ TITLES = {
     "pls1_perm_null": "Permutation null of PLS1 coefficients",
     "pls3_confirmatory_test": "Confirmatory test of a PLS3 signal",
     "pls1_perm_alpha": "Dual coefficients of PLS1 fits from a Gram matrix",
-    "rotate": "Rotate PLS1 weights or a fitted PLS1 model",
-    "pls1_rotation_stability": "Rotation-stability diagnostic for PLS1",
+    "rotate": "Rotate a factors result, a PLS3 model or a weight matrix",
+    "factors": "Split a coefficient vector into factors on the basis of X",
+    "pca_basis": "Right singular vectors of a standardized matrix",
+    "profiles_find_n": "Choose the number of profile factors",
+    "profiles": "Split a coefficient vector into rotated factors and scores",
+    "profiles_search": "Split a fitted PLS1 coefficient, choosing the number of factors",
 }
 
 RE_HEADING = re.compile(r"^#{1,6}\s+(.*\S)\s*$")

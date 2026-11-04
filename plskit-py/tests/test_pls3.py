@@ -96,7 +96,7 @@ class _Foreign:
         (lambda m1, m3, X: plskit.pls3_transform(m1, X),
          "model must be a PLS3Result, got a PLS1Result"),
         (lambda m1, m3, X: plskit.plssvd_transform({"U": X}, X),
-         "model is missing field 'V'"),
+         "result is missing field 'V'"),
         (lambda m1, m3, X: plskit.pls1_predict(X, X),
          "model must be a PLS1Result, got a matrix"),
         (lambda m1, m3, X: plskit.pls1_predict(1, X),

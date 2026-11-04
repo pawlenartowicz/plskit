@@ -70,7 +70,7 @@ size(scores.x_scores)    # (200, 2)
 ## Rotation and errors
 
 ```julia
-rot = rotate(model; method=:varimax)
+rot = rotate(factors(model, X, 2); X=X)
 rot.rotation_spec.args   # (max_iter = 50, tol = 1.0e-8, kaiser_normalize = true)
 
 try

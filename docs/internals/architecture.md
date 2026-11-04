@@ -51,7 +51,8 @@ A Rust caller uses the functions of `plskit` directly.
 | `signal_test` | `pls1_confirmatory_test`, `split_nb_gate` |
 | `perm_null`, `perm_alpha` | `pls1_perm_null`, `pls1_perm_alpha` |
 | `pls3`, `pls3_signal_test` | `pls3_fit`, `pls3_transform`, `spls3_fit`, the `plssvd_*` aliases, `pls3_confirmatory_test` |
-| `rotate`, `rotation_stability` | `rotate`, `pls1_rotation_stability` |
+| `rotate` | `rotate` |
+| `factors`, `pca` | `factors`, `FactorsOutput::rotated`, `profiles_find_n`; `pca_basis` |
 | `error` | `PlsKitError`, with a stable `code()` string per variant |
 | `linalg`, `resample`, `rng` | shared helpers: products and decompositions, split and permutation indices, seeded generators |
 | `dual_route`, `gram_p`, `sequential`, `subsample` | crate-internal: Gram-matrix routes for the resampling loops, the sequential tests, the subsampling engine |

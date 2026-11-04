@@ -65,7 +65,7 @@ number is the Python wheel's.
 
 ## Status
 
-Version 0.7.2, running Python `plskit` 0.7.2. Not yet in the General
+Version 0.8.0, running Python `plskit` 0.8.0. Not yet in the General
 registry.
 
 ## Documentation
@@ -93,4 +93,4 @@ GPL-3.0-or-later.
 ```
 
 ---
-**Paweł Lenartowicz** — [Freestyler Scientist](https://freestylerscientist.pl) · [GitHub](https://github.com/pawlenartowicz/) · [ORCID](https://orcid.org/0000-0002-6906-7217)
+**Paweł Lenartowicz** — [Personal site](https://pawlenartowicz.pl) · [GitHub](https://github.com/pawlenartowicz/) · [ORCID](https://orcid.org/0000-0002-6906-7217)

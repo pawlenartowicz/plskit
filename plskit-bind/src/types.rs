@@ -12,7 +12,7 @@ pub struct FieldSpec {
     pub name: &'static str,
     /// Type code: `mat`, `vec`, `f64`, `i64`, `u64`, `bool`, `str`,
     /// `intmap`, `intvec`, `boolvec`, `vec_or_mat`, `f64_or_vec`, `args`,
-    /// `record:<Type>[|<Type>]`, or `list:<Type>`.
+    /// or `record:<Type>[|<Type>]`.
     pub ty: &'static str,
     /// Whether the field may be null.
     pub nullable: bool,
@@ -75,7 +75,6 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             req("pre_standardized", "bool"),
             opt("weights", "vec"),
             req("n_eff", "f64"),
-            opt("rotation_spec", "record:RotationSpec"),
             opt(
                 "selection_result",
                 "record:FindKOptimalResult|FindKSequenceResult",
@@ -103,6 +102,7 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             opt("keep_Y", "i64"),
             opt("converged", "boolvec"),
             opt("n_iter", "intvec"),
+            opt("rotation_spec", "record:RotationSpec"),
         ],
     },
     ResultTypeSpec {
@@ -241,24 +241,53 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
         fields: &[req("W_rot", "mat"), req("spec", "record:RotationSpec")],
     },
     ResultTypeSpec {
-        name: "RotationStabilityResult",
-        r_class: "rotation_stability_result",
+        name: "FactorsResult",
+        r_class: "factors_result",
         fields: &[
-            req("method", "str"),
-            req("n_boot", "i64"),
-            req("m", "i64"),
-            req("m_rate", "f64"),
-            req("level", "f64"),
+            req("F", "mat"),
+            req("W", "mat"),
+            req("size", "vec"),
+            req("coef", "vec"),
+            req("pre_standardized", "bool"),
+            opt("rotation_spec", "record:RotationSpec"),
+        ],
+    },
+    ResultTypeSpec {
+        name: "PCABasisResult",
+        r_class: "pca_basis_result",
+        fields: &[req("V", "mat"), req("s", "vec")],
+    },
+    ResultTypeSpec {
+        name: "ProfilesFindNResult",
+        r_class: "profiles_find_n_result",
+        fields: &[
+            req("n_star", "i64"),
+            req("n_grid", "intvec"),
+            req("r2_mean", "vec"),
+            req("r2_se", "vec"),
+            req("K_star", "i64"),
+            req("n_failed_folds", "i64"),
             req("seed", "u64"),
-            req("variance_ratio", "record:CIScalar"),
-            req("variance_ratio_per_axis", "list:CIScalar"),
-            req("variance_unrot", "f64"),
-            req("variance_rot", "f64"),
-            req("variance_unrot_per_axis", "vec"),
-            req("variance_rot_per_axis", "vec"),
-            req("degenerate_baseline", "bool"),
-            req("n_boot_finite", "i64"),
-            req("n_eff", "f64"),
+        ],
+    },
+    ResultTypeSpec {
+        name: "ProfilesResult",
+        r_class: "profiles_result",
+        fields: &[
+            opt("model", "record:PLS1Result"),
+            req("factors", "record:FactorsResult"),
+            req("scores", "mat"),
+        ],
+    },
+    ResultTypeSpec {
+        name: "ProfilesSearchResult",
+        r_class: "profiles_search_result",
+        fields: &[
+            req("model", "record:PLS1Result"),
+            req("factors", "record:FactorsResult"),
+            req("scores", "mat"),
+            req("n_search", "record:ProfilesFindNResult"),
+            req("seed", "u64"),
         ],
     },
     ResultTypeSpec {
@@ -311,13 +340,6 @@ fn conforms(v: &Value<'_>, ty: &str) -> Result<(), String> {
                 }
                 _ => false,
             }
-        }
-        (t, Value::List(items)) if t.starts_with("list:") => {
-            let inner = format!("record:{}", &t["list:".len()..]);
-            for item in items {
-                conforms(item, &inner)?;
-            }
-            true
         }
         _ => false,
     };

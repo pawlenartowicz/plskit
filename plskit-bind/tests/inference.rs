@@ -308,32 +308,3 @@ fn perm_alpha_record_and_errors() {
     assert_eq!(e.code, "invalid_argument");
     assert_eq!(e.message, "Y must be 2-D, got 1-D");
 }
-
-#[test]
-fn rotation_stability_record_and_errors() {
-    let (x, y) = data(80, 6, 1);
-    let base = || {
-        vec![
-            ("X", x.clone()),
-            ("y", y.clone()),
-            ("k", Value::I64(2)),
-            ("n_boot", Value::I64(100)),
-            ("seed", Value::U64(3)),
-        ]
-    };
-    let o = ok("pls1_rotation_stability", base());
-    let r = record(&o);
-    check_record(r).unwrap();
-    assert!(matches!(field(r, "variance_ratio_per_axis"), Value::List(l) if l.len() == 2));
-
-    let mut v = base();
-    v.push(("rotation_method", Value::text("promax")));
-    assert_eq!(
-        err("pls1_rotation_stability", v).code,
-        "rotation_method_not_implemented"
-    );
-
-    let mut v = base();
-    v.push(("rotation_args", args(vec![("bogus", Value::I64(1))])));
-    assert_eq!(err("pls1_rotation_stability", v).code, "invalid_args");
-}

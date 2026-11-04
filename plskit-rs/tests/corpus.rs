@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use plskit::{
     CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
     FindKOptimalOpts, FindKSequenceOpts, FindKeepOptimalOpts, FitOpts, KSpec, PermNullOpts,
-    Pls3ConfirmatoryTestOpts, Pls3FitOpts, PreprocessInput, RotationMethod,
-    RotationStabilityMethod, RotationStabilityOpts, Selector, TransformWhich, VarimaxArgs,
+    Pls3ConfirmatoryTestOpts, Pls3FitOpts, PreprocessInput, RotationMethod, Selector,
+    TransformWhich, VarimaxArgs,
 };
 use serde_json::Value;
 
@@ -49,10 +49,11 @@ const COVERED_FUNCTIONS: &[&str] = &[
     "pls1_confirmatory_test",
     "pls1_predict",
     "rotate",
+    "factors",
+    "profiles_find_n",
     "preprocess",
     "pls1_perm_null",
     "pls1_perm_alpha",
-    "pls1_rotation_stability",
     "spls1_fit",
     "spls1_find_keep_optimal",
     "spls1_find_k_optimal",
@@ -895,6 +896,43 @@ fn rotate_cases_match_corpus() {
     });
 }
 
+/// `factors` on the fixed-`k` route: fit, split on the PCA basis of
+/// standardized `X`, then varimax on `L = Xs W_f`.
+#[test]
+#[allow(clippy::many_single_char_names)] // n, x, m, f, l, r are the math names
+fn factors_cases_match_corpus() {
+    let kwargs = Kwargs::top(&["k", "n_factors"]);
+    for_each_case("factors", kwargs, |case, inputs, fx| {
+        let kw = &case["kwargs"];
+        let n = kw_usize(kw, "n_factors");
+        let x = inputs.mat("X");
+        let m = plskit::pls1_fit(
+            x.as_ref(),
+            inputs.col("y").as_ref(),
+            KSpec::Fixed(kw_usize(kw, "k")),
+            None,
+            FitOpts::default(),
+        )
+        .expect("fit");
+        let (xs, _, _) = plskit::linalg::standardize(x.as_ref());
+        let f = plskit::factors(m.coef.as_ref(), x.as_ref(), n, false).expect("factors");
+        let l = faer::Mat::<f64>::from_fn(xs.nrows(), f.w.ncols(), |i, j| {
+            (0..xs.ncols()).map(|t| xs[(i, t)] * f.w[(t, j)]).sum()
+        });
+        let rot = plskit::rotate(
+            f.w.as_ref(),
+            RotationMethod::Varimax(VarimaxArgs::default()),
+            Some(l.as_ref()),
+        )
+        .expect("rotate");
+        let (fr, r) = f.rotated(rot.r.as_ref()).expect("rotated");
+        fx.mat("F", &fr.f);
+        fx.mat("W", &fr.w);
+        fx.col("size", &fr.size);
+        fx.mat("R", &r);
+    });
+}
+
 #[test]
 fn preprocess_cases_match_corpus() {
     let kwargs = Kwargs::top(&["d", "n", "seed", "weights"]);
@@ -924,6 +962,38 @@ fn preprocess_cases_match_corpus() {
             |fx, w| fx.col("weights_normalized", w),
         );
         fx.optional("n_eff", r.n_eff, |fx, v| fx.scalar("n_eff", v));
+    });
+}
+
+/// `profiles_find_n` with default options at the manifest seed.
+#[test]
+fn profiles_find_n_cases_match_corpus() {
+    let kwargs = Kwargs::top(&["k", "n_max", "seed"]);
+    for_each_case("profiles_find_n", kwargs, |case, inputs, fx| {
+        let kw = &case["kwargs"];
+        let r = plskit::profiles_find_n(
+            inputs.mat("X").as_ref(),
+            inputs.col("y").as_ref(),
+            kw_usize(kw, "k"),
+            kw_usize(kw, "n_max"),
+            plskit::ProfilesFindNOpts {
+                seed: kw_seed(kw),
+                ..plskit::ProfilesFindNOpts::default()
+            },
+        )
+        .expect("profiles_find_n");
+        let ints = |v: &[usize]| {
+            v.iter()
+                .map(|&i| i64::try_from(i).unwrap())
+                .collect::<Vec<_>>()
+        };
+        fx.int("n_star", r.n_star);
+        fx.ints("n_grid", &ints(&r.n_grid));
+        fx.array("r2_mean", &r.r2_mean);
+        fx.array("r2_se", &r.r2_se);
+        fx.int("k_star", r.k_star);
+        fx.int("n_failed_folds", r.n_failed_folds);
+        fx.int("seed", r.seed);
     });
 }
 
@@ -1003,58 +1073,6 @@ fn pls1_perm_alpha_cases_match_corpus() {
         fx.ints("resolved", &resolved);
         fx.int("k", r.k);
         fx.int("n_features", r.n_features);
-    });
-}
-
-#[test]
-fn pls1_rotation_stability_cases_match_corpus() {
-    let kwargs = Kwargs::top(&[
-        "d",
-        "k",
-        "level",
-        "m_rate",
-        "n",
-        "n_boot",
-        "pre_standardized",
-        "seed",
-        "weights",
-    ]);
-    for_each_case("pls1_rotation_stability", kwargs, |case, inputs, fx| {
-        let kw = &case["kwargs"];
-        let weights = inputs.weights(case);
-        let d = RotationStabilityOpts::default();
-        let r = plskit::pls1_rotation_stability(
-            inputs.mat("X").as_ref(),
-            inputs.col("y").as_ref(),
-            kw_usize(kw, "k"),
-            RotationStabilityMethod::Varimax(VarimaxArgs::default()),
-            None,
-            weights.as_ref().map(faer::Col::as_ref),
-            RotationStabilityOpts {
-                n_boot: kw_opt_usize(kw, "n_boot").unwrap_or(d.n_boot),
-                m_rate: kw_opt_f64(kw, "m_rate").unwrap_or(d.m_rate),
-                level: kw_opt_f64(kw, "level").unwrap_or(d.level),
-                pre_standardized: kw_bool(kw, "pre_standardized"),
-                seed: kw_seed(kw),
-                ..d
-            },
-        )
-        .expect("rotation_stability");
-        check_ci_scalar(fx, "variance_ratio", &r.variance_ratio);
-        for (a, ci) in r.variance_ratio_per_axis.iter().enumerate() {
-            check_ci_scalar(fx, &format!("variance_ratio_per_axis_k{a}"), ci);
-        }
-        fx.scalar("variance_unrot", r.variance_unrot);
-        fx.scalar("variance_rot", r.variance_rot);
-        fx.array("variance_unrot_per_axis", &r.variance_unrot_per_axis);
-        fx.array("variance_rot_per_axis", &r.variance_rot_per_axis);
-        fx.int("n_boot", r.n_boot);
-        fx.int("m", r.m);
-        fx.int("seed", r.seed);
-        fx.scalar("m_rate", r.m_rate);
-        fx.scalar("level", r.level);
-        fx.int("degenerate_baseline", i64::from(r.degenerate_baseline));
-        fx.int("n_boot_finite", r.n_boot_finite);
     });
 }
 

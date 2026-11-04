@@ -93,11 +93,7 @@ component would have been larger.
 
 ### Rotation removes the zeros
 
-`rotate` right-multiplies the weights by an orthogonal `R`. A rotated
-sparse salience matrix is dense again: every column becomes a mixture of
-all `k` supports. plskit does not guard against this. Sparsity and
-simple-structure rotation are two answers to the same question (make the
-loadings readable), and you pick one.
+`rotate` multiplies the weights by an orthogonal `R`. On a sparse fit every rotated column becomes a mixture of all `k` supports, so the salience matrix is dense again and the columns are not unit-norm. `rotate` raises a warning of kind `rotated_sparse` when it runs on a sparse result. Sparsity and rotation both aim at readable loadings, and you pick one.
 
 ## What is unchanged
 

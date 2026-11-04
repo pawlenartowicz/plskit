@@ -17,6 +17,8 @@
 pub(crate) mod dual_route;
 /// Error types for plskit.
 pub mod error;
+/// Orthogonal factors of one coefficient vector.
+pub mod factors;
 /// K selection (CV / BIC / sequence).
 pub mod find_k;
 /// PLS1 model fitting (the NIPALS PLS1 model, computed by Improved Kernel PLS).
@@ -31,6 +33,8 @@ mod fixture_route_pins;
 pub(crate) mod gram_p;
 /// Low-level linear algebra helpers (standardize, row-subset, etc.).
 pub mod linalg;
+/// PCA basis of standardized `X`.
+pub mod pca;
 /// PLS1 dual coefficients from a caller's Gram matrix (`pls1_perm_alpha`),
 /// for callers that hold the standardized block themselves.
 pub mod perm_alpha;
@@ -54,16 +58,13 @@ pub mod resample;
 pub mod rng;
 /// Simple-structure rotation of PLS weights (varimax).
 pub mod rotate;
-/// Rotation-stability diagnostic for PLS1.
-pub mod rotation_stability;
 /// Sequential component tests (step-down inference). Crate-internal helper
 /// used by `pls1_find_k_sequence` and the diagnostic path of `pls1_find_k_optimal`.
 pub(crate) mod sequential;
 /// Confirmatory PLS1 omnibus test at fixed K.
 pub mod signal_test;
-/// Subsampling engine (Politis–Romano). Public for the engines that drive
-/// the `CI` path of `pls1_confirmatory_test` and `pls1_rotation_stability`,
-/// but the engine entry points themselves are not on the public surface.
+/// Subsampling engine (Politis–Romano). Drives the `CI` path of
+/// `pls1_confirmatory_test`; the engine entry points are not on the public surface.
 pub(crate) mod subsample;
 /// Helpers shared by several modules' unit tests.
 #[cfg(test)]
@@ -82,12 +83,16 @@ mod test_support;
 pub use faer::{Col, ColRef, Mat, MatRef};
 
 pub use error::{PlsKitError, PlsKitResult};
+pub use factors::{
+    FactorsOutput, ProfilesFindNOpts, ProfilesFindNOutput, factors, profiles_find_n,
+};
 pub use find_k::{
     FindKOptimalOpts, FindKOptimalOutput, FindKSequenceOpts, FindKSequenceOutput,
     FindKeepOptimalOpts, FindKeepOptimalOutput, Selector, pls1_find_k_optimal,
     pls1_find_k_sequence, spls1_find_k_optimal, spls1_find_k_sequence, spls1_find_keep_optimal,
 };
 pub use fit::{FitOpts, KSpec, ParChoice, Pls1Model, pls1_fit, spls1_fit};
+pub use pca::{PcaBasisOutput, pca_basis};
 pub use perm_alpha::{PermAlphaOutput, pls1_perm_alpha};
 pub use perm_null::{PermNullOpts, PermNullOutput, pls1_perm_null};
 pub use pls3::{
@@ -98,10 +103,6 @@ pub use pls3_signal_test::{Pls3ConfirmatoryTestOpts, pls3_confirmatory_test};
 pub use predict::pls1_predict;
 pub use preprocess::{PreprocessInput, PreprocessResult, preprocess};
 pub use rotate::{RotateOutput, RotationMethod, VarimaxArgs, rotate};
-pub use rotation_stability::{
-    RotationStabilityMethod, RotationStabilityOpts, RotationStabilityOutput,
-    pls1_rotation_stability,
-};
 pub use signal_test::{
     CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
     ConfirmatoryTestOutput, SPLIT_NB_REROUTE_N_PERM, SplitNbGateOutput, pls1_confirmatory_test,

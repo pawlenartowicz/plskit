@@ -133,4 +133,4 @@ GPL-3.0-or-later.
 ```
 
 ---
-**Paweł Lenartowicz** — [Freestyler Scientist](https://freestylerscientist.pl) · [GitHub](https://github.com/pawlenartowicz/) · [ORCID](https://orcid.org/0000-0002-6906-7217)
+**Paweł Lenartowicz** — [Personal site](https://pawlenartowicz.pl) · [GitHub](https://github.com/pawlenartowicz/) · [ORCID](https://orcid.org/0000-0002-6906-7217)

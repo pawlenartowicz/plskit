@@ -57,8 +57,8 @@ Pipeline:
          bracket the full-data β_ref under PLS shrinkage on small m),
        * engine diagnostic counters.
 
-The CI bundle uses an independent resampling pass (subsamples for β and
-holdout correlation, bootstrap resamples for leverage) on a child-seed
+The CI bundle uses an independent resampling pass (subsamples for β, half
+splits for the holdout correlation, bootstrap resamples for leverage) on a child-seed
 branch of the user-facing seed, so the omnibus and CI streams don't
 interfere.
 """

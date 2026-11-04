@@ -71,8 +71,6 @@ to the page that explains it.
 
 - `split_exact` refits for every permutation at `k ≥ 2`, with a sparse
   `keep`, and in `pls3_confirmatory_test`: about `n_perm × n_splits` fits.
-- `pls1_rotation_stability` accepts `2 ≤ k ≤ 7`. Its alignment step
-  enumerates `2^k · k!` candidates per resample.
 - `pls1_perm_alpha` works at `k = 1` only.
 - A copy of `X` larger than half the memory budget makes the units that
   copy `X` run one at a time ([when to change it](threads.md#when-to-change-it)).

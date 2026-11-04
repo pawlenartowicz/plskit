@@ -13,7 +13,6 @@ categories = ["science", "mathematics"]
 
 [dependencies]
 faer = { workspace = true }
-procrustes = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 getrandom = { workspace = true }

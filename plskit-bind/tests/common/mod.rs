@@ -145,3 +145,32 @@ pub fn same(a: &Value<'_>, b: &Value<'_>) -> bool {
         _ => false,
     }
 }
+
+/// `a (n x p) * b (p x m)`, column-major in and out, by the same faer
+/// kernel `profiles` uses so that results can be compared bit for bit.
+pub fn matmul(a: &Value<'_>, b: &Value<'_>) -> Vec<f64> {
+    let (Value::Mat(am), Value::Mat(bm)) = (a, b) else {
+        panic!("matrices expected")
+    };
+    let (ad, bd) = (floats(a), floats(b));
+    let ma = faer::MatRef::from_column_major_slice(&ad, am.nrows(), am.ncols());
+    let mb = faer::MatRef::from_column_major_slice(&bd, bm.nrows(), bm.ncols());
+    let mut c = faer::Mat::<f64>::zeros(am.nrows(), bm.ncols());
+    faer::linalg::matmul::matmul(
+        c.as_mut(),
+        faer::Accum::Replace,
+        ma,
+        mb,
+        1.0,
+        faer::Par::Seq,
+    );
+    (0..c.ncols())
+        .flat_map(|j| (0..c.nrows()).map(move |r| (r, j)))
+        .map(|(r, j)| c[(r, j)])
+        .collect::<Vec<_>>()
+}
+
+pub fn xstd(x: &Value<'static>) -> Value<'static> {
+    let o = ok("preprocess", vec![("X", x.clone())]);
+    field(record(&o), "X_std").clone()
+}

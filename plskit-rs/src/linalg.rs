@@ -119,26 +119,6 @@ pub(crate) fn self_adjoint_eigen(
     Ok((s.column_vector().to_owned(), u))
 }
 
-/// The rotation `procrustes::orthogonal(a, reference, false)` returns:
-/// `R = U V'` from the SVD `a' reference = U Σ V'`, the orthogonal `K × K`
-/// matrix minimizing `‖a R − reference‖_F`, formed the same way (`Par::Seq`
-/// products, `U V'`). That crate takes the SVD through faer's `svd()`,
-/// which reads the global parallelism; this one runs it on `Par::Seq`.
-/// That crate asks for the full SVD and this for the thin one; faer's
-/// `svd` distinguishes the two only in the size of `U` and `V` (`m` vs
-/// `min(m, n)` columns), which coincide for the square `K × K` input, so
-/// the computation is the same.
-/// NaN-filled when the SVD fails to converge, as there. The caller
-/// guarantees `a` and `reference` have the same non-zero shape.
-pub(crate) fn orthogonal_rotation(a: MatRef<'_, f64>, reference: MatRef<'_, f64>) -> Mat<f64> {
-    let k = a.ncols();
-    let m = mat_mul(a.transpose(), reference, Par::Seq);
-    let Ok(svd) = thin_svd(m.as_ref(), Par::Seq) else {
-        return Mat::<f64>::from_fn(k, k, |_, _| f64::NAN);
-    };
-    mat_mul(svd.u.as_ref(), svd.v.transpose(), Par::Seq)
-}
-
 /// Solve `a x = b` in place of `b` (square `a`, any number of right-hand
 /// sides) by LU with partial pivoting, sequentially: faer's
 /// `PartialPivLu::new(a).solve_in_place(b)`, minus the global read. The
@@ -2236,53 +2216,6 @@ mod tests {
         }
     }
 
-    /// `orthogonal_rotation` is `procrustes::orthogonal(a, reference,
-    /// false).rotation` to the bit (its contract: the same products and SVD,
-    /// minus the global-parallelism read), on the shapes `rotation_stability`
-    /// forms (`a` = `W_b`, `reference` = `W_ref`, both d × k), a near-degenerate
-    /// pair (reference = `a` with two columns swapped, one sign flipped and
-    /// 1e-12 noise) and a rank-deficient `a'·reference` (two equal
-    /// reference columns).
-    #[test]
-    #[allow(clippy::disallowed_methods)] // procrustes::orthogonal is the oracle
-    fn orthogonal_rotation_matches_procrustes_orthogonal() {
-        use crate::test_support::{assert_bits_eq, mat_vals};
-        use rand::{RngExt, SeedableRng};
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(17);
-        let mut uniform =
-            |d: usize, k: usize| Mat::<f64>::from_fn(d, k, |_, _| rng.random_range(-1.0..1.0));
-        let mut cases: Vec<(String, Mat<f64>, Mat<f64>)> = [(7, 2), (7, 3), (400, 5)]
-            .into_iter()
-            .map(|(d, k)| (format!("uniform {d}x{k}"), uniform(d, k), uniform(d, k)))
-            .collect();
-        let a = uniform(7, 3);
-        let noise = uniform(7, 3);
-        let near = Mat::<f64>::from_fn(7, 3, |i, j| {
-            let v = match j {
-                0 => a[(i, 1)],
-                1 => -a[(i, 0)],
-                _ => a[(i, 2)],
-            };
-            v + 1e-12 * noise[(i, j)]
-        });
-        cases.push(("near-degenerate".into(), a.clone(), near));
-        let r = uniform(7, 3);
-        let rank_def = Mat::<f64>::from_fn(7, 3, |i, j| r[(i, j.min(1))]);
-        cases.push(("rank-deficient".into(), a, rank_def));
-        for (what, a, reference) in &cases {
-            let got = orthogonal_rotation(a.as_ref(), reference.as_ref());
-            let want = procrustes::orthogonal(a.as_ref(), reference.as_ref(), false)
-                .unwrap()
-                .rotation;
-            assert_eq!(
-                (got.nrows(), got.ncols()),
-                (want.nrows(), want.ncols()),
-                "{what}"
-            );
-            assert_bits_eq(&mat_vals(got.as_ref()), &mat_vals(want.as_ref()), what);
-        }
-    }
-
     #[test]
     fn stable_rank_rank1_is_one() {
         // Outer product u v^T: single nonzero singular value.
@@ -2457,7 +2390,7 @@ mod leverage_diag_tests {
 /// The American Statistician 50(4), definition 7).
 ///
 /// Serves the Politis–Romano centered-scaled subsampling CIs in
-/// `subsample` and the percentile bootstrap CIs in `rotation_stability`.
+/// `subsample`.
 ///
 /// Caller is responsible for sorting `sorted` ascending before calling.
 /// Empty slice ⇒ `f64::NAN`. `q` is clamped to `[0, 1]`.

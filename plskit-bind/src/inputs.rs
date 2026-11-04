@@ -84,6 +84,13 @@ impl<'a> Inputs<'a> {
         coerce::to_bool(&self.take(name)).map_err(|w| named(name, &w))
     }
 
+    pub(crate) fn opt_bool(&mut self, name: &str) -> Result<Option<bool>, BindError> {
+        match self.take(name) {
+            Value::Null => Ok(None),
+            v => coerce::to_bool(&v).map(Some).map_err(|w| named(name, &w)),
+        }
+    }
+
     pub(crate) fn string(&mut self, name: &str) -> Result<String, BindError> {
         let v = self.take(name);
         coerce::to_str(&v)

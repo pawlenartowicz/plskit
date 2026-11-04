@@ -1791,10 +1791,6 @@ mod tests_site_route {
             raw_perm_route(2000, 5, 50, 1000, 1, None, false),
             ReplicateRoute::GramP
         );
-        assert_eq!(
-            perm_null_route(2000, 50, 1000, 1, false),
-            ReplicateRoute::GramP
-        );
     }
 
     #[test]

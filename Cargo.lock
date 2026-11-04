@@ -1183,14 +1183,13 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "plskit"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "approx",
  "faer",
  "getrandom 0.4.3",
  "ndarray",
  "ndarray-npy",
- "procrustes",
  "proptest",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
@@ -1202,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "plskit-bind"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "faer",
  "plskit",
@@ -1210,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "plskit-py"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "faer",
  "numpy",
@@ -1220,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "plskit-testdata-gen"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "faer",
@@ -1296,16 +1295,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "procrustes"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49569c4c24f82e784a764db2d3e808a851e1666d5b12af3d6da0fefb08f9fdff"
-dependencies = [
- "faer",
- "thiserror 1.0.69",
 ]
 
 [[package]]

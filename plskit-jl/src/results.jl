@@ -99,13 +99,11 @@ function _mapping(x::Py)
 end
 
 # list[int] (keep_grid) -> Vector{Int}; list[bool] -> Vector{Bool} (checked
-# before the int case since bool is an int subtype in Python); a list of results (variance_ratio_per_axis) -> Vector{PlsKitResult}.
+# before the int case since bool is an int subtype in Python).
 # An empty list is a Vector{Int}: only keep_grid can be empty.
 function _list(x::Py)
     items = collect(x)
-    if !isempty(items) && all(i -> pytruth(_dataclasses.is_dataclass(i)), items)
-        return PlsKitResult[_result(i) for i in items]
-    elseif !isempty(items) && all(i -> pyisinstance(i, pybuiltins.bool), items)
+    if !isempty(items) && all(i -> pyisinstance(i, pybuiltins.bool), items)
         return Bool[pyconvert(Bool, i) for i in items]
     end
     return Int[pyconvert(Int, i) for i in items]

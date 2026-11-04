@@ -62,19 +62,9 @@ def _find_k_sequence():
     return plskit.pls1_find_k_sequence(X, y, k_max=4, weights=w, seed=0), 80
 
 
-def _rotation_stability():
-    rng = np.random.default_rng(5)
-    X = rng.normal(size=(60, 5))
-    y = X[:, 0] + 0.2 * rng.normal(size=60)
-    w = rng.uniform(0.5, 2.0, size=60)
-    return plskit.pls1_rotation_stability(
-        X, y, k=2, weights=w, n_boot=200, seed=0), 60
-
-
 _WEIGHTED_CALLS = {
     "find_k_optimal_bic": _find_k_optimal_bic,
     "find_k_sequence": _find_k_sequence,
-    "rotation_stability": _rotation_stability,
 }
 
 
@@ -99,28 +89,24 @@ def _pathological():
     return X, y, w
 
 
-def test_rotation_stability_skip_rate_guard_fires():
-    X, y, w = _pathological()
-    with pytest.raises(plskit.PlsKitResamplingDegenerate) as ei:
-        plskit.pls1_rotation_stability(X, y, k=3, weights=w, n_boot=500, seed=0)
-    err = ei.value
-    assert err.threshold == 0.01
-    assert err.skipped > 0
-    assert err.total == 500
-    assert err.skip_rate > 0.01
-
-
-def test_rotation_stability_max_skip_rate_one_returns_truncated():
-    X, y, w = _pathological()
-    r = plskit.pls1_rotation_stability(
-        X, y, k=3, weights=w, n_boot=500, seed=0, max_skip_rate=1.0)
-    assert r.n_boot_finite < r.n_boot
-
-
 def test_confirmatory_ci_skip_rate_guard_fires():
     X, y, w = _pathological()
-    with pytest.raises(plskit.PlsKitResamplingDegenerate):
+    with pytest.raises(plskit.PlsKitResamplingDegenerate) as ei:
         plskit.pls1_confirmatory_test(
             X, y, k=3, test_method="raw_perm", args={"n_perm": 200},
             ci=True, weights=w, n_boot=500, seed=0,
         )
+    err = ei.value
+    assert err.threshold == 0.01
+    assert err.total == 500
+    assert err.skip_rate > err.threshold
+
+
+def test_confirmatory_ci_max_skip_rate_one_returns_truncated():
+    X, y, w = _pathological()
+    r = plskit.pls1_confirmatory_test(
+        X, y, k=3, test_method="raw_perm", args={"n_perm": 200},
+        ci=True, weights=w, n_boot=500, seed=0,
+        max_skip_rate=1.0, max_failure_rate=1.0,
+    )
+    assert r.ci.n_boot_finite < r.ci.n_boot

@@ -7,7 +7,7 @@ use crate::error::BindError;
 use crate::fns::{done, engine, pls3_y};
 use crate::inputs::Inputs;
 use crate::methods;
-use crate::value::{MatF64, Outcome, VecF64};
+use crate::value::{MatF64, Outcome, Value, VecF64};
 
 /// `pls3_fit` / `plssvd_fit(X, Y, k=1, *, pre_standardized_X=False,
 /// pre_standardized_Y=False, weights=None)`.
@@ -31,7 +31,7 @@ pub(crate) fn pls3_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
         w.as_ref().map(VecF64::as_col),
         opts,
     ))?;
-    Ok(done(convert::pls3_model(&m)))
+    Ok(done(convert::pls3_model(&m, Value::Null)))
 }
 
 /// `spls3_fit(X, Y, k, keep_X, keep_Y, *, pre_standardized_X=False,
@@ -65,7 +65,7 @@ pub(crate) fn spls3_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
         w.as_ref().map(VecF64::as_col),
         opts,
     ))?;
-    Ok(done(convert::pls3_model(&m)))
+    Ok(done(convert::pls3_model(&m, Value::Null)))
 }
 
 /// `pls3_transform` / `plssvd_transform(model, X_new=None, Y_new=None, *,

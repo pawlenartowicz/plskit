@@ -131,7 +131,7 @@ pub(crate) fn pls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
         },
     ))?;
     Ok(Outcome {
-        result: Value::Record(convert::pls1_model(&model, Value::Null, selection)),
+        result: Value::Record(convert::pls1_model(&model, selection)),
         warnings,
     })
 }
@@ -167,5 +167,5 @@ pub(crate) fn spls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
             ..FitOpts::default()
         },
     ))?;
-    Ok(done(convert::pls1_model(&m, Value::Null, Value::Null)))
+    Ok(done(convert::pls1_model(&m, Value::Null)))
 }

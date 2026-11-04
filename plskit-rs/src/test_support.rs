@@ -493,7 +493,7 @@ pub(crate) enum Agree {
     /// `1e-14` in `assert_agree`: change together). For the entries that form their
     /// products in X's own layout and so agree across layouts only to
     /// rounding (`pls1_fit` / `spls1_fit`, which form products in X's own
-    /// layout, and what reads them: `pls1_predict`, `pls1_rotation_stability`,
+    /// layout, and what reads them: `pls1_predict`,
     /// and the selections in `pls1_find_k_optimal`, `spls1_find_k_optimal`
     /// and `spls1_find_keep_optimal`). Lengths are
     /// still exact, and an integer (a count, `k_used`) that differs by one

@@ -34,9 +34,9 @@ values are represented.
 - Strings and names are re-encoded to UTF-8 before they reach the
   engine; a string that is not valid UTF-8 after that re-encoding
   (bytes `enc2utf8()` cannot fix up) raises `invalid_argument`.
-- `args`, `find_k_args` and `rotation_args` are named lists; `NULL`
+- `args`, `find_k_args` and `find_n_args` are named lists; `NULL`
   (the whole argument or one entry) means the engine default. For
-  `args` and `rotation_args`, `list()` behaves the same as `NULL`.
+  `args` and `find_n_args`, `list()` behaves the same as `NULL`.
   `find_k_args` is the exception: with an integer `k` (not
   `"optimal"` or `"sequence"`), `find_k_args` must be `NULL`;
   `find_k_args = list()` still raises `invalid_argument`, because the
@@ -76,10 +76,11 @@ type name, then `"plskit_result"`.
 names). There are no `coef()` or `predict()` methods (wrappers add no
 statistical methods of their own): call `pls1_predict(fit, X_new)`.
 
-Results can be passed back: `pls1_predict(fit, X_new)`, `rotate(fit)`,
-`pls3_transform(model, ...)`. `rotate` takes a fitted `pls1_result`
-(model overload, returns a `pls1_result` with `rotation_spec` set) or a
-weight matrix (returns a `rotate_result`). A result edited by hand so
+Results can be passed back: `pls1_predict(fit, X_new)`, `rotate(f, X)`,
+`pls3_transform(model, ...)`. `rotate` takes a `factors_result` or a
+`pls3_result` (returns the same class with `rotation_spec` set; the
+optional `X` gives the target) or a weight matrix (returns a
+`rotate_result`). A result edited by hand so
 that it no longer forms a valid model raises `invalid_argument`; an
 unclassed copy (`unclass(fit)`) still works.
 
@@ -112,7 +113,10 @@ tryCatch(pls1_fit(X, y, weights = w),
 When the `split_nb` auto-gate reroutes an explicit `split_nb` request, a warning of class
 `c("plskit_rerouted", "plskit_warning", "warning", "condition")` carries
 `requested`, `actual`, `n_perm`, `stable_rank` and `n_eff`; silence it with
-`suppressWarnings(..., classes = "plskit_rerouted")`.
+`suppressWarnings(..., classes = "plskit_rerouted")`. When `rotate` gets a
+sparse `pls3_result`, a warning of class
+`c("plskit_rotated_sparse", "plskit_warning", "warning", "condition")`
+carries only `kind` and the message.
 
 ## Known limitations
 

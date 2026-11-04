@@ -48,7 +48,6 @@ Every public entry that takes weights and a component count calls
 | `pls1_fit` (and `spls1_fit`, which delegates) | `fit.rs` | `k`, only when `opts.check_n_eff` |
 | `pls1_confirmatory_test` | `signal_test.rs` (`confirmatory_test_impl`) | resolved `k` |
 | `pls1_perm_null` | `perm_null.rs` | `k` |
-| `pls1_rotation_stability` | `rotation_stability.rs` | `k` |
 | `pls1_find_k_optimal`, `spls1_find_k_optimal` | `find_k.rs` (`find_k_optimal_impl`) | `k_max` |
 | `pls1_find_k_sequence`, `spls1_find_k_sequence` | `find_k.rs` (`find_k_sequence_impl`) | `k_max` |
 | `spls1_find_keep_optimal` | `find_k.rs` | `k` |
@@ -97,7 +96,7 @@ of its site, which runs with the check off, as those sites do.
 ## Internal call sites that keep the check on
 
 - **Reference fits** in the `ci` branch of `pls1_confirmatory_test`
-  (`signal_test.rs`) and in `pls1_rotation_stability` leave
+  (`signal_test.rs`) leaves
   `check_n_eff` at its default. On the full data this repeats the entry check and cannot fail.
 - **CI subsamples** (`subsample.rs`, `run_one_confirmatory`): the
   per-subsample fit leaves `check_n_eff` at its default, so the check fires on the
@@ -108,11 +107,6 @@ of its site, which runs with the check off, as those sites do.
   compared with `max_skip_rate` (`ResamplingDegenerate`), failures with
   `max_failure_rate` (`ResampleFailureRateExceeded`). Without weights the
   check cannot fire here, because the engine rejects `m < k + 2` up front.
-- **Rotation-stability subsamples** (`rotation_stability.rs`,
-  `run_one_rotation_stability`): `check_n_eff` is at its default here too. Any worker error,
-  `n_eff` or numerical, becomes a NaN row; the NaN-row filter counts them
-  as skips against `max_skip_rate`. This path deliberately does not split
-  skips from failures.
 
 ## History note
 

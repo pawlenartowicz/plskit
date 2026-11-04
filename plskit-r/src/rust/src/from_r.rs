@@ -72,6 +72,8 @@ impl Inputs {
             let ctx = match kind {
                 Some(ParamKind::Args) => Ctx::Args,
                 Some(ParamKind::Model | ParamKind::ModelOrMat) => Ctx::Model,
+                // A named numeric vector is data; only a list is a model record.
+                Some(ParamKind::ModelOrVec) if matches!(node, Node::List { .. }) => Ctx::Model,
                 _ => Ctx::Data,
             };
             rec.push(key, convert(node, ctx, key)?)

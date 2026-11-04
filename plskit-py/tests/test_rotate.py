@@ -97,11 +97,11 @@ def test_rotate_rejects_a_list_that_contains_itself():
     assert ei.value.code == "invalid_argument"
 
 
-def test_rotate_rejects_a_model_dict_that_contains_itself():
-    model = {}
-    model["a"] = model
+def test_rotate_rejects_a_dict_that_contains_itself():
+    d = {}
+    d["a"] = d
     with pytest.raises(plskit.PlsKitError, match="is nested too deeply") as ei:
-        plskit.rotate(model)
+        plskit.rotate(_W, args=d)
     assert ei.value.code == "invalid_argument"
 
 
@@ -115,92 +115,22 @@ def test_rotation_spec_args_is_immutable():
         r.spec.args["max_iter"] = 99
 
 
-# ── Model-in dispatch ────────────────────────────────────────
-
-
-def test_rotate_model_rotates_scores_and_loadings_and_keeps_coef():
-    X, y = _data()
-    m = plskit.pls1_fit(X, y, k=3)
-    m2 = plskit.rotate(m, method="varimax")
-    assert isinstance(m2, plskit.PLS1Result)
-    assert m.rotation_spec is None  # the input model is untouched
-    assert m2.rotation_spec.method == "varimax"
-    R = m2.rotation_spec.R
-    np.testing.assert_allclose(m2.W, m.W @ R, atol=1e-12)
-    np.testing.assert_allclose(m2.T, m.T @ R, atol=1e-12)
-    np.testing.assert_allclose(m2.P, m.P @ R, atol=1e-12)
-    # Q rotates by R.T, so the fitted signal T @ Q is unchanged.
-    np.testing.assert_allclose(m2.T @ m2.Q, m.T @ m.Q, atol=1e-10)
-    np.testing.assert_allclose(m2.coef, m.coef, atol=1e-15)
-    np.testing.assert_allclose(m2.beta, m.beta, atol=1e-15)
-    assert m2.intercept == m.intercept
-
-
-def test_rotate_model_already_rotated_raises():
-    X, y = _data()
-    m = plskit.pls1_fit(X, y, k=3)
-    m2 = plskit.rotate(m, method="varimax")
-    with pytest.raises(plskit.PlsKitError) as ei:
-        plskit.rotate(m2, method="varimax")
-    assert ei.value.code == "already_rotated"
-
-
-def test_rotate_sparse_model_keeps_keep():
-    X, y = _data()
-    m = plskit.spls1_fit(X, y, k=2, keep=3)
-    m2 = plskit.rotate(m, method="varimax")
-    assert m2.keep == m.keep == 3
-
-
-def test_rotate_optimal_k_model_keeps_selection_result():
-    X, y = _data()
-    m = plskit.pls1_fit(X, y, k="optimal", k_max=4)
-    m2 = plskit.rotate(m, method="varimax")
-    assert m2.selection_result == m.selection_result
-    assert m2.selection_result is not None
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        lambda m: {"P": m.P[:-1]},
-        lambda m: {"coef": None},
-        lambda m: {"T": m.T.tolist()},
-        lambda m: {"T": m.T[:, :2]},
-        lambda m: {"P": m.P[:, :2]},
-        lambda m: {"Q": m.Q[:2]},
-    ],
-    ids=["P_rows", "unused_field_none", "nested_list_field", "T_columns", "P_columns",
-         "Q_length"],
-)
-def test_rotate_model_rejects_a_field_it_cannot_use(change):
-    X, y = _data()
-    m = plskit.pls1_fit(X, y, k=3)
-    with pytest.raises(plskit.PlsKitError) as ei:
-        plskit.rotate(dataclasses.replace(m, **change(m)), method="varimax")
-    assert ei.value.code == "invalid_argument"
-
-
 # ── Bad input ─────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
     "first, message",
     [
-        ("pls3", "rotate() first arg must be a PLS1Result, got a PLS3Result"),
         (None, "rotate() missing required argument 'model_or_W'"),
         ("not a model or array",
          'model_or_W must be a numeric matrix, got the string "not a model or array"'),
-        (np.ones(3), "rotate() first arg must be a PLS1Result or a matrix, got a vector"),
+        (np.ones(3), "rotate() first arg must be a FactorsResult, a PLS3Result or a matrix, got a vector"),
     ],
-    ids=["pls3_result", "none", "string", "vector"],
+    ids=["none", "string", "vector"],
 )
 def test_rotate_wrong_first_arg_is_invalid_argument(first, message):
-    """A first argument that is neither a PLS1Result nor a matrix raises
+    """A first argument that is neither a FactorsResult nor a matrix raises
     `invalid_argument`, not a bare TypeError."""
-    if isinstance(first, str) and first == "pls3":
-        X, _ = _data()
-        first = plskit.pls3_fit(X, X[:, :3] + 1.0, k=1)
     with pytest.raises(plskit.PlsKitError) as ei:
         plskit.rotate(first, method="varimax")
     assert ei.value.code == "invalid_argument"
@@ -213,3 +143,63 @@ def test_rotate_reads_a_nested_list_w_like_any_array_argument():
     ref = plskit.rotate(W, method="varimax")
     assert np.array_equal(got.W_rot, ref.W_rot)
     assert np.array_equal(got.spec.R, ref.spec.R)
+
+
+# ── FactorsResult, PLS3Result, PLS1Result ─────────────────────
+
+
+def _factors(n=3):
+    X, y = _data()
+    m = plskit.pls1_fit(X, y, k=2)
+    return X, m, plskit.factors(m, X, n)
+
+
+def test_rotate_x_equals_row_scores_target():
+    X, _, f = _factors()
+    Xs = plskit.preprocess(X).X_std
+    a = plskit.rotate(f, X)
+    b = plskit.rotate(f, L=Xs @ f.W)
+    # Not bitwise: numpy's matmul (Accelerate on macOS) and the engine's round L differently.
+    np.testing.assert_allclose(a.F, b.F, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(a.rotation_spec.R, b.rotation_spec.R, rtol=0, atol=1e-12)
+
+
+def test_rotate_pls3_returns_pls3result():
+    X, _ = _data()
+    Y = X[:, :3] + np.random.default_rng(2).normal(size=(80, 3))
+    m3 = plskit.pls3_fit(X, Y, k=3)
+    r = plskit.rotate(m3, X)
+    assert type(r) is plskit.PLS3Result
+    assert r.rotation_spec is not None
+    assert m3.rotation_spec is None
+    r2 = plskit.rotate(m3, L=m3.V)
+    assert type(r2) is plskit.PLS3Result
+
+
+def test_sparse_pls3_warns():
+    X, _ = _data()
+    Y = X[:, :3] + np.random.default_rng(2).normal(size=(80, 3))
+    m3 = plskit.spls3_fit(X, Y, k=2, keep_X=3, keep_Y=2)
+    with pytest.warns(UserWarning, match="spreads its zeros"):
+        plskit.rotate(m3, X)
+
+
+def test_rotate_refuses_pls1_result():
+    X, m, _ = _factors()
+    with pytest.raises(plskit.PlsKitError, match="does not take a PLS1Result") as ei:
+        plskit.rotate(m, X)
+    assert ei.value.code == "invalid_argument"
+
+
+def test_x_and_l_together_is_invalid_argument():
+    X, _, f = _factors()
+    with pytest.raises(plskit.PlsKitError) as ei:
+        plskit.rotate(f, X, L=X[:, :3])
+    assert ei.value.code == "invalid_argument"
+
+
+def test_untagged_record_is_invalid_argument():
+    X, _ = _data()
+    with pytest.raises(plskit.PlsKitError, match="got a record") as ei:
+        plskit.rotate({"F": 1}, X)
+    assert ei.value.code == "invalid_argument"

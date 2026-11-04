@@ -48,8 +48,9 @@ const CORPUS_CASES = [
     "pls1_confirmatory_auto_split_exact",
     "pls1_perm_null_basic_n80_d6_k2",
     "pls1_perm_alpha_n40_p60_m4_k1",
-    "pls1_rotation_stability_n80_d6_k2",
     "rotate_varimax_d6_k2",
+    "factors_pls1_n50_d10_k2_n3",
+    "profiles_find_n_n100_d12_k2",
 ]
 
 const ATOL_SCALAR = 1e-12
@@ -139,6 +140,9 @@ function run_case(case, inputs)
     elseif fn == "rotate"
         fit = pls1_fit(inputs["X"], inputs["y"]; k=kw["k"])
         return record(rotate(fit.W; method=kw["method"]))
+    elseif fn == "factors"
+        fit = pls1_fit(inputs["X"], inputs["y"]; k=kw["k"])
+        return record(rotate(factors(fit, inputs["X"], kw["n_factors"]); X=inputs["X"]))
     elseif fn == "preprocess"
         return record(preprocess(; X=inputs["X"], Y=inputs["y"],
                                  weights=corpus_weights(case, inputs)))

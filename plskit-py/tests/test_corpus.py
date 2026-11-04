@@ -206,6 +206,11 @@ def test_corpus_case(case):
     elif fn == "rotate":
         model = plskit.pls1_fit(X, y, k=int(kwargs["k"]))
         r = plskit.rotate(model.W, method=kwargs.get("method", "varimax"))
+    elif fn == "factors":
+        m = plskit.pls1_fit(X, y, k=int(kwargs["k"]))
+        r = plskit.rotate(plskit.factors(m, X, int(kwargs["n_factors"])), X)
+    elif fn == "profiles_find_n":
+        r = plskit.profiles_find_n(X, y, int(kwargs["k"]), int(kwargs["n_max"]), seed=int(kwargs["seed"]))
     elif fn == "preprocess":
         r = plskit.preprocess(X=X, Y=y, weights=kwargs.get("weights"))
     elif fn == "pls1_perm_null":
@@ -221,15 +226,6 @@ def test_corpus_case(case):
         r = plskit.pls1_perm_alpha(
             inputs["gram"], inputs["Y"], k=kwargs["k"], n_features=kwargs["n_features"]
         )
-    elif fn == "pls1_rotation_stability":
-        # As for pls1_perm_null: only the data-shape keys are dropped.
-        for key in ("d", "n"):
-            kwargs.pop(key, None)
-        k = int(kwargs.pop("k"))
-        for key, conv in (("n_boot", int), ("m_rate", float), ("level", float)):
-            if key in kwargs:
-                kwargs[key] = conv(kwargs[key])
-        r = plskit.pls1_rotation_stability(X, y, k, **kwargs)
     elif fn == "spls1_fit":
         # `seed` here is the data-generation seed: spls1_fit is deterministic
         # and takes none (the Rust corpus arm ignores it too).

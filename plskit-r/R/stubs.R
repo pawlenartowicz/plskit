@@ -561,68 +561,158 @@ pls1_perm_alpha <- function(
   ))
 }
 
-#' Rotate PLS1 weights or a fitted PLS1 model
+#' Rotate a factors result, a PLS3 model or a weight matrix
 #'
 #' R binding of `rotate`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
 #' "4.1 Rotation" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param model_or_W,method,L,args See the canonical reference.
-#' @return A list of class `c("rotate_result", "plskit_result")`, or `c("pls1_result", "plskit_result")`, depending on the input.
+#' @param model_or_W,X,method,L,args,pre_standardized See the canonical reference.
+#' @return A list of class `c("rotate_result", "plskit_result")`, or `c("pls3_result", "plskit_result")`, or `c("factors_result", "plskit_result")`, depending on the input.
 #' @export
 rotate <- function(
   model_or_W,
+  X = NULL,
   method = "varimax",
   L = NULL,
-  args = NULL
+  args = NULL,
+  pre_standardized = NULL
 ) {
   .plskit_call("rotate", list(
     model_or_W = model_or_W,
+    X = X,
     method = method,
     L = L,
-    args = args
+    args = args,
+    pre_standardized = pre_standardized
   ))
 }
 
-#' Rotation-stability diagnostic for PLS1
+#' Split a coefficient vector into factors on the basis of X
 #'
-#' R binding of `pls1_rotation_stability`. Arguments, defaults and result fields are
+#' R binding of `factors`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
-#' "4.2 Rotation-stability diagnostic" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
+#' "4.3 Factors" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k,rotation_method,rotation_args,L,n_boot,m_rate,level,pre_standardized,seed,verbose,weights,max_skip_rate See the canonical reference.
-#' @return A list of class `c("rotation_stability_result", "plskit_result")`.
+#' @param model_or_coef,X,n,pre_standardized See the canonical reference.
+#' @return A list of class `c("factors_result", "plskit_result")`.
 #' @export
-pls1_rotation_stability <- function(
+factors <- function(
+  model_or_coef,
+  X,
+  n,
+  pre_standardized = NULL
+) {
+  .plskit_call("factors", list(
+    model_or_coef = model_or_coef,
+    X = X,
+    n = n,
+    pre_standardized = pre_standardized
+  ))
+}
+
+#' Right singular vectors of a standardized matrix
+#'
+#' R binding of `pca_basis`. Arguments, defaults and result fields are
+#' documented once, in the canonical reference: section
+#' "4.2 PCA basis" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
+#'
+#' @param X,pre_standardized See the canonical reference.
+#' @return A list of class `c("pca_basis_result", "plskit_result")`.
+#' @export
+pca_basis <- function(
+  X,
+  pre_standardized = FALSE
+) {
+  .plskit_call("pca_basis", list(
+    X = X,
+    pre_standardized = pre_standardized
+  ))
+}
+
+#' Choose the number of profile factors
+#'
+#' R binding of `profiles_find_n`. Arguments, defaults and result fields are
+#' documented once, in the canonical reference: section
+#' "4.4 Choosing n" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
+#'
+#' @param X,y,k,n_max,args,pre_standardized,seed See the canonical reference.
+#' @return A list of class `c("profiles_find_n_result", "plskit_result")`.
+#' @export
+profiles_find_n <- function(
   X,
   y,
   k,
-  rotation_method = "varimax",
-  rotation_args = NULL,
-  L = NULL,
-  n_boot = NULL,
-  m_rate = NULL,
-  level = NULL,
+  n_max = 9L,
+  args = NULL,
   pre_standardized = FALSE,
-  seed = NULL,
-  verbose = FALSE,
-  weights = NULL,
-  max_skip_rate = NULL
+  seed = NULL
 ) {
-  .plskit_call("pls1_rotation_stability", list(
+  .plskit_call("profiles_find_n", list(
     X = X,
     y = y,
     k = k,
-    rotation_method = rotation_method,
-    rotation_args = rotation_args,
-    L = L,
-    n_boot = n_boot,
-    m_rate = m_rate,
-    level = level,
+    n_max = n_max,
+    args = args,
     pre_standardized = pre_standardized,
-    seed = seed,
-    verbose = verbose,
-    weights = weights,
-    max_skip_rate = max_skip_rate
+    seed = seed
+  ))
+}
+
+#' Split a coefficient vector into rotated factors and scores
+#'
+#' R binding of `profiles`. Arguments, defaults and result fields are
+#' documented once, in the canonical reference: section
+#' "4.5 Profiles" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
+#'
+#' @param model_or_coef,X,n,rotation,args,pre_standardized See the canonical reference.
+#' @return A list of class `c("profiles_result", "plskit_result")`.
+#' @export
+profiles <- function(
+  model_or_coef,
+  X,
+  n,
+  rotation = "varimax",
+  args = NULL,
+  pre_standardized = NULL
+) {
+  .plskit_call("profiles", list(
+    model_or_coef = model_or_coef,
+    X = X,
+    n = n,
+    rotation = rotation,
+    args = args,
+    pre_standardized = pre_standardized
+  ))
+}
+
+#' Split a fitted PLS1 coefficient, choosing the number of factors
+#'
+#' R binding of `profiles_search`. Arguments, defaults and result fields are
+#' documented once, in the canonical reference: section
+#' "4.5 Profiles" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
+#'
+#' @param model,X,y,n_max,rotation,args,find_n_args,seed See the canonical reference.
+#' @return A list of class `c("profiles_search_result", "plskit_result")`.
+#' @export
+profiles_search <- function(
+  model,
+  X,
+  y,
+  n_max = 9L,
+  rotation = "varimax",
+  args = NULL,
+  find_n_args = NULL,
+  seed = NULL
+) {
+  .plskit_call("profiles_search", list(
+    model = model,
+    X = X,
+    y = y,
+    n_max = n_max,
+    rotation = rotation,
+    args = args,
+    find_n_args = find_n_args,
+    seed = seed
   ))
 }

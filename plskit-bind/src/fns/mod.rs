@@ -2,6 +2,7 @@
 //! parameter through [`Inputs`], calls `finish`, builds the engine
 //! options, calls the engine and converts the output.
 
+pub(crate) mod factors;
 pub(crate) mod find_k;
 pub(crate) mod inference;
 pub(crate) mod pls1;

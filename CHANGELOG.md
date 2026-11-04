@@ -4,6 +4,20 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+- Added: `factors(coef, x, n, pre_standardized)` splits a coefficient vector into `n` orthogonal factors that sum to it. It builds the basis from the principal components of `X`, so the basis is the same whatever fit the coefficient came from. A part of the coefficient outside the row space of the standardized kept columns of `X` (for example from a sparse fit with more kept columns than `N − 1`) is appended, normalized, as one extra last basis direction, so it lands in the last factor.
+- Added: `FactorsOutput::rotated(r)` rotates the factors by an orthogonal matrix, sorts them by size and pins their signs. In the wrappers this is an overload of `rotate`, and `rotate(f, X)` rotates with varimax on the row scores `Xs W`.
+- Added: `Pls3Model::rotated(r)` and, in the wrappers, `rotate(PLS3Result)`, which rotates `U`, `V` and both score matrices, recomputes `singular_values`, sorts and pins signs. It warns with kind `rotated_sparse` on a sparse fit, whose rotated columns are not unit-norm. `rotate(PLS3Result, X)` uses the fit's stored `x_scores` as the varimax target, and `pre_standardized` is refused for a `PLS3Result`.
+- Added: `pca_basis(x, pre_standardized)` returns the right singular vectors and singular values of standardized `X`.
+- Added: `profiles_find_n(x, y, k, n_max, opts)` chooses the number of factors by parallel analysis and cross-validated R².
+- Added: `profiles(model_or_coef, X, n)` in `plskit-bind` and the Python, R and Julia wrappers, which splits and rotates the coefficient vector of a fit in one call.
+- Added: `profiles_search(model, X, y)` in `plskit-bind` and the wrappers, which runs `profiles` at the `n` that `profiles_find_n` picks and returns a `ProfilesSearchResult` with that search on it.
+- Changed: `holdout_corr` in the confirmatory CI (`pls1_confirmatory_test` with `ci`) comes from half splits: each replicate fits on `m_h = ⌊n/2⌋` rows whatever `m_rate` is, and `point` is the mean over the half splits. A CI request with `⌊n/2⌋ < k + 2` is refused with `invalid_argument`. A replicate whose half-split fit fails has a NaN `holdout_corr` and is kept for the other readouts; this includes a half split with too few effective observations, which now counts toward `max_failure_rate`, not `max_skip_rate`.
+- Changed: `pls1_perm_null` at `k = 1` holds `c` at `c_ref` instead of refitting it on each permuted `y`, so its null is that of `X_j'y`. At `k ≥ 2` it is unchanged.
+- Removed: `rotate(PLS1Result)` and the `PLS1Result.rotation_spec` field. Use `profiles`, or `rotate(m.W, ...)` for the weights alone.
+- Removed: `pls1_rotation_stability`, with `RotationStabilityOutput` and the `procrustes` dependency.
+- Removed (Rust): `PlsKitError::AlreadyRotated`. The wrappers still raise the `already_rotated` code.
+- The testdata corpus gains `factors_pls1_n50_d10_k2_n3` and `profiles_find_n_n100_d12_k2` and loses the three `pls1_rotation_stability_*` cases, so it goes from 84 to 83 cases. Five outputs change: the four `pls1_confirmatory_*split_nb_ci*` files and `pls1_perm_null_wide_n60_d3000_k1`.
+
 ## [0.7.2] - 2026-10-19
 
 No engine code changes: results are unchanged; the testdata corpus is

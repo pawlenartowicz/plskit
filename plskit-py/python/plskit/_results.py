@@ -39,22 +39,18 @@ class PLS1Result:
     pre_standardized: bool
     weights: np.ndarray | None
     n_eff: float
-    rotation_spec: RotationSpec | None = None
     selection_result: FindKOptimalResult | FindKSequenceResult | None = None
     keep: int | None = None          # spls1 keep-count; None for dense pls1_fit
 
 
 @dataclass(frozen=True)
 class CIScalar:
-    """Resampling CI for a scalar functional, plus its SE.
+    """CI for a scalar, plus its SD. Its one use is `ConfirmatoryCI.holdout_corr`.
 
-    `point`, `lower`, `upper` are on the natural scale of the statistic.
-    `sd` is on the *inference scale* used to build the CI:
-
-    * variance_ratio: inference scale = natural scale.
-    * holdout_corr (Fisher-transformed NB-Wald): inference scale = atanh(r)
-      (z-scale). The r-scale CI is asymmetric and cannot be reconstructed from
-      ``point ± sd``; bounds are guaranteed to lie in (−1, 1).
+    `point`, `lower`, `upper` are on the r-scale; `point` is the mean over
+    half splits. `sd` is on the Fisher z-scale (atanh(r)) the CI is built on,
+    so the r-scale CI is asymmetric and cannot be reconstructed from
+    ``point ± sd``; bounds lie in (−1, 1).
     """
     point: float
     lower: float
@@ -85,43 +81,6 @@ class ConfirmatoryCI:
 
     n_boot_finite: int                 # workers that succeeded; ≤ n_boot
     n_boot_finite_holdout_corr: int    # subset whose holdout_corr is finite; ≤ n_boot_finite
-
-
-@dataclass(frozen=True)
-class RotationStabilityResult:
-    """Output of `pls1_rotation_stability`.
-
-    All variance and ratio quantities are computed on signed-permutation-
-    aligned squared Frobenius residuals (rotated and unrotated weights
-    aligned to their respective references via 2^K · K! brute-force
-    enumeration).
-
-    Interpretation:
-        ratio < 1   → rotation reduced axis variance (rotated axes
-                       are more replicable than unrotated ones)
-        ratio ≈ 1   → rotation did not change axis replicability
-        ratio > 1   → rotation increased axis variance (rotated axes
-                       are less replicable; suspect a local-optimum
-                       varimax convergence issue)
-    """
-    method: str
-    n_boot: int
-    m: int
-    m_rate: float
-    level: float
-    seed: int
-
-    variance_ratio: CIScalar
-    variance_ratio_per_axis: list[CIScalar]
-
-    variance_unrot: float
-    variance_rot: float
-    variance_unrot_per_axis: np.ndarray
-    variance_rot_per_axis: np.ndarray
-
-    degenerate_baseline: bool
-    n_boot_finite: int
-    n_eff: float = float("nan")
 
 
 @dataclass(frozen=True)
@@ -294,6 +253,7 @@ class PLS3Result:
     keep_Y: int | None = None          # Y-side keep-count; None on a dense fit
     converged: np.ndarray | None = None  # (k_used,) bool; None on a dense fit
     n_iter: np.ndarray | None = None     # (k_used,) int; None on a dense fit
+    rotation_spec: RotationSpec | None = None  # None until rotated
 
 
 @dataclass(frozen=True)
@@ -304,3 +264,55 @@ class PLS3Scores:
     """
     x_scores: np.ndarray | None    # (n_new, k_used)
     y_scores: np.ndarray | None    # (n_new, k_used)
+
+
+@dataclass(frozen=True)
+class FactorsResult:
+    """Output of `factors`, and of `rotate` on a `FactorsResult`.
+
+    A factor is a part of one coefficient vector. It is not a latent
+    variable, and ``n`` is not a count of dimensions. ``size`` is nonnegative.
+    """
+    F: np.ndarray                      # (D, n); columns sum to `coef`
+    W: np.ndarray                      # (D, n); unit directions, orthonormal; F = W * size
+    size: np.ndarray                   # (n,); ‖F[:, i]‖, nonnegative
+    coef: np.ndarray                   # (D,); the input, carried for `rotate`
+    pre_standardized: bool             # whether the X it was made from was used as given
+    rotation_spec: RotationSpec | None = None   # None until rotated
+
+
+@dataclass(frozen=True)
+class PCABasisResult:
+    """Output of `pca_basis`: right singular vectors of standardized X with s > 1e-10 s[0]."""
+    V: np.ndarray                      # (D, K)
+    s: np.ndarray                      # (K,)
+
+
+@dataclass(frozen=True)
+class ProfilesFindNResult:
+    """Output of `profiles_find_n`."""
+    n_star: int                        # chosen n; 0 when the best j is not above zero by 2 SE
+    n_grid: list[int]                  # j = 1 ..= min(K_star, n_max)
+    r2_mean: np.ndarray                # (len(n_grid),); mean held-out R² per j
+    r2_se: np.ndarray                  # (len(n_grid),); sd / sqrt(folds used), ddof = 1
+    K_star: int                        # components kept by parallel analysis
+    n_failed_folds: int                # folds not used
+    seed: int
+
+
+@dataclass(frozen=True)
+class ProfilesResult:
+    """Output of `profiles`. ``model`` is ``None`` when `profiles` got a vector."""
+    model: PLS1Result | None
+    factors: FactorsResult
+    scores: np.ndarray                 # (N, n); Xs F, columns sum to the fit's score on Xs
+
+
+@dataclass(frozen=True)
+class ProfilesSearchResult:
+    """Output of `profiles_search`: the `ProfilesResult` fields and the search."""
+    model: PLS1Result
+    factors: FactorsResult
+    scores: np.ndarray                 # (N, n); Xs F, columns sum to the fit's score on Xs
+    n_search: ProfilesFindNResult
+    seed: int

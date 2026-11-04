@@ -44,6 +44,10 @@ run_case <- function(case, inputs) {
       fit <- pls1_fit(arr("X"), arr("y"), k = kw[["k"]])
       rotate(fit$W, method = kw[["method"]])
     },
+    factors = {
+      fit <- pls1_fit(arr("X"), arr("y"), k = kw[["k"]])
+      rotate(factors(fit, arr("X"), kw[["n_factors"]]), arr("X"))
+    },
     preprocess = {
       preprocess(arr("X"), arr("y"), weights = if (has_weights) arr("weights"))
     },

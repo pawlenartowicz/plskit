@@ -35,9 +35,6 @@ three fields this page is about:
 
 `beta` is the headline output. The NIPALS quantities `W`, `T`, `P`, `Q`
 (described below) are exposed for diagnostics and downstream tools.
-Rotating a model with `rotate` replaces `T`, `P`, `W`, `Q` and leaves
-`beta`, `coef`, and `intercept` unchanged, so predictions from a rotated
-model are identical to those from the original.
 
 ## Standardization
 

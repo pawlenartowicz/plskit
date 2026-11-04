@@ -24,10 +24,10 @@ again <- pls1_confirmatory_test(X, y, k = 1, test_method = "split_exact",
                                 seed = test$seed)
 identical(again, test)   # TRUE
 
-# Choose k, then rotate the model (the selection result travels along)
+# Choose k, split the coefficient into factors, then rotate them
 fit2 <- pls1_fit(X, y, k = "optimal", k_max = 4,
                  find_k_args = list(selector = "bic"))
-rot <- rotate(fit2, method = "varimax")
+rot <- rotate(factors(fit2, X, 2L), X)
 rot$rotation_spec$args
 
 # Errors are conditions carrying the Python error codes

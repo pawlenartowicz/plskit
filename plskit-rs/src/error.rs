@@ -75,10 +75,6 @@ pub enum PlsKitError {
     #[error("shape mismatch: {0}")]
     ShapeMismatch(String),
 
-    /// Caller tried to rotate an already-rotated `PLS1Result`.
-    #[error("model already has a rotation_spec; re-rotation is not supported")]
-    AlreadyRotated,
-
     /// Observation weights vector is invalid (negative, all-zero, or too
     /// concentrated for the requested resampling).
     #[error("invalid weights: {reason}")]
@@ -183,20 +179,6 @@ pub enum PlsKitError {
     },
 }
 
-impl From<procrustes::ProcrustesError> for PlsKitError {
-    /// Caught one frame up by the resampling workers (Rayon handler maps
-    /// `Err → NaN row / Failed`), so this conversion is in practice not
-    /// user-visible. The mapping preserves the procrustes message for the
-    /// rare cases where it does surface (e.g. direct callers of internal
-    /// alignment paths).
-    fn from(e: procrustes::ProcrustesError) -> Self {
-        match e {
-            procrustes::ProcrustesError::NonFinite => Self::NonFiniteInput,
-            other => Self::Internal(format!("procrustes alignment failed: {other}")),
-        }
-    }
-}
-
 impl PlsKitError {
     /// Stable string code used by the Python wrapper to populate
     /// `PlsKitError.code`. Variant names in `snake_case`.
@@ -213,7 +195,6 @@ impl PlsKitError {
             Self::InvalidArgs { .. } => "invalid_args",
             Self::InvalidInput(_) => "invalid_input",
             Self::ShapeMismatch(_) => "shape_mismatch",
-            Self::AlreadyRotated => "already_rotated",
             Self::InvalidWeights { .. } => "invalid_weights",
             Self::ResamplingDegenerate { .. } => "resampling_degenerate",
             Self::ResampleFailureRateExceeded { .. } => "resample_failure_rate_exceeded",
@@ -264,7 +245,6 @@ mod tests {
             ),
             (E::InvalidInput(s()), "invalid_input"),
             (E::ShapeMismatch(s()), "shape_mismatch"),
-            (E::AlreadyRotated, "already_rotated"),
             (E::InvalidWeights { reason: "negative" }, "invalid_weights"),
             (
                 E::ResamplingDegenerate {
@@ -314,42 +294,17 @@ mod tests {
                     E::InvalidArgs { .. } => 7,
                     E::InvalidInput(_) => 8,
                     E::ShapeMismatch(_) => 9,
-                    E::AlreadyRotated => 10,
-                    E::InvalidWeights { .. } => 11,
-                    E::ResamplingDegenerate { .. } => 12,
-                    E::ResampleFailureRateExceeded { .. } => 13,
-                    E::PermNullDegenerate { .. } => 14,
-                    E::OptimalNoComponent => 15,
-                    E::SequenceNoRejection { .. } => 16,
+                    E::InvalidWeights { .. } => 10,
+                    E::ResamplingDegenerate { .. } => 11,
+                    E::ResampleFailureRateExceeded { .. } => 12,
+                    E::PermNullDegenerate { .. } => 13,
+                    E::OptimalNoComponent => 14,
+                    E::SequenceNoRejection { .. } => 15,
                 }
             })
             .collect();
         seen.sort_unstable();
-        assert_eq!(seen, (0..17).collect::<Vec<_>>(), "one row per variant");
-    }
-
-    #[test]
-    fn procrustes_dimension_mismatch_converts_to_internal() {
-        // procrustes returns DimensionMismatch when a NIPALS short-circuit
-        // truncates `w_b`; the From impl must convert (so `?` works at the
-        // call sites in subsample.rs / rotation_stability.rs).
-        let a = faer::Mat::<f64>::zeros(6, 1);
-        let r = faer::Mat::<f64>::from_fn(6, 2, |i, j| if i == j { 1.0 } else { 0.0 });
-        let pe: PlsKitError = procrustes::orthogonal(a.as_ref(), r.as_ref(), false)
-            .unwrap_err()
-            .into();
-        assert!(matches!(pe, PlsKitError::Internal(_)));
-    }
-
-    #[test]
-    fn procrustes_non_finite_converts_to_non_finite_input() {
-        let mut a = faer::Mat::<f64>::from_fn(6, 2, |i, j| if i == j { 1.0 } else { 0.0 });
-        a[(3, 1)] = f64::NAN;
-        let r = faer::Mat::<f64>::from_fn(6, 2, |i, j| if i == j { 1.0 } else { 0.0 });
-        let pe: PlsKitError = procrustes::orthogonal(a.as_ref(), r.as_ref(), true)
-            .unwrap_err()
-            .into();
-        assert!(matches!(pe, PlsKitError::NonFiniteInput), "{pe:?}");
+        assert_eq!(seen, (0..16).collect::<Vec<_>>(), "one row per variant");
     }
 
     /// The message is all a wrapper's exception carries of this variant's

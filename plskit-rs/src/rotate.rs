@@ -178,8 +178,8 @@ fn varimax_rotate(
 
     // Step 4: w_rot = w @ r, computed from the original (not row-normalized)
     // w regardless of kaiser_normalize, so row magnitudes are preserved.
-    // Par::Seq: rotate runs inside rotation_stability's rayon workers, so the
-    // D×K GEMM must not dispatch to the global pool. (The rotate parity test pins
+    // Par::Seq: rotate must not dispatch to the global pool, so the D×K GEMM
+    // runs sequentially. (The rotate parity test pins
     // R and the sweep count, not w_rot — the kernel choice here is free.)
     let mut w_rot = Mat::<f64>::zeros(w.nrows(), r.ncols());
     faer::linalg::matmul::matmul(

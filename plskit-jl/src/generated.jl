@@ -5,18 +5,20 @@ export preprocess, pls1_fit, pls1_predict, pls1_find_k_optimal, pls1_find_k_sequ
        spls1_fit, spls1_find_keep_optimal, spls1_find_k_optimal, spls1_find_k_sequence,
        pls3_fit, plssvd_fit, pls3_transform, plssvd_transform, spls3_fit,
        pls1_confirmatory_test, split_nb_gate, pls1_perm_null, pls3_confirmatory_test,
-       pls1_perm_alpha, rotate, pls1_rotation_stability
+       pls1_perm_alpha, rotate, factors, pca_basis, profiles_find_n, profiles,
+       profiles_search
 
 export PreprocessResult, PLS1Result, PLS3Result, PLS3Scores, FindKOptimalResult,
        FindKSequenceResult, FindKeepOptimalResult, ConfirmatoryTestResult, SplitNbGateResult,
        PermNullResult, PermAlphaResult, CIScalar, ConfirmatoryCI, RotateResult,
-       RotationStabilityResult, RotationSpec
+       FactorsResult, PCABasisResult, ProfilesFindNResult, ProfilesResult,
+       ProfilesSearchResult, RotationSpec
 
 # Field order of every result type, as in docs/python/results.md.
 const _RESULT_FIELDS = Dict{Symbol,Vector{Symbol}}(
     :PreprocessResult => [:X_std, :X_mean, :X_scale, :Y_std, :Y_mean, :Y_scale, :weights_normalized, :n_eff],
-    :PLS1Result => [:T, :P, :W, :Q, :coef, :beta, :intercept, :k_used, :pre_standardized, :weights, :n_eff, :rotation_spec, :selection_result, :keep],
-    :PLS3Result => [:U, :V, :singular_values, :x_scores, :y_scores, :X_mean, :X_scale, :Y_mean, :Y_scale, :k_used, :pre_standardized_X, :pre_standardized_Y, :keep_X, :keep_Y, :converged, :n_iter],
+    :PLS1Result => [:T, :P, :W, :Q, :coef, :beta, :intercept, :k_used, :pre_standardized, :weights, :n_eff, :selection_result, :keep],
+    :PLS3Result => [:U, :V, :singular_values, :x_scores, :y_scores, :X_mean, :X_scale, :Y_mean, :Y_scale, :k_used, :pre_standardized_X, :pre_standardized_Y, :keep_X, :keep_Y, :converged, :n_iter, :rotation_spec],
     :PLS3Scores => [:x_scores, :y_scores],
     :FindKOptimalResult => [:k_star, :selector, :cv_scores, :cv_scores_se, :bic_scores, :pvalues, :diagnostic, :seed, :n_eff, :stable_rank],
     :FindKSequenceResult => [:k_star, :pvalues, :test_method, :alpha, :seed, :n_eff, :stable_rank],
@@ -28,7 +30,11 @@ const _RESULT_FIELDS = Dict{Symbol,Vector{Symbol}}(
     :CIScalar => [:point, :lower, :upper, :sd],
     :ConfirmatoryCI => [:n_boot, :m, :m_rate, :level, :beta_sign_z, :beta_sign_z_signed, :leverage_ci_lower, :leverage_ci_upper, :leverage_se, :beta_ci_lower, :beta_ci_upper, :beta_se, :holdout_corr, :n_boot_finite, :n_boot_finite_holdout_corr],
     :RotateResult => [:W_rot, :spec],
-    :RotationStabilityResult => [:method, :n_boot, :m, :m_rate, :level, :seed, :variance_ratio, :variance_ratio_per_axis, :variance_unrot, :variance_rot, :variance_unrot_per_axis, :variance_rot_per_axis, :degenerate_baseline, :n_boot_finite, :n_eff],
+    :FactorsResult => [:F, :W, :size, :coef, :pre_standardized, :rotation_spec],
+    :PCABasisResult => [:V, :s],
+    :ProfilesFindNResult => [:n_star, :n_grid, :r2_mean, :r2_se, :K_star, :n_failed_folds, :seed],
+    :ProfilesResult => [:model, :factors, :scores],
+    :ProfilesSearchResult => [:model, :factors, :scores, :n_search, :seed],
     :RotationSpec => [:method, :args, :R, :sweeps, :V_converged, :L_was_provided],
 )
 
@@ -45,7 +51,7 @@ const PreprocessResult = PlsKitResult{:PreprocessResult}
     PLS1Result
 
 `PlsKitResult{:PLS1Result}`, the Julia form of Python's `plskit.PLS1Result`.
-Fields: `T`, `P`, `W`, `Q`, `coef`, `beta`, `intercept`, `k_used`, `pre_standardized`, `weights`, `n_eff`, `rotation_spec`, `selection_result`, `keep`.
+Fields: `T`, `P`, `W`, `Q`, `coef`, `beta`, `intercept`, `k_used`, `pre_standardized`, `weights`, `n_eff`, `selection_result`, `keep`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const PLS1Result = PlsKitResult{:PLS1Result}
@@ -54,7 +60,7 @@ const PLS1Result = PlsKitResult{:PLS1Result}
     PLS3Result
 
 `PlsKitResult{:PLS3Result}`, the Julia form of Python's `plskit.PLS3Result`.
-Fields: `U`, `V`, `singular_values`, `x_scores`, `y_scores`, `X_mean`, `X_scale`, `Y_mean`, `Y_scale`, `k_used`, `pre_standardized_X`, `pre_standardized_Y`, `keep_X`, `keep_Y`, `converged`, `n_iter`.
+Fields: `U`, `V`, `singular_values`, `x_scores`, `y_scores`, `X_mean`, `X_scale`, `Y_mean`, `Y_scale`, `k_used`, `pre_standardized_X`, `pre_standardized_Y`, `keep_X`, `keep_Y`, `converged`, `n_iter`, `rotation_spec`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const PLS3Result = PlsKitResult{:PLS3Result}
@@ -159,13 +165,49 @@ Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/pyt
 const RotateResult = PlsKitResult{:RotateResult}
 
 """
-    RotationStabilityResult
+    FactorsResult
 
-`PlsKitResult{:RotationStabilityResult}`, the Julia form of Python's `plskit.RotationStabilityResult`.
-Fields: `method`, `n_boot`, `m`, `m_rate`, `level`, `seed`, `variance_ratio`, `variance_ratio_per_axis`, `variance_unrot`, `variance_rot`, `variance_unrot_per_axis`, `variance_rot_per_axis`, `degenerate_baseline`, `n_boot_finite`, `n_eff`.
+`PlsKitResult{:FactorsResult}`, the Julia form of Python's `plskit.FactorsResult`.
+Fields: `F`, `W`, `size`, `coef`, `pre_standardized`, `rotation_spec`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-const RotationStabilityResult = PlsKitResult{:RotationStabilityResult}
+const FactorsResult = PlsKitResult{:FactorsResult}
+
+"""
+    PCABasisResult
+
+`PlsKitResult{:PCABasisResult}`, the Julia form of Python's `plskit.PCABasisResult`.
+Fields: `V`, `s`.
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
+"""
+const PCABasisResult = PlsKitResult{:PCABasisResult}
+
+"""
+    ProfilesFindNResult
+
+`PlsKitResult{:ProfilesFindNResult}`, the Julia form of Python's `plskit.ProfilesFindNResult`.
+Fields: `n_star`, `n_grid`, `r2_mean`, `r2_se`, `K_star`, `n_failed_folds`, `seed`.
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
+"""
+const ProfilesFindNResult = PlsKitResult{:ProfilesFindNResult}
+
+"""
+    ProfilesResult
+
+`PlsKitResult{:ProfilesResult}`, the Julia form of Python's `plskit.ProfilesResult`.
+Fields: `model`, `factors`, `scores`.
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
+"""
+const ProfilesResult = PlsKitResult{:ProfilesResult}
+
+"""
+    ProfilesSearchResult
+
+`PlsKitResult{:ProfilesSearchResult}`, the Julia form of Python's `plskit.ProfilesSearchResult`.
+Fields: `model`, `factors`, `scores`, `n_search`, `seed`.
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
+"""
+const ProfilesSearchResult = PlsKitResult{:ProfilesSearchResult}
 
 """
     RotationSpec
@@ -386,23 +428,67 @@ function pls1_perm_alpha(gram, Y; k=1, n_features)
 end
 
 """
-    rotate(model_or_W; method="varimax", L=nothing, args=nothing) -> RotateResult or PLS1Result
+    rotate(model_or_W; X=nothing, method="varimax", L=nothing, args=nothing, pre_standardized=nothing) -> RotateResult or PLS3Result or FactorsResult
 
 Call Python's `plskit.rotate` with the same arguments and defaults.
 Reference: [`rotate` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function rotate(model_or_W; method="varimax", L=nothing, args=nothing)
-    _call(:rotate; model_or_W, method, L, args)
+function rotate(model_or_W; X=nothing, method="varimax", L=nothing, args=nothing, pre_standardized=nothing)
+    _call(:rotate; model_or_W, X, method, L, args, pre_standardized)
 end
 
 """
-    pls1_rotation_stability(X, y, k; rotation_method="varimax", rotation_args=nothing, L=nothing, n_boot=nothing, m_rate=nothing, level=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing) -> RotationStabilityResult
+    factors(model_or_coef, X, n; pre_standardized=nothing) -> FactorsResult
 
-Call Python's `plskit.pls1_rotation_stability` with the same arguments and defaults.
-Reference: [`pls1_rotation_stability` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+Call Python's `plskit.factors` with the same arguments and defaults.
+Reference: [`factors` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function pls1_rotation_stability(X, y, k; rotation_method="varimax", rotation_args=nothing, L=nothing, n_boot=nothing, m_rate=nothing, level=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing)
-    _call(:pls1_rotation_stability; X, y, k, rotation_method, rotation_args, L, n_boot, m_rate, level, pre_standardized, seed, verbose, weights, max_skip_rate)
+function factors(model_or_coef, X, n; pre_standardized=nothing)
+    _call(:factors; model_or_coef, X, n, pre_standardized)
+end
+
+"""
+    pca_basis(X; pre_standardized=false) -> PCABasisResult
+
+Call Python's `plskit.pca_basis` with the same arguments and defaults.
+Reference: [`pca_basis` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
+"""
+function pca_basis(X; pre_standardized=false)
+    _call(:pca_basis; X, pre_standardized)
+end
+
+"""
+    profiles_find_n(X, y, k; n_max=9, args=nothing, pre_standardized=false, seed=nothing) -> ProfilesFindNResult
+
+Call Python's `plskit.profiles_find_n` with the same arguments and defaults.
+Reference: [`profiles_find_n` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
+"""
+function profiles_find_n(X, y, k; n_max=9, args=nothing, pre_standardized=false, seed=nothing)
+    _call(:profiles_find_n; X, y, k, n_max, args, pre_standardized, seed)
+end
+
+"""
+    profiles(model_or_coef, X, n; rotation="varimax", args=nothing, pre_standardized=nothing) -> ProfilesResult
+
+Call Python's `plskit.profiles` with the same arguments and defaults.
+Reference: [`profiles` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
+"""
+function profiles(model_or_coef, X, n; rotation="varimax", args=nothing, pre_standardized=nothing)
+    _call(:profiles; model_or_coef, X, n, rotation, args, pre_standardized)
+end
+
+"""
+    profiles_search(model, X, y; n_max=9, rotation="varimax", args=nothing, find_n_args=nothing, seed=nothing) -> ProfilesSearchResult
+
+Call Python's `plskit.profiles_search` with the same arguments and defaults.
+Reference: [`profiles_search` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
+"""
+function profiles_search(model, X, y; n_max=9, rotation="varimax", args=nothing, find_n_args=nothing, seed=nothing)
+    _call(:profiles_search; model, X, y, n_max, rotation, args, find_n_args, seed)
 end

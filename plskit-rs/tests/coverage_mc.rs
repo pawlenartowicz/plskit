@@ -12,10 +12,9 @@
 //! Both must have two-sided empirical coverage in `[0.90, 1.00]`
 //! (`level ± 0.05`) at level=0.95:
 //!
-//!  * **`holdout_corr`**, every cell. NB-Wald is conservative by
-//!    construction (Nadeau–Bengio 2003), so empirical coverage tends to sit
-//!    at or above 0.95; over-coverage near 1.00 is expected and accepted by
-//!    the upper edge of the band.
+//!  * **`holdout_corr`**, every cell. Its NB-Wald interval is built on half
+//!    splits, where the Nadeau–Bengio 2003 factor `(n − m)/m` is about 1, so
+//!    coverage should sit near 0.95.
 //!  * **`leverage_ci_*` on each signal coordinate (`j < 2`) at
 //!    `k ≤ SIGNAL_RANK`.** The interval is a normal-theory bootstrap
 //!    interval centered on the full-data leverage (n-out-of-n refits; see
@@ -28,9 +27,9 @@
 //!
 //! ## Coverage target (the oracle)
 //!
-//! Both metrics are *biased at finite n* — `holdout_corr` by the subsample
-//! train size `m = ceil(n^m_rate)` (a model trained on `≈ n^0.7` rows — 26 at
-//! n=100 — generalizes worse than one trained on more), and `leverage` by
+//! Both metrics are *biased at finite n* — `holdout_corr` by its train size
+//! `⌊n/2⌋` (a model trained on half the rows generalizes worse than one
+//! trained on all of them), and `leverage` by
 //! noise-dimension contamination of the weight vector at small `n/d`. So the
 //! coverage target is NOT the asymptotic (large-n) value: that quantity
 //! differs from the estimand each finite-n CI is centered on, and scoring

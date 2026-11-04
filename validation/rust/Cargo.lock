@@ -765,11 +765,10 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "plskit"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "faer",
  "getrandom 0.4.3",
- "procrustes",
  "rand 0.10.3",
  "rand_chacha 0.10.0",
  "rayon",
@@ -816,16 +815,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "procrustes"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49569c4c24f82e784a764db2d3e808a851e1666d5b12af3d6da0fefb08f9fdff"
-dependencies = [
- "faer",
- "thiserror 1.0.69",
 ]
 
 [[package]]
