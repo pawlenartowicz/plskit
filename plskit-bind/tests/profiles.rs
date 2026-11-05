@@ -845,6 +845,7 @@ fn a_wide_sparse_fit_is_split_and_rotated() {
 }
 
 #[test]
+#[allow(clippy::float_cmp)] // exact zero vs nonzero coef
 fn a_constant_column_is_harmless() {
     let (x, y) = data(40, 6, 9);
     let with_col = |v: f64| {

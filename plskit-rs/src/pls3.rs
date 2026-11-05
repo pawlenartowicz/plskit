@@ -1712,6 +1712,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // a sign flip is exact
     fn negated_single_component_flips_back() {
         let (x, y) = shared_factor_data(60, 8, 4, 11);
         let m = pls3_fit(x.as_ref(), y.as_ref(), 1, None, Pls3FitOpts::default()).unwrap();
@@ -1733,6 +1734,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // a signed permutation is exact
     fn signed_permutation_returns_the_fit() {
         for (_, _, m) in [dense_fit(), sparse_fit()] {
             let mut r = Mat::<f64>::zeros(3, 3);

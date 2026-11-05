@@ -1020,6 +1020,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // exact zeros by construction
     fn left_out_variables_hold_exact_zeros() {
         let (x, mut coef) = x_and_coef();
         coef[3] = 0.0;
@@ -1237,6 +1238,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // tr/te are train/test
     fn heldout_r2_matches_hand_values() {
         // Train z = (1, -1, 1, -1), y = (3, 1, 3, 1): ybar 2, beta 1.
         // Test z = (1, -1), y = (3, 2): SSE 1, SST 1, around the training mean.
@@ -1250,6 +1252,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // tr/te are train/test
     fn heldout_r2_solves_the_leading_block_for_each_j() {
         // Correlated centered scores z1 = (1, 1, -1, -1), z2 = (1, 0, 0, -1),
         // y = z1 + z2 = (2, 1, -1, -2), ybar 0. G = [[4, 2], [2, 2]], b = (6, 4).
@@ -1268,6 +1271,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::similar_names)] // tr/te are train/test
     fn heldout_sst_zero_is_not_finite() {
         let ztr = Mat::<f64>::from_fn(4, 1, |i, _| if i % 2 == 0 { 1.0 } else { -1.0 });
         let ytr = Col::<f64>::from_fn(4, |i| if i % 2 == 0 { 3.0 } else { 1.0 });
