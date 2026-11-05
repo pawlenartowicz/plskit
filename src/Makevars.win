@@ -1,0 +1,27 @@
+# Windows (Rtools). The Rust target must be installed:
+#   rustup target add x86_64-pc-windows-gnu
+# A builder that names its own target in CARGO_BUILD_TARGET wins:
+# r-universe's Windows arm64 jobs set it to aarch64-pc-windows-gnullvm
+# (Rtools' clang-aarch64 toolchain) and install that target.
+# The system libraries are the ones a Rust staticlib needs on Windows.
+TARGET = $(if $(CARGO_BUILD_TARGET),$(CARGO_BUILD_TARGET),x86_64-pc-windows-gnu)
+LIBDIR = ./rust/target/$(TARGET)/release
+STATLIB = $(LIBDIR)/libplskit_r.a
+PKG_LIBS = -L$(LIBDIR) -lplskit_r -lws2_32 -ladvapi32 -luserenv -lbcrypt -lntdll
+
+all: $(SHLIB) rust_clean
+
+.PHONY: $(STATLIB)
+
+$(SHLIB): $(STATLIB)
+
+# Deletes the crates unpacked from rust/vendor.tar.xz once the DLL is
+# linked; the reason is at rust_clean in src/Makevars — change together.
+rust_clean: $(SHLIB)
+	rm -Rf ./rust/vendor
+
+$(STATLIB):
+	"$(R_HOME)/bin$(R_ARCH_BIN)/Rscript.exe" ../tools/cargo-build.R --target=$(TARGET)
+
+clean:
+	rm -Rf $(SHLIB) $(STATLIB) $(OBJECTS) ./rust/target
