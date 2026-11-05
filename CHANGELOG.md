@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented here.
 
-## [Unreleased]
+## [0.8.0] - 2026-11-05
 
 - Added: `factors(coef, x, n, pre_standardized)` splits a coefficient vector into `n` orthogonal factors that sum to it. It builds the basis from the principal components of `X`, so the basis is the same whatever fit the coefficient came from. A part of the coefficient outside the row space of the standardized kept columns of `X` (for example from a sparse fit with more kept columns than `N − 1`) is appended, normalized, as one extra last basis direction, so it lands in the last factor.
 - Added: `FactorsOutput::rotated(r)` rotates the factors by an orthogonal matrix, sorts them by size and pins their signs. In the wrappers this is an overload of `rotate`, and `rotate(f, X)` rotates with varimax on the row scores `Xs W`.
