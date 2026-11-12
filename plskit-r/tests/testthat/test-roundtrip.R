@@ -163,3 +163,48 @@ test_that("a length-1 coef reaches the engine as a vector", {
   f <- factors(0.5, x1, 1L)
   expect_equal(unname(drop(f$F)), 0.5, tolerance = 1e-12)
 })
+
+test_that("subset() on a gram_matrix_result takes 1-based rows and checks them", {
+  g <- gram_matrix(d$X, pre_standardized = TRUE)
+  expect_s3_class(g, c("gram_matrix_result", "plskit_result"), exact = TRUE)
+  rows <- c(8, 1, 4, 4, 60)
+  s <- subset(g, rows)
+  expect_s3_class(s, c("gram_matrix_result", "plskit_result"), exact = TRUE)
+  expect_identical(s$gram, g$gram[rows, rows])
+  expect_identical(s[c("n_features", "pre_standardized")], g[c("n_features", "pre_standardized")])
+  for (bad in list(c(0, 2), c(1, 61), c(-1, 2), c(1.5, 2), 3, numeric(0), c(1, NA), c(TRUE, TRUE))) {
+    expect_identical(catch_plskit(subset(g, bad))$code, "invalid_argument")
+  }
+  expect_identical(catch_plskit(subset(g, 1:2, drop = TRUE))$code, "invalid_argument")
+})
+
+test_that("gram= takes a gram_matrix_result, its subset, or a matrix with n_features", {
+  X <- matrix(stats::rnorm(30 * 80), 30, 80)
+  y <- X[, 1] + stats::rnorm(30)
+  a <- pls1_confirmatory_test(X, y, k = 1L, test_method = "split_exact", args = list(n_perm = 19, n_splits = 8), seed = 3)
+  g <- gram_matrix(X)
+  b <- pls1_confirmatory_test(gram = g, y = y, k = 1L, test_method = "split_exact", args = list(n_perm = 19, n_splits = 8), seed = 3)
+  expect_equal(b$statistic, a$statistic, tolerance = 1e-12)
+  expect_identical(b$pvalue, a$pvalue)
+  c2 <- pls1_confirmatory_test(gram = g$gram, n_features = 80, y = y, k = 1L, test_method = "split_exact", args = list(n_perm = 19, n_splits = 8), seed = 3)
+  expect_identical(c2$statistic, b$statistic)
+  r <- pls1_perm_alpha(subset(g, 1:25), matrix(y[1:25], ncol = 1), k = 2)
+  expect_identical(dim(r$alpha), c(25L, 1L))
+  expect_identical(catch_plskit(pls1_confirmatory_test(X, y, gram = g))$code, "invalid_argument")
+  expect_identical(catch_plskit(pls1_confirmatory_test(gram = g, y = y, n_features = 80))$code, "invalid_argument")
+})
+
+test_that("k takes a set: the tested k and the per-k p-values come back", {
+  d <- make_xy()
+  run <- function(k) {
+    pls1_confirmatory_test(d$X, d$y, k = k, test_method = "split_exact",
+                           args = list(n_perm = 19L, n_splits = 5L), seed = 1)
+  }
+  a <- run(1:3)
+  expect_identical(a$k, 1:3)
+  expect_type(a$pvalues_by_k, "double")
+  expect_identical(names(a$pvalues_by_k), c("1", "2", "3"))
+  expect_identical(names(a$statistics_by_k), c("1", "2", "3"))
+  expect_null(a$statistic)
+  expect_identical(run(c(1, 2, 3)), a)
+})

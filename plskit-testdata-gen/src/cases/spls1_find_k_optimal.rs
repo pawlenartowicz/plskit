@@ -34,7 +34,12 @@ pub fn r2_se_keep3(root: &Path) -> Result<Case> {
         root,
         "spls1_find_k_optimal_r2_se_keep3",
         INPUTS_NAME,
-        &Xyw { x, y, w: None },
+        &Xyw {
+            x,
+            y,
+            w: None,
+            ..Default::default()
+        },
         |_| Ok(()),
     )
 }
@@ -55,6 +60,7 @@ pub fn r2_se_keep3_weighted(root: &Path) -> Result<Case> {
         x: data.x.clone(),
         y: data.y.clone(),
         w: None,
+        ..Default::default()
     })?;
     optimal_on(root, name, WEIGHTED_N80_D6_INPUTS, &data, |r| {
         let scores = |o: &FindKOptimalOutput| -> Vec<f64> {
@@ -77,6 +83,7 @@ fn r2_se_keep3_call(data: &Xyw) -> Result<FindKOptimalOutput> {
         K_MAX,
         KEEP,
         w.as_ref().map(faer::Col::as_ref),
+        None,
         FindKOptimalOpts {
             selector: Selector::R2Se,
             n_folds: 5,

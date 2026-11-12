@@ -50,17 +50,17 @@ import plskit
 X = np.random.default_rng(0).normal(size=(200, 20))
 y = X[:, :3].sum(axis=1) + np.random.default_rng(1).normal(size=200)
 
-# Fit at fixed K, or let plskit pick K via cross-validation.
+# Fit at fixed K, or let plskit pick K by cross-validation (the default:
+# k="optimal" with k_max up to 9).
 model   = plskit.pls1_fit(X, y, k=3, seed=42)
-optimal = plskit.pls1_fit(X, y, k="optimal", k_max=10, seed=42)
+optimal = plskit.pls1_fit(X, y, seed=42)
 
 y_hat = plskit.pls1_predict(model, X_new=X[:5])
 
-# Confirmatory test for any signal; k=1 with split_exact is recommended.
-sig = plskit.pls1_confirmatory_test(
-    X, y, k=1, test_method="split_exact", seed=42,
-)
-print(sig.pvalue, sig.statistic)
+# Confirmatory test for signal at some k in the default set (1..8, cut by
+# the design). It names no k to fit at; pls1_fit(X, y) chooses its own.
+sig = plskit.pls1_confirmatory_test(X, y, seed=42)
+print(sig.pvalue, sig.k, sig.pvalues_by_k)
 ```
 
 ## Public surface
@@ -78,7 +78,7 @@ variant. PLS2 and multi-block PLS are planned.
 - **PLS3 / PLSSVD:** `pls3_fit` (alias `plssvd_fit`), `pls3_transform`
   (alias `plssvd_transform`), sparse `spls3_fit` (new in 0.6.0).
 - **Inference:** `pls1_confirmatory_test`, `pls3_confirmatory_test`,
-  `split_nb_gate`, `pls1_perm_null`, `pls1_perm_alpha`.
+  `split_nb_gate`, `pls1_perm_null`, `pls1_perm_alpha`, `gram_matrix`.
 - **Interpretive:** `rotate`, `factors`, `pca_basis`, `profiles_find_n`, `profiles`, `profiles_search`.
 
 Results are frozen dataclasses and carry the inputs and seed that

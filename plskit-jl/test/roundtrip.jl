@@ -25,20 +25,64 @@ end
     @test plssvd_transform(m; Y_new=Y, which="y_scores").x_scores === nothing
 end
 
+@testset "PLSKit.subset takes 1-based rows" begin
+    X, _ = pls1_data()
+    g = gram_matrix(X; pre_standardized=true)
+    @test g isa GramMatrixResult
+    rows = [8, 1, 4, 4, 60]
+    s = PLSKit.subset(g, rows)
+    @test s isa GramMatrixResult
+    @test s.gram == g.gram[rows, rows]
+    @test (s.n_features, s.pre_standardized) == (g.n_features, true)
+    for bad in ([0, 2], [1, 61], [3])
+        e = try
+            PLSKit.subset(g, bad)
+        catch err
+            err
+        end
+        @test e isa PlsKitError && e.code === :invalid_argument
+    end
+    # a Bool mask is not a list of row numbers
+    @test_throws MethodError PLSKit.subset(g, [true, true])
+end
+
+@testset "gram= takes the GramMatrixResult and a subset of it" begin
+    X, y = pls1_data(5; n=30, d=80)
+    kw = (k=1, test_method="split_exact", args=(n_perm=19, n_splits=8), seed=3)
+    a = pls1_confirmatory_test(X, y; kw...)
+    @test pls1_confirmatory_test(; X, y, kw...).statistic == a.statistic
+    b = pls1_confirmatory_test(; gram=gram_matrix(X), y, kw...)
+    @test b.statistic ≈ a.statistic rtol = 1e-12
+    @test b.pvalue == a.pvalue
+    s = PLSKit.subset(gram_matrix(X), collect(1:25))
+    r = pls1_perm_alpha(s, reshape(y[1:25], :, 1); k=2)
+    @test size(r.alpha) == (25, 1)
+end
+
+@testset "k takes a set" begin
+    X, y = pls1_data()
+    r = pls1_confirmatory_test(X, y; k=1:3, test_method="split_exact",
+                               args=(n_perm=19, n_splits=5), seed=1)
+    @test r.k isa Vector{Int} && r.k == [1, 2, 3]
+    @test r.pvalues_by_k isa Dict{Int,Float64}
+    @test sort(collect(keys(r.pvalues_by_k))) == [1, 2, 3]
+    @test r.statistic === nothing
+end
+
 @testset "seed: drawn, passed back, reproduced" begin
     X, y = pls1_data()
-    a = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,))
+    a = pls1_confirmatory_test(X, y; k=1, test_method="raw_perm", args=(n_perm=100,))
     @test a.seed isa UInt64
-    b = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,), seed=a.seed)
+    b = pls1_confirmatory_test(X, y; k=1, test_method="raw_perm", args=(n_perm=100,), seed=a.seed)
     @test b.seed === a.seed
     @test b.pvalue == a.pvalue && b.statistic == a.statistic
 end
 
 @testset "seed above 2^63: $(s)" for s in (typemax(UInt64), UInt64(2)^63 + 5)
     X, y = pls1_data()
-    a = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,), seed=s)
+    a = pls1_confirmatory_test(X, y; k=1, test_method="raw_perm", args=(n_perm=100,), seed=s)
     @test a.seed === s
-    b = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,), seed=a.seed)
+    b = pls1_confirmatory_test(X, y; k=1, test_method="raw_perm", args=(n_perm=100,), seed=a.seed)
     @test b.pvalue == a.pvalue && b.statistic == a.statistic
 end
 

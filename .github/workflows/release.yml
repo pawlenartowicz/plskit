@@ -178,7 +178,8 @@ jobs:
     name: Build Pyodide wheel (GH Release only)
     needs: [publish-py]
     if: endsWith(github.ref_name, '-py')
-    runs-on: ubuntu-latest
+    # setup-python has no 3.14.2 build for ubuntu 26.04 (ubuntu-latest); 24.04 has one.
+    runs-on: ubuntu-24.04
     permissions:
       contents: write   # softprops/action-gh-release attaches the wheel
     env:

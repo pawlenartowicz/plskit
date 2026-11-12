@@ -75,6 +75,7 @@ fn pls1_fit_is_invariant_to_the_scale_of_x_and_y() {
                 y.as_ref(),
                 KSpec::Fixed(3),
                 wref,
+                None,
                 FitOpts::default(),
             )
             .unwrap()
@@ -131,7 +132,11 @@ fn pls3_confirmatory_test_is_invariant_to_the_scale_of_x_and_y() {
         .unwrap()
     };
     let base = run(&x, &y);
-    assert!(base.statistic > 0.3, "statistic = {}", base.statistic);
+    assert!(
+        base.statistic.unwrap() > 0.3,
+        "statistic = {}",
+        base.statistic.unwrap()
+    );
     for factor in FACTORS {
         for (side, r) in [
             ("X", run(&scaled(&x, factor), &y)),
@@ -139,8 +144,8 @@ fn pls3_confirmatory_test_is_invariant_to_the_scale_of_x_and_y() {
         ] {
             let what = format!("{side}×{factor:e}");
             assert_close(
-                r.statistic,
-                base.statistic,
+                r.statistic.unwrap(),
+                base.statistic.unwrap(),
                 1e-10,
                 &format!("{what}: statistic"),
             );
@@ -256,6 +261,7 @@ fn pls1_fit_ignores_a_column_without_information_at_any_magnitude() {
                 y.as_ref(),
                 KSpec::Fixed(2),
                 wref,
+                None,
                 FitOpts::default(),
             )
             .unwrap()

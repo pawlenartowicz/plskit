@@ -10,7 +10,7 @@ use crate::fmt::{py_list, py_repr};
 use crate::fns::{done, engine, with_warning};
 use crate::inputs::Inputs;
 use crate::methods::{self, Common};
-use crate::value::{Outcome, Record, Value, VecF64};
+use crate::value::{MatF64, Outcome, Record, Value, VecF64};
 use crate::warn;
 
 /// The data every K-selection call runs on.
@@ -19,6 +19,7 @@ pub(crate) struct Data<'d> {
     pub(crate) x: MatRef<'d, f64>,
     pub(crate) y: ColRef<'d, f64>,
     pub(crate) weights: Option<ColRef<'d, f64>>,
+    pub(crate) covariates: Option<MatRef<'d, f64>>,
 }
 
 /// Body shared by `pls1_find_k_optimal`, `spls1_find_k_optimal` and
@@ -38,10 +39,21 @@ fn optimal_core(
     let opts = methods::find_k_optimal_opts(selector, diagnostic, args, c)?;
     let r = match keep {
         None => engine(plskit::pls1_find_k_optimal(
-            d.x, d.y, k_max, d.weights, opts,
+            d.x,
+            d.y,
+            k_max,
+            d.weights,
+            d.covariates,
+            opts,
         ))?,
         Some(kp) => engine(plskit::spls1_find_k_optimal(
-            d.x, d.y, k_max, kp, d.weights, opts,
+            d.x,
+            d.y,
+            k_max,
+            kp,
+            d.weights,
+            d.covariates,
+            opts,
         ))?,
     };
     if for_fit {
@@ -73,10 +85,21 @@ fn sequence_core(
     let opts = methods::find_k_sequence_opts(test_method, alpha, args, c)?;
     let r = match keep {
         None => engine(plskit::pls1_find_k_sequence(
-            d.x, d.y, k_max, d.weights, opts,
+            d.x,
+            d.y,
+            k_max,
+            d.weights,
+            d.covariates,
+            opts,
         ))?,
         Some(kp) => engine(plskit::spls1_find_k_sequence(
-            d.x, d.y, k_max, kp, d.weights, opts,
+            d.x,
+            d.y,
+            k_max,
+            kp,
+            d.weights,
+            d.covariates,
+            opts,
         ))?,
     };
     if for_fit {
@@ -114,11 +137,13 @@ fn optimal_entry(inp: &mut Inputs<'_>, sparse: bool) -> Result<Outcome, BindErro
     let args = inp.opt_record("args")?;
     let c = common(inp)?;
     let w = inp.opt_vec("weights")?;
+    let z = inp.opt_covariates()?;
     inp.finish()?;
     let d = Data {
         x: x.as_mat(),
         y: y.as_col(),
         weights: w.as_ref().map(VecF64::as_col),
+        covariates: z.as_ref().map(MatF64::as_mat),
     };
     let (r, warning) = optimal_core(
         d,
@@ -147,11 +172,13 @@ fn sequence_entry(inp: &mut Inputs<'_>, sparse: bool) -> Result<Outcome, BindErr
     let args = inp.opt_record("args")?;
     let c = common(inp)?;
     let w = inp.opt_vec("weights")?;
+    let z = inp.opt_covariates()?;
     inp.finish()?;
     let d = Data {
         x: x.as_mat(),
         y: y.as_col(),
         weights: w.as_ref().map(VecF64::as_col),
+        covariates: z.as_ref().map(MatF64::as_mat),
     };
     let (r, warning) = sequence_core(
         d,
@@ -168,7 +195,7 @@ fn sequence_entry(inp: &mut Inputs<'_>, sparse: bool) -> Result<Outcome, BindErr
 
 /// `pls1_find_k_optimal(X, y, k_max, *, selector="r2_se", diagnostic=None,
 /// args=None, pre_standardized=False, seed=None,
-/// verbose=False, weights=None)`.
+/// verbose=False, weights=None, covariates=None)`.
 pub(crate) fn pls1_find_k_optimal(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     optimal_entry(inp, false)
 }
@@ -180,7 +207,7 @@ pub(crate) fn spls1_find_k_optimal(inp: &mut Inputs<'_>) -> Result<Outcome, Bind
 
 /// `pls1_find_k_sequence(X, y, k_max, *, test_method="auto", alpha=None,
 /// args=None, pre_standardized=False, seed=None,
-/// verbose=False, weights=None)`.
+/// verbose=False, weights=None, covariates=None)`.
 pub(crate) fn pls1_find_k_sequence(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     sequence_entry(inp, false)
 }
@@ -191,7 +218,7 @@ pub(crate) fn spls1_find_k_sequence(inp: &mut Inputs<'_>) -> Result<Outcome, Bin
 }
 
 /// `spls1_find_keep_optimal(X, y, k, *, args=None, seed=None,
-/// verbose=False, weights=None)`.
+/// verbose=False, weights=None, covariates=None)`.
 pub(crate) fn spls1_find_keep_optimal(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = inp.vec("y")?;
@@ -200,6 +227,7 @@ pub(crate) fn spls1_find_keep_optimal(inp: &mut Inputs<'_>) -> Result<Outcome, B
     let seed = inp.seed()?;
     let verbose = inp.bool("verbose")?;
     let w = inp.opt_vec("weights")?;
+    let z = inp.opt_covariates()?;
     inp.finish()?;
     let opts = methods::keep_optimal_opts(args.as_ref(), seed, verbose)?;
     let r = engine(plskit::spls1_find_keep_optimal(
@@ -207,6 +235,7 @@ pub(crate) fn spls1_find_keep_optimal(inp: &mut Inputs<'_>) -> Result<Outcome, B
         y.as_col(),
         k,
         w.as_ref().map(VecF64::as_col),
+        z.as_ref().map(MatF64::as_mat),
         opts,
     ))?;
     Ok(done(convert::find_keep_optimal(&r)))
@@ -256,8 +285,9 @@ fn fk_args<'r, 'a>(fk: &'r Record<'a>) -> Result<Option<&'r Record<'a>>, BindErr
 }
 
 /// `pls1_fit`'s string `k`: `find_k_args` validated, the selection run with
-/// `for_fit`, and the K to fit returned with the selection record and any
-/// reroute warning.
+/// `for_fit` up to `k_max` (the engine's `pls1_default_k_max` when null),
+/// and the K to fit returned with the selection record and any reroute
+/// warning.
 pub(crate) fn select_k(
     d: Data<'_>,
     mode: &str,
@@ -266,11 +296,13 @@ pub(crate) fn select_k(
     pre_standardized: bool,
     seed: Option<u64>,
 ) -> Result<(usize, Value<'static>, Vec<Record<'static>>), BindError> {
-    let Some(k_max) = k_max else {
-        return Err(BindError::invalid_argument(format!(
-            "k={} requires k_max",
-            py_repr(mode)
-        )));
+    let k_max = match k_max {
+        Some(k_max) => k_max,
+        None => engine(plskit::find_k::pls1_default_k_max(
+            d.x,
+            d.weights,
+            d.covariates,
+        ))?,
     };
     let fk = find_k_args.unwrap_or_default();
     let c = Common {

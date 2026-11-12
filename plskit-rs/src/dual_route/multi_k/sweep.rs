@@ -1,7 +1,8 @@
-//! The n-space kernel's validation sweep: gate soundness, per-replicate
-//! agreement with the primal kernel, fallback rates, and the score
-//! discrepancy `SCORE_BAND` is set from. `cargo test -p plskit --release
-//! multi_k::sweep -- --nocapture` prints the report.
+//! The n-space kernel's accuracy sweep: per design family and component
+//! count `k = 1..=10`, the coefficients and the split-half `r` of the
+//! n-space route against the p-space fit on the same scaled X, which set
+//! [`K_DUAL_MAX`]. `cargo test -p plskit --release multi_k::sweep --
+//! --nocapture` prints the table.
 #![allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
 #![allow(
     clippy::many_single_char_names,
@@ -12,30 +13,26 @@
 use std::collections::BTreeMap;
 
 use super::*;
-use crate::dual_route::SCORE_BAND;
 use crate::fit::{ParChoice, pls1_fit_prepared_fro};
-use crate::linalg::{standardize, standardize_apply, standardize1};
+use crate::held_out_gram::HeldOutGram;
+use crate::linalg::{standardize, standardize1};
+use crate::signal_test::{SplitIdx, prepare_split, split_column_r};
 use crate::test_support::{orthonormal_basis, project_off};
-use faer::{Col, Mat, Par};
+use faer::{Col, Mat};
 use rand::{RngExt, SeedableRng};
 
-/// Soundness and agreement are checked for every `k` up to this, whatever
-/// `K_DUAL_MAX` is: the gates must fail closed at every `k`.
+/// The component counts the sweep measures.
 const K_SWEEP_MAX: usize = 10;
+
+/// The agreement tolerances: `|Δcoef| ≤ COEF_TOL·max(1, ‖coef‖_∞)` and
+/// `|Δr| ≤ R_TOL`.
+const COEF_TOL: f64 = 1e-10;
+const R_TOL: f64 = 1e-12;
 
 struct Design {
     family: &'static str,
     xs: Mat<f64>,
     z: Col<f64>,
-    k_min: usize,
-}
-
-#[derive(Default)]
-struct Tally {
-    resolved: usize,
-    zero: usize,
-    unresolved: usize,
-    worst_rel: f64,
 }
 
 fn uniform(n: usize, p: usize, seed: u64) -> Mat<f64> {
@@ -83,53 +80,6 @@ fn in_span(xs: &Mat<f64>, m: usize) -> (Col<f64>, Mat<f64>, Col<f64>) {
     (z, u, s)
 }
 
-/// Component `m` of an outcome placed at `c·√(BOUND_BAND·E_w(m))·‖z‖`, just
-/// past gate 1 for `c` near 1, after `m − 1` strong components and before
-/// exhaustion (the outcome's `X̃` part lies in `m` directions). The kernel's
-/// own trace supplies `E_w(m)` and `wn_m`, which is linear in the weight
-/// `δ` of the `m`-th direction while `δ` is small.
-fn gate_edge_designs() -> Vec<Design> {
-    let mut out = Vec::new();
-    // Rank 6 with p ≫ n: an outcome part orthogonal to X̃ exists, so
-    // component m can be weak relative to ‖z‖.
-    let xs = std_x(&low_rank(40, 800, 6, 17));
-    let (_, u, _) = in_span(&xs, 1);
-    let ones = Col::<f64>::from_fn(40, |_| 1.0);
-    let basis = orthonormal_basis(ones.as_ref(), xs.as_ref(), 1e-8);
-    let mut e_perp = noise(40, 117);
-    project_off(&basis, &mut e_perp);
-    let gram = NspaceGram::new(xs.as_ref(), Par::Seq);
-    let block = gram.block();
-    let strong = [1.3, -0.7];
-    for m in 1..=3_usize {
-        let build = |delta: f64| {
-            Col::<f64>::from_fn(40, |i| {
-                (0..m - 1).map(|j| strong[j] * u[(i, j)]).sum::<f64>()
-                    + delta * u[(i, m - 1)]
-                    + e_perp[i]
-            })
-        };
-        let delta0 = 1e-3;
-        let z0 = build(delta0);
-        let (_, trace) = pls1_nspace_kernel_traced(&block, z0.as_ref(), m);
-        let tr = trace
-            .get(m - 1)
-            .unwrap_or_else(|| panic!("gate_edge m={m}: the kernel stopped before component m"));
-        let wn0 = tr.wn2.max(0.0).sqrt();
-        for c in [1.0, 1.1, 1.5, 3.0, 10.0, 30.0, 100.0] {
-            let target = c * (BOUND_BAND * tr.e_w).sqrt() * z0.norm_l2();
-            let z = build(delta0 * target / wn0);
-            out.push(Design {
-                family: "gate_edge",
-                xs: xs.clone(),
-                z,
-                k_min: m,
-            });
-        }
-    }
-    out
-}
-
 #[allow(clippy::too_many_lines)]
 fn designs() -> Vec<Design> {
     let mut out = Vec::new();
@@ -140,7 +90,6 @@ fn designs() -> Vec<Design> {
             family: "ordinary",
             xs,
             z,
-            k_min: 1,
         });
     }
     {
@@ -152,7 +101,6 @@ fn designs() -> Vec<Design> {
             family: "small_n",
             xs,
             z,
-            k_min: 1,
         });
     }
     for seed in [5_u64, 6] {
@@ -162,7 +110,6 @@ fn designs() -> Vec<Design> {
             family: "weak_signal",
             xs,
             z,
-            k_min: 1,
         });
     }
     {
@@ -172,7 +119,6 @@ fn designs() -> Vec<Design> {
             family: "rank_deficient",
             xs,
             z,
-            k_min: 1,
         });
     }
     {
@@ -183,7 +129,6 @@ fn designs() -> Vec<Design> {
             family: "duplicated_rows",
             xs,
             z,
-            k_min: 1,
         });
     }
     for (n, seed) in [(6_usize, 9_u64), (8, 10)] {
@@ -193,7 +138,6 @@ fn designs() -> Vec<Design> {
             family: "tiny_n",
             xs,
             z,
-            k_min: 1,
         });
     }
     for seed in [11_u64, 12] {
@@ -207,7 +151,6 @@ fn designs() -> Vec<Design> {
             family: "y_orthogonal",
             xs,
             z,
-            k_min: 1,
         });
     }
     {
@@ -219,7 +162,6 @@ fn designs() -> Vec<Design> {
             family: "y_exhausted",
             xs,
             z,
-            k_min: 1,
         });
     }
     for m in 1..=3 {
@@ -229,7 +171,6 @@ fn designs() -> Vec<Design> {
             family: "y_in_span",
             xs,
             z,
-            k_min: 1,
         });
     }
     for c in [0.1, 0.3, 1.0, 3.0, 10.0] {
@@ -243,7 +184,6 @@ fn designs() -> Vec<Design> {
             family: "boundary",
             xs,
             z,
-            k_min: 3,
         });
     }
     for s in [1e-4, 1e-8, 1e-10, 1e-12] {
@@ -255,177 +195,194 @@ fn designs() -> Vec<Design> {
             family: "tiny_scale",
             xs,
             z,
-            k_min: 1,
         });
     }
-    out.extend(gate_edge_designs());
     out
 }
 
-#[test]
-fn nspace_kernel_is_sound_and_matches_the_primal_on_every_design_family() {
-    let mut tally: BTreeMap<(&'static str, usize), Tally> = BTreeMap::new();
-    for d in designs() {
-        let (n, p) = (d.xs.nrows(), d.xs.ncols());
-        let gram = NspaceGram::new(d.xs.as_ref(), Par::Seq);
-        let block = gram.block();
-        for k in d.k_min..=K_SWEEP_MAX.min(n - 1) {
-            let fit = pls1_fit_prepared_fro(
-                d.xs.as_ref(),
-                d.z.as_ref(),
-                k,
-                None,
-                ParChoice::Seq,
-                d.xs.norm_l2(),
-            )
-            .expect("primal fit");
-            let t = tally.entry((d.family, k)).or_default();
-            match pls1_nspace_kernel(&block, d.z.as_ref(), k) {
-                NspaceOutcome::Resolved { alpha, k_used } => {
-                    assert_eq!(k_used, k);
-                    assert_eq!(
-                        fit.k_used, k,
-                        "gate soundness: {} n={n} p={p} k={k}: Resolved, but the primal keeps {}",
-                        d.family, fit.k_used
-                    );
-                    let coef = seq_gemv(d.xs.transpose(), &alpha);
-                    let scale = (0..p).map(|j| fit.coef[j].abs()).fold(1.0_f64, f64::max);
-                    let diff = (0..p)
-                        .map(|j| (coef[j] - fit.coef[j]).abs())
-                        .fold(0.0_f64, f64::max);
-                    assert!(
-                        diff <= 1e-10 * scale,
-                        "equivalence: {} n={n} p={p} k={k}: |Δcoef| = {diff:e} (scale {scale:e})",
-                        d.family
-                    );
-                    t.resolved += 1;
-                    t.worst_rel = t.worst_rel.max(diff / scale);
-                }
-                NspaceOutcome::ZeroModel => {
-                    assert_eq!(fit.k_used, 0, "zero model: {} k={k}", d.family);
-                    t.zero += 1;
-                }
-                NspaceOutcome::Unresolved => t.unresolved += 1,
-            }
-        }
-    }
-    eprintln!("family             k  resolved  zero  to_primal  worst |Δcoef|/max(1,|coef|)");
-    for ((family, k), t) in &tally {
-        eprintln!(
-            "{family:<17} {k:>2}  {:>8}  {:>4}  {:>9}  {:.1e}",
-            t.resolved, t.zero, t.unresolved, t.worst_rel
-        );
-    }
-    let (res, zero, unres) = tally.values().fold((0, 0, 0), |a, t| {
-        (a.0 + t.resolved, a.1 + t.zero, a.2 + t.unresolved)
-    });
-    let served = |family: &str, k: usize| family == "ordinary" && k <= K_DUAL_MAX;
-    let ordinary: Vec<&Tally> = tally
-        .iter()
-        .filter(|((family, k), _)| served(family, *k))
-        .map(|(_, t)| t)
-        .collect();
-    let ordinary_fallbacks: usize = ordinary.iter().map(|t| t.unresolved).sum();
-    let worst = tally.values().map(|t| t.worst_rel).fold(0.0_f64, f64::max);
-    eprintln!(
-        "/// Measured on the validation sweep ({} calls, k = 1..={K_SWEEP_MAX}, \
-         `K_DUAL_MAX` = {K_DUAL_MAX}): {res} resolved, {zero} zero-model, {unres} sent to the \
-         primal kernel; {ordinary_fallbacks} fallbacks on ordinary data at k ≤ `K_DUAL_MAX`; \
-         worst |Δcoef| / max(1, ‖coef‖_∞) = {worst:.1e}.",
-        res + zero + unres
-    );
-    assert_eq!(
-        ordinary_fallbacks, 0,
-        "ordinary data must not fall back at k ≤ K_DUAL_MAX"
-    );
-    assert!(!ordinary.is_empty() && ordinary.iter().all(|t| t.resolved > 0));
+/// Worst errors of one (k, family) cell on the fits where both routes keep
+/// the same component count: `|Δcoef| / max(1, ‖coef‖_∞)` on all rows and
+/// `|Δr|` on the split.
+#[derive(Default)]
+struct Cell {
+    coef: f64,
+    r: f64,
 }
 
-// The band is measured for the `k` the n-space route serves on the
-// `split_exact` score path, `2..=K_DUAL_MAX`; larger `k` are measured and
-// printed only, so raising `K_DUAL_MAX` moves them into the band. The checks
-// on `SCORE_BAND` stay runtime assertions: a `const` assertion would stop the
-// whole test crate from compiling instead of failing this test.
+/// One fit where the two routes keep different component counts.
+struct Flip {
+    family: &'static str,
+    design: usize,
+    k: usize,
+    /// `"coef"` (all rows) or `"r"` (the split's training half).
+    on: &'static str,
+    nspace: usize,
+    pspace: usize,
+    /// `|Δcoef| / max(1, ‖coef‖_∞)` or `|Δr|`.
+    err: f64,
+}
+
+/// The fits where the n-space route may keep a different component count
+/// than the p-space fit: `z'Gz` resolves `‖X̃'z‖` only to `G`'s rounding,
+/// far above the relative floor, so an outcome orthogonal to `X̃` and the
+/// components past the rank of `X̃` (rank 4 in `y_exhausted`) sit where the
+/// two routes can decide differently.
+fn flip_expected(family: &str, k: usize) -> bool {
+    family == "y_orthogonal" || (family == "y_exhausted" && k > 4)
+}
+
+/// `coef = X̃_tr'·alpha` of an n-space outcome and its component count.
+fn nspace_coef(xs_tr: MatRef<'_, f64>, out: NspaceOutcome) -> (Col<f64>, usize) {
+    match out {
+        NspaceOutcome::Resolved { alpha, k_used } => (seq_gemv(xs_tr.transpose(), &alpha), k_used),
+        NspaceOutcome::ZeroModel => (Col::<f64>::zeros(xs_tr.ncols()), 0),
+    }
+}
+
+/// The n-space component count for `z` on `block`.
+fn nspace_k_used(block: &NspaceBlock<'_>, z: ColRef<'_, f64>, k: usize) -> usize {
+    match pls1_nspace_kernel(block, z, k) {
+        NspaceOutcome::Resolved { k_used, .. } => k_used,
+        NspaceOutcome::ZeroModel => 0,
+    }
+}
+
+/// Every design family, `k = 1..=10`: the block the route reads (the all-row
+/// Gram matrix's, `NspaceSplit::from_gram`) against `pls1_fit` on the same
+/// scaled X (`prepare_split`'s halves, scale one, the designs being
+/// standardized). Coefficients on all rows as the training block; `r` on
+/// the split of the first half against the second, `split_columns_r_nspace`
+/// against `split_column_r`. On the fits where both routes keep the same
+/// component count, every family meets `|Δcoef| ≤ 1e-10·max(1, ‖coef‖_∞)`
+/// and `|Δr| ≤ 1e-12` at every `k ≤ K_DUAL_MAX`; a fit where the counts
+/// differ is listed, and is allowed only where [`flip_expected`] says.
 #[test]
-#[allow(clippy::assertions_on_constants)]
-fn score_band_covers_the_measured_score_discrepancy() {
-    let mut eta_max = 0.0_f64;
-    let mut measured = 0_usize;
-    // Diagnostic only: `k > K_DUAL_MAX`, which the route never serves.
-    let mut eta_beyond = 0.0_f64;
-    let mut measured_beyond = 0_usize;
+#[allow(clippy::too_many_lines)]
+fn nspace_matches_pspace_up_to_k_dual_max() {
+    let mut cells: BTreeMap<(usize, &'static str), Cell> = BTreeMap::new();
+    let mut flips: Vec<Flip> = Vec::new();
+    let mut seen: BTreeMap<&'static str, usize> = BTreeMap::new();
     for d in designs() {
-        let n = d.xs.nrows();
-        if n < 12 {
-            continue;
-        }
-        let n_tr = n / 2;
-        let n_te = n - n_tr;
-        let (xs_tr, mean, scale) = standardize(d.xs.subrows(0, n_tr));
-        let xs_te = standardize_apply(d.xs.subrows(n_tr, n_te), mean.as_ref(), scale.as_ref());
-        let z = std_y(&Col::<f64>::from_fn(n_tr, |i| d.z[i]));
-        let gram = NspaceGram::new(xs_tr.as_ref(), Par::Seq);
-        let m = cross_of(xs_te.as_ref(), xs_tr.as_ref(), Par::Seq);
-        for k in 2..=K_SWEEP_MAX.min(n_tr - 1) {
-            let NspaceOutcome::Resolved { alpha, .. } =
-                pls1_nspace_kernel(&gram.block(), z.as_ref(), k)
-            else {
-                continue;
-            };
-            let fit = pls1_fit_prepared_fro(
-                xs_tr.as_ref(),
-                z.as_ref(),
-                k,
-                None,
-                ParChoice::Seq,
-                xs_tr.norm_l2(),
-            )
-            .expect("primal fit");
-            let s_gram = seq_gemv(m.as_ref(), &alpha);
-            let s_primal = seq_gemv(xs_te.as_ref(), &fit.coef);
-            let norm = s_primal.norm_l2();
-            if norm > 0.0 {
-                let diff = Col::<f64>::from_fn(n_te, |i| s_gram[i] - s_primal[i]).norm_l2();
-                if k <= K_DUAL_MAX {
-                    eta_max = eta_max.max(diff / norm);
-                    measured += 1;
+        let design = {
+            let c = seen.entry(d.family).or_default();
+            *c += 1;
+            *c - 1
+        };
+        let (n, p) = (d.xs.nrows(), d.xs.ncols());
+        let ones = Col::<f64>::from_fn(p, |_| 1.0);
+        let g = HeldOutGram::from_x(d.xs.as_ref(), None, ones.as_ref());
+        let z = std_y(&d.z);
+        let all = SplitIdx {
+            tr: (0..n).collect(),
+            te: Vec::new(),
+        };
+        let prep = prepare_split(d.xs.as_ref(), &all, None, ones.as_ref());
+        let ns = NspaceSplit::from_gram(&g, &all);
+        let n_tr = n - n / 2;
+        let half = SplitIdx {
+            tr: (0..n_tr).collect(),
+            te: (n_tr..n).collect(),
+        };
+        let prep_h = prepare_split(d.xs.as_ref(), &half, None, ones.as_ref());
+        let ns_h = NspaceSplit::from_gram(&g, &half);
+        let z_h = std_y(&Col::<f64>::from_fn(n_tr, |i| d.z[i]));
+        let primal = |xs: MatRef<'_, f64>, z: &Col<f64>, x_fro: f64, k: usize| {
+            pls1_fit_prepared_fro(xs, z.as_ref(), k, None, ParChoice::Seq, x_fro)
+                .expect("p-space fit")
+        };
+        for k in 1..=K_SWEEP_MAX.min(n - 1) {
+            let cell = cells.entry((k, d.family)).or_default();
+            let fit = primal(prep.xs_tr.as_ref(), &z, prep.x_fro, k);
+            let (coef, k_used) = nspace_coef(
+                prep.xs_tr.as_ref(),
+                pls1_nspace_kernel(&ns.gram.block(), z.as_ref(), k),
+            );
+            let scale = (0..p).map(|j| fit.coef[j].abs()).fold(1.0_f64, f64::max);
+            let diff = (0..p)
+                .map(|j| (coef[j] - fit.coef[j]).abs())
+                .fold(0.0_f64, f64::max)
+                / scale;
+            if k_used == fit.k_used {
+                cell.coef = cell.coef.max(diff);
+            } else {
+                flips.push(Flip {
+                    family: d.family,
+                    design,
+                    k,
+                    on: "coef",
+                    nspace: k_used,
+                    pspace: fit.k_used,
+                    err: diff,
+                });
+            }
+            if k < n_tr {
+                let r_n = split_columns_r_nspace(&half, &ns_h, 1, &|_, i| d.z[i], &[k])[0][0];
+                let r_p = split_column_r(&prep_h, &half, &|i| d.z[i], &[k], None)[0];
+                let ku_p = primal(prep_h.xs_tr.as_ref(), &z_h, prep_h.x_fro, k).k_used;
+                let ku_n = nspace_k_used(&ns_h.gram.block(), z_h.as_ref(), k);
+                if ku_n == ku_p {
+                    cell.r = cell.r.max((r_n - r_p).abs());
                 } else {
-                    eta_beyond = eta_beyond.max(diff / norm);
-                    measured_beyond += 1;
+                    flips.push(Flip {
+                        family: d.family,
+                        design,
+                        k,
+                        on: "r",
+                        nspace: ku_n,
+                        pspace: ku_p,
+                        err: (r_n - r_p).abs(),
+                    });
                 }
             }
         }
     }
-    let required = 10.0 * eta_max / 1e-10;
-    eprintln!(
-        "score discrepancy over {measured} resolved calls at k = 2..={K_DUAL_MAX}: \
-         eta_max = {eta_max:.2e}; SCORE_BAND must be at least {required:.2e}"
-    );
-    eprintln!(
-        "diagnostic, not in the band: {measured_beyond} resolved calls at \
-         k = {}..={K_SWEEP_MAX}: eta_max = {eta_beyond:.2e}",
-        K_DUAL_MAX + 1
-    );
-    assert!(measured > 0);
+    let meets = |k: usize| {
+        cells
+            .range((k, "")..(k + 1, ""))
+            .all(|(_, c)| c.coef <= COEF_TOL && c.r <= R_TOL)
+    };
+    let k_max = (1..=K_SWEEP_MAX)
+        .take_while(|&k| meets(k))
+        .last()
+        .unwrap_or(0);
+    eprintln!("k  family             |dcoef|/max(1,|coef|)  |dr|   (equal component counts)");
+    for ((k, family), c) in &cells {
+        eprintln!("{k:>2} {family:<17} {:>21.1e}  {:.1e}", c.coef, c.r);
+    }
+    eprintln!("/// | k | worst |Δcoef|/max(1, ‖coef‖_∞) | worst |Δr| |");
+    for k in 1..=K_SWEEP_MAX {
+        let row = cells.range((k, "")..(k + 1, ""));
+        let worst = |f: &dyn Fn(&Cell) -> f64| {
+            row.clone().fold(
+                ("", 0.0_f64),
+                |a, ((_, fam), c)| {
+                    if f(c) > a.1 { (*fam, f(c)) } else { a }
+                },
+            )
+        };
+        let (fc, wc) = worst(&|c| c.coef);
+        let (fr, wr) = worst(&|c| c.r);
+        eprintln!("/// | {k} | {wc:.1e} ({fc}) | {wr:.1e} ({fr}) |");
+    }
+    eprintln!("/// Flips (family, design, k, on, kept n-space / p-space, error):");
+    for f in &flips {
+        eprintln!(
+            "/// - {} {}, k = {}, {}: {} / {}, {:.1e}",
+            f.family, f.design, f.k, f.on, f.nspace, f.pspace, f.err
+        );
+    }
+    eprintln!("largest k meeting the tolerances at every k up to it: {k_max}");
+    let unexpected: Vec<String> = flips
+        .iter()
+        .filter(|f| !flip_expected(f.family, f.k))
+        .map(|f| format!("{} {} k={} {}", f.family, f.design, f.k, f.on))
+        .collect();
     assert!(
-        eta_max > 0.0,
-        "eta_max must be a positive measured discrepancy"
-    );
-    let target = 10f64.powf(required.log10().ceil());
-    // One-sided: SCORE_BAND is shared with the p-space Gram route (gram_p),
-    // which may raise it above this n-space requirement to cover its own
-    // score discrepancy, up to the ceiling asserted below. So this only
-    // checks that the band still covers the n-space measurement; it does
-    // not pin SCORE_BAND to this exact value.
-    assert!(
-        SCORE_BAND >= target,
-        "SCORE_BAND is {SCORE_BAND:e}; it must be at least the required value {target:e} \
-         (10x the measured maximum, rounded up to a power of ten), \
-         so raise it if the measurement grows"
+        unexpected.is_empty(),
+        "component counts differ outside the expected families: {unexpected:?}"
     );
     assert!(
-        SCORE_BAND <= 1e-2,
-        "SCORE_BAND = {SCORE_BAND:e} would gate ordinary scores"
+        k_max >= K_DUAL_MAX,
+        "K_DUAL_MAX = {K_DUAL_MAX}, but the sweep meets the tolerances only up to k = {k_max}"
     );
-    assert!(SCORE_BAND > 2.0 * (crate::dual_route::DUAL_ROUTE_MAX_N_TR as f64) * f64::EPSILON);
 }

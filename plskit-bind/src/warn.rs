@@ -21,7 +21,10 @@ pub(crate) fn rerouted(
     let actual = actual.unwrap_or("None");
     let mut saw = Vec::new();
     if let Some(sr) = stable_rank {
-        saw.push(format!("stable rank of the standardized X = {}", g4(sr)));
+        saw.push(format!(
+            "stable rank of X as the tests read it = {}",
+            g4(sr)
+        ));
     }
     if let Some(ne) = n_eff {
         saw.push(format!("n_eff = {}", g4(ne)));
@@ -110,7 +113,7 @@ mod tests {
         assert_eq!(
             msg,
             "'split_nb' was rerouted to 'split_exact': the split_nb auto-gate flagged this design \
-             (stable rank of the standardized X = 2.5; n_eff = 60). The fallback runs n_perm=1000 \
+             (stable rank of X as the tests read it = 2.5; n_eff = 60). The fallback runs n_perm=1000 \
              permutations, so it costs more than split_nb. Pass args={'force': True} to run \
              split_nb anyway."
         );

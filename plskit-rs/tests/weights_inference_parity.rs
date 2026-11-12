@@ -82,13 +82,23 @@ fn perm_null_beta_ref_integer_weights_match_row_duplication() {
         y.as_ref(),
         2,
         Some(w.as_ref()),
+        None,
         opts(100),
         Some(7),
     )
     .unwrap();
 
     let (x_dup, y_dup) = duplicate_rows(x.as_ref(), y.as_ref(), &w_int);
-    let dup = pls1_perm_null(x_dup.as_ref(), y_dup.as_ref(), 2, None, opts(100), Some(7)).unwrap();
+    let dup = pls1_perm_null(
+        x_dup.as_ref(),
+        y_dup.as_ref(),
+        2,
+        None,
+        None,
+        opts(100),
+        Some(7),
+    )
+    .unwrap();
 
     assert_eq!(weighted.beta_ref.len(), dup.beta_ref.len());
     for j in 0..weighted.beta_ref.len() {
@@ -119,10 +129,10 @@ fn find_k_optimal_bic_integer_weights_match_row_duplication() {
     };
 
     let weighted =
-        pls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, Some(w.as_ref()), opts()).unwrap();
+        pls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, Some(w.as_ref()), None, opts()).unwrap();
 
     let (x_dup, y_dup) = duplicate_rows(x.as_ref(), y.as_ref(), &w_int);
-    let dup = pls1_find_k_optimal(x_dup.as_ref(), y_dup.as_ref(), 4, None, opts()).unwrap();
+    let dup = pls1_find_k_optimal(x_dup.as_ref(), y_dup.as_ref(), 4, None, None, opts()).unwrap();
 
     assert_eq!(
         weighted.k_star, dup.k_star,
@@ -171,6 +181,7 @@ fn perm_null_beta_ref_matches_weighted_fit_coef() {
         y.as_ref(),
         2,
         Some(w.as_ref()),
+        None,
         PermNullOpts {
             n_perm: 100,
             return_perm_matrix: false,
@@ -186,6 +197,7 @@ fn perm_null_beta_ref_matches_weighted_fit_coef() {
         y.as_ref(),
         KSpec::Fixed(2),
         Some(w.as_ref()),
+        None,
         FitOpts::default(),
     )
     .unwrap();
@@ -210,9 +222,9 @@ fn find_k_sequence_weighted_deflation_not_inflated() {
     // every deflated step "significant" and drive the weighted k_star to
     // k_max=4 while the unweighted run on the same data stops at 2. The
     // √W⁻¹-deflated residual must reach the same structural verdict as the
-    // unweighted run. (A duplication-parity oracle is impossible here —
-    // the per-step splits are RNG-drawn over different row counts; see module
-    // doc — so equality of k_star on a fixed seed is the strongest pin.)
+    // unweighted run. (A duplication-parity oracle is impossible here: the
+    // per-step splits are RNG-drawn over different row counts, see the module
+    // doc, so equality of k_star on a fixed seed is the strongest pin.)
     let (x, y) = synth(60, 5, 6.0, 11);
     let w = Col::<f64>::from_fn(60, |i| if i % 2 == 0 { 2.0 } else { 0.25 });
     let opts = FindKSequenceOpts {
@@ -222,8 +234,9 @@ fn find_k_sequence_weighted_deflation_not_inflated() {
         seed: Some(19),
         ..Default::default()
     };
-    let weighted = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, Some(w.as_ref()), opts).unwrap();
-    let unweighted = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, None, opts).unwrap();
+    let weighted =
+        pls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, Some(w.as_ref()), None, opts).unwrap();
+    let unweighted = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, None, None, opts).unwrap();
     assert_eq!(
         weighted.k_star, unweighted.k_star,
         "weighted pvalues={:?}, unweighted pvalues={:?}",
@@ -295,6 +308,7 @@ fn find_k_optimal_cv_ignores_zero_weight_rows() {
             y.as_ref(),
             4,
             weights.map(Col::as_ref),
+            None,
             FindKOptimalOpts {
                 selector: Selector::R2Se,
                 seed: Some(21),

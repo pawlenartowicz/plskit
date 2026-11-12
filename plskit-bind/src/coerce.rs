@@ -53,6 +53,29 @@ pub(crate) fn to_usize(v: &Value<'_>) -> Result<usize, String> {
     }
 }
 
+/// A set of counts: one count, or a list of them. R doubles and numpy
+/// arrays arrive as a float vector, so its entries must be whole.
+pub(crate) fn to_usize_set(v: &Value<'_>) -> Result<Vec<usize>, String> {
+    let bad =
+        |got: String| format!("must be a non-negative whole number or a list of them, got {got}");
+    match v {
+        Value::IntVec(xs) => xs
+            .iter()
+            .map(|&n| usize::try_from(n).map_err(|_| bad(n.to_string())))
+            .collect(),
+        Value::Vec(xs) => xs
+            .as_slice()
+            .iter()
+            .map(|&x| to_usize(&Value::F64(x)).map_err(|_| bad(x.to_string())))
+            .collect(),
+        Value::List(xs) => xs
+            .iter()
+            .map(|x| to_usize(x).map_err(|_| bad(describe(x))))
+            .collect(),
+        _ => to_usize(v).map(|n| vec![n]).map_err(|_| bad(describe(v))),
+    }
+}
+
 /// A seed: any `u64`. A float must be whole and at most 2^53; larger
 /// seeds travel as decimal strings (R's form).
 pub(crate) fn to_seed(v: &Value<'_>) -> Result<u64, String> {
@@ -167,6 +190,33 @@ mod tests {
         assert_eq!(
             to_usize(&Value::F64(2.5)).unwrap_err(),
             "must be a non-negative whole number, got 2.5"
+        );
+    }
+
+    #[test]
+    fn count_sets() {
+        assert_eq!(to_usize_set(&Value::I64(2)), Ok(vec![2]));
+        assert_eq!(to_usize_set(&Value::F64(2.0)), Ok(vec![2]));
+        assert_eq!(to_usize_set(&Value::IntVec(vec![3, 1])), Ok(vec![3, 1]));
+        let v = Value::Vec(VecF64::Owned(vec![1.0, 2.0]));
+        assert_eq!(to_usize_set(&v), Ok(vec![1, 2]));
+        let v = Value::List(vec![Value::F64(1.0), Value::F64(2.0)]);
+        assert_eq!(to_usize_set(&v), Ok(vec![1, 2]));
+        for bad in [
+            Value::I64(-1),
+            Value::IntVec(vec![1, -2]),
+            Value::Vec(VecF64::Owned(vec![1.0, 2.5])),
+            Value::Vec(VecF64::Owned(vec![1.0, f64::NAN])),
+            Value::BoolVec(vec![true]),
+            Value::text("1"),
+            Value::List(vec![Value::F64(1.5)]),
+            Value::List(vec![Value::Bool(true)]),
+        ] {
+            assert!(to_usize_set(&bad).is_err(), "{bad:?} accepted");
+        }
+        assert_eq!(
+            to_usize_set(&Value::IntVec(vec![1, -2])).unwrap_err(),
+            "must be a non-negative whole number or a list of them, got -2"
         );
     }
 

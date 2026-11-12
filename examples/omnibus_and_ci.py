@@ -9,19 +9,19 @@ This is the extended companion to `fit_and_ci.py`. Where that example
 demonstrates a single recommended test + CI, this one walks the full
 omnibus method axis on the same data so the methods can be compared
 side by side, including the score/split_exact complementarity
-(`docs/python/api.md` §3.1).
+(`docs/python/api.md` §3.1, "Five test methods").
 
 Pipeline:
 
   1. Generate synthetic data with a known PLS1 signal in the first two
      of D=8 columns (everything else is noise). y depends on X through a
      single direction, so the signal is concentrated.
-  2. Fit PLS1 at K=1 (the recommended omnibus K, `docs/python/api.md`
-     §3.1 "default `k=1`"; this design has no reason to fix K higher).
+  2. Fit PLS1 at K=1, and test at K=1: y depends on X through one
+     direction here.
   3. Run every omnibus method on the same X, y, k, seed and tabulate
      p-value + statistic + per-method workload knobs:
        * split_exact: permutation-calibrated split-half test that holds
-                      its level on any design; recommended at k=1
+                      its level on any design; recommended
        * split_nb:    same held-out-correlation statistic, calibrated by
                       the Fisher-z t approximation instead of permutation
                       (faster; auto-gated on small or low-rank designs)
@@ -185,7 +185,8 @@ def main() -> None:
         print(f"  β[{j}] z={z:+7.2f}{flag}")
 
     # Per-coordinate β CIs: a regression-style diagnostic (PLS1 only).
-    # The calibrated readouts are `holdout_corr` and, at k=1, `beta_sign_z`;
+    # The inferential readouts are `holdout_corr` (beta, see
+    # docs/python/results.md) and, at k=1, `beta_sign_z`;
     # the CI below omits the SE corrections that `beta_sign_z` applies.
     # Centered-scaled CIs may be biased by PLS shrinkage on small m; see
     # `docs/python/results.md` caveats; the midpoint is *not* guaranteed to bracket

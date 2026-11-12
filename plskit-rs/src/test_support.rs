@@ -273,6 +273,52 @@ pub(crate) fn gram_p_weights(n: usize) -> Col<f64> {
     })
 }
 
+/// `[1, z]`: `z` with a leading column of ones.
+pub(crate) fn with_intercept(z: MatRef<'_, f64>) -> Mat<f64> {
+    Mat::<f64>::from_fn(z.nrows(), z.ncols() + 1, |i, j| {
+        if j == 0 { 1.0 } else { z[(i, j - 1)] }
+    })
+}
+
+/// WLS coefficients of `v`'s columns on `a` from the normal equations
+/// `(A'WA) b = A'W v`, solved by `lu_solve_in_place` (`W = I` for `None`):
+/// the oracle for `CovariateBasis::coef`.
+#[allow(clippy::many_single_char_names)]
+pub(crate) fn wls_normal_equations(
+    a: MatRef<'_, f64>,
+    w: Option<ColRef<'_, f64>>,
+    v: MatRef<'_, f64>,
+) -> Mat<f64> {
+    use crate::linalg::{lu_solve_in_place, mat_mul};
+    let aw = Mat::<f64>::from_fn(a.nrows(), a.ncols(), |i, j| {
+        a[(i, j)] * w.map_or(1.0, |w| w[i])
+    });
+    let g = mat_mul(aw.transpose(), a, faer::Par::Seq);
+    let mut b = mat_mul(aw.transpose(), v, faer::Par::Seq);
+    lu_solve_in_place(g.as_ref(), b.as_mut());
+    b
+}
+
+/// `max |a − b| ≤ rel · max |b|` over all entries.
+pub(crate) fn assert_close_rel(a: MatRef<'_, f64>, b: MatRef<'_, f64>, rel: f64, what: &str) {
+    assert_eq!(
+        (a.nrows(), a.ncols()),
+        (b.nrows(), b.ncols()),
+        "{what}: shape"
+    );
+    let (mut diff, mut scale) = (0.0_f64, 0.0_f64);
+    for j in 0..b.ncols() {
+        for i in 0..b.nrows() {
+            diff = diff.max((a[(i, j)] - b[(i, j)]).abs());
+            scale = scale.max(b[(i, j)].abs());
+        }
+    }
+    assert!(
+        diff <= rel * scale,
+        "{what}: max diff {diff:e} > {rel:e} · {scale:e}"
+    );
+}
+
 /// The values of one matrix in three more layouts: a column-major submatrix
 /// of a larger NaN-padded buffer (non-zero offset, column stride above the
 /// row count), a row-major view (the transpose of a stored transpose,

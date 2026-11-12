@@ -13,5 +13,6 @@ families `plskit` ships, alongside [sparse PLS1](sparse.md)
 - [Sparse PLS1](sparse.md): the `keep` count, its selection, and inference after selection (`spls1_*`)
 - [Inference](inference.md): confirmatory tests (`split_exact`, `split_nb`, `score`, `e`, `raw_perm`) (*placeholder, paper-pending*)
 - [Confidence intervals](ci.md): rotation-invariant subsample CIs (`pls1_confirmatory_test(ci=True)`) (*placeholder, paper-pending*)
+- [Covariates](covariates.md): adjusting the fit, the tests and k selection for covariates; Freedman–Lane nulls; `null_y`
 - [Weights](weights.md): observation weights (WLS-style precision / sampling weights)
 - [Profiles](profiles.md): `factors` and `profiles`, which split one coefficient vector into orthogonal factors

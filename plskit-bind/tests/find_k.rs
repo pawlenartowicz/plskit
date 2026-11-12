@@ -169,18 +169,6 @@ fn pls1_fit_mode_errors() {
         vec![
             ("X", x.clone()),
             ("y", y.clone()),
-            ("k", Value::text("optimal")),
-        ],
-    );
-    assert_eq!(
-        (e.code, e.message.as_str()),
-        ("invalid_argument", "k='optimal' requires k_max")
-    );
-    let e = err(
-        "pls1_fit",
-        vec![
-            ("X", x.clone()),
-            ("y", y.clone()),
             ("k", Value::text("bogus")),
             ("k_max", Value::I64(3)),
         ],

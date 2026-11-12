@@ -6,7 +6,7 @@ use plskit::Pls1Model;
 use crate::coerce;
 use crate::convert::{self, mat};
 use crate::error::BindError;
-use crate::fns::rotate::{carried, product, rotate_factors, standardized};
+use crate::fns::rotate::{carried, check_covariates, product, rotate_factors, standardized};
 use crate::fns::{done, engine};
 use crate::inputs::Inputs;
 use crate::methods;
@@ -35,16 +35,16 @@ fn count(inp: &mut Inputs<'_>, name: &str) -> Result<usize, BindError> {
     count_value(name, &v)
 }
 
+/// Coefficient, `pre_standardized`, covariate count, model value: see [`first_arg`].
+type FirstArg = (Col<f64>, bool, Option<Option<usize>>, Value<'static>);
+
 /// Read `model_or_coef`: a `PLS1Result` record is checked with
 /// [`splittable_model`], anything else is read as a coefficient vector.
 /// Returns the coefficient, the fit's own `pre_standardized` (false for a
-/// vector), and, when `with_model`, the `PLS1Result` value (null otherwise
-/// and for a vector).
-fn first_arg(
-    v: Value<'_>,
-    x: MatRef<'_, f64>,
-    with_model: bool,
-) -> Result<(Col<f64>, bool, Value<'static>), BindError> {
+/// vector), the fit's covariate count (`None` for a vector, `Some(None)` for a
+/// fit without covariates), and, when
+/// `with_model`, the `PLS1Result` value (null otherwise and for a vector).
+fn first_arg(v: Value<'_>, x: MatRef<'_, f64>, with_model: bool) -> Result<FirstArg, BindError> {
     if matches!(v, Value::Record(_)) {
         let rec = convert::model_record(v, "PLS1Result", "model_or_coef")?;
         let m = splittable_model(&rec, x)?;
@@ -53,26 +53,41 @@ fn first_arg(
         } else {
             Value::Null
         };
-        return Ok((m.coef, m.pre_standardized, value));
+        let adjusted = Some(m.covariate_coef.as_ref().map(Col::nrows));
+        return Ok((m.coef, m.pre_standardized, adjusted, value));
     }
     let c =
         coerce::to_vec(v).map_err(|w| BindError::invalid_argument(format!("model_or_coef {w}")))?;
-    Ok((c.as_col().to_owned(), false, Value::Null))
+    Ok((c.as_col().to_owned(), false, None, Value::Null))
 }
 
-/// `factors(model_or_coef, X, n, *, pre_standardized=None)`.
+/// `factors(model_or_coef, X, n, *, covariates=None, pre_standardized=None)`.
+///
+/// A fit with covariates needs them and a fit without refuses them; a
+/// vector takes them or not.
 pub(crate) fn factors(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let first = inp.take("model_or_coef");
     let x = inp.mat("X")?;
     let n = count(inp, "n")?;
+    let z = inp.opt_covariates()?;
     let set = inp.opt_bool("pre_standardized")?;
     inp.finish()?;
-    let (coef, fit_pre, _) = first_arg(first, x.as_mat(), false)?;
+    let (coef, fit_pre, adjusted, _) = first_arg(first, x.as_mat(), false)?;
+    check_covariates("model", adjusted.map(|c| c.is_some()), z.is_some())?;
+    if let (Some(Some(q)), Some(z)) = (adjusted, &z)
+        && z.ncols() != q
+    {
+        return Err(BindError::new(
+            "shape_mismatch",
+            format!("covariates have {} columns; the model has {q}", z.ncols()),
+        ));
+    }
     let out = engine(plskit::factors(
         coef.as_ref(),
         x.as_mat(),
         n,
         set.unwrap_or(fit_pre),
+        z.as_ref().map(MatF64::as_mat),
     ))?;
     Ok(done(convert::factors(&out, Value::Null)))
 }
@@ -140,6 +155,17 @@ fn splittable_model(rec: &Record<'_>, x: MatRef<'_, f64>) -> Result<Pls1Model, B
     Ok(m)
 }
 
+/// `profiles` and `profiles_search` take no covariates, so a fit with them
+/// would be split and scored on unadjusted X.
+fn refuse_covariate_model(has_covariates: bool, fn_name: &str) -> Result<(), BindError> {
+    if has_covariates {
+        return Err(BindError::invalid_argument(format!(
+            "{fn_name}() does not take a model fitted with covariates: use factors(m, X, n, covariates=Z) and rotate(f, X, covariates=Z)"
+        )));
+    }
+    Ok(())
+}
+
 /// `m` as a `PLS1Result`, with the wrapper-level `selection_result` of `rec`.
 fn model_value(m: &Pls1Model, rec: &Record<'_>) -> Value<'static> {
     Value::Record(convert::pls1_model(m, carried(rec, "selection_result")))
@@ -156,7 +182,7 @@ fn split_and_rotate(
     rotation: &str,
     args: Option<&Record<'_>>,
 ) -> Result<(Value<'static>, Value<'static>), BindError> {
-    let f = engine(plskit::factors(coef, x, n, pre_standardized))?;
+    let f = engine(plskit::factors(coef, x, n, pre_standardized, None))?;
     let xs_owned = standardized(x, pre_standardized)?;
     let xs = xs_owned.as_ref().map_or(x, Mat::as_ref);
     let l = MatF64::from_mat(&product(xs, f.w.as_ref()));
@@ -182,7 +208,8 @@ pub(crate) fn profiles(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let set = inp.opt_bool("pre_standardized")?;
     inp.finish()?;
     methods::rotation_method(&rotation, args.as_ref())?;
-    let (coef, fit_pre, model) = first_arg(first, x.as_mat(), true)?;
+    let (coef, fit_pre, adjusted, model) = first_arg(first, x.as_mat(), true)?;
+    refuse_covariate_model(matches!(adjusted, Some(Some(_))), "profiles")?;
     let (factors, scores) = split_and_rotate(
         x.as_mat(),
         coef.as_ref(),
@@ -218,6 +245,7 @@ pub(crate) fn profiles_search(inp: &mut Inputs<'_>) -> Result<Outcome, BindError
     methods::rotation_method(&rotation, args.as_ref())?;
     let rec = convert::model_record(model, "PLS1Result", "model")?;
     let m = splittable_model(&rec, x.as_mat())?;
+    refuse_covariate_model(m.covariate_coef.is_some(), "profiles_search")?;
     if m.keep.is_some() {
         return Err(BindError::new(
             "invalid_input",

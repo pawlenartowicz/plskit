@@ -4,10 +4,10 @@
 \alias{factors}
 \title{Split a coefficient vector into factors on the basis of X}
 \usage{
-factors(model_or_coef, X, n, pre_standardized = NULL)
+factors(model_or_coef, X, n, pre_standardized = NULL, covariates = NULL)
 }
 \arguments{
-\item{model_or_coef, X, n, pre_standardized}{See the canonical reference.}
+\item{model_or_coef, X, n, pre_standardized, covariates}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("factors_result", "plskit_result")}.

@@ -15,11 +15,12 @@ spls1_find_k_optimal(
   pre_standardized = FALSE,
   seed = NULL,
   verbose = FALSE,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 )
 }
 \arguments{
-\item{X, y, k_max, keep, selector, diagnostic, args, pre_standardized, seed, verbose, weights}{See the canonical reference.}
+\item{X, y, k_max, keep, selector, diagnostic, args, pre_standardized, seed, verbose, weights, covariates}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("find_k_optimal_result", "plskit_result")}.

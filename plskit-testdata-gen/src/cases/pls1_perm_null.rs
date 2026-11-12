@@ -1,9 +1,9 @@
 //! `pls1_perm_null` fixture cases.
 
 use crate::cases::{
-    CasePaths, WEIGHTED_PRESTD_N80_D6_INPUTS, Xyw, case_files, ensure_moved, manifest_case,
-    ndarray_to_faer_col, ndarray_to_faer_mat, perm_null_weights, scalar_f64, scalar_i64,
-    synth_data, weighted_prestd_n80_d6,
+    CasePaths, WEIGHTED_PRESTD_N80_D6_INPUTS, Xyw, array_descriptors, case_files, ensure_moved,
+    manifest_case, ndarray_to_faer_col, ndarray_to_faer_mat, perm_null_weights, scalar_f64,
+    scalar_i64, synth_covariates, synth_data, weighted_prestd_n80_d6,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
@@ -46,6 +46,7 @@ pub fn basic_n80_d6_k2(root: &Path) -> Result<Case> {
         x_faer.as_ref(),
         y_faer.as_ref(),
         2,
+        None,
         None,
         PermNullOpts {
             n_perm: 200,
@@ -130,6 +131,7 @@ fn perm_null_case(
         y_faer.as_ref(),
         k,
         w_faer.as_ref().map(faer::Col::as_ref),
+        None,
         PermNullOpts {
             n_perm,
             return_perm_matrix: false,
@@ -304,6 +306,7 @@ fn tall_case(
         y_faer.as_ref(),
         k,
         w_faer.as_ref().map(faer::Col::as_ref),
+        None,
         PermNullOpts {
             n_perm: TALL_N_PERM,
             return_perm_matrix: false,
@@ -362,11 +365,13 @@ struct PermNullCall<'a> {
 /// The call `c` describes, on `c.data`.
 fn perm_null_run(c: &PermNullCall<'_>) -> Result<PermNullOutput> {
     let weights = c.data.w_faer();
+    let z = c.data.z_faer();
     Ok(pls1_perm_null(
         c.data.x_faer().as_ref(),
         c.data.y_faer().as_ref(),
         c.k,
         weights.as_ref().map(faer::Col::as_ref),
+        z.as_ref().map(faer::Mat::as_ref),
         PermNullOpts {
             n_perm: c.n_perm,
             return_perm_matrix: c.return_perm_matrix,
@@ -402,6 +407,9 @@ fn perm_null_call(root: &Path, c: &PermNullCall<'_>) -> Result<Case> {
         w.add_i64("k", &scalar_i64(i64::try_from(result.k)?))?;
         w.add_i64("seed", &scalar_i64(i64::try_from(result.seed)?))?;
         w.add_f64("n_eff", &scalar_f64(result.n_eff))?;
+        if let Some(nc) = result.n_covariates {
+            w.add_i64("n_covariates", &scalar_i64(i64::try_from(nc)?))?;
+        }
         if let Some(flat) = result.beta_perm_matrix {
             let matrix = ndarray::Array2::from_shape_vec((result.n_perm, d), flat)?;
             w.add_f64("beta_perm_matrix", &matrix.into_dyn())?;
@@ -422,6 +430,7 @@ fn perm_null_call(root: &Path, c: &PermNullCall<'_>) -> Result<Case> {
     if c.return_perm_matrix {
         kwargs["return_perm_matrix"] = serde_json::json!(true);
     }
+    array_descriptors(&mut kwargs, c.data);
     manifest_case(root, c.name, function, rel_inputs, rel_outputs, kwargs)
 }
 
@@ -440,7 +449,12 @@ pub fn pre_standardized_n80_d6_k2(root: &Path) -> Result<Case> {
         &PermNullCall {
             name: "pls1_perm_null_pre_standardized_n80_d6_k2",
             inputs_name: "pls1_perm_null_basic_n80_d6_k2",
-            data: &Xyw { x, y, w: None },
+            data: &Xyw {
+                x,
+                y,
+                w: None,
+                ..Default::default()
+            },
             k: 2,
             n_perm: 200,
             pre_standardized: true,
@@ -467,6 +481,7 @@ pub fn weighted_n40_d1_k1(root: &Path) -> Result<Case> {
                 x,
                 y,
                 w: Some(perm_null_weights(40)),
+                ..Default::default()
             },
             k: 1,
             n_perm: 200,
@@ -507,6 +522,49 @@ pub fn weighted_prestd_n80_d6_k2(root: &Path) -> Result<Case> {
         "beta_perm_z",
         &with.beta_perm_z,
         &without.beta_perm_z,
+    )?;
+    perm_null_call(root, &call)
+}
+
+/// Case: `pls1_perm_null` at `k=2`, 200 permutations, on `(n=80, d=6)` data
+/// with three covariates, the third an alias of the first (Freedman-Lane
+/// null columns). The call must differ from the same call without covariates.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_perm_null` fails.
+pub fn covariates_n80_d6_k2(root: &Path) -> Result<Case> {
+    let (x, y) = synth_data(80, 6, 2, 4.0, 42);
+    let z = Some(synth_covariates(&x, 7));
+    let data = Xyw {
+        x,
+        y,
+        z,
+        ..Default::default()
+    };
+    let call = PermNullCall {
+        name: "pls1_perm_null_covariates",
+        inputs_name: "pls1_perm_null_covariates",
+        data: &data,
+        k: 2,
+        n_perm: 200,
+        pre_standardized: false,
+        return_perm_matrix: false,
+    };
+    let plain_data = Xyw {
+        x: data.x.clone(),
+        y: data.y.clone(),
+        ..Default::default()
+    };
+    let plain = perm_null_run(&PermNullCall {
+        data: &plain_data,
+        ..call
+    })?;
+    let with = perm_null_run(&call)?;
+    ensure_moved(
+        call.name,
+        "beta_perm_z",
+        &with.beta_perm_z,
+        &plain.beta_perm_z,
     )?;
     perm_null_call(root, &call)
 }

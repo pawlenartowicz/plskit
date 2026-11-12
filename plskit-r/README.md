@@ -75,10 +75,11 @@ y <- 4 * (X[, 1] + X[, 2]) + 0.5 * rnorm(60)
 fit  <- pls1_fit(X, y, k = 3, seed = 42)
 yhat <- pls1_predict(fit, X[1:5, ])
 
-# Confirmatory test for any signal; k = 1 with split_exact is recommended.
-test <- pls1_confirmatory_test(X, y, k = 1, test_method = "split_exact",
-                               seed = 42)
+# Confirmatory test for signal at some k in the default set (1..8, cut
+# by the design: 1:6 here). It names no k to fit at.
+test <- pls1_confirmatory_test(X, y, seed = 42)
 test$pvalue
+test$k
 ```
 
 ## Same names as Python

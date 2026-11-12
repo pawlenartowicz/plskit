@@ -81,10 +81,12 @@ fn factors_returns_a_checked_record() {
             "size",
             "coef",
             "pre_standardized",
-            "rotation_spec"
+            "rotation_spec",
+            "covariate_adjusted"
         ]
     );
     assert!(field(r, "rotation_spec").is_null());
+    assert!(matches!(field(r, "covariate_adjusted"), Value::Bool(false)));
     let (f, c) = (floats(field(r, "F")), floats(field(r, "coef")));
     for row in 0..12 {
         let sum: f64 = (0..3).map(|j| f[row + 12 * j]).sum();
@@ -1027,4 +1029,30 @@ fn profiles_search_still_refuses_sparse() {
     );
     assert_eq!(e.code, "invalid_input");
     assert!(e.message.contains("weights"), "{}", e.message);
+}
+
+#[test]
+fn factors_refuses_covariates_with_the_wrong_column_count() {
+    let (x, y) = data(40, 6, 3);
+    let z = |q: u32| matv((0..40 * q).map(|i| f64::from((i * 7) % 13)).collect(), 40);
+    let m = ok(
+        "pls1_fit",
+        vec![
+            ("X", x.clone()),
+            ("y", y),
+            ("k", Value::I64(2)),
+            ("covariates", z(2)),
+        ],
+    )
+    .result;
+    let e = err(
+        "factors",
+        vec![
+            ("model_or_coef", m),
+            ("X", x),
+            ("n", Value::I64(2)),
+            ("covariates", z(3)),
+        ],
+    );
+    assert_eq!(e.code, "shape_mismatch", "{}", e.message);
 }

@@ -23,8 +23,8 @@ end
 
 @testset "raised through the public API" begin
     X, y = pls1_data()
-    @test plskit_error(() -> pls1_fit(X, y[1:59])).code === :dimension_mismatch
-    e = plskit_error(() -> pls1_fit(X, y; weights=-ones(60)))
+    @test plskit_error(() -> pls1_fit(X, y[1:59]; k=1)).code === :dimension_mismatch
+    e = plskit_error(() -> pls1_fit(X, y; k=1, weights=-ones(60)))
     @test e.code === :invalid_weights
     @test e.details === (reason=:negative,)
     @test occursin("PlsKitError(:invalid_weights)", sprint(showerror, e))

@@ -87,7 +87,18 @@ pub(crate) fn write_find_k_optimal(path: &Path, r: &FindKOptimalOutput) -> Resul
 /// synthetic inputs they share.
 fn run_optimal_case(root: &Path, c: &OptimalCase) -> Result<Case> {
     let (x, y) = synth_data(SYNTH_N, SYNTH_D, SYNTH_K_SIGNAL, SYNTH_SNR, SYNTH_SEED);
-    optimal_on(root, c, INPUTS_NAME, &Xyw { x, y, w: None }, |_| Ok(()))
+    optimal_on(
+        root,
+        c,
+        INPUTS_NAME,
+        &Xyw {
+            x,
+            y,
+            w: None,
+            ..Default::default()
+        },
+        |_| Ok(()),
+    )
 }
 
 /// `pls1_find_k_optimal` at [`K_MAX`] with `data`'s weights.
@@ -98,6 +109,7 @@ fn optimal_call(data: &Xyw, opts: FindKOptimalOpts) -> Result<FindKOptimalOutput
         data.y_faer().as_ref(),
         K_MAX,
         w.as_ref().map(faer::Col::as_ref),
+        None,
         opts,
     )?)
 }
@@ -272,6 +284,7 @@ pub fn r2_se_weighted(root: &Path) -> Result<Case> {
             x: data.x.clone(),
             y: data.y.clone(),
             w: None,
+            ..Default::default()
         },
         c.opts,
     )?;

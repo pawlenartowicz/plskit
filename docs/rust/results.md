@@ -37,7 +37,9 @@ long form below.
 | `q_loadings` | `Col<f64>` | `(K,)` |
 | `coef` | `Col<f64>` | `(D,)` |
 | `beta` | `Col<f64>` | `(D,)` |
-| `intercept` | `f64` | scalar |
+| `intercept` | `f64` | scalar; with covariates, the intercept of `y_hat = intercept + X·beta + Z·covariate_coef` |
+| `covariate_coef` | `Option<Col<f64>>` | `(p_Z,)`; `None` without covariates; 0 at a dropped (aliased) column |
+| `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1; `None` without covariates |
 | `k_used` | `usize` | scalar; `< k` when a component's `‖X_a'y_a‖` or `t't` fell below `1e-14`, or `‖X_a'y_a‖` fell below `max(n, D)·ε·‖X‖_F·‖y‖`, with `X`, `y` the inputs the PLS1 kernel runs on (standardized unless `pre_standardized`, rows scaled by `√w`): `y` is then exhausted and what is left of `X_a'y_a` is rounding noise. `0` when this happens at the first component (`y` constant, or orthogonal to `X` up to rounding): the zero model, `coef = beta = 0` and `intercept` the (weighted) mean of `y` |
 | `pre_standardized` | `bool` | scalar |
 | `weights` | `Option<Col<f64>>` | `(n,)` when present; `None` for uniform/absent weights |
@@ -86,8 +88,7 @@ observation weights are not implemented for this family.
 `pls1_confirmatory_test` does. For PLS3 `ci` is always `None` and `n_eff`
 equals `n`. `rho_hat` is populated for `split_nb` only, and only when the
 test half has at least 4 rows; `stable_rank` is `Some` on an explicit `split_nb`
-request, and on an `"auto"` request that reached the stable-rank check
-(p > 4, n_eff ≥ 250); `None` otherwise.
+request and `None` otherwise (`Auto` runs `split_exact` on every PLS3 design).
 
 ## `FindKOptimalOutput`, what `pls1_find_k_optimal` returns
 
@@ -102,6 +103,7 @@ request, and on an `"auto"` request that reached the stable-rank check
 | `diagnostic` | `Option<String>` | `diagnostic.is_some()` |
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | always; equals `n_samples` for uniform/absent weights |
+| `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
 | `stable_rank` | `Option<f64>` | `Some` when `diagnostic == Some(SplitNb)` — fired or not, including under `force` |
 
 When `diagnostic` is set, `pvalues` carries the per-component p-values
@@ -129,7 +131,8 @@ diagnostic runs no step: `pvalues` is `Some` of a length-0 column and
 | `alpha` | `f64` | always |
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | always; equals `n_samples` for uniform/absent weights |
-| `stable_rank` | `Option<f64>` | `Some` on an explicit `split_nb` request, and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff ≥ 250, and p ≤ 100·n without `keep`); `None` otherwise |
+| `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
+| `stable_rank` | `Option<f64>` | `Some` on an explicit `split_nb` request, and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n without `keep`); `None` otherwise |
 
 Closed testing on nested H is exact, so `pvalues[..k_star]` is an
 honest FWER-controlled sequence. The path-max p-value is
@@ -151,6 +154,7 @@ explain why. `split_nb_gate` returns them without running a test.
 | `keep_grid` | `Vec<usize>` | the logged geometric grid swept (powers of two; endpoints 1 and n_features always included); empty when `keep_star` is `0` |
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | effective sample size; `f64::NAN` if unavailable |
+| `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
 
 Selection criterion: the 1-SE rule on mean CV R² — `keep_star` is the
 sparsest keep whose mean CV R² is within 1 SE of the maximum. The full
@@ -161,16 +165,19 @@ field semantics are identical to the Python counterpart; see
 
 | Field | Rust type | Notes |
 |---|---|---|
-| `pvalue` | `f64` | always |
-| `statistic` | `f64` | always |
+| `pvalue` | `f64` | always; for a set of more than one `k`, the min-p p for the whole set |
+| `statistic` | `Option<f64>` | `Some` for one `k`; `None` for a set of more than one `k` |
 | `test_method` | `String` | the method that ran: one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`, never `"auto"`; `"split_exact"` when an explicit `"split_nb"` request was rerouted by the auto-gate |
-| `k` | `usize` | the K tested (echoed from the input) |
+| `k` | `Vec<usize>` | the tested set, sorted ascending; one `k` gives a one-element vector (`pls3_confirmatory_test` gives `vec![k]`) |
+| `pvalues_by_k` | `BTreeMap<usize, f64>` | each tested `k` → its own p, not adjusted for the set |
+| `statistics_by_k` | `BTreeMap<usize, f64>` | each tested `k` → its statistic |
 | `n_perm` | `Option<usize>` | `Some` for `raw_perm` / `split_exact`, `None` for `split_nb` / `score` / `e` |
 | `n_splits` | `Option<usize>` | `Some` for `split_*` methods, `None` for `raw_perm` / `score` / `e` |
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | always; Kish effective sample size, equals `n_samples` for uniform/absent weights |
+| `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
 | `rho_hat` | `Option<f64>` | `Some` for `split_nb` only, and only when unweighted (no weights, or all-equal weights) with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
-| `stable_rank` | `Option<f64>` | stable rank of the standardized `X`, as seen by the `split_nb` auto-gate; `Some` on an explicit `split_nb` request (fired or not, including under `force`), and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff ≥ 250, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise |
+| `stable_rank` | `Option<f64>` | stable rank of `X` as the `split_nb` auto-gate read it (standardized once over all rows, or only centred under `pre_standardized`); `Some` on an explicit `split_nb` request (fired or not, including under `force`), and on a PLS1 `"auto"` request with one `k` that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise, and on every `pls3_confirmatory_test` `"auto"` request |
 | `ci` | `Option<ConfirmatoryCI>` | `Some` when called with `ci=true`; carries the rotation-invariant subsample CIs |
 
 ## `SplitNbGateOutput`, what `split_nb_gate` returns
@@ -178,11 +185,11 @@ field semantics are identical to the Python counterpart; see
 | Field | Rust type | Notes |
 |---|---|---|
 | `fires` | `bool` | `true` → an explicit `split_nb` request on this `X` reroutes to `split_exact` |
-| `stable_rank` | `f64` | stable rank of the standardized `X`. NaN when the Gram matrix of the standardized `X` is not finite. The gate then fires. |
+| `stable_rank` | `f64` | stable rank of `X` as the tests read it: standardized, or only centred under `pre_standardized`. NaN when the Gram matrix of that `X` is not finite. The gate then fires. |
 | `n_eff` | `f64` | Kish effective sample size; equals `n_samples` for uniform/absent weights |
 
 Every field is always populated. This is the same rule the test
-functions apply internally, on the same standardized `X` — querying it
+functions apply internally, on `X` read the same way: querying it
 costs one SVD and no resampling.
 
 ## `PermNullOutput`, what `pls1_perm_null` returns
@@ -193,6 +200,7 @@ costs one SVD and no resampling.
 | `k` | `usize` | K used for fitting |
 | `seed` | `u64` | RNG seed actually used |
 | `n_eff` | `f64` | effective sample size (`sum(w)² / sum(w²)`); equals `n` when weights are uniform |
+| `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
 | `beta_ref` | `Vec<f64>` | full-data β reference, length D |
 | `beta_perm_mean` | `Vec<f64>` | mean of β under permuted y, length D; ≈ 0 under H0 (calibration diagnostic) |
 | `beta_perm_sd` | `Vec<f64>` | SD of β under permuted y, length D |
@@ -205,11 +213,20 @@ At `k = 1` a row is `c_ref·X̃ᵀỹ_p`, the permuted fit with its scalar `c` h
 
 | Field | Rust type | Notes |
 |---|---|---|
-| `alpha` | `Mat<f64>` | `(n, m)`; column `j` gives `coef = X̃'·alpha[:, j]` on the standardized scale; NaN in a column that is not resolved |
-| `k_used` | `Vec<usize>` | length `m`; `k` for a resolved fit, `0` for a zero model and for an unresolved column |
-| `resolved` | `Vec<bool>` | length `m`; `false` where the fit cannot be certified from `gram` alone |
+| `alpha` | `Mat<f64>` | `(n, m)`; column `j` gives `coef = X̃'·alpha[:, j]` on the standardized scale |
+| `k_used` | `Vec<usize>` | length `m`; `k`, fewer when the fit stops at a truncation exit, `0` for a zero model |
 | `k` | `usize` | as passed |
 | `n_features` | `usize` | as passed |
+
+## `GramMatrixOutput`, what `gram_matrix` returns
+
+| Field | Rust type | Notes |
+|---|---|---|
+| `gram` | `Mat<f64>` | `(n, n)`; `X̃X̃'`, with `X̃` = `X` centred over all rows and divided by its column standard deviations (population), or only centred under `pre_standardized` |
+| `n_features` | `usize` | the column count of `X`, constant columns included |
+| `pre_standardized` | `bool` | as passed |
+
+`GramMatrixOutput::subset(&self, rows: &[usize]) -> PlsKitResult<GramMatrixOutput>` returns `gram[rows, rows]` with the same `n_features` and `pre_standardized`. It returns `InvalidArgument` when a row is not below `n` or `rows` has fewer than 2 entries.
 
 ## `CIScalar`, scalar CI
 
@@ -226,6 +243,8 @@ A CI for a scalar, plus its SD. Its one use is `ConfirmatoryCI::holdout_corr`, w
 
 Rotation-invariant readouts only.
 
+`ConfirmatoryCI` is beta, not to be trusted yet: `holdout_corr` scales each half with its own moments, while the held-out tests scale once over all rows, so it does not estimate exactly what they report.
+
 | Field | Rust type | Shape |
 |---|---|---|
 | `n_boot` | `usize` | scalar (resampling replicates; each draws one size-`m` subsample, one n-out-of-n bootstrap resample and one half split) |
@@ -240,7 +259,7 @@ Rotation-invariant readouts only.
 | `beta_ci_lower` | `Vec<f64>` | `(D,)` per-coordinate subsampling CI on β, shrinkage-corrected and finite-population-scaled; PLS1-only, calibrated at K = 1 |
 | `beta_ci_upper` | `Vec<f64>` | `(D,)` per-coordinate |
 | `beta_se` | `Vec<f64>` | `(D,)` `= √(m/(n − m)) · sd(β_b[j]) / κ̂`, the SE `beta_sign_z` divides by |
-| `holdout_corr` | `CIScalar` | scalar (Fisher z-transformed NB-Wald CI on the held-out correlation of a fit trained on `⌊n/2⌋` rows; does not depend on `m_rate`) |
+| `holdout_corr` | `CIScalar` | scalar (Fisher z-transformed NB-Wald CI on the held-out correlation of a fit trained on `⌊n/2⌋` rows, beta (see above); does not depend on `m_rate`) |
 | `n_boot_finite` | `usize` | scalar; resamples whose worker fit succeeded (≤ `n_boot`) |
 | `n_boot_finite_holdout_corr` | `usize` | scalar; subset whose holdout_corr is finite |
 
@@ -279,6 +298,7 @@ at nominal 5%), does not grow with `n_boot`, and is not calibrated at
 | `size` | `Col<f64>` | `‖f[:, i]‖`, length `n`, nonnegative |
 | `coef` | `Col<f64>` | the input coefficient vector, length `D` |
 | `pre_standardized` | `bool` | whether `X` was taken as already standardized |
+| `covariate_adjusted` | `bool` | whether covariates were removed from `x`; `rotate` of it then needs the same covariates |
 
 `factors` returns the factors in block order. When `coef` has a part outside the row space of the standardized kept columns of `x` (for example a sparse fit with more kept columns than `N − 1`), `factors` appends that part, normalized, as one extra last direction of the basis, so it lands in the last factor. `FactorsOutput::rotated(r)` takes an orthogonal `R` of shape `(n, n)` and returns the rotated `FactorsOutput` together with the `R` after sign pinning and sorting, so the new `w` is the old `w` times that `R`. The columns of `f` still sum to `coef` for every orthogonal `R`.
 

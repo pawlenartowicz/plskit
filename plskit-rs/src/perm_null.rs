@@ -92,6 +92,9 @@ pub struct PermNullOutput {
     /// Optional `(n_perm, D)` β matrix in row-major layout (length n_perm·D).
     /// Some when `opts.return_perm_matrix == true`.
     pub beta_perm_matrix: Option<Vec<f64>>,
+    /// `rank([1, Z]) − 1`, the covariates kept after aliased columns are
+    /// dropped. `None` without covariates.
+    pub n_covariates: Option<usize>,
 }
 
 /// Permutation-null engine for PLS1 β. See module docs.
@@ -100,6 +103,11 @@ pub struct PermNullOutput {
 /// - `x`: `(n, d)`
 /// - `y`: `(n,)`
 /// - `k`: components retained per fit; `1 ≤ k ≤ d`
+/// - `covariates`: optional `Z`, `(n, p_z)`. X is standardized, then X and
+///   y are replaced by their (weighted) residuals on `[1, Z]`, as `pls1_fit`
+///   does with covariates; β maps are computed on those residuals, and null
+///   row c fits the Freedman–Lane column `M_Z·π_c(ỹ)`, the residual on
+///   `[1, Z]` of the permuted residual.
 ///
 /// # Errors
 /// - `PlsKitError::InvalidArgument` when `n_perm < 100` or `k < 1`
@@ -107,6 +115,9 @@ pub struct PermNullOutput {
 /// - `PlsKitError::KExceedsMax` when `k > d`
 /// - `PlsKitError::NonFiniteInput` when X or y contains NaN/inf
 /// - `PlsKitError::InvalidWeights` when weights are invalid
+/// - `PlsKitError::ShapeMismatch` when `covariates` does not have `n` rows
+/// - `PlsKitError::NonFiniteInput` when `covariates` contains NaN/inf
+/// - `PlsKitError::InsufficientResidualDf` when `n − rank([1, Z]) < k + 1`
 ///
 /// # Panics
 /// Never (all internal indexing guarded by validated shapes).
@@ -116,10 +127,11 @@ pub fn pls1_perm_null(
     y: ColRef<'_, f64>,
     k: usize,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: PermNullOpts,
     seed: Option<u64>,
 ) -> PlsKitResult<PermNullOutput> {
-    crate::fit::with_thread_limit(|| perm_null_impl(x, y, k, weights, opts, seed))
+    crate::fit::with_thread_limit(|| perm_null_impl(x, y, k, weights, covariates, opts, seed))
 }
 
 /// Body of [`pls1_perm_null`], on the caller's pool.
@@ -129,6 +141,7 @@ pub(crate) fn perm_null_impl(
     y: ColRef<'_, f64>,
     k: usize,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: PermNullOpts,
     seed: Option<u64>,
 ) -> PlsKitResult<PermNullOutput> {
@@ -176,7 +189,17 @@ pub(crate) fn perm_null_impl(
     // column-major view is borrowed and any other layout is copied into
     // column-major storage (`linalg::col_major_or_copy` says why the layout
     // matters).
-    let (xs_owned, ys_owned): (Option<Mat<f64>>, Col<f64>) = if opts.pre_standardized {
+    //
+    // With covariates, X and y are standardized the same way and then
+    // replaced by their residuals on `[1, Z]` (`covariates::adjust`, as
+    // `pls1_fit` does), so `beta_ref` is the covariate fit's `coef`.
+    let mut basis = None;
+    let (xs_owned, ys_owned): (Option<Mat<f64>>, Col<f64>) = if let Some(z) = covariates {
+        let adj = crate::covariates::adjust(x, y, z, wref, opts.pre_standardized)?;
+        adj.basis.check_df(k)?;
+        basis = Some(adj.basis);
+        (Some(adj.x), adj.y)
+    } else if opts.pre_standardized {
         (
             crate::linalg::col_major_or_copy(x),
             Col::<f64>::from_fn(n, |i| y[i]),
@@ -200,6 +223,7 @@ pub(crate) fn perm_null_impl(
         ys,
         KSpec::Fixed(k),
         wref,
+        None,
         FitOpts {
             pre_standardized: true,
             // check_n_eff: false — n_eff was already validated at the top-level
@@ -229,7 +253,12 @@ pub(crate) fn perm_null_impl(
 
     let (seed_used, mut rng) = crate::rng::resolve_seed(seed)?;
 
-    run_engine(
+    // Freedman–Lane: null column c is the residual on `[1, Z]` of the
+    // permuted residual, `M_Z·π_c(ỹ)`, on the raw (not √w-scaled) scale.
+    let fl = basis
+        .as_ref()
+        .map(|b| move |_: usize, m: faer::MatMut<'_, f64>| b.residualize(m));
+    let mut out = run_engine(
         xs_fit,
         ys,
         k,
@@ -238,8 +267,13 @@ pub(crate) fn perm_null_impl(
         n_eff_val,
         opts,
         seed_used,
+        fl.as_ref().map(|f| f as crate::resample::NullMap<'_>),
         &mut rng,
-    )
+    )?;
+    out.n_covariates = basis
+        .as_ref()
+        .map(crate::covariates::CovariateBasis::n_covariates);
+    Ok(out)
 }
 
 // The row driver of the permutation null: the route's block is built once,
@@ -263,15 +297,25 @@ fn run_engine(
     n_eff_val: f64,
     opts: PermNullOpts,
     seed_used: u64,
+    null_map: Option<crate::resample::NullMap<'_>>,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<PermNullOutput> {
     debug_assert!(k <= xs_fit.ncols(), "k <= p is the caller's precondition");
     let n = xs_fit.nrows();
     let d = xs_fit.ncols();
     let b = opts.n_perm;
-    // The fit target X̃'s rows see: `ys` permuted by `perm`, `√w`-scaled when weighted.
-    let target = |perm: Option<&[usize]>| {
-        let y = faer::Col::<f64>::from_fn(n, |i| ys[perm.map_or(i, |p| p[i])]);
+    // The null targets: column c ≥ 1 of `cols` is `ys` permuted by
+    // `permutation_from_seed(n, seeds[c - 1])`, then `null_map`, the columns
+    // every route takes, from one child seed per permutation.
+    let seeds = crate::rng::child_seeds(rng, b);
+    let cols = crate::resample::Columns {
+        y: ys.as_mat(),
+        seeds: &seeds,
+        null_map,
+    };
+    // The fit target X̃'s rows see: column `c` of `cols`, `√w`-scaled when weighted.
+    let target = |c: usize| {
+        let y = cols.column(c);
         match sqw {
             Some(s) => crate::fit::scale_col(y.as_ref(), s),
             None => y,
@@ -292,21 +336,16 @@ fn run_engine(
         // the observed scale: β is not pivotal. Each row holds c at its
         // observed value, `c_ref·X̃'ỹ_p`, so the null is that of X_j'y, the
         // same null as β_j = 0 at k = 1.
-        let s_ref =
-            crate::linalg::mat_vec(xs_fit.transpose(), target(None).as_ref(), faer::Par::Seq);
+        let s_ref = crate::linalg::mat_vec(xs_fit.transpose(), target(0).as_ref(), faer::Par::Seq);
         let ss: f64 = (0..d).map(|j| s_ref[j] * s_ref[j]).sum();
         let c_ref = if ss > 0.0 {
             (0..d).map(|j| beta_ref[j] * s_ref[j]).sum::<f64>() / ss
         } else {
             0.0
         };
-        crate::resample::parallel_fill_rows_seeded(rng, b, d, |_, child, row| {
-            let perm = crate::resample::permute_indices(n, child);
-            let s = crate::linalg::mat_vec(
-                xs_fit.transpose(),
-                target(Some(&perm)).as_ref(),
-                faer::Par::Seq,
-            );
+        crate::resample::parallel_fill_rows(b, d, |i, row| {
+            let s =
+                crate::linalg::mat_vec(xs_fit.transpose(), target(i + 1).as_ref(), faer::Par::Seq);
             for (j, v) in row.iter_mut().enumerate() {
                 *v = c_ref * s[j];
             }
@@ -316,11 +355,8 @@ fn run_engine(
         // calling thread, before any parallel work.
         let route = perm_null_route(n, d, b, k, sqw.is_some());
         let block = perm_block(route, xs_fit, crate::fit::par_fixed());
-        crate::resample::parallel_fill_rows_seeded(rng, b, d, |_, child, row| {
-            // The permutation is the first draw off the child stream, as in
-            // the replicate-by-replicate worker.
-            let perm = crate::resample::permute_indices(n, child);
-            if perm_row(&block, xs_fit, sqw, ys, &perm, k, row).is_err() {
+        crate::resample::parallel_fill_rows(b, d, |i, row| {
+            if perm_row(&block, xs_fit, sqw, cols.column(i + 1).as_ref(), k, row).is_err() {
                 row.fill(f64::NAN);
             }
         })
@@ -344,6 +380,7 @@ fn run_engine(
         } else {
             None
         },
+        n_covariates: None,
     })
 }
 
@@ -432,7 +469,7 @@ pub(crate) fn perm_null_route(
 /// Per-call state of a route, built once by `run_engine` and shared
 /// read-only by every permutation row. The primal route needs only
 /// `‖xs_fit‖_F`.
-enum PermBlock<'x> {
+enum PermBlock {
     /// `x_fro = ‖xs_fit‖_F` (`norm_l2` of the view), the norm the kernel's
     /// truncation floor reads. Taken once per call instead of once per row:
     /// the same call on the same view, so the same bits.
@@ -444,33 +481,28 @@ enum PermBlock<'x> {
     /// the calling thread.
     Nspace(crate::dual_route::NspaceGram),
     /// The p-space Gram block of `xs_fit`, built once per call.
-    GramP(crate::gram_p::GramPBlock<'x>),
+    GramP(crate::gram_p::GramPBlock),
 }
 
 /// The block of `route` for the prepared `xs_fit`, its precompute run under
 /// `par` (`fit::par_fixed()`). `Special` is not a `perm_null` route;
 /// handed it, the builder returns the primal block. `Nspace` builds `G` and
-/// its norms once; `GramP` builds `C = X̃'X̃` and its norm estimate once;
-/// `Primal` takes `‖xs_fit‖_F` once.
-fn perm_block(route: ReplicateRoute, xs_fit: MatRef<'_, f64>, par: faer::Par) -> PermBlock<'_> {
+/// its norms once; `GramP` builds `C = X̃'X̃` once; `Primal` takes
+/// `‖xs_fit‖_F` once.
+fn perm_block(route: ReplicateRoute, xs_fit: MatRef<'_, f64>, par: faer::Par) -> PermBlock {
     match route {
         ReplicateRoute::Nspace => {
             PermBlock::Nspace(crate::dual_route::NspaceGram::new(xs_fit, par))
         }
-        // `Seq`: the `ParChoice` of the Primal arm's fit, `perm_row`.
-        ReplicateRoute::GramP => PermBlock::GramP(crate::gram_p::GramPBlock::new(
-            xs_fit,
-            par,
-            crate::fit::ParChoice::Seq,
-        )),
+        ReplicateRoute::GramP => PermBlock::GramP(crate::gram_p::GramPBlock::new(xs_fit, par)),
         ReplicateRoute::Special | ReplicateRoute::Primal => PermBlock::Primal {
             x_fro: xs_fit.norm_l2(),
         },
     }
 }
 
-/// One permutation row: β of the refit on the permuted standardized outcome
-/// `ys_std[perm[i]]` (scaled by `sqw` when weighted), written into `out`
+/// One permutation row: β of the refit on `y_null`, a null column of the
+/// standardized outcome (scaled by `sqw` when weighted), written into `out`
 /// (length d). `xs_fit` is standardized and, when weighted, √w-scaled.
 /// Weights are NOT permuted: `w[i]` stays tied to row `i` whichever `y`
 /// value lands there (key invariant), which is why `xs_fit` can be shared.
@@ -482,28 +514,23 @@ fn perm_block(route: ReplicateRoute, xs_fit: MatRef<'_, f64>, par: faer::Par) ->
 /// # Errors
 /// What the kernel returns; `run_engine` then writes a NaN row.
 fn perm_row(
-    block: &PermBlock<'_>,
+    block: &PermBlock,
     xs_fit: MatRef<'_, f64>,
     sqw: Option<ColRef<'_, f64>>,
-    ys_std: ColRef<'_, f64>,
-    perm: &[usize],
+    y_null: ColRef<'_, f64>,
     k: usize,
     out: &mut [f64],
 ) -> PlsKitResult<()> {
     use crate::fit::{ParChoice, pls1_fit_prepared_fro, scale_col};
     match block {
         &PermBlock::Primal { x_fro } => {
-            let n = xs_fit.nrows();
-            let y_perm = faer::Col::<f64>::from_fn(n, |i| ys_std[perm[i]]);
             // Seq inside the per-permutation worker: outer Rayon owns the threadpool.
             let fit = match sqw {
                 Some(s) => {
-                    let ys_fit = scale_col(y_perm.as_ref(), s);
+                    let ys_fit = scale_col(y_null, s);
                     pls1_fit_prepared_fro(xs_fit, ys_fit.as_ref(), k, None, ParChoice::Seq, x_fro)?
                 }
-                None => {
-                    pls1_fit_prepared_fro(xs_fit, y_perm.as_ref(), k, None, ParChoice::Seq, x_fro)?
-                }
+                None => pls1_fit_prepared_fro(xs_fit, y_null, k, None, ParChoice::Seq, x_fro)?,
             };
             for (j, v) in out.iter_mut().enumerate() {
                 *v = fit.coef[j];
@@ -512,69 +539,36 @@ fn perm_row(
         }
         PermBlock::Nspace(gram) => {
             debug_assert!(k >= 1 && sqw.is_none());
-            if crate::dual_route::nspace_perm_row(gram, xs_fit, ys_std, perm, k, out) {
-                Ok(())
-            } else {
-                // Unresolved: the Primal arm's body, call for call.
-                perm_row(
-                    &PermBlock::Primal {
-                        x_fro: gram.x_fro(),
-                    },
-                    xs_fit,
-                    sqw,
-                    ys_std,
-                    perm,
-                    k,
-                    out,
-                )
-            }
+            crate::dual_route::nspace_perm_row(gram, xs_fit, y_null, k, out);
+            Ok(())
         }
         PermBlock::GramP(gram) => {
             debug_assert!(k >= 1);
-            if let Some(coef) = perm_row_coef(gram, sqw, ys_std, perm, k) {
-                for (j, v) in out.iter_mut().enumerate() {
-                    *v = coef[j];
-                }
-                return Ok(());
+            let coef = perm_row_coef(gram, xs_fit, sqw, y_null, k);
+            for (j, v) in out.iter_mut().enumerate() {
+                *v = coef[j];
             }
-            perm_row(
-                &PermBlock::Primal {
-                    x_fro: gram.x_fro(),
-                },
-                xs_fit,
-                sqw,
-                ys_std,
-                perm,
-                k,
-                out,
-            )
+            Ok(())
         }
     }
 }
 
-/// The Gram-p arm's fit of one permutation row: the fit target
-/// the Primal arm builds (`ys_std` permuted by `perm`, then `scale_col`-ed by
-/// `sqw` when weighted, weights tied to rows), fitted on the block's `C`.
-/// `None` when a gate refuses the replicate; the arm then runs the Primal
-/// arm's body, so the row is the Primal route's to the bit. A non-finite
-/// target fails the `tt` gate (every gate is an `a >= b` conjunction) and
-/// reaches that body too. `pre_standardized = true` inside the loop, so the
-/// row is `coef`.
+/// The Gram-p arm's fit of one permutation row, from the block's `C` alone
+/// after the GEMV `s₁ = xs_fit'ys`: the fit target the Primal arm builds
+/// (the null column `y_null`, `scale_col`-ed by `sqw` when weighted,
+/// weights tied to rows), `s₁` under the Primal arm's `ParChoice::Seq`.
+/// `pre_standardized = true` inside the loop, so the row is `coef`.
 fn perm_row_coef(
-    gram: &crate::gram_p::GramPBlock<'_>,
+    gram: &crate::gram_p::GramPBlock,
+    xs_fit: MatRef<'_, f64>,
     sqw: Option<ColRef<'_, f64>>,
-    ys_std: ColRef<'_, f64>,
-    perm: &[usize],
+    y_null: ColRef<'_, f64>,
     k: usize,
-) -> Option<faer::Col<f64>> {
-    let n = ys_std.nrows();
-    let y_perm = faer::Col::<f64>::from_fn(n, |i| ys_std[perm[i]]);
-    let ys_fit = match sqw {
-        Some(s) => crate::fit::scale_col(y_perm.as_ref(), s),
-        None => y_perm,
-    };
-    gram.fit_replicate(ys_fit.as_ref(), k, None)
-        .map(|(coef, _)| coef)
+) -> faer::Col<f64> {
+    let scaled = sqw.map(|s| crate::fit::scale_col(y_null, s));
+    let ys = scaled.as_ref().map_or(y_null, faer::Col::as_ref);
+    let s1 = crate::gram_p::first_product(xs_fit, ys, crate::fit::ParChoice::Seq, k);
+    gram.fit(s1.as_ref(), ys.norm_l2(), k, None).coef
 }
 
 #[cfg(test)]
@@ -631,7 +625,7 @@ mod layout_invariance {
                 };
                 for_each_layout(
                     &x0,
-                    |_, xv| pls1_perm_null(xv, y0.as_ref(), 2, wr, opts, Some(31)).unwrap(),
+                    |_, xv| pls1_perm_null(xv, y0.as_ref(), 2, wr, None, opts, Some(31)).unwrap(),
                     |view, got, want| {
                         assert_out_bits(got, want, &format!("{} {view} pre={pre}", f.name));
                     },
@@ -648,7 +642,7 @@ mod tests_engine_streaming {
 
     #[test]
     fn streaming_matches_retained_byte_exact() {
-        // Both paths fill the same flat buffer (parallel_fill_rows_seeded) and
+        // Both paths fill the same flat buffer (parallel_fill_rows) and
         // run the two-pass reduce over it; only retained returns the matrix.
         let (x, y) = synth(100, 5, 2, 4.0, 42);
         let opts_retained = PermNullOpts {
@@ -661,8 +655,26 @@ mod tests_engine_streaming {
             return_perm_matrix: false,
             ..opts_retained
         };
-        let r1 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts_retained, Some(99)).unwrap();
-        let r2 = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts_streaming, Some(99)).unwrap();
+        let r1 = pls1_perm_null(
+            x.as_ref(),
+            y.as_ref(),
+            2,
+            None,
+            None,
+            opts_retained,
+            Some(99),
+        )
+        .unwrap();
+        let r2 = pls1_perm_null(
+            x.as_ref(),
+            y.as_ref(),
+            2,
+            None,
+            None,
+            opts_streaming,
+            Some(99),
+        )
+        .unwrap();
         assert_eq!((r1.n_perm, r1.k), (200, 2));
         assert_eq!(r1.beta_perm_matrix.as_ref().map(Vec::len), Some(200 * 5));
         assert!(r2.beta_perm_matrix.is_none());
@@ -710,7 +722,7 @@ mod tests_calibration {
             pre_standardized: false,
             verbose: false,
         };
-        let out = pls1_perm_null(x.as_ref(), y.as_ref(), 1, None, opts, Some(7)).unwrap();
+        let out = pls1_perm_null(x.as_ref(), y.as_ref(), 1, None, None, opts, Some(7)).unwrap();
         // Tolerance: 5σ band around 0 with σ ≈ sd/√B. `sd[j]/√1000 * 5` ~ generous.
         for j in 0..5 {
             let band = 5.0 * out.beta_perm_sd[j] / (1000.0_f64).sqrt();
@@ -738,8 +750,16 @@ mod tests_calibration {
                 pre_standardized: false,
                 verbose: false,
             };
-            let out =
-                pls1_perm_null(x.as_ref(), y.as_ref(), 1, None, opts, Some(seed * 11 + 7)).unwrap();
+            let out = pls1_perm_null(
+                x.as_ref(),
+                y.as_ref(),
+                1,
+                None,
+                None,
+                opts,
+                Some(seed * 11 + 7),
+            )
+            .unwrap();
             for &z in &out.beta_perm_z {
                 if z.is_finite() {
                     total += 1;
@@ -767,7 +787,7 @@ mod tests_calibration {
             pre_standardized: false,
             verbose: false,
         };
-        let out = pls1_perm_null(x.as_ref(), y.as_ref(), 1, None, opts, Some(31)).unwrap();
+        let out = pls1_perm_null(x.as_ref(), y.as_ref(), 1, None, None, opts, Some(31)).unwrap();
         // Feature 0 carries the planted signal with positive sign.
         assert!(
             out.beta_perm_z[0] > 0.0,
@@ -806,7 +826,7 @@ mod tests_calibration {
             pre_standardized: false,
             verbose: false,
         };
-        let out = pls1_perm_null(x.as_ref(), y.as_ref(), 1, None, opts, Some(43)).unwrap();
+        let out = pls1_perm_null(x.as_ref(), y.as_ref(), 1, None, None, opts, Some(43)).unwrap();
         let z = &out.beta_perm_z;
         assert!(z[..10].iter().all(|v| *v > 3.0), "block z {:?}", &z[..10]);
         assert!(
@@ -839,7 +859,7 @@ mod tests_validation {
             pre_standardized: false,
             verbose: false,
         };
-        let err = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts, Some(1)).unwrap_err();
+        let err = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, None, opts, Some(1)).unwrap_err();
         assert_eq!(err.code(), "dimension_mismatch");
     }
 
@@ -853,7 +873,7 @@ mod tests_validation {
             pre_standardized: false,
             verbose: false,
         };
-        let err = pls1_perm_null(x.as_ref(), y.as_ref(), 5, None, opts, Some(1)).unwrap_err();
+        let err = pls1_perm_null(x.as_ref(), y.as_ref(), 5, None, None, opts, Some(1)).unwrap_err();
         assert_eq!(err.code(), "k_exceeds_max");
     }
 
@@ -868,7 +888,7 @@ mod tests_validation {
             pre_standardized: false,
             verbose: false,
         };
-        let err = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts, Some(1)).unwrap_err();
+        let err = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, None, opts, Some(1)).unwrap_err();
         assert_eq!(err.code(), "invalid_argument");
         assert!(format!("{err}").contains("n_perm must be"), "{err}");
     }
@@ -894,17 +914,7 @@ mod tests_nspace {
     }
 
     fn run(x: &Mat<f64>, y: &Col<f64>, k: usize, o: PermNullOpts) -> PermNullOutput {
-        pls1_perm_null(x.as_ref(), y.as_ref(), k, None, o, Some(17)).expect("perm_null")
-    }
-
-    /// The whole B×D matrix bit for bit: the rows a fallback computes are
-    /// the primal route's exactly.
-    fn assert_matrix_bits_eq(a: &PermNullOutput, b: &PermNullOutput, what: &str) {
-        assert_eq!(
-            bits(a.beta_perm_matrix.as_deref().expect("matrix")),
-            bits(b.beta_perm_matrix.as_deref().expect("matrix")),
-            "{what}: every row falls back, so every bit is the primal's"
-        );
+        pls1_perm_null(x.as_ref(), y.as_ref(), k, None, None, o, Some(17)).expect("perm_null")
     }
 
     #[test]
@@ -927,6 +937,7 @@ mod tests_nspace {
             y.as_ref(),
             2,
             Some(w.as_ref()),
+            None,
             opts(),
             Some(17),
         )
@@ -971,7 +982,7 @@ mod tests_nspace {
 
     #[test]
     fn tiny_scale_pre_standardized_x_matches_the_primal_route() {
-        // The one input that reaches the absolute-floor gates.
+        // The one input that reaches the kernel's absolute floors.
         let (x, y) = synth(40, 2000, 1, 1.0, 3);
         let (xs, _, _) = standardize(x.as_ref());
         let (ys, _, _) = standardize1(y.as_ref());
@@ -990,20 +1001,16 @@ mod tests_nspace {
                 &format!("scale {s:e}"),
             );
         }
-        // At these two scales no replicate clears the gates, so the whole
-        // matrix is the primal route's to the bit.
-        for s in [1e-8, 1e-12] {
-            let xt = Mat::<f64>::from_fn(40, 2000, |i, j| xs[(i, j)] * s);
-            let gram = run(&xt, &ys, 2, o);
-            let primal = with_gram_routes_disabled(|| run(&xt, &ys, 2, o));
-            assert_matrix_bits_eq(&gram, &primal, &format!("scale {s:e}"));
-        }
     }
 
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn pre_standardized_outcomes_of_extreme_magnitude_match_the_primal_route() {
-        // Squares of z underflow (1e-160) or overflow (1e160); the gates
-        // must fail closed and hand those replicates to the primal.
+        // Squares of z underflow (1e-160) or overflow (1e160), and below
+        // about 1e-16 the absolute exit `‖X_a'y_a‖ < 1e-14` decides the
+        // components; the kernel divides z by a power of two first and
+        // applies that exit on the scale of z, so every row is the primal's
+        // to `1e-10` of its own largest entry, and a zero row stays zero.
         let (x, y) = synth(40, 2000, 1, 1.0, 4);
         let (xs, _, _) = standardize(x.as_ref());
         let (ys, _, _) = standardize1(y.as_ref());
@@ -1011,24 +1018,26 @@ mod tests_nspace {
             pre_standardized: true,
             ..opts()
         };
-        for m in [1e-160, 1e-120, 1e120, 1e160] {
+        for m in [1e-160, 1e-120, 1e-20, 1e-16, 1e120, 1e160] {
             let yt = Col::<f64>::from_fn(40, |i| ys[i] * m);
             let gram = run(&xs, &yt, 2, o);
             let primal = with_gram_routes_disabled(|| run(&xs, &yt, 2, o));
-            assert_rows_close(
+            let d = gram.beta_ref.len();
+            let (a, b) = (
                 gram.beta_perm_matrix.as_deref().expect("matrix"),
                 primal.beta_perm_matrix.as_deref().expect("matrix"),
-                gram.beta_ref.len(),
-                &format!("|y| ~ {m:e}"),
             );
-        }
-        // At these two magnitudes `‖z‖²` underflows or overflows for every
-        // replicate, so the whole matrix is the primal route's to the bit.
-        for m in [1e-160, 1e160] {
-            let yt = Col::<f64>::from_fn(40, |i| ys[i] * m);
-            let gram = run(&xs, &yt, 2, o);
-            let primal = with_gram_routes_disabled(|| run(&xs, &yt, 2, o));
-            assert_matrix_bits_eq(&gram, &primal, &format!("|y| ~ {m:e}"));
+            for (r, (ra, rb)) in a.chunks(d).zip(b.chunks(d)).enumerate() {
+                let scale = rb.iter().fold(0.0_f64, |s, v| s.max(v.abs()));
+                let diff = ra
+                    .iter()
+                    .zip(rb)
+                    .fold(0.0_f64, |s, (u, v)| s.max((u - v).abs()));
+                assert!(
+                    diff <= 1e-10 * scale,
+                    "|y| ~ {m:e}, row {r}: max |Δ| {diff:e} against row scale {scale:e}"
+                );
+            }
         }
     }
 }
@@ -1038,59 +1047,9 @@ mod tests_gram_p {
     use super::*;
     use crate::signal_test::{ReplicateRoute, with_gram_routes_disabled};
     use crate::test_support::{
-        assert_rows_close, assert_summaries_close, bits, conditioned, gram_p_weights, linear_y,
-        unif,
+        assert_rows_close, assert_summaries_close, bits, gram_p_weights, linear_y, unif,
     };
-    use faer::{Col, Mat, Par};
-
-    #[test]
-    fn gram_p_arm_falls_back_to_the_primal_arm_to_the_bit() {
-        // κ = 1e9 at k = p = 20: every permutation fails a gate (Tt by
-        // component 4 on this design), so every GramP row is the
-        // Primal arm's row, bit for bit. The route rule never sends k = 20
-        // here; the arm itself accepts any k.
-        let xs = conditioned(2000, 20, 1e9, 5);
-        let (ys, _, _) = crate::linalg::standardize1(linear_y(&xs, 0.1, 6).as_ref());
-        let g_block = perm_block(ReplicateRoute::GramP, xs.as_ref(), Par::Seq);
-        let p_block = perm_block(ReplicateRoute::Primal, xs.as_ref(), Par::Seq);
-        let PermBlock::GramP(gram) = &g_block else {
-            panic!("perm_block(GramP) built another block")
-        };
-        let (mut row_g, mut row_p) = (vec![0.0_f64; 20], vec![0.0_f64; 20]);
-        for b in 0..20u64 {
-            let perm = crate::resample::permutation_from_seed(2000, b);
-            assert!(
-                perm_row_coef(gram, None, ys.as_ref(), &perm, 20).is_none(),
-                "premise: permutation {b} falls back"
-            );
-            let rg = perm_row(
-                &g_block,
-                xs.as_ref(),
-                None,
-                ys.as_ref(),
-                &perm,
-                20,
-                &mut row_g,
-            );
-            let rp = perm_row(
-                &p_block,
-                xs.as_ref(),
-                None,
-                ys.as_ref(),
-                &perm,
-                20,
-                &mut row_p,
-            );
-            assert_eq!(rg.is_ok(), rp.is_ok(), "permutation {b}: same outcome");
-            assert!(
-                row_g
-                    .iter()
-                    .zip(&row_p)
-                    .all(|(a, c)| a.to_bits() == c.to_bits()),
-                "permutation {b}: the fallback row is the Primal row"
-            );
-        }
-    }
+    use faer::{Col, Mat};
 
     #[test]
     fn perm_null_gram_route_is_invisible() {
@@ -1115,6 +1074,7 @@ mod tests_gram_p {
                     y.as_ref(),
                     k,
                     wopt.map(Col::as_ref),
+                    None,
                     opts,
                     Some(77),
                 )
@@ -1147,32 +1107,20 @@ mod tests_gram_p {
 
     #[test]
     fn tiny_scale_pre_standardized_x_matches_the_primal_route() {
-        // At 1e-6 the Gram route resolves; at 1e-8, tt approaches the
-        // absolute band and it must fall back. Either way: the Primal
-        // route's rows. beta scales as 1/scale, so the rows are compared
-        // with the relative row rule.
+        // At 1e-8, t't = ‖Xs·w‖² is about 2e-13 (2000 rows of unit-SD
+        // columns times 1e-16), near the kernel's absolute exit of 1e-14.
+        // The rows are the Primal route's to the row rule (beta scales as
+        // 1/scale).
         let x = unif(2000, 50, 78);
         let (xs, _, _) = crate::linalg::standardize(x.as_ref());
         let (ys, _, _) = crate::linalg::standardize1(linear_y(&x, 1.0, 79).as_ref());
         for scale in [1e-6, 1e-8] {
             let xt = Mat::<f64>::from_fn(2000, 50, |i, j| xs[(i, j)] * scale);
-            // Premise: the GramP block resolves some permutations at 1e-6
-            // and none at 1e-8.
-            let g_block = perm_block(ReplicateRoute::GramP, xt.as_ref(), Par::Seq);
-            let PermBlock::GramP(gram) = &g_block else {
-                panic!("perm_block(GramP) built another block")
-            };
-            let resolved = (0..50u64)
-                .filter(|&b| {
-                    let perm = crate::resample::permutation_from_seed(2000, b);
-                    perm_row_coef(gram, None, ys.as_ref(), &perm, 2).is_some()
-                })
-                .count();
-            if scale > 1e-7 {
-                assert!(resolved > 0, "premise: scale {scale:e} resolves some rows");
-            } else {
-                assert_eq!(resolved, 0, "premise: scale {scale:e} resolves no row");
-            }
+            assert_eq!(
+                perm_null_route(2000, 50, 300, 2, false),
+                ReplicateRoute::GramP,
+                "premise"
+            );
             let opts = PermNullOpts {
                 n_perm: 300,
                 return_perm_matrix: true,
@@ -1180,7 +1128,7 @@ mod tests_gram_p {
                 verbose: false,
             };
             let call = || {
-                pls1_perm_null(xt.as_ref(), ys.as_ref(), 2, None, opts, Some(80))
+                pls1_perm_null(xt.as_ref(), ys.as_ref(), 2, None, None, opts, Some(80))
                     .expect("perm_null")
             };
             let g = call();
@@ -1191,6 +1139,90 @@ mod tests_gram_p {
                 50,
                 &format!("scale {scale:e}"),
             );
+        }
+    }
+
+    /// With covariates, `beta_ref` is the covariate fit's `coef`, the
+    /// result records the kept covariates, and the null rows are the
+    /// engine's on the adjusted data with the Freedman–Lane map, bit for
+    /// bit. The engine reads its null columns through the map: one
+    /// that writes `ỹ` into every null column makes every null row the
+    /// observed fit, so `beta_perm_sd` is 0 to rounding.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn perm_null_with_covariates() {
+        use crate::fit::{FitOpts, KSpec, fit_row_scale, pls1_fit, scale_rows};
+        use crate::test_support::{assert_close_rel, synth, test_weights, unif};
+        use faer::{Col, Mat};
+        let n = 60;
+        let (x, y) = synth(n, 8, 2, 1.0, 81);
+        let z = unif(n, 2, 82);
+        let opts = PermNullOpts {
+            n_perm: 100,
+            ..PermNullOpts::default()
+        };
+        for (k, w) in [(1, None), (2, None), (2, Some(test_weights(n)))] {
+            let wr = w.as_ref().map(Col::as_ref);
+            let out = pls1_perm_null(
+                x.as_ref(),
+                y.as_ref(),
+                k,
+                wr,
+                Some(z.as_ref()),
+                opts,
+                Some(5),
+            )
+            .unwrap();
+            let fit = pls1_fit(
+                x.as_ref(),
+                y.as_ref(),
+                KSpec::Fixed(k),
+                wr,
+                Some(z.as_ref()),
+                FitOpts::default(),
+            )
+            .unwrap();
+            let beta_ref = Col::<f64>::from_fn(8, |j| out.beta_ref[j]);
+            assert_close_rel(beta_ref.as_mat(), fit.coef.as_mat(), 1e-12, "beta_ref");
+            assert_eq!(out.n_covariates, Some(2));
+
+            let (wn, _) = crate::fit::validate_and_normalize_weights(wr, n, k).unwrap();
+            let adj = crate::covariates::adjust(
+                x.as_ref(),
+                y.as_ref(),
+                z.as_ref(),
+                wn.as_ref().map(Col::as_ref),
+                false,
+            )
+            .unwrap();
+            let sqw = wn.as_ref().map(|w| fit_row_scale(w.as_ref()));
+            let xs_fit: Mat<f64> = match &sqw {
+                Some(s) => scale_rows(adj.x.as_ref(), s.as_ref()),
+                None => adj.x.clone(),
+            };
+            let engine = |map: Option<crate::resample::NullMap<'_>>| {
+                let (_, mut rng) = crate::rng::resolve_seed(Some(5)).unwrap();
+                run_engine(
+                    xs_fit.as_ref(),
+                    adj.y.as_ref(),
+                    k,
+                    sqw.as_ref().map(Col::as_ref),
+                    out.beta_ref.clone(),
+                    out.n_eff,
+                    opts,
+                    5,
+                    map,
+                    &mut rng,
+                )
+                .unwrap()
+            };
+            let fl = |_: usize, m: faer::MatMut<'_, f64>| adj.basis.residualize(m);
+            assert_eq!(engine(Some(&fl)).beta_perm_sd, out.beta_perm_sd, "k = {k}");
+            let fill =
+                |_: usize, mut m: faer::MatMut<'_, f64>| m.copy_from(adj.y.as_ref().as_mat());
+            let scale = out.beta_ref.iter().fold(0.0_f64, |m, b| m.max(b.abs()));
+            let sd = engine(Some(&fill)).beta_perm_sd;
+            assert!(sd.iter().all(|s| *s <= 1e-12 * scale), "k = {k}: {sd:?}");
         }
     }
 }

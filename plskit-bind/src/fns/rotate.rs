@@ -2,6 +2,7 @@
 
 use faer::linalg::matmul::matmul;
 use faer::{Accum, Mat, MatRef, Par};
+use plskit::covariates::CovariateBasis;
 use plskit::{FactorsOutput, PreprocessInput, RotationMethod};
 
 use crate::coerce;
@@ -98,12 +99,36 @@ fn check_not_rotated(rec: &Record<'_>, what: &str) -> Result<(), BindError> {
     Ok(())
 }
 
+/// The covariate rule of a call that takes a fit (or its factors) with X.
+/// `fitted` is whether the fit had covariates, `None` for a raw vector or
+/// matrix, which takes them or not as the caller says. A fit with
+/// covariates needs them, so X is never used unadjusted; a fit without
+/// them refuses them.
+pub(crate) fn check_covariates(
+    what: &str,
+    fitted: Option<bool>,
+    given: bool,
+) -> Result<(), BindError> {
+    match (fitted, given) {
+        (Some(true), false) => Err(BindError::invalid_argument(format!(
+            "{what} was made with covariates: pass covariates, so X is adjusted as the fit was"
+        ))),
+        (Some(false), true) => Err(BindError::invalid_argument(format!(
+            "{what} was made without covariates: covariates are not accepted"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// `Xs W` as a rotation target. `Xs` is `x` standardized unless
-/// `pre_standardized`.
+/// `pre_standardized`. With covariates `Z` the target is `M_Z·Xs·W`, the
+/// least-squares residuals of `Xs W` on `[1, Z]`: `M_Z` is linear, so this
+/// is `X̃ W` with `X̃ = M_Z·Xs` the adjusted data of the fit.
 fn row_target(
     x: MatRef<'_, f64>,
     w: MatRef<'_, f64>,
     pre_standardized: bool,
+    covariates: Option<MatRef<'_, f64>>,
 ) -> Result<MatF64<'static>, BindError> {
     if x.ncols() != w.nrows() {
         return Err(BindError::new(
@@ -123,7 +148,17 @@ fn row_target(
     }
     let xs_owned = standardized(x, pre_standardized)?;
     let xs = xs_owned.as_ref().map_or(x, Mat::as_ref);
-    Ok(MatF64::from_mat(&product(xs, w)))
+    let mut l = product(xs, w);
+    if let Some(z) = covariates {
+        if z.nrows() != x.nrows() {
+            return Err(BindError::new(
+                "shape_mismatch",
+                format!("covariates have {} rows, X has {}", z.nrows(), x.nrows()),
+            ));
+        }
+        engine(CovariateBasis::new(z, None))?.residualize(l.as_mut());
+    }
+    Ok(MatF64::from_mat(&l))
 }
 
 /// A field of `rec` copied as it is, or null.
@@ -131,16 +166,20 @@ pub(crate) fn carried(rec: &Record<'_>, key: &str) -> Value<'static> {
     rec.get(key).map_or(Value::Null, |v| v.clone().into_owned())
 }
 
-/// `rotate(model_or_W, X=None, *, method="varimax", L=None, args=None,
-/// pre_standardized=None)`.
+/// `rotate(model_or_W, X=None, *, covariates=None, method="varimax", L=None,
+/// args=None, pre_standardized=None)`.
 ///
-/// `X` sets the target to `Xs W`. `pre_standardized` defaults to the
+/// `X` sets the target to `Xs W`, or to `M_Z·Xs·W` with `covariates`
+/// (see [`row_target`]). A `FactorsResult` made with covariates needs them
+/// with `X`, one made without refuses them; a `PLS3Result` refuses them. `pre_standardized` defaults to the
 /// result's own value, and to false for a matrix. For a `PLS3Result` the
 /// target is its stored `x_scores` (`X` is checked for its row count only),
 /// so `pre_standardized` is refused there.
+#[allow(clippy::too_many_lines)] // one match arm per overload of the first argument
 pub(crate) fn rotate(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let target = inp.take("model_or_W");
     let x = inp.opt_mat("X")?;
+    let z = inp.opt_covariates()?;
     let method = inp.string("method")?;
     let l = inp.opt_mat("L")?;
     let args = inp.opt_record("args")?;
@@ -156,10 +195,16 @@ pub(crate) fn rotate(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
             "pre_standardized needs X: it says how to standardize X",
         ));
     }
+    if x.is_none() && z.is_some() {
+        return Err(BindError::invalid_argument(
+            "covariates need X: they are removed from X",
+        ));
+    }
+    let z = z.as_ref().map(MatF64::as_mat);
     match target {
         Value::Mat(w) => {
             let l = match &x {
-                Some(x) => Some(row_target(x.as_mat(), w.as_mat(), set.unwrap_or(false))?),
+                Some(x) => Some(row_target(x.as_mat(), w.as_mat(), set.unwrap_or(false), z)?),
                 None => l,
             };
             let rot = rotate_array(w.as_mat(), &method, l.as_ref(), args.as_ref())?;
@@ -173,11 +218,15 @@ pub(crate) fn rotate(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
             check_not_rotated(&r, "factors")?;
             let f = convert::factors_from_record(&r)?;
             let l = match &x {
-                Some(x) => Some(row_target(
-                    x.as_mat(),
-                    f.w.as_ref(),
-                    set.unwrap_or(f.pre_standardized),
-                )?),
+                Some(x) => {
+                    check_covariates("factors", Some(f.covariate_adjusted), z.is_some())?;
+                    Some(row_target(
+                        x.as_mat(),
+                        f.w.as_ref(),
+                        set.unwrap_or(f.pre_standardized),
+                        z,
+                    )?)
+                }
                 None => l,
             };
             let (out, spec) = rotate_factors(&f, &method, l.as_ref(), args.as_ref())?;
@@ -187,6 +236,11 @@ pub(crate) fn rotate(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
             if set.is_some() {
                 return Err(BindError::invalid_argument(
                     "pre_standardized is not taken for a PLS3Result: X gives its stored x_scores as the target",
+                ));
+            }
+            if z.is_some() {
+                return Err(BindError::invalid_argument(
+                    "covariates are not taken for a PLS3Result: X gives its stored x_scores as the target",
                 ));
             }
             check_not_rotated(&r, "model")?;

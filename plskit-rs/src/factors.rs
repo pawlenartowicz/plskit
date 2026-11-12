@@ -26,6 +26,7 @@
 
 use faer::{Col, ColRef, Mat, MatRef, Par};
 
+use crate::covariates::CovariateBasis;
 use crate::error::{PlsKitError, PlsKitResult};
 use crate::fit::{FitOpts, KSpec, ParChoice, pls1_fit_impl};
 use crate::linalg::{
@@ -57,6 +58,9 @@ pub struct FactorsOutput {
     pub coef: Col<f64>,
     /// Whether `X` was taken as already standardized.
     pub pre_standardized: bool,
+    /// Whether the covariates were removed from `X` before the basis was
+    /// taken.
+    pub covariate_adjusted: bool,
 }
 
 /// Block end positions (exclusive) for cutting `c` into `n` blocks.
@@ -119,11 +123,20 @@ fn block_ends(c: &[f64], n: usize) -> Vec<usize> {
 /// - `x`: `(N, D)`, `N ≥ 1`
 /// - `n`: `1 ≤ n ≤ K`, where `K` is the rank of the columns left in, plus
 ///   one when the residual column is appended
+/// - `covariates`: `(N, p_Z)`, optional
 /// - returns `f: (D, n)`, `w: (D, n)`, `size: (n,)`, `coef: (D,)`
+///
+/// With `covariates`, the columns of `x` left in are standardized without
+/// weights (taken as given under `pre_standardized`), then replaced by their
+/// least-squares residuals on `[1, Z]` over all rows, and the PCA basis is
+/// taken of those residuals. `covariate_adjusted` is then true.
 ///
 /// # Errors
 ///
-/// - [`PlsKitError::ShapeMismatch`] — `coef.nrows() != x.ncols()`.
+/// - [`PlsKitError::ShapeMismatch`] — `coef.nrows() != x.ncols()`, or
+///   `covariates` has a row count other than `x.nrows()`.
+/// - [`PlsKitError::NonFiniteInput`] — `covariates` holds a NaN or an
+///   infinity.
 /// - [`PlsKitError::InvalidInput`] — non-finite `coef` or `x`; zero `coef`;
 ///   `n` outside `[1, K]`; a block with `size ≤ 1e-12 ‖coef‖` (the message
 ///   names the block's component range); `‖coef‖` or `W' coef` overflowing
@@ -136,6 +149,7 @@ pub fn factors(
     x: MatRef<'_, f64>,
     n: usize,
     pre_standardized: bool,
+    covariates: Option<MatRef<'_, f64>>,
 ) -> PlsKitResult<FactorsOutput> {
     let d = x.ncols();
     if coef.nrows() != d {
@@ -159,7 +173,25 @@ pub fn factors(
         return Err(PlsKitError::InvalidInput("coef is zero".into()));
     }
     let x_kept = Mat::<f64>::from_fn(x.nrows(), kept.len(), |i, j| x[(i, kept[j])]);
-    let mut v = pca_basis(x_kept.as_ref(), pre_standardized)?.v;
+    let mut v = if let Some(z) = covariates {
+        if z.nrows() != x.nrows() {
+            return Err(PlsKitError::ShapeMismatch(format!(
+                "covariates have {} rows, X has {}",
+                z.nrows(),
+                x.nrows()
+            )));
+        }
+        let basis = CovariateBasis::new(z, None)?;
+        let mut xs = if pre_standardized {
+            x_kept
+        } else {
+            standardize(x_kept.as_ref()).0
+        };
+        basis.residualize(xs.as_mut());
+        pca_basis(xs.as_ref(), true)?.v
+    } else {
+        pca_basis(x_kept.as_ref(), pre_standardized)?.v
+    };
     let coef_kept = Col::<f64>::from_fn(kept.len(), |i| coef[kept[i]]);
     let resid = |u: ColRef<'_, f64>| {
         let vu = mat_vec(
@@ -188,7 +220,7 @@ pub fn factors(
             w[(j, col)] = v[(row, col)];
         }
     }
-    split_on_basis(w.as_ref(), coef, n, pre_standardized)
+    split_on_basis(w.as_ref(), coef, n, pre_standardized, covariates.is_some())
 }
 
 /// Split `coef` into `n` orthogonal factors along the columns of `w`.
@@ -217,6 +249,7 @@ fn split_on_basis(
     coef: ColRef<'_, f64>,
     n: usize,
     pre_standardized: bool,
+    covariate_adjusted: bool,
 ) -> PlsKitResult<FactorsOutput> {
     let (d, k) = w.shape();
     if n < 1 || n > k {
@@ -262,6 +295,7 @@ fn split_on_basis(
         size,
         coef: coef.to_owned(),
         pre_standardized,
+        covariate_adjusted,
     })
 }
 
@@ -344,6 +378,7 @@ impl FactorsOutput {
                 size,
                 coef: self.coef.clone(),
                 pre_standardized: self.pre_standardized,
+                covariate_adjusted: self.covariate_adjusted,
             },
             r_out,
         ))
@@ -582,6 +617,7 @@ pub fn profiles_find_n(
             x_tr.as_ref(),
             y_tr.as_ref(),
             KSpec::Fixed(k),
+            None,
             None,
             FitOpts {
                 check_n_eff: false,
@@ -861,7 +897,7 @@ mod tests {
     fn sum_orthonormality_and_sizes_hold() {
         let (w, coef) = basis_and_coef();
         for n in [3, 1, K] {
-            let out = split_on_basis(w.as_ref(), coef.as_ref(), n, false).unwrap();
+            let out = split_on_basis(w.as_ref(), coef.as_ref(), n, false, false).unwrap();
             assert_eq!(out.f.shape(), (D, n));
             assert_identities(&out, coef.as_ref());
         }
@@ -871,7 +907,7 @@ mod tests {
     fn identities_hold_after_a_hand_built_rotation() {
         let (w, coef) = basis_and_coef();
         for n in [3, 1, K] {
-            let out = split_on_basis(w.as_ref(), coef.as_ref(), n, false).unwrap();
+            let out = split_on_basis(w.as_ref(), coef.as_ref(), n, false, false).unwrap();
             let (rot, _) = out.rotated(givens(n).as_ref()).unwrap();
             assert_identities(&rot, coef.as_ref());
         }
@@ -881,7 +917,7 @@ mod tests {
     fn flipping_a_rotation_column_leaves_f_unchanged() {
         let (w, coef) = basis_and_coef();
         for n in [3, K] {
-            let out = split_on_basis(w.as_ref(), coef.as_ref(), n, false).unwrap();
+            let out = split_on_basis(w.as_ref(), coef.as_ref(), n, false, false).unwrap();
             let r = givens(n);
             let mut r_flip = r.clone();
             for row in 0..n {
@@ -905,7 +941,7 @@ mod tests {
     fn rotated_is_sorted_nonnegative_and_r_is_exact() {
         let (w, coef) = basis_and_coef();
         for n in [3, K] {
-            let out = split_on_basis(w.as_ref(), coef.as_ref(), n, false).unwrap();
+            let out = split_on_basis(w.as_ref(), coef.as_ref(), n, false, false).unwrap();
             let (rot, r) = out.rotated(givens(n).as_ref()).unwrap();
             for j in 0..n {
                 assert!(rot.size[j] >= 0.0);
@@ -925,7 +961,7 @@ mod tests {
     #[test]
     fn one_factor_after_rotation_is_coef() {
         let (w, coef) = basis_and_coef();
-        let out = split_on_basis(w.as_ref(), coef.as_ref(), 1, false).unwrap();
+        let out = split_on_basis(w.as_ref(), coef.as_ref(), 1, false, false).unwrap();
         for i in 0..D {
             assert!((out.f[(i, 0)] - coef[i]).abs() <= 1e-12);
         }
@@ -938,7 +974,7 @@ mod tests {
     #[test]
     fn output_ignores_basis_column_signs() {
         let (w, coef) = basis_and_coef();
-        let base = split_on_basis(w.as_ref(), coef.as_ref(), 3, false).unwrap();
+        let base = split_on_basis(w.as_ref(), coef.as_ref(), 3, false, false).unwrap();
         let w_neg = Mat::<f64>::from_fn(D, K, |i, j| {
             if j == 1 || j == 3 {
                 -w[(i, j)]
@@ -946,7 +982,7 @@ mod tests {
                 w[(i, j)]
             }
         });
-        let flipped = split_on_basis(w_neg.as_ref(), coef.as_ref(), 3, false).unwrap();
+        let flipped = split_on_basis(w_neg.as_ref(), coef.as_ref(), 3, false, false).unwrap();
         for j in 0..3 {
             for i in 0..D {
                 assert!((base.f[(i, j)] - flipped.f[(i, j)]).abs() <= 1e-12);
@@ -962,30 +998,42 @@ mod tests {
             |r: PlsKitResult<FactorsOutput>| matches!(r, Err(PlsKitError::InvalidInput(_)));
 
         assert!(
-            invalid(split_on_basis(w.as_ref(), coef.as_ref(), 0, false)),
+            invalid(split_on_basis(w.as_ref(), coef.as_ref(), 0, false, false)),
             "n = 0"
         );
         assert!(
-            invalid(split_on_basis(w.as_ref(), coef.as_ref(), K + 1, false)),
+            invalid(split_on_basis(
+                w.as_ref(),
+                coef.as_ref(),
+                K + 1,
+                false,
+                false
+            )),
             "n = K + 1"
         );
 
         let w_scaled = Mat::<f64>::from_fn(D, K, |i, j| w[(i, j)] * 1.001);
         assert!(
-            invalid(split_on_basis(w_scaled.as_ref(), coef.as_ref(), 3, false)),
+            invalid(split_on_basis(
+                w_scaled.as_ref(),
+                coef.as_ref(),
+                3,
+                false,
+                false
+            )),
             "non-orthonormal"
         );
 
         let mut off_span = coef.clone();
         off_span[0] += 1e-3;
-        match split_on_basis(w.as_ref(), off_span.as_ref(), 3, false) {
+        match split_on_basis(w.as_ref(), off_span.as_ref(), 3, false, false) {
             Err(PlsKitError::InvalidInput(m)) => assert!(m.contains("basis of X"), "{m}"),
             other => panic!("outside span: {other:?}"),
         }
 
         let e = Mat::<f64>::from_fn(5, 3, |i, j| if i == j { 1.0 } else { 0.0 });
         let c = Col::<f64>::from_fn(5, |i| if i == 0 { 1.0 } else { 0.0 });
-        match split_on_basis(e.as_ref(), c.as_ref(), 3, false) {
+        match split_on_basis(e.as_ref(), c.as_ref(), 3, false, false) {
             Err(PlsKitError::InvalidInput(msg)) => {
                 assert!(msg.contains("1..2"), "message names the range: {msg}");
                 assert!(msg.contains("0-based, end excluded"), "convention: {msg}");
@@ -1007,9 +1055,9 @@ mod tests {
     fn factors_matches_the_basis_split_on_the_same_x() {
         let (x, coef) = x_and_coef();
         let xs = standardize(x.as_ref()).0;
-        let got = factors(coef.as_ref(), x.as_ref(), 3, false).unwrap();
+        let got = factors(coef.as_ref(), x.as_ref(), 3, false, None).unwrap();
         let v = pca_basis(xs.as_ref(), true).unwrap().v;
-        let want = split_on_basis(v.as_ref(), coef.as_ref(), 3, false).unwrap();
+        let want = split_on_basis(v.as_ref(), coef.as_ref(), 3, false, false).unwrap();
         for j in 0..3 {
             assert!((got.size[j] - want.size[j]).abs() <= 1e-12, "size {j}");
             for i in 0..10 {
@@ -1020,12 +1068,79 @@ mod tests {
     }
 
     #[test]
+    fn factors_with_covariates_equals_adjusted_call() {
+        use crate::covariates::adjust;
+        use crate::fit::{FitOpts, KSpec, pls1_fit};
+        let n = 60;
+        let z = unif(n, 2, 31);
+        // X depends on Z, so removing Z changes it.
+        let x0 = unif(n, 8, 32);
+        let x = Mat::<f64>::from_fn(n, 8, |i, j| x0[(i, j)] + 2.0 * z[(i, j % 2)]);
+        let y = Col::<f64>::from_fn(n, |i| x[(i, 0)] + z[(i, 0)] + 0.1 * unif_col(n, 33)[i]);
+        let model = pls1_fit(
+            x.as_ref(),
+            y.as_ref(),
+            KSpec::Fixed(3),
+            None,
+            Some(z.as_ref()),
+            FitOpts::default(),
+        )
+        .unwrap();
+        let xt = adjust(x.as_ref(), y.as_ref(), z.as_ref(), None, false)
+            .unwrap()
+            .x;
+        let got = factors(model.coef.as_ref(), x.as_ref(), 3, false, Some(z.as_ref())).unwrap();
+        let want = factors(model.coef.as_ref(), xt.as_ref(), 3, true, None).unwrap();
+        let plain = factors(model.coef.as_ref(), x.as_ref(), 3, false, None).unwrap();
+        assert!(got.covariate_adjusted && !want.covariate_adjusted && !plain.covariate_adjusted);
+        let mut differs = false;
+        for j in 0..3 {
+            assert!(
+                (got.size[j] - want.size[j]).abs() <= 1e-12 * want.size[j],
+                "size {j}"
+            );
+            differs |= (got.size[j] - plain.size[j]).abs() > 1e-6;
+            for i in 0..8 {
+                assert!((got.f[(i, j)] - want.f[(i, j)]).abs() <= 1e-12, "f");
+                assert!((got.w[(i, j)] - want.w[(i, j)]).abs() <= 1e-12, "w");
+                differs |= (got.w[(i, j)] - plain.w[(i, j)]).abs() > 1e-6;
+            }
+        }
+        assert!(differs, "covariates must change the output");
+        let (rot, _) = got.rotated(givens(3).as_ref()).unwrap();
+        assert!(rot.covariate_adjusted);
+        let short = Mat::<f64>::zeros(n - 1, 1);
+        assert!(matches!(
+            factors(
+                model.coef.as_ref(),
+                x.as_ref(),
+                3,
+                false,
+                Some(short.as_ref())
+            ),
+            Err(PlsKitError::ShapeMismatch(_))
+        ));
+        let mut bad = z.clone();
+        bad[(0, 0)] = f64::NAN;
+        assert!(matches!(
+            factors(
+                model.coef.as_ref(),
+                x.as_ref(),
+                3,
+                false,
+                Some(bad.as_ref())
+            ),
+            Err(PlsKitError::NonFiniteInput)
+        ));
+    }
+
+    #[test]
     #[allow(clippy::float_cmp)] // exact zeros by construction
     fn left_out_variables_hold_exact_zeros() {
         let (x, mut coef) = x_and_coef();
         coef[3] = 0.0;
         coef[7] = 0.0;
-        let out = factors(coef.as_ref(), x.as_ref(), 3, false).unwrap();
+        let out = factors(coef.as_ref(), x.as_ref(), 3, false, None).unwrap();
         for j in 0..3 {
             for i in [3, 7] {
                 assert_eq!(out.f[(i, j)], 0.0);
@@ -1039,8 +1154,8 @@ mod tests {
     fn n_is_bounded_by_the_rank_after_leaving_out() {
         let (x, full) = x_and_coef();
         let coef = Col::<f64>::from_fn(10, |i| if i < 4 { full[i] } else { 0.0 });
-        assert!(factors(coef.as_ref(), x.as_ref(), 4, false).is_ok());
-        match factors(coef.as_ref(), x.as_ref(), 5, false) {
+        assert!(factors(coef.as_ref(), x.as_ref(), 4, false, None).is_ok());
+        match factors(coef.as_ref(), x.as_ref(), 5, false, None) {
             Err(PlsKitError::InvalidInput(m)) => assert!(m.contains("K=4"), "{m}"),
             other => panic!("{other:?}"),
         }
@@ -1054,18 +1169,18 @@ mod tests {
         let coef = unif_col(200, 32);
         let xs = standardize(x.as_ref()).0;
         for n in [2, 20] {
-            let out = factors(coef.as_ref(), x.as_ref(), n, false).unwrap();
+            let out = factors(coef.as_ref(), x.as_ref(), n, false, None).unwrap();
             assert_identities(&out, coef.as_ref());
         }
         // At n = K every block is one column, so the last factor is the residual.
-        let out = factors(coef.as_ref(), x.as_ref(), 20, false).unwrap();
+        let out = factors(coef.as_ref(), x.as_ref(), 20, false, None).unwrap();
         let unseen = mat_vec(xs.as_ref(), out.w.as_ref().col(19), Par::Seq);
         assert!(
             unseen.norm_l2() <= 1e-10 * xs.norm_l2(),
             "{}",
             unseen.norm_l2()
         );
-        match factors(coef.as_ref(), x.as_ref(), 21, false) {
+        match factors(coef.as_ref(), x.as_ref(), 21, false, None) {
             Err(PlsKitError::InvalidInput(m)) => assert!(m.contains("K=20"), "{m}"),
             other => panic!("{other:?}"),
         }
@@ -1079,9 +1194,9 @@ mod tests {
         });
         let coef = mat_vec(x.transpose(), unif_col(50, 42).as_ref(), Par::Seq);
         let v = pca_basis(x.as_ref(), true).unwrap().v;
-        let want = split_on_basis(v.as_ref(), coef.as_ref(), 3, true).unwrap();
-        let got = factors(coef.as_ref(), x.as_ref(), 3, true).unwrap();
-        let other = factors(coef.as_ref(), x.as_ref(), 3, false).unwrap();
+        let want = split_on_basis(v.as_ref(), coef.as_ref(), 3, true, false).unwrap();
+        let got = factors(coef.as_ref(), x.as_ref(), 3, true, None).unwrap();
+        let other = factors(coef.as_ref(), x.as_ref(), 3, false, None).unwrap();
         let mut gap = 0.0_f64;
         for j in 0..3 {
             assert!((got.size[j] - want.size[j]).abs() <= 1e-12, "size {j}");
@@ -1106,33 +1221,39 @@ mod tests {
         let mut left_out = coef.clone();
         left_out[2] = 0.0;
         x[(5, 2)] = f64::NAN;
-        let m = message(factors(left_out.as_ref(), x.as_ref(), 3, false));
+        let m = message(factors(left_out.as_ref(), x.as_ref(), 3, false, None));
         assert!(m.contains("X contains non-finite"), "NaN in x: {m}");
 
         let (x, coef) = x_and_coef();
         let mut coef_inf = coef.clone();
         coef_inf[1] = f64::INFINITY;
-        let m = message(factors(coef_inf.as_ref(), x.as_ref(), 3, false));
+        let m = message(factors(coef_inf.as_ref(), x.as_ref(), 3, false, None));
         assert!(m.contains("coef contains non-finite"), "inf coef: {m}");
 
         let zero = Col::<f64>::zeros(10);
-        let m = message(factors(zero.as_ref(), x.as_ref(), 3, false));
+        let m = message(factors(zero.as_ref(), x.as_ref(), 3, false, None));
         assert!(m.contains("coef is zero"), "zero coef: {m}");
 
         let short = Col::<f64>::zeros(9);
         assert!(matches!(
-            factors(short.as_ref(), x.as_ref(), 3, false),
+            factors(short.as_ref(), x.as_ref(), 3, false, None),
             Err(PlsKitError::ShapeMismatch(_))
         ));
 
         let no_rows = Mat::<f64>::zeros(0, 10);
-        message(factors(coef.as_ref(), no_rows.as_ref(), 3, false));
+        message(factors(coef.as_ref(), no_rows.as_ref(), 3, false, None));
 
         // Every column left in is constant; the one that varies is left out.
         let constant = Mat::<f64>::from_fn(50, 10, |i, j| if j == 3 { x[(i, j)] } else { 0.1 });
         let mut left_out = coef.clone();
         left_out[3] = 0.0;
-        let m = message(factors(left_out.as_ref(), constant.as_ref(), 3, false));
+        let m = message(factors(
+            left_out.as_ref(),
+            constant.as_ref(),
+            3,
+            false,
+            None,
+        ));
         assert!(m.contains("constant"), "constant columns: {m}");
     }
 
@@ -1141,7 +1262,7 @@ mod tests {
         let (x, mut coef) = x_and_coef();
         coef[3] = 0.0;
         coef[7] = 0.0;
-        let out = factors(coef.as_ref(), x.as_ref(), 3, false).unwrap();
+        let out = factors(coef.as_ref(), x.as_ref(), 3, false, None).unwrap();
         // A column flip with a negative a_i negates every row, zeros included.
         let mut flip = givens(3);
         for row in 0..3 {
@@ -1162,7 +1283,7 @@ mod tests {
     fn rotated_carries_pre_standardized() {
         let (x, coef) = x_and_coef();
         for flag in [false, true] {
-            let out = factors(coef.as_ref(), x.as_ref(), 3, flag).unwrap();
+            let out = factors(coef.as_ref(), x.as_ref(), 3, flag, None).unwrap();
             let (rot, _) = out.rotated(givens(3).as_ref()).unwrap();
             assert_eq!(rot.pre_standardized, flag);
         }
@@ -1171,7 +1292,7 @@ mod tests {
     #[test]
     fn rotated_rejects_bad_shapes() {
         let (w, coef) = basis_and_coef();
-        let out = split_on_basis(w.as_ref(), coef.as_ref(), 3, false).unwrap();
+        let out = split_on_basis(w.as_ref(), coef.as_ref(), 3, false, false).unwrap();
         let shape = |r: PlsKitResult<(FactorsOutput, Mat<f64>)>| {
             matches!(r, Err(PlsKitError::ShapeMismatch(_)))
         };
@@ -1523,7 +1644,7 @@ mod tests {
     #[test]
     fn rotated_checks_its_own_basis_and_span() {
         let (w, coef) = basis_and_coef();
-        let out = split_on_basis(w.as_ref(), coef.as_ref(), 3, false).unwrap();
+        let out = split_on_basis(w.as_ref(), coef.as_ref(), 3, false, false).unwrap();
         let r = Mat::<f64>::identity(3, 3);
         let invalid =
             |o: &FactorsOutput| matches!(o.rotated(r.as_ref()), Err(PlsKitError::InvalidInput(_)));
@@ -1547,7 +1668,7 @@ mod tests {
             _ => 0.0,
         });
         let coef = Col::<f64>::from_fn(3, |i| if i < 2 { 1.7e308 } else { 1.0 });
-        let r = split_on_basis(w.as_ref(), coef.as_ref(), 2, false);
+        let r = split_on_basis(w.as_ref(), coef.as_ref(), 2, false, false);
         match r {
             Err(PlsKitError::InvalidInput(m)) => assert!(m.contains("overflows"), "{m}"),
             other => panic!("{other:?}"),

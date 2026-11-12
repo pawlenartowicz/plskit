@@ -14,11 +14,12 @@ pls1_find_k_sequence(
   pre_standardized = FALSE,
   seed = NULL,
   verbose = FALSE,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 )
 }
 \arguments{
-\item{X, y, k_max, test_method, alpha, args, pre_standardized, seed, verbose, weights}{See the canonical reference.}
+\item{X, y, k_max, test_method, alpha, args, pre_standardized, seed, verbose, weights, covariates}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("find_k_sequence_result", "plskit_result")}.

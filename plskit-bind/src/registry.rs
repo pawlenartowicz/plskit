@@ -21,6 +21,8 @@ pub enum ParamKind {
     VecOrMat,
     /// Non-negative whole number.
     Int,
+    /// A whole number or a list of them (`pls1_confirmatory_test`'s `k`).
+    IntOrInts,
     /// A seed: `u64`, or a decimal string.
     Seed,
     /// A float.
@@ -35,8 +37,8 @@ pub enum ParamKind {
     Args,
     /// A result record passed back (`model`).
     Model,
-    /// A `FactorsResult` or `PLS3Result` record, or a matrix (`rotate`'s first
-    /// argument).
+    /// A result record or a matrix: `rotate`'s first argument (a
+    /// `FactorsResult` or `PLS3Result`), and `gram` (a `GramMatrixResult`).
     ModelOrMat,
     /// A `PLS1Result` record or a coefficient vector (`factors`' and
     /// `profiles`' first argument).
@@ -55,6 +57,7 @@ impl ParamKind {
             Self::Vec => "vec",
             Self::VecOrMat => "vec_or_mat",
             Self::Int => "int",
+            Self::IntOrInts => "int_or_ints",
             Self::Seed => "seed",
             Self::Float => "float",
             Self::Bool => "bool",
@@ -177,19 +180,24 @@ static REGISTRY: &[FnSpec] = &[
         params: &[
             pos("X", K::Mat),
             pos("y", K::Vec),
-            pos_d("k", K::KOrMode, I(1)),
+            pos_d("k", K::KOrMode, S("optimal")),
             kw("k_max", K::Int, N),
             kw("find_k_args", K::Args, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
             kw("weights", K::Vec, N),
+            kw("covariates", K::VecOrMat, N),
         ],
         result_types: &["PLS1Result"],
         run: fns::pls1::pls1_fit,
     },
     FnSpec {
         name: "pls1_predict",
-        params: &[pos("model", K::Model), pos("X_new", K::Mat)],
+        params: &[
+            pos("model", K::Model),
+            pos("X_new", K::Mat),
+            kw("covariates", K::VecOrMat, N),
+        ],
         result_types: &[],
         run: fns::pls1::pls1_predict,
     },
@@ -206,6 +214,7 @@ static REGISTRY: &[FnSpec] = &[
             kw("seed", K::Seed, N),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
+            kw("covariates", K::VecOrMat, N),
         ],
         result_types: &["FindKOptimalResult"],
         run: fns::find_k::pls1_find_k_optimal,
@@ -223,6 +232,7 @@ static REGISTRY: &[FnSpec] = &[
             kw("seed", K::Seed, N),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
+            kw("covariates", K::VecOrMat, N),
         ],
         result_types: &["FindKSequenceResult"],
         run: fns::find_k::pls1_find_k_sequence,
@@ -236,6 +246,7 @@ static REGISTRY: &[FnSpec] = &[
             pos("keep", K::Int),
             kw("pre_standardized", K::Bool, B(false)),
             kw("weights", K::Vec, N),
+            kw("covariates", K::VecOrMat, N),
         ],
         result_types: &["PLS1Result"],
         run: fns::pls1::spls1_fit,
@@ -250,6 +261,7 @@ static REGISTRY: &[FnSpec] = &[
             kw("seed", K::Seed, N),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
+            kw("covariates", K::VecOrMat, N),
         ],
         result_types: &["FindKeepOptimalResult"],
         run: fns::find_k::spls1_find_keep_optimal,
@@ -268,6 +280,7 @@ static REGISTRY: &[FnSpec] = &[
             kw("seed", K::Seed, N),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
+            kw("covariates", K::VecOrMat, N),
         ],
         result_types: &["FindKOptimalResult"],
         run: fns::find_k::spls1_find_k_optimal,
@@ -286,6 +299,7 @@ static REGISTRY: &[FnSpec] = &[
             kw("seed", K::Seed, N),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
+            kw("covariates", K::VecOrMat, N),
         ],
         result_types: &["FindKSequenceResult"],
         run: fns::find_k::spls1_find_k_sequence,
@@ -358,9 +372,9 @@ static REGISTRY: &[FnSpec] = &[
     FnSpec {
         name: "pls1_confirmatory_test",
         params: &[
-            pos("X", K::Mat),
-            pos("y", K::Vec),
-            pos_d("k", K::Int, I(1)),
+            pos_d("X", K::Mat, N),
+            pos_d("y", K::Vec, N),
+            pos_d("k", K::IntOrInts, N),
             kw("test_method", K::Str, S("auto")),
             kw("args", K::Args, N),
             kw("ci", K::Bool, B(false)),
@@ -373,13 +387,21 @@ static REGISTRY: &[FnSpec] = &[
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
             kw("max_skip_rate", K::Float, N),
+            kw("covariates", K::VecOrMat, N),
+            kw("null_y", K::Mat, N),
+            kw("gram", K::ModelOrMat, N),
+            kw("n_features", K::Int, N),
         ],
         result_types: &["ConfirmatoryTestResult"],
         run: fns::inference::pls1_confirmatory_test,
     },
     FnSpec {
         name: "split_nb_gate",
-        params: &[pos("X", K::Mat), kw("weights", K::Vec, N)],
+        params: &[
+            pos("X", K::Mat),
+            kw("weights", K::Vec, N),
+            kw("pre_standardized", K::Bool, B(false)),
+        ],
         result_types: &["SplitNbGateResult"],
         run: fns::inference::split_nb_gate,
     },
@@ -395,6 +417,7 @@ static REGISTRY: &[FnSpec] = &[
             kw("seed", K::Seed, N),
             kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
+            kw("covariates", K::VecOrMat, N),
         ],
         result_types: &["PermNullResult"],
         run: fns::inference::pls1_perm_null,
@@ -402,8 +425,8 @@ static REGISTRY: &[FnSpec] = &[
     FnSpec {
         name: "pls3_confirmatory_test",
         params: &[
-            pos("X", K::Mat),
-            pos("Y", K::Mat),
+            pos_d("X", K::Mat, N),
+            pos_d("Y", K::Mat, N),
             pos_d("k", K::Int, I(1)),
             kw("test_method", K::Str, S("auto")),
             kw("args", K::Args, N),
@@ -411,6 +434,8 @@ static REGISTRY: &[FnSpec] = &[
             kw("pre_standardized_Y", K::Bool, B(false)),
             kw("seed", K::Seed, N),
             kw("verbose", K::Bool, B(false)),
+            kw("gram", K::ModelOrMat, N),
+            kw("n_features", K::Int, N),
         ],
         result_types: &["ConfirmatoryTestResult"],
         run: fns::inference::pls3_confirmatory_test,
@@ -418,13 +443,19 @@ static REGISTRY: &[FnSpec] = &[
     FnSpec {
         name: "pls1_perm_alpha",
         params: &[
-            pos("gram", K::Mat),
+            pos("gram", K::ModelOrMat),
             pos("Y", K::Mat),
             pos_d("k", K::Int, I(1)),
-            kw("n_features", K::Int, DefaultValue::Required),
+            kw("n_features", K::Int, N),
         ],
         result_types: &["PermAlphaResult"],
         run: fns::inference::pls1_perm_alpha,
+    },
+    FnSpec {
+        name: "gram_matrix",
+        params: &[pos("X", K::Mat), kw("pre_standardized", K::Bool, B(false))],
+        result_types: &["GramMatrixResult"],
+        run: fns::inference::gram_matrix,
     },
     FnSpec {
         name: "rotate",
@@ -435,6 +466,7 @@ static REGISTRY: &[FnSpec] = &[
             kw("L", K::Mat, N),
             kw("args", K::Args, N),
             kw("pre_standardized", K::Bool, N),
+            kw("covariates", K::VecOrMat, N),
         ],
         result_types: &["RotateResult", "PLS3Result", "FactorsResult"],
         run: fns::rotate::rotate,
@@ -446,6 +478,7 @@ static REGISTRY: &[FnSpec] = &[
             pos("X", K::Mat),
             pos("n", K::Int),
             kw("pre_standardized", K::Bool, N),
+            kw("covariates", K::VecOrMat, N),
         ],
         result_types: &["FactorsResult"],
         run: fns::factors::factors,
@@ -689,7 +722,9 @@ mod tests {
                 })
             }
             ParamKind::Vec | ParamKind::ModelOrVec => Value::Vec(VecF64::Owned(vec![1.0])),
-            ParamKind::Int | ParamKind::Seed | ParamKind::KOrMode => Value::I64(1),
+            ParamKind::Int | ParamKind::IntOrInts | ParamKind::Seed | ParamKind::KOrMode => {
+                Value::I64(1)
+            }
             ParamKind::Float => Value::F64(0.5),
             ParamKind::Bool => Value::Bool(true),
             ParamKind::Str => Value::text("x"),

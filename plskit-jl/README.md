@@ -65,7 +65,7 @@ number is the Python wheel's.
 
 ## Status
 
-Version 0.8.0, running Python `plskit` 0.8.0. Not yet in the General
+Version 0.9.0, running Python `plskit` 0.9.0. Not yet in the General
 registry.
 
 ## Documentation

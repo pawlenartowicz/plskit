@@ -50,15 +50,14 @@ pub enum KSpec {
 //
 // Route detail. `Auto` (where the loop runs its units through
 // `resample::map_units`): `signal_test::split_column_r` through
-// `signal_test::SPLIT_FIT_PAR`, which also covers the second passes of the
-// K = 1 no-refit routes and the first step `ŝ₁ = Xs'ys` of `split_exact`'s
-// Gram-p arm (formed under the `Par` that fit resolves); the two
-// `find_k` fold fits; `subsample::fit_rows`. `Seq`: the `raw_perm` fold fit
-// (`signal_test::cv_fold_contribution`), its K = 1 Gram route's second
-// pass and the Gram-p arm's first step on its folds; the permutation
-// refits of `pls1_perm_null` and the Gram-p arm's first step there; the
+// `signal_test::SPLIT_FIT_PAR`, which also covers the first product
+// `ŝ₁ = Xs'ys` of `split_exact`'s Gram-p arm (formed under the `Par` that
+// fit resolves); the two `find_k` fold fits; `subsample::fit_rows`. `Seq`:
+// the `raw_perm` fold fit (`signal_test::cv_fold_contribution`) and the
+// Gram-p arm's first product on its folds; the permutation refits of
+// `pls1_perm_null` and the Gram-p arm's first product there; the
 // per-replicate products of the Gram-p and n-space backends beyond that
-// first step; and the per-split PLS3 fit of `pls3_signal_test`, which
+// first product; and the per-split PLS3 fit of `pls3_signal_test`, which
 // runs every product with `Par::Seq`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParChoice {
@@ -384,7 +383,9 @@ pub struct Pls1Model {
     pub coef: Col<f64>,
     /// Regression coefficients back-projected to raw X scale; shape `(n_features,)`.
     pub beta: Col<f64>,
-    /// y intercept in raw scale (0 when `pre_standardized=true`).
+    /// y intercept in raw scale (0 when `pre_standardized=true` without
+    /// covariates; with covariates, the intercept of the fit
+    /// `ŷ = intercept + X·β + Z·covariate_coef` in either case).
     pub intercept: f64,
     /// Number of components actually retained (≤ requested `k`).
     pub k_used: usize,
@@ -398,6 +399,13 @@ pub struct Pls1Model {
     /// Resolved sparse keep-count. `None` for dense fits — mirrors the
     /// `weights: Option<Col<f64>>` precedent.
     pub keep: Option<usize>,
+    /// Coefficients of the covariates `Z`, one per column of `Z`, 0 at a
+    /// dropped (aliased) column; shape `(p_z,)`. `None` when fitted without
+    /// covariates.
+    pub covariate_coef: Option<Col<f64>>,
+    /// `rank([1, Z]) − 1`, the covariates kept. `None` when fitted without
+    /// covariates.
+    pub n_covariates: Option<usize>,
 }
 
 /// Validate weights and produce `(normalized vector, n_eff, all_uniform_flag)`.
@@ -638,6 +646,15 @@ pub(crate) fn check_fit_y_and_k(
 /// - `x`: `(n_samples, n_features)`
 /// - `y`: `(n_samples,)`
 /// - `weights`: optional per-observation weights; `None` is equivalent to all-ones.
+/// - `covariates`: optional `Z`, `(n_samples, p_z)`. With `Z`, X is
+///   standardized (or used as given under `pre_standardized`), then X and y
+///   are replaced by their weighted least-squares residuals on `[1, Z]`
+///   (`crate::covariates`), and the PLS1 fit runs on those residuals. The
+///   scores, loadings, weights and `coef` describe the adjusted data;
+///   `beta`, `intercept` and `covariate_coef` give
+///   `ŷ = intercept + X·β + Z·covariate_coef` on the raw scale. A column of
+///   `Z` that is constant or a linear combination of the intercept and
+///   earlier columns is dropped.
 /// - returns `Pls1Model { t_scores: (n_samples, k_used), p_loadings: (n_features, k_used),
 ///   w_star: (n_features, k_used), q_loadings: (k_used,), coef: (n_features,),
 ///   beta: (n_features,), ... }`
@@ -649,6 +666,9 @@ pub(crate) fn check_fit_y_and_k(
 /// - `PlsKitError::KExceedsMax` when `k > n_features`
 /// - `PlsKitError::NonFiniteInput` when X, y, or weights contains NaN/inf
 /// - `PlsKitError::InvalidWeights` for negative, all-zero, or insufficient-`n_eff` weights
+/// - `PlsKitError::ShapeMismatch` when `covariates` does not have `n_samples` rows
+/// - `PlsKitError::NonFiniteInput` when `covariates` contains NaN/inf
+/// - `PlsKitError::InsufficientResidualDf` when `n_samples − rank([1, Z]) < k + 1`
 ///
 /// # Panics
 /// Never (all internal indexing guarded by validated shapes).
@@ -658,9 +678,10 @@ pub fn pls1_fit(
     y: ColRef<'_, f64>,
     k: KSpec,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: FitOpts,
 ) -> PlsKitResult<Pls1Model> {
-    crate::fit::with_thread_limit(|| pls1_fit_impl(x, y, k, weights, opts))
+    crate::fit::with_thread_limit(|| pls1_fit_impl(x, y, k, weights, covariates, opts))
 }
 
 /// Body of [`pls1_fit`], on the caller's pool.
@@ -670,6 +691,7 @@ pub(crate) fn pls1_fit_impl(
     y: ColRef<'_, f64>,
     k: KSpec,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: FitOpts,
 ) -> PlsKitResult<Pls1Model> {
     let n_samples = x.nrows();
@@ -703,6 +725,10 @@ pub(crate) fn pls1_fit_impl(
     };
     let wref: Option<ColRef<'_, f64>> = w_norm.as_ref().map(Col::as_ref);
 
+    if let Some(z) = covariates {
+        return pls1_fit_covariates(x, y, z, k, weights, wref, opts);
+    }
+
     // √w' row factor. Row-scaling is the Cholesky factor of diag(w'),
     // *not* preprocessing, so it applies even when pre_standardized=true.
     let sqw: Option<Col<f64>> = wref.map(crate::linalg::sqrt_col);
@@ -717,7 +743,7 @@ pub(crate) fn pls1_fit_impl(
     // weights is Some. The standardized X itself is written only when its
     // columns' means are too large for the implicit products (below).
     let mut fx: Option<crate::linalg::FitX> =
-        (!opts.pre_standardized).then(|| crate::linalg::fit_x_moments(x, None, wref, fit_par));
+        (!opts.pre_standardized).then(|| crate::linalg::fit_x_moments(x, wref, fit_par));
     let (ys_owned, y_mean, y_scale) = if opts.pre_standardized {
         (None, 0.0, 1.0)
     } else {
@@ -885,7 +911,69 @@ pub(crate) fn pls1_fit_impl(
         weights: w_norm,
         n_eff: n_eff_val,
         keep: opts.keep,
+        covariate_coef: None,
+        n_covariates: None,
     })
+}
+
+/// The covariate branch of [`pls1_fit_impl`], after the weights are
+/// validated (`wref` is their normalized form). The fit on the adjusted
+/// data `(X̃, ỹ)` runs with `pre_standardized` semantics. On the raw scale,
+/// `β_j = coef_j · s_y / s_j` (`β = coef` under `pre_standardized`), and the
+/// covariate part is one WLS regression: `d` = coefficients of
+/// `y − (X − 1·μ_X')·β` on `[1, Z]`, which is `γ_y − Γ_X·β` (`γ_y`, `Γ_X` the
+/// coefficients of y and of the centred X on `[1, Z]`), so
+/// `ŷ = [1, Z]·γ_y + (X − 1·μ_X' − [1, Z]·Γ_X)·β` multiplies out to
+/// `intercept + X·β + Z·covariate_coef` with `intercept = d₀ − μ_X'·β` and
+/// `covariate_coef = d₁..` (`μ_X = 0` under `pre_standardized`).
+#[allow(clippy::many_single_char_names)]
+fn pls1_fit_covariates(
+    x: MatRef<'_, f64>,
+    y: ColRef<'_, f64>,
+    z: MatRef<'_, f64>,
+    k: KSpec,
+    weights: Option<ColRef<'_, f64>>,
+    wref: Option<ColRef<'_, f64>>,
+    opts: FitOpts,
+) -> PlsKitResult<Pls1Model> {
+    let KSpec::Fixed(k_requested) = k;
+    check_finite_mat(x)?;
+    let adj = crate::covariates::adjust(x, y, z, wref, opts.pre_standardized)?;
+    adj.basis.check_df(k_requested)?;
+    // The truncation guard of a pre-standardized fit applies only when the
+    // caller passed `pre_standardized`; the n_eff check has run above.
+    let mut m = pls1_fit_impl(
+        adj.x.as_ref(),
+        adj.y.as_ref(),
+        k,
+        weights,
+        None,
+        FitOpts {
+            pre_standardized: true,
+            check_n_eff: opts.check_n_eff && opts.pre_standardized,
+            ..opts
+        },
+    )?;
+    if !opts.pre_standardized {
+        m.beta = Col::<f64>::from_fn(m.coef.nrows(), |j| m.coef[j] * adj.y_scale / adj.x_scale[j]);
+    }
+    // r = y − (X − 1·μ')·β, centred term by term so that large column
+    // means do not cancel inside the product.
+    let mut r = y.to_owned();
+    for j in 0..x.ncols() {
+        let (mu, bj) = (adj.x_mean[j], m.beta[j]);
+        for i in 0..x.nrows() {
+            r[i] -= (x[(i, j)] - mu) * bj;
+        }
+    }
+    let d = adj.basis.coef(r.as_ref().as_mat());
+    let full = adj.basis.full_coef(d.col(0));
+    let mu_beta: f64 = (0..x.ncols()).map(|j| adj.x_mean[j] * m.beta[j]).sum();
+    m.intercept = full[0] - mu_beta;
+    m.covariate_coef = Some(Col::<f64>::from_fn(adj.basis.p_z(), |c| full[1 + c]));
+    m.n_covariates = Some(adj.basis.n_covariates());
+    m.pre_standardized = opts.pre_standardized;
+    Ok(m)
 }
 
 /// Sparse PLS1 fit, head of the `spls1_*` family: the PLS1 (NIPALS) model
@@ -899,6 +987,8 @@ pub(crate) fn pls1_fit_impl(
 /// guarantee a nested selection path across components; tune `keep`, do not
 /// interpret the path.
 ///
+/// `covariates` is `pls1_fit`'s: selection acts on the adjusted X.
+///
 /// # Errors
 /// Everything `pls1_fit` returns, plus `InvalidArgument` for `keep == 0`
 /// or `keep > n_features`.
@@ -908,6 +998,7 @@ pub fn spls1_fit(
     k: KSpec,
     keep: usize,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: FitOpts,
 ) -> PlsKitResult<Pls1Model> {
     crate::fit::with_thread_limit(|| {
@@ -916,6 +1007,7 @@ pub fn spls1_fit(
             y,
             k,
             weights,
+            covariates,
             FitOpts {
                 keep: Some(keep),
                 ..opts
@@ -1193,7 +1285,8 @@ pub(crate) const NIPALS_ABS_FLOOR: f64 = 1e-14;
 ///
 /// The K = 1 Gram mirror `dual_route::pls1_cv_r2_columns` evaluates this
 /// same function on the kernel's `‖y‖`, to the bit, and on an `‖X‖_F` taken
-/// from the column moments, equal to the kernel's to rounding, but it
+/// from the trace of the fold's Gram block, equal to the kernel's to
+/// rounding, but it
 /// cannot form `‖X'y‖` to the accuracy the floor needs, so a column it
 /// cannot resolve is recomputed by this kernel (see the doc comment there).
 #[allow(clippy::cast_precision_loss)]
@@ -1568,7 +1661,7 @@ impl ImplicitXBackend<'_> {
 
 impl ComponentBackend for ImplicitXBackend<'_> {
     fn gate_s(&mut self, _a: usize, s: &Col<f64>, keep: Option<usize>) -> Gate {
-        if crate::gram_p::selected_norm_and_gap(s, keep).0 < self.band {
+        if crate::gram_p::selected_norm(s, keep) < self.band {
             Gate::Unresolved
         } else {
             Gate::Continue
@@ -1853,6 +1946,7 @@ mod tests {
             y.as_ref(),
             KSpec::Fixed(3),
             None,
+            None,
             FitOpts {
                 pre_standardized: true,
                 ..FitOpts::default()
@@ -1882,6 +1976,7 @@ mod tests {
             y.as_ref(),
             KSpec::Fixed(3),
             None,
+            None,
             FitOpts::default(),
         )
         .unwrap();
@@ -1890,6 +1985,7 @@ mod tests {
             y.as_ref(),
             KSpec::Fixed(3),
             8,
+            None,
             None,
             FitOpts::default(),
         )
@@ -1923,6 +2019,7 @@ mod tests {
                 y.as_ref(),
                 KSpec::Fixed(3),
                 keep,
+                None,
                 None,
                 FitOpts::default(),
             )
@@ -1960,6 +2057,7 @@ mod tests {
             KSpec::Fixed(1),
             1,
             None,
+            None,
             FitOpts {
                 pre_standardized: true,
                 check_n_eff: false,
@@ -1979,6 +2077,7 @@ mod tests {
             y.as_ref(),
             KSpec::Fixed(1),
             3,
+            None,
             None,
             FitOpts {
                 pre_standardized: true,
@@ -2055,6 +2154,7 @@ mod tests {
             y.as_ref(),
             KSpec::Fixed(40),
             None,
+            None,
             FitOpts::default(),
         )
         .unwrap();
@@ -2080,6 +2180,7 @@ mod tests {
             y.as_ref(),
             KSpec::Fixed(40),
             10,
+            None,
             None,
             FitOpts::default(),
         )
@@ -2109,6 +2210,7 @@ mod tests {
             y.as_ref(),
             KSpec::Fixed(10),
             None,
+            None,
             FitOpts::default(),
         )
         .unwrap();
@@ -2125,6 +2227,7 @@ mod tests {
             x.as_ref(),
             y.as_ref(),
             KSpec::Fixed(20),
+            None,
             None,
             FitOpts::default(),
         )
@@ -2156,6 +2259,7 @@ mod tests {
                 y.as_ref(),
                 KSpec::Fixed(3),
                 None,
+                None,
                 FitOpts::default(),
             )
             .unwrap();
@@ -2172,6 +2276,7 @@ mod tests {
                 y.as_ref(),
                 KSpec::Fixed(1),
                 4,
+                None,
                 None,
                 FitOpts::default(),
             )
@@ -2191,6 +2296,7 @@ mod tests {
             ys.as_ref(),
             KSpec::Fixed(1),
             None,
+            None,
             FitOpts {
                 pre_standardized: true,
                 ..FitOpts::default()
@@ -2204,6 +2310,7 @@ mod tests {
             xs.as_ref(),
             ys.as_ref(),
             KSpec::Fixed(1),
+            None,
             None,
             FitOpts {
                 pre_standardized: true,
@@ -2232,6 +2339,7 @@ mod tests {
             y.as_ref(),
             KSpec::Fixed(1),
             None,
+            None,
             FitOpts::default(),
         )
         .unwrap();
@@ -2248,6 +2356,7 @@ mod tests {
             y.as_ref(),
             KSpec::Fixed(20),
             None,
+            None,
             FitOpts::default(),
         )
         .unwrap();
@@ -2258,6 +2367,7 @@ mod tests {
             y.as_ref(),
             KSpec::Fixed(20),
             Some(w.as_ref()),
+            None,
             FitOpts::default(),
         )
         .unwrap();
@@ -2438,7 +2548,7 @@ mod boundary_tests {
         opts: FitOpts,
     ) -> Vec<f64> {
         assert_layout_agree(x, what, Agree::Corpus(FIT_LAYOUT_TOL), |xv| {
-            pls1_fit(xv, y.as_ref(), KSpec::Fixed(k), w, opts).map(|m| model_vals(&m))
+            pls1_fit(xv, y.as_ref(), KSpec::Fixed(k), w, None, opts).map(|m| model_vals(&m))
         })
         .unwrap_or_else(|e| panic!("{what}: {e}"))
     }
@@ -2538,7 +2648,7 @@ mod boundary_tests {
         let (x, y) = signal_data(203, 2100, 10);
         let x = offset(&x, 2e3);
         let x_t = x.transpose().to_owned();
-        let mut fx = crate::linalg::fit_x_moments(x_t.transpose(), None, None, Par::Seq);
+        let mut fx = crate::linalg::fit_x_moments(x_t.transpose(), None, Par::Seq);
         assert!(
             fx.max_mean_ratio() > IMPLICIT_MAX_MEAN_RATIO,
             "203x2100 + 2e3: left the standardized copy"
@@ -2582,8 +2692,7 @@ mod boundary_tests {
         for (f, c, implicit) in [(&fams[0], 300.0, true), (&fams[1], 1e6, false)] {
             let x = offset(&f.x, c);
             let w = f.w.as_ref().map(Col::as_ref);
-            let ratio =
-                crate::linalg::fit_x_moments(x.as_ref(), None, w, Par::Seq).max_mean_ratio();
+            let ratio = crate::linalg::fit_x_moments(x.as_ref(), w, Par::Seq).max_mean_ratio();
             let what = format!("{} + {c:e} (ratio {ratio:.0})", f.name);
             assert_eq!(
                 ratio > 100.0 && ratio < IMPLICIT_MAX_MEAN_RATIO,
@@ -2629,6 +2738,7 @@ mod boundary_tests {
                 view,
                 ys.as_ref(),
                 KSpec::Fixed(1),
+                None,
                 None,
                 FitOpts {
                     pre_standardized: true,
@@ -2682,7 +2792,7 @@ mod boundary_tests {
                         ..FitOpts::default()
                     };
                     let r = assert_layout_agree(&bad, &what, Agree::Bits, |xv| {
-                        pls1_fit(xv, f.y.as_ref(), KSpec::Fixed(1), w, opts).map(|_| vec![])
+                        pls1_fit(xv, f.y.as_ref(), KSpec::Fixed(1), w, None, opts).map(|_| vec![])
                     });
                     assert!(
                         matches!(r, Err(PlsKitError::NonFiniteInput)),
@@ -2725,6 +2835,7 @@ mod boundary_tests {
                     y.as_ref(),
                     KSpec::Fixed(1),
                     None,
+                    None,
                     FitOpts::default(),
                 )
                 .unwrap();
@@ -2761,7 +2872,7 @@ mod boundary_tests {
                 check_n_eff,
                 ..FitOpts::default()
             };
-            let r = pls1_fit(big.as_ref(), ys.as_ref(), KSpec::Fixed(1), None, opts);
+            let r = pls1_fit(big.as_ref(), ys.as_ref(), KSpec::Fixed(1), None, None, opts);
             assert!(!matches!(r, Err(PlsKitError::NonFiniteInput)), "{r:?}");
         }
     }
@@ -2957,7 +3068,7 @@ mod boundary_tests {
             ),
         ];
         for (what, xv, yv, k, w, opts, code, reason) in cases {
-            let e = pls1_fit(xv, yv, KSpec::Fixed(k), w, opts).expect_err(what);
+            let e = pls1_fit(xv, yv, KSpec::Fixed(k), w, None, opts).expect_err(what);
             assert_eq!(e.code(), code, "{what}: {e}");
             if let Some(want) = reason {
                 assert!(
@@ -2968,7 +3079,7 @@ mod boundary_tests {
         }
         // The public sparse entry range-checks its keep-count the same way.
         for keep in [0, 6] {
-            let e = spls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(2), keep, None, d)
+            let e = spls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(2), keep, None, None, d)
                 .expect_err("spls1_fit keep");
             assert_eq!(e.code(), ia, "spls1_fit keep={keep}: {e}");
         }
@@ -3003,7 +3114,7 @@ mod boundary_tests {
         let mut out = vec![
             (
                 "pls1_fit".to_owned(),
-                show(pls1_fit(x, y, KSpec::Fixed(k), w, FitOpts::default())),
+                show(pls1_fit(x, y, KSpec::Fixed(k), w, None, FitOpts::default())),
             ),
             (
                 "perm_null".to_owned(),
@@ -3012,6 +3123,7 @@ mod boundary_tests {
                     y,
                     k,
                     w,
+                    None,
                     PermNullOpts {
                         n_perm: 100,
                         ..Default::default()
@@ -3026,6 +3138,7 @@ mod boundary_tests {
                     y,
                     k,
                     w,
+                    None,
                     FindKSequenceOpts {
                         n_splits: 10,
                         seed,
@@ -3040,6 +3153,7 @@ mod boundary_tests {
                     y,
                     k,
                     w,
+                    None,
                     FindKeepOptimalOpts {
                         seed,
                         ..Default::default()
@@ -3053,6 +3167,7 @@ mod boundary_tests {
                 y,
                 k,
                 w,
+                None,
                 FindKOptimalOpts {
                     selector,
                     seed,
@@ -3066,8 +3181,10 @@ mod boundary_tests {
                 ConfirmatoryTestInput::Raw {
                     x,
                     y,
-                    k,
+                    k: Some(&[k]),
                     weights: w,
+                    covariates: None,
+                    null_y: None,
                 },
                 ConfirmatoryTestOpts {
                     args,
@@ -3181,7 +3298,7 @@ mod boundary_tests {
             })
             .unwrap();
             assert_layout_agree(&f.x, &what("split_nb_gate"), bits, |xv| {
-                let g = split_nb_gate(xv, w)?;
+                let g = split_nb_gate(xv, w, false)?;
                 Ok(vec![f64::from(u8::from(g.fires)), g.stable_rank, g.n_eff])
             })
             .unwrap();
@@ -3190,15 +3307,18 @@ mod boundary_tests {
                 f.y.as_ref(),
                 KSpec::Fixed(2),
                 w,
+                None,
                 FitOpts::default(),
             )
             .unwrap();
             assert_layout_agree(&f.x, &what("pls1_predict"), agree, |xv| {
-                Ok(col_vals(crate::predict::pls1_predict(&model, xv)?.as_ref()))
+                Ok(col_vals(
+                    crate::predict::pls1_predict(&model, xv, None)?.as_ref(),
+                ))
             })
             .unwrap();
             assert_layout_agree(&f.x, &what("factors"), agree, |xv| {
-                let out = crate::factors::factors(model.coef.as_ref(), xv, 2, false)?;
+                let out = crate::factors::factors(model.coef.as_ref(), xv, 2, false, None)?;
                 let mut v = mat_vals(out.f.as_ref());
                 v.extend(col_vals(out.size.as_ref()));
                 Ok(v)
@@ -3307,32 +3427,32 @@ mod boundary_tests {
         row(
             "spls1_fit",
             "k",
-            show(spls1_fit(x, y, KSpec::Fixed(0), 3, None, d)),
+            show(spls1_fit(x, y, KSpec::Fixed(0), 3, None, None, d)),
         );
         row(
             "spls1_fit keep",
             "keep",
-            show(spls1_fit(x, y, KSpec::Fixed(2), 0, None, d)),
+            show(spls1_fit(x, y, KSpec::Fixed(2), 0, None, None, d)),
         );
         row(
             "spls1_find_k_optimal",
             "k_max",
-            show(spls1_find_k_optimal(x, y, 0, 3, None, fk())),
+            show(spls1_find_k_optimal(x, y, 0, 3, None, None, fk())),
         );
         row(
             "spls1_find_k_optimal keep",
             "keep",
-            show(spls1_find_k_optimal(x, y, 2, 0, None, fk())),
+            show(spls1_find_k_optimal(x, y, 2, 0, None, None, fk())),
         );
         row(
             "spls1_find_k_sequence",
             "k_max",
-            show(spls1_find_k_sequence(x, y, 0, 3, None, fs())),
+            show(spls1_find_k_sequence(x, y, 0, 3, None, None, fs())),
         );
         row(
             "spls1_find_k_sequence keep",
             "keep",
-            show(spls1_find_k_sequence(x, y, 2, 0, None, fs())),
+            show(spls1_find_k_sequence(x, y, 2, 0, None, None, fs())),
         );
         row("pls3_fit", "k", show(pls3_fit(x, yy, 0, None, p3())));
         row("plssvd_fit", "k", show(plssvd_fit(x, yy, 0, None, p3())));
@@ -3404,6 +3524,7 @@ mod boundary_tests {
                         ys.as_ref(),
                         KSpec::Fixed(k),
                         Some(wn.as_ref()),
+                        None,
                         opts,
                     )
                     .unwrap();
@@ -3442,5 +3563,288 @@ mod boundary_tests {
                 }
             }
         }
+    }
+}
+
+/// `pls1_fit` and `spls1_fit` with covariates: the fit on the adjusted data,
+/// the raw-scale coefficients, and the covariate errors.
+#[cfg(test)]
+#[allow(clippy::many_single_char_names)]
+mod covariate_tests {
+    use super::*;
+    use crate::covariates::adjust;
+    use crate::test_support::{assert_close_rel, signal_data, test_weights, unif, unif_col};
+
+    /// `(x, y, z)`: X offset from zero, y driven by X and by the first
+    /// covariate, Z with two iid columns.
+    fn data(n: usize) -> (Mat<f64>, Col<f64>, Mat<f64>) {
+        let (x, y) = signal_data(n, 8, 3);
+        let x = Mat::<f64>::from_fn(n, 8, |i, j| x[(i, j)] + 3.0);
+        let z = unif(n, 2, 4);
+        let y = Col::<f64>::from_fn(n, |i| 2.0 * y[i] + 1.5 * z[(i, 0)] + 10.0);
+        (x, y, z)
+    }
+
+    fn fit(
+        x: MatRef<'_, f64>,
+        y: ColRef<'_, f64>,
+        w: Option<&Col<f64>>,
+        z: Option<MatRef<'_, f64>>,
+        pre_standardized: bool,
+    ) -> PlsKitResult<Pls1Model> {
+        pls1_fit(
+            x,
+            y,
+            KSpec::Fixed(2),
+            w.map(Col::as_ref),
+            z,
+            FitOpts {
+                pre_standardized,
+                ..FitOpts::default()
+            },
+        )
+    }
+
+    #[test]
+    fn fit_with_covariates_equals_fit_on_adjusted_data() {
+        let n = 60;
+        let (x, y, z) = data(n);
+        for w in [None, Some(test_weights(n))] {
+            let m = fit(x.as_ref(), y.as_ref(), w.as_ref(), Some(z.as_ref()), false).unwrap();
+            let (wn, _) =
+                validate_and_normalize_weights(w.as_ref().map(Col::as_ref), n, 2).unwrap();
+            let adj = adjust(
+                x.as_ref(),
+                y.as_ref(),
+                z.as_ref(),
+                wn.as_ref().map(Col::as_ref),
+                false,
+            )
+            .unwrap();
+            let o = fit(adj.x.as_ref(), adj.y.as_ref(), w.as_ref(), None, true).unwrap();
+            assert_close_rel(m.coef.as_mat(), o.coef.as_mat(), 1e-12, "coef");
+            assert_close_rel(m.t_scores.as_ref(), o.t_scores.as_ref(), 1e-12, "t_scores");
+            assert_eq!(m.n_covariates, Some(2));
+            assert_eq!(m.covariate_coef.as_ref().map(Col::nrows), Some(2));
+            assert!(!m.pre_standardized);
+            assert!(o.covariate_coef.is_none() && o.n_covariates.is_none());
+        }
+    }
+
+    #[test]
+    fn fit_with_aliased_columns_equals_fit_without() {
+        let n = 60;
+        let (x, y, z) = data(n);
+        // [1, z0, 5, z0, z1]: intercept, constant and duplicate dropped.
+        let z_alias = Mat::<f64>::from_fn(n, 5, |i, j| match j {
+            0 => 1.0,
+            1 | 3 => z[(i, 0)],
+            2 => 5.0,
+            _ => z[(i, 1)],
+        });
+        for w in [None, Some(test_weights(n))] {
+            let clean = fit(x.as_ref(), y.as_ref(), w.as_ref(), Some(z.as_ref()), false).unwrap();
+            let alias = fit(
+                x.as_ref(),
+                y.as_ref(),
+                w.as_ref(),
+                Some(z_alias.as_ref()),
+                false,
+            )
+            .unwrap();
+            assert_close_rel(alias.beta.as_mat(), clean.beta.as_mat(), 1e-12, "beta");
+            assert_close_rel(
+                alias.t_scores.as_ref(),
+                clean.t_scores.as_ref(),
+                1e-12,
+                "t_scores",
+            );
+            assert!((alias.intercept - clean.intercept).abs() <= 1e-12 * clean.intercept.abs());
+            let (ca, cc) = (alias.covariate_coef.unwrap(), clean.covariate_coef.unwrap());
+            let want = Col::<f64>::from_fn(5, |j| match j {
+                1 => cc[0],
+                4 => cc[1],
+                _ => 0.0,
+            });
+            assert_close_rel(ca.as_mat(), want.as_mat(), 1e-12, "covariate_coef");
+            assert_eq!((ca[0], ca[2], ca[3]), (0.0, 0.0, 0.0));
+            assert_eq!(alias.n_covariates, Some(2));
+        }
+    }
+
+    #[test]
+    fn spls1_fit_takes_covariates() {
+        let n = 60;
+        let (x, y, z) = data(n);
+        let m = spls1_fit(
+            x.as_ref(),
+            y.as_ref(),
+            KSpec::Fixed(2),
+            3,
+            None,
+            Some(z.as_ref()),
+            FitOpts::default(),
+        )
+        .unwrap();
+        assert_eq!(m.keep, Some(3));
+        assert_eq!(m.n_covariates, Some(2));
+    }
+
+    /// A constant covariate is only the intercept, which the plain fit
+    /// already removes: an independent check of `adjust`'s standardization.
+    #[test]
+    fn fit_with_a_constant_covariate_equals_plain_fit() {
+        let n = 60;
+        let (x, y, _) = data(n);
+        let z = Mat::<f64>::from_fn(n, 1, |_, _| 4.0);
+        for w in [None, Some(test_weights(n))] {
+            let m = fit(x.as_ref(), y.as_ref(), w.as_ref(), Some(z.as_ref()), false).unwrap();
+            let o = fit(x.as_ref(), y.as_ref(), w.as_ref(), None, false).unwrap();
+            assert_close_rel(m.beta.as_mat(), o.beta.as_mat(), 1e-12, "beta");
+            assert_close_rel(m.t_scores.as_ref(), o.t_scores.as_ref(), 1e-12, "t_scores");
+            assert!((m.intercept - o.intercept).abs() <= 1e-12 * o.intercept.abs());
+            assert_eq!(m.n_covariates, Some(0));
+            assert_eq!(m.covariate_coef.unwrap()[0], 0.0);
+        }
+    }
+
+    /// `n − rank = k + 1` is accepted, `n − rank = k` refused.
+    #[test]
+    fn check_df_boundary() {
+        let k = 2;
+        let z = unif(10, 7, 14);
+        let ok = crate::covariates::CovariateBasis::new(z.as_ref().subcols(0, 6), None).unwrap();
+        assert_eq!(ok.rank(), 7);
+        assert!(ok.check_df(k).is_ok());
+        let tight = crate::covariates::CovariateBasis::new(z.as_ref(), None).unwrap();
+        assert_eq!(tight.rank(), 8);
+        assert!(matches!(
+            tight.check_df(k),
+            Err(PlsKitError::InsufficientResidualDf {
+                n: 10,
+                rank: 8,
+                k: 2
+            })
+        ));
+    }
+
+    /// Zero-weight rows add no residual degrees of freedom: 10 rows weighted
+    /// 1 and 40 weighted 0 are refused as the 10 rows alone are.
+    #[test]
+    fn check_df_counts_rows_with_positive_weight() {
+        let z = unif(50, 9, 15);
+        let w = Col::<f64>::from_fn(50, |i| if i < 10 { 1.0 } else { 0.0 });
+        let weighted =
+            crate::covariates::CovariateBasis::new(z.as_ref(), Some(w.as_ref())).unwrap();
+        let alone =
+            crate::covariates::CovariateBasis::new(z.as_ref().subrows(0, 10), None).unwrap();
+        for basis in [weighted, alone] {
+            assert!(matches!(
+                basis.check_df(2),
+                Err(PlsKitError::InsufficientResidualDf {
+                    n: 10,
+                    rank: 10,
+                    k: 2
+                })
+            ));
+        }
+    }
+
+    /// y in the span of `[1, Z]` gives what a constant y gives without
+    /// covariates: the zero model, and `split_exact` with p = 1, statistic 0.
+    #[test]
+    fn y_in_the_span_of_the_covariates_is_a_constant_y() {
+        use crate::signal_test::{
+            ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, pls1_confirmatory_test,
+        };
+        let n = 200;
+        let x = unif(n, 30, 16);
+        let z = unif(n, 2, 17);
+        let y_span = Col::<f64>::from_fn(n, |i| 3.0 + 2.0 * z[(i, 0)] - z[(i, 1)]);
+        let y_const = Col::<f64>::from_fn(n, |_| 3.0);
+        for (y, z) in [(&y_span, Some(z.as_ref())), (&y_const, None)] {
+            let m = fit(x.as_ref(), y.as_ref(), None, z, false).unwrap();
+            assert_eq!(m.k_used, 0);
+            let t = pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k: Some(&[1]),
+                    weights: None,
+                    covariates: z,
+                    null_y: None,
+                },
+                ConfirmatoryTestOpts {
+                    args: ConfirmatoryArgs::SplitExact {
+                        n_perm: 19,
+                        n_splits: 4,
+                    },
+                    seed: Some(18),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!((t.pvalue, t.statistic.unwrap()), (1.0, 0.0));
+        }
+    }
+
+    /// Under `pre_standardized` the fit takes X and y as given: on X
+    /// standardized by hand it predicts what the plain fit predicts on raw X.
+    #[test]
+    fn pre_standardized_fit_with_covariates_predicts_as_the_plain_fit() {
+        let n = 60;
+        let (x, y, z) = data(n);
+        let y = Col::<f64>::from_fn(n, |i| 5.0 * y[i] + 3.0);
+        let xs = Mat::<f64>::from_fn(n, x.ncols(), |i, j| {
+            let c = x.col(j);
+            let mean = (0..n).map(|r| c[r]).sum::<f64>() / n as f64;
+            let sd = ((0..n).map(|r| (c[r] - mean).powi(2)).sum::<f64>() / (n - 1) as f64).sqrt();
+            (c[i] - mean) / sd
+        });
+        let zr = Some(z.as_ref());
+        let flagged = fit(xs.as_ref(), y.as_ref(), None, zr, true).unwrap();
+        let plain = fit(x.as_ref(), y.as_ref(), None, zr, false).unwrap();
+        let got = crate::predict::pls1_predict(&flagged, xs.as_ref(), zr).unwrap();
+        let want = crate::predict::pls1_predict(&plain, x.as_ref(), zr).unwrap();
+        for i in 0..n {
+            assert!(
+                (got[i] - want[i]).abs() <= 1e-10 * want[i].abs().max(1.0),
+                "row {i}: {} vs {}",
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn covariate_errors() {
+        let n = 40;
+        let (x, y, z) = data(n);
+        let short = z.as_ref().subrows(0, n - 1);
+        assert!(matches!(
+            fit(x.as_ref(), y.as_ref(), None, Some(short), false),
+            Err(PlsKitError::ShapeMismatch(_))
+        ));
+        let mut bad = z.clone();
+        bad[(5, 1)] = f64::NAN;
+        assert!(matches!(
+            fit(x.as_ref(), y.as_ref(), None, Some(bad.as_ref()), false),
+            Err(PlsKitError::NonFiniteInput)
+        ));
+        let x10 = unif(10, 5, 11);
+        let y10 = unif_col(10, 12);
+        let z10 = unif(10, 8, 13);
+        let r = fit(x10.as_ref(), y10.as_ref(), None, Some(z10.as_ref()), false);
+        assert!(
+            matches!(
+                r,
+                Err(PlsKitError::InsufficientResidualDf {
+                    n: 10,
+                    rank: 9,
+                    k: 2
+                })
+            ),
+            "{r:?}"
+        );
     }
 }

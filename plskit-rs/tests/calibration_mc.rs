@@ -13,6 +13,9 @@
 //!   split_exact (its refit route) and `spls1_find_k_sequence`.
 //! - PLS3 cells (two blocks; that family takes no weights): split_exact and
 //!   split_nb of `pls3_confirmatory_test`.
+//! - Ignored k-set cell (`k_set_level_under_null`): the min-p `split_exact`
+//!   test over the default k set, upper edge of the 99% binomial band (see
+//!   its doc).
 //!
 //! Under H0 (y ⟂ X; Y ⟂ X for PLS3) a valid α-level test rejects at rate
 //! ≤ α. We assert the empirical FPR over `N_REPS` seeded replications (100
@@ -44,6 +47,7 @@ use plskit::{
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use std::time::Instant;
 
 const ALPHA: f64 = 0.05;
 const N_REPS: usize = 200;
@@ -113,8 +117,10 @@ fn assert_calibrated(
             ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
                 y: y.as_ref(),
-                k,
+                k: Some(&[k]),
                 weights: if weighted { Some(w.as_ref()) } else { None },
+                covariates: None,
+                null_y: None,
             },
             ConfirmatoryTestOpts {
                 args: make_args(),
@@ -320,6 +326,7 @@ fn find_k_sequence_weighted_h0_fpr_within_band() {
             y.as_ref(),
             3,
             Some(w.as_ref()),
+            None,
             FindKSequenceOpts {
                 test_method: ConfirmatoryMethod::SplitNb,
                 n_splits: 15,
@@ -406,8 +413,10 @@ fn split_exact_concentrated_spectrum_h0_fpr_within_band() {
             ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
                 y: y.as_ref(),
-                k: 1,
+                k: Some(&[1]),
                 weights: Some(w.as_ref()),
+                covariates: None,
+                null_y: None,
             },
             ConfirmatoryTestOpts {
                 args: ConfirmatoryArgs::SplitExact {
@@ -446,6 +455,7 @@ fn spls1_find_k_sequence_sparse_h0_fpr_within_band() {
             y.as_ref(),
             3,
             2,
+            None,
             None,
             FindKSequenceOpts {
                 test_method: ConfirmatoryMethod::SplitNb,
@@ -492,4 +502,104 @@ fn pls3_split_nb_h0_fpr_within_band() {
         "split_nb",
         11_000,
     );
+}
+
+/// The upper edge of the 99% binomial band of rejection counts at `ALPHA`
+/// over `r` draws: the 0.995 quantile of Binomial(r, ALPHA).
+fn binomial_upper_99(r: usize) -> usize {
+    let odds = ALPHA / (1.0 - ALPHA);
+    let mut pmf = (1.0 - ALPHA).powi(i32::try_from(r).unwrap());
+    let mut cdf = pmf;
+    for c in 0..r {
+        if cdf >= 0.995 {
+            return c;
+        }
+        pmf *= (r - c) as f64 / (c + 1) as f64 * odds;
+        cdf += pmf;
+    }
+    r
+}
+
+/// One H0 draw for `k_set_level_under_null`: X uniform on (-1, 1), or with
+/// `rank = Some(m)` an n x m by m x p product of uniforms plus 0.01 uniform
+/// noise; y independent of X. `stream` seeds the draw.
+fn k_set_null_data(n: usize, p: usize, rank: Option<usize>, stream: u64) -> (Mat<f64>, Col<f64>) {
+    let mut rng = ChaCha8Rng::seed_from_u64(0x0C5E_7000_C0FF_EE00 ^ stream);
+    let mut unif = |r: usize, c: usize, s: f64| {
+        Mat::<f64>::from_fn(r, c, |_, _| s * rng.random_range(-1.0..1.0))
+    };
+    let x = match rank {
+        None => unif(n, p, 1.0),
+        Some(m) => {
+            let f = unif(n, m, 1.0);
+            let l = unif(m, p, 1.0);
+            &f * &l + unif(n, p, 0.01)
+        }
+    };
+    // y independent of X => H0 true.
+    let y = unif(n, 1, 1.0).col(0).to_owned();
+    (x, y)
+}
+
+/// Level of the min-p `split_exact` test over the default k set (`k: None`,
+/// 1..8 on all three designs) under H0: tall (n = 60, p = 20), wide
+/// (n = 40, p = 200) and low stable rank (n = 60, p = 100, rank-3 X plus 0.01
+/// noise), unweighted, `n_perm = 99`, default `n_splits = 32`. Each design's
+/// rejection count at `ALPHA` over `R` draws must be at most the upper edge of
+/// the 99% binomial band: min-p over p-values on a 1/(n_perm + 1) grid has
+/// ties, so its exact property is P(p <= alpha) <= alpha. Prints one line
+/// per design before asserting.
+#[test]
+#[ignore = "Monte Carlo, about 10 minutes on 4 cores"]
+fn k_set_level_under_null() {
+    const R: usize = 10_000;
+    const N_PERM: usize = 99;
+    let designs: [(&str, usize, usize, Option<usize>); 3] = [
+        ("tall", 60, 20, None),
+        ("wide", 40, 200, None),
+        ("low stable rank", 60, 100, Some(3)),
+    ];
+    let hi = binomial_upper_99(R);
+    let mut outside = Vec::new();
+    for (d, &(label, n, p, rank)) in designs.iter().enumerate() {
+        let start = Instant::now();
+        let mut rejects = 0usize;
+        for rep in 0..R {
+            let stream = ((d as u64) << 32) | rep as u64;
+            let (x, y) = k_set_null_data(n, p, rank, stream);
+            let r = pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k: None,
+                    weights: None,
+                    covariates: None,
+                    null_y: None,
+                },
+                ConfirmatoryTestOpts {
+                    args: ConfirmatoryArgs::SplitExact {
+                        n_perm: N_PERM,
+                        n_splits: 32,
+                    },
+                    seed: Some(20_000 + stream),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(r.k, (1..=8).collect::<Vec<_>>(), "{label}: default set");
+            if r.pvalue <= ALPHA {
+                rejects += 1;
+            }
+        }
+        println!(
+            "{label}: n={n} p={p} R={R} n_perm={N_PERM} rejects={rejects} rate={:.4} upper={:.4} wall={:.1}s",
+            rejects as f64 / R as f64,
+            hi as f64 / R as f64,
+            start.elapsed().as_secs_f64()
+        );
+        if rejects > hi {
+            outside.push(label);
+        }
+    }
+    assert!(outside.is_empty(), "above the 99% band: {outside:?}");
 }

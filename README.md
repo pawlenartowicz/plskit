@@ -54,19 +54,12 @@ rng = np.random.default_rng(0)
 X = rng.standard_normal((200, 20))
 y = X[:, :3].sum(axis=1) + rng.standard_normal(200)
 
-model = plskit.pls1_fit(X, y, k=1)
-sig   = plskit.pls1_confirmatory_test(
-    X, y, k=1, test_method="split_exact", seed=42,
-)
-sig.pvalue, sig.statistic
+sig   = plskit.pls1_confirmatory_test(X, y, seed=42)  # signal at some k in 1..8?
+model = plskit.pls1_fit(X, y, seed=42)                  # k chosen by cross-validation
+sig.pvalue, sig.k, model.k_used
 ```
 
-`test_method` defaults to `"auto"`, which picks `split_exact` or `split_nb`
-from `X`. `k=1` with `split_exact` is the recommended choice: a split-half test calibrated by
-permutation, so it holds its level on any design (its p-value is
-floored at `1/(n_perm + 1)`). `split_nb` is the faster asymptotic
-alternative. See the [Python API](docs/python/api.md) (§3.1) for all
-five methods.
+Without `k`, `pls1_confirmatory_test` tests the set `k = 1..8`, cut by the design, and returns one p-value for signal at some `k` in the set. It names no `k` to fit at: `pls1_fit(X, y)` chooses its own `k` by cross-validation. `test_method` defaults to `"auto"`, which over a set runs `split_exact`, the recommended method: a split-half test calibrated by permutation, so it holds its level on any design (its p-value is floored at `1/(n_perm + 1)`). At one `k`, `"auto"` picks `split_exact` or `split_nb` from `X`; `k=1, test_method="split_nb"` is the faster asymptotic alternative. See the [Python API](docs/python/api.md) (§3.1) for all five methods.
 
 ## Documentation
 

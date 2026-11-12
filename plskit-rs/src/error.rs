@@ -177,6 +177,23 @@ pub enum PlsKitError {
         /// The significance threshold the sequence ran at.
         alpha: f64,
     },
+
+    /// Too few residual degrees of freedom after removing the covariates:
+    /// `n − rank([1, Z]) < k + 1`.
+    #[error(
+        "insufficient residual degrees of freedom: n={n} rows minus rank([1, Z])={rank} \
+         leaves fewer than k + 1 = {} for k={k} components. Lower k or pass fewer \
+         covariates.",
+        k + 1
+    )]
+    InsufficientResidualDf {
+        /// Rows with positive weight (all rows unweighted).
+        n: usize,
+        /// Rank of `[1, Z]`, the intercept included.
+        rank: usize,
+        /// Requested number of components.
+        k: usize,
+    },
 }
 
 impl PlsKitError {
@@ -201,6 +218,7 @@ impl PlsKitError {
             Self::PermNullDegenerate { .. } => "perm_null_degenerate",
             Self::OptimalNoComponent => "optimal_no_component",
             Self::SequenceNoRejection { .. } => "sequence_no_rejection",
+            Self::InsufficientResidualDf { .. } => "insufficient_residual_df",
         }
     }
 }
@@ -278,6 +296,14 @@ mod tests {
                 E::SequenceNoRejection { alpha: 0.05 },
                 "sequence_no_rejection",
             ),
+            (
+                E::InsufficientResidualDf {
+                    n: 3,
+                    rank: 2,
+                    k: 1,
+                },
+                "insufficient_residual_df",
+            ),
         ];
         let mut seen: Vec<usize> = table
             .iter()
@@ -300,11 +326,12 @@ mod tests {
                     E::PermNullDegenerate { .. } => 13,
                     E::OptimalNoComponent => 14,
                     E::SequenceNoRejection { .. } => 15,
+                    E::InsufficientResidualDf { .. } => 16,
                 }
             })
             .collect();
         seen.sort_unstable();
-        assert_eq!(seen, (0..16).collect::<Vec<_>>(), "one row per variant");
+        assert_eq!(seen, (0..17).collect::<Vec<_>>(), "one row per variant");
     }
 
     /// The message is all a wrapper's exception carries of this variant's

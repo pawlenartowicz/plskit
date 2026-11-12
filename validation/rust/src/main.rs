@@ -103,7 +103,7 @@ fn run_fit(out: &mut Out) {
     for (n, p, k) in fit_grid() {
         let (x, y) = fit_data(n, p);
         let t = time_call(|| {
-            pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(k), None, FitOpts::default()).unwrap();
+            pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(k), None, None, FitOpts::default()).unwrap();
         });
         out.put("pls1", "pls1_fit", (n, p, k), t);
         eprintln!("{n:>6} {p:>6} {k:>3}  plskit-rs/pls1_fit          wall {:10.3} ms  cpu {:10.3} ms", t.0, t.1);

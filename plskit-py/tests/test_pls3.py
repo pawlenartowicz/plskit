@@ -148,7 +148,7 @@ def test_confirmatory_test_split_exact_marshals_its_fields():
     )
     assert isinstance(r, plskit.ConfirmatoryTestResult)
     assert r.test_method == "split_exact"
-    assert r.k == 1
+    assert r.k == [1]
     assert r.n_perm == 199
     assert r.n_splits == 10
     assert r.seed == 42
@@ -262,7 +262,7 @@ def test_pls3_family_rejects_unusable_top_level_values(call, message):
     assert ei.value.code == "invalid_argument"
 
 
-def test_auto_is_the_default_and_resolves_per_design():
+def test_auto_is_the_default_and_runs_split_exact():
     X, Y = _data(n=80, p=6)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -278,10 +278,11 @@ def test_auto_is_the_default_and_resolves_per_design():
         large = plskit.pls3_confirmatory_test(
             X, Y, args={"n_perm": 49, "n_splits": 6}, seed=3
         )
-    assert large.test_method == "split_nb"
-    assert large.n_perm is None
+    assert plskit.split_nb_gate(X).fires is False
+    assert large.test_method == "split_exact"
+    assert large.n_perm == 49
     assert large.n_splits == 6
-    assert large.stable_rank is not None
+    assert large.stable_rank is None
 
 
 def test_auto_args_take_n_perm_and_n_splits_only():

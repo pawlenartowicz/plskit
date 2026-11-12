@@ -43,14 +43,20 @@ end
 
 function _call(fname::Symbol; kwargs...)
     _check_main_thread()
+    return _pycall(pygetattr(_plskit, String(fname)); kwargs...)
+end
+
+# Call the Python callable `fn`: a Python PlsKitError becomes a Julia one,
+# and Python warnings become Julia warnings. Callers check the thread first.
+function _pycall(fn::Py, args...; kwargs...)
+    pyargs = [_to_py(a) for a in args]
     pykw = [k => _to_py(v) for (k, v) in kwargs]
-    fn = pygetattr(_plskit, String(fname))
     catcher = _warnings.catch_warnings(record=true)
     caught = catcher.__enter__()
     local out
     try
         _warnings.simplefilter("always")
-        out = fn(; pykw...)
+        out = fn(pyargs...; pykw...)
     catch e
         if e isa PyException && pyisinstance(e.v, _plskit.PlsKitError)
             throw(_plskit_error(e.v))
@@ -63,4 +69,38 @@ function _call(fname::Symbol; kwargs...)
         end
     end
     return _to_julia(out)
+end
+
+# `X` and `y` / `Y` of the two confirmatory tests have a `None` default in
+# Python, so that `gram=` can replace `X`, and the stubs in generated.jl take
+# them by keyword. These methods keep them positional, as they were.
+"""
+    pls1_confirmatory_test(X, y; kwargs...) -> ConfirmatoryTestResult
+
+The same call with `X` and `y` positional; every other argument is a keyword, as
+in the keyword form. A `gram=` call uses the keyword form, without `X`:
+`pls1_confirmatory_test(; gram=g, y=y)`.
+"""
+pls1_confirmatory_test(X, y; kwargs...) = pls1_confirmatory_test(; X, y, kwargs...)
+
+"""
+    pls3_confirmatory_test(X, Y; kwargs...) -> ConfirmatoryTestResult
+
+The same call with `X` and `Y` positional; every other argument is a keyword, as
+in the keyword form. A `gram=` call uses the keyword form, without `X`:
+`pls3_confirmatory_test(; gram=g, Y=Y)`.
+"""
+pls3_confirmatory_test(X, Y; kwargs...) = pls3_confirmatory_test(; X, Y, kwargs...)
+
+"""
+    PLSKit.subset(g::GramMatrixResult, rows) -> GramMatrixResult
+
+Python's `g.subset(rows)`, with 1-based `rows`: `g.gram[rows, rows]` with the
+same `n_features` and `pre_standardized`, the Gram matrix of those rows on
+the all-row centring and scale. Not exported, because DataFrames exports a
+`subset` of its own.
+"""
+function subset(g::PlsKitResult{:GramMatrixResult}, rows::AbstractVector{<:Union{Signed,Unsigned}})
+    _check_main_thread()
+    return _pycall(getfield(g, :py).subset, collect(Int, rows) .- 1)
 end

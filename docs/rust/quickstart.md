@@ -1,7 +1,6 @@
 # Quickstart
 
-Three steps on small synthetic data: fit PLS1, run a confirmatory test with
-`split_exact`, and fit PLS3. The same steps in Python are in the
+Three steps on small synthetic data: fit PLS1, run a confirmatory test with `split_exact` over the default set of `k`, and fit PLS3. The same steps in Python are in the
 [Python quickstart](../python/quickstart.md).
 
 Add `plskit` as a dependency (see [Installation](installation.md)). Build
@@ -27,21 +26,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let y = Col::<f64>::from_fn(n, |i| x[(i, 0)] - 0.5 * x[(i, 1)] + 0.5 * noise(i, 99));
 
     // 1. Fit PLS1 with two components and predict on the training rows.
-    let model = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(2), None, FitOpts::default())?;
+    let model = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(2), None, None, FitOpts::default())?;
     println!("k_used = {}", model.k_used);
     println!("beta[0..2] = [{:.3}, {:.3}]", model.beta[0], model.beta[1]);
-    let y_hat = pls1_predict(&model, x.as_ref())?;
+    let y_hat = pls1_predict(&model, x.as_ref(), None)?;
     println!("y_hat[0] = {:.3}", y_hat[0]);
 
-    // 2. Confirmatory test at k = 1 with split_exact, the recommended method.
-    //    Small n_perm / n_splits keep the example fast; use the defaults
-    //    (1000 / 50) for real analyses.
+    // 2. Confirmatory test with split_exact, the recommended method, over
+    //    the default set of k (k: None). Small n_perm / n_splits keep the
+    //    example fast; use the defaults (1000 / 32) for real analyses.
     let test = pls1_confirmatory_test(
         ConfirmatoryTestInput::Raw {
             x: x.as_ref(),
             y: y.as_ref(),
-            k: 1,
+            k: None,
             weights: None,
+            covariates: None,
+            null_y: None,
         },
         ConfirmatoryTestOpts {
             args: ConfirmatoryArgs::SplitExact {
@@ -52,10 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..ConfirmatoryTestOpts::default()
         },
     )?;
-    println!(
-        "{}: statistic = {:.3}, p = {:.4}",
-        test.test_method, test.statistic, test.pvalue
-    );
+    println!("{}: k = {:?}, p = {:.4}", test.test_method, test.k, test.pvalue);
 
     // 3. Fit PLS3 (PLSSVD) on two blocks: X and a 3-column Y block.
     let q = 3;
@@ -80,31 +78,24 @@ printed digits):
 k_used = 2
 beta[0..2] = [0.092, -0.112]
 y_hat[0] = -0.812
-split_exact: statistic = 0.996, p = 0.0050
+split_exact: k = [1, 2, 3, 4, 5, 6, 7, 8], p = 0.0050
 singular values = [163.845, 127.909]
 x_scores: 60 x 2
 ```
 
 ## What each step does
 
-**1. Fit.** `pls1_fit(x, y, k, weights, opts)` takes borrowed views
+**1. Fit.** `pls1_fit(x, y, k, weights, covariates, opts)` takes borrowed views
 (`MatRef` / `ColRef`, obtained with `.as_ref()`), a component count as
-`KSpec::Fixed(k)`, optional observation weights (`None` for uniform), and a
+`KSpec::Fixed(k)`, optional observation weights (`None` for uniform),
+optional covariates (`None` for none), and a
 `FitOpts` struct. The returned `Pls1Model` carries raw-scale coefficients
 (`beta`, `intercept`), the standardized-scale fit (`coef`, `w_star`,
 `t_scores`, ...), and `k_used`, which can be smaller than the requested `k`
-when `X` or `y` runs out of informative directions. `pls1_predict(&model, x_new)`
+when `X` or `y` runs out of informative directions. `pls1_predict(&model, x_new, covariates)`
 applies the fitted model to new rows.
 
-**2. Test.** `pls1_confirmatory_test` asks whether there is any `X`-`y`
-signal at a fixed `k`. The method is the `ConfirmatoryArgs` variant;
-`ConfirmatoryTestOpts::default()` fills `args` with `Auto`, which picks
-`split_exact` or `split_nb` from the design (see
-[`"auto"`](../concepts/PLS1/inference.md#test_methodauto) and
-[Choosing the method in Rust](api.md#choosing-the-method-in-rust)).
-`split_exact` at `k = 1` is the recommended method. A fixed `seed` makes
-the result reproducible, and the same seed gives byte-identical output at
-any thread count. `test.test_method` reports the method that actually ran.
+**2. Test.** `pls1_confirmatory_test` asks whether there is any `X`-`y` signal at some `k` in a set fixed before the test sees `y`. `k: None` is the default set `1..=8`, cut by the design (here `p = 8` and `n = 60` leave all eight); `Some(&[1])` tests one `k`. The test returns one p-value for the whole set, `test.k` lists the tested set, and `test.pvalues_by_k` / `test.statistics_by_k` hold each `k`'s own p and statistic; `test.statistic` is `None` for a set of more than one `k` ([A set of `k`](../concepts/PLS1/inference.md#a-set-of-k)). The test names no `k` to fit at. The method is the `ConfirmatoryArgs` variant; `ConfirmatoryTestOpts::default()` fills `args` with `Auto`, which runs `split_exact` over a set of more than one `k` and picks `split_exact` or `split_nb` from the design at one `k` (see [`"auto"`](../concepts/PLS1/inference.md#test_methodauto) and [Choosing the method in Rust](api.md#choosing-the-method-in-rust)). `split_exact` is the recommended method. A fixed `seed` makes the result reproducible, and the same seed gives byte-identical output at any thread count. `test.test_method` reports the method that actually ran.
 
 **3. PLS3.** `pls3_fit(x, y, k, weights, opts)` takes two matrices: neither
 block is the outcome, and the model describes which pattern of `X` covaries

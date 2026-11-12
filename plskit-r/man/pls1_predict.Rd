@@ -4,10 +4,10 @@
 \alias{pls1_predict}
 \title{Predict from a fitted PLS1 model}
 \usage{
-pls1_predict(model, X_new)
+pls1_predict(model, X_new, covariates = NULL)
 }
 \arguments{
-\item{model, X_new}{See the canonical reference.}
+\item{model, X_new, covariates}{See the canonical reference.}
 }
 \value{
 A numeric vector.

@@ -1,8 +1,8 @@
 //! `pls1_fit` fixture cases.
 
 use crate::cases::{
-    CasePaths, Xyw, faer_col_to_array, manifest_case, ndarray_to_faer_col, ndarray_to_faer_mat,
-    scalar_f64, scalar_i64, synth_data,
+    CasePaths, Xyw, array_descriptors, ensure_moved, faer_col_to_array, manifest_case,
+    ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_covariates, synth_data,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
@@ -42,6 +42,7 @@ fn fit_fixed_k(root: &Path, c: &FitFixedKCase<'_>) -> Result<Case> {
         x_faer.as_ref(),
         y_faer.as_ref(),
         c.kspec,
+        None,
         None,
         FitOpts::default(),
     )?;
@@ -177,6 +178,7 @@ pub fn small_n50_d10_sequence(root: &Path) -> Result<Case> {
         y_faer.as_ref(),
         4_usize,
         None,
+        None,
         FindKSequenceOpts {
             seed: Some(42),
             ..FindKSequenceOpts::default()
@@ -204,6 +206,7 @@ pub fn small_n50_d10_sequence(root: &Path) -> Result<Case> {
         x_faer.as_ref(),
         y_faer.as_ref(),
         KSpec::Fixed(seq.k_star),
+        None,
         None,
         FitOpts::default(),
     )?;
@@ -284,6 +287,7 @@ pub fn weighted_n50_d10_k2(root: &Path) -> Result<Case> {
         y_faer.as_ref(),
         KSpec::Fixed(2),
         Some(weights_faer.as_ref()),
+        None,
         FitOpts::default(),
     )?;
 
@@ -346,24 +350,50 @@ fn fit_on(
     let paths = CasePaths::build(root, function, name)?;
     data.write(&paths.abs_inputs)?;
     let w = data.w_faer();
-    let model = pls1_fit(
-        data.x_faer().as_ref(),
-        data.y_faer().as_ref(),
-        KSpec::Fixed(k),
-        w.as_ref().map(faer::Col::as_ref),
-        FitOpts {
-            pre_standardized,
-            ..FitOpts::default()
-        },
-    )?;
+    let z = data.z_faer();
+    let fit = |covariates: Option<&faer::Mat<f64>>| {
+        pls1_fit(
+            data.x_faer().as_ref(),
+            data.y_faer().as_ref(),
+            KSpec::Fixed(k),
+            w.as_ref().map(faer::Col::as_ref),
+            covariates.map(faer::Mat::as_ref),
+            FitOpts {
+                pre_standardized,
+                ..FitOpts::default()
+            },
+        )
+    };
+    let model = fit(z.as_ref())?;
+    if z.is_some() {
+        let plain = fit(None)?;
+        ensure_moved(
+            name,
+            "beta",
+            &(0..model.beta.nrows())
+                .map(|i| model.beta[i])
+                .collect::<Vec<_>>(),
+            &(0..plain.beta.nrows())
+                .map(|i| plain.beta[i])
+                .collect::<Vec<_>>(),
+        )?;
+    }
     {
         let mut w = NpzWriter::create(&paths.abs_outputs)?;
         w.add_f64("coef", &faer_col_to_array(&model.coef))?;
         w.add_f64("beta", &faer_col_to_array(&model.beta))?;
         w.add_f64("intercept", &scalar_f64(model.intercept))?;
         w.add_i64("k_used", &scalar_i64(i64::try_from(model.k_used)?))?;
+        if let Some(cc) = &model.covariate_coef {
+            w.add_f64("covariate_coef", &faer_col_to_array(cc))?;
+        }
+        if let Some(nc) = model.n_covariates {
+            w.add_i64("n_covariates", &scalar_i64(i64::try_from(nc)?))?;
+        }
         w.finish()?;
     }
+    let mut kwargs = kwargs;
+    array_descriptors(&mut kwargs, data);
     manifest_case(
         root,
         name,
@@ -371,6 +401,51 @@ fn fit_on(
         paths.rel_inputs,
         paths.rel_outputs,
         kwargs,
+    )
+}
+
+/// `synth_data(50, 10, 2, 4.0, 42)` with [`synth_covariates`]`(x, 7)`.
+fn covariates_n50_d10(w: Option<ndarray::Array1<f64>>) -> Xyw {
+    let (x, y) = synth_data(50, 10, 2, 4.0, 42);
+    let z = Some(synth_covariates(&x, 7));
+    Xyw {
+        x,
+        y,
+        w,
+        z,
+        ..Default::default()
+    }
+}
+
+/// Case: `pls1_fit` at k=2 with three covariates, the third an alias of the
+/// first. Outputs add `covariate_coef` (0 at the aliased column) and
+/// `n_covariates`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_fit` fails.
+pub fn covariates_n50_d10_k2(root: &Path) -> Result<Case> {
+    fit_on(
+        root,
+        "pls1_fit_covariates",
+        &covariates_n50_d10(None),
+        2,
+        false,
+        serde_json::json!({"k": 2, "seed": 42}),
+    )
+}
+
+/// Case: [`covariates_n50_d10_k2`] with [`half_double_weights`].
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_fit` fails.
+pub fn covariates_weighted_n50_d10_k2(root: &Path) -> Result<Case> {
+    fit_on(
+        root,
+        "pls1_fit_covariates_weighted",
+        &covariates_n50_d10(Some(half_double_weights())),
+        2,
+        false,
+        serde_json::json!({"k": 2, "seed": 42, "weights": "nonuniform"}),
     )
 }
 
@@ -391,6 +466,7 @@ pub fn pre_standardized_weighted_n50_d10_k3(root: &Path) -> Result<Case> {
         x: ndarray::Array2::from_shape_fn((xs.nrows(), xs.ncols()), |(i, j)| xs[(i, j)]),
         y: ndarray::Array1::from_shape_fn(ys.nrows(), |i| ys[i]),
         w: Some(half_double_weights()),
+        ..Default::default()
     };
     fit_on(
         root,
@@ -428,7 +504,12 @@ pub fn offset_n50_d10_k3(root: &Path) -> Result<Case> {
     fit_on(
         root,
         "pls1_fit_offset_n50_d10_k3",
-        &Xyw { x, y, w: None },
+        &Xyw {
+            x,
+            y,
+            w: None,
+            ..Default::default()
+        },
         3,
         false,
         serde_json::json!({"k": 3, "seed": 42}),
@@ -461,6 +542,7 @@ pub fn mean_heavy_weighted_n50_d10_k3(root: &Path) -> Result<Case> {
             x,
             y,
             w: Some(half_double_weights()),
+            ..Default::default()
         },
         3,
         false,

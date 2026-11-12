@@ -5,10 +5,11 @@ use std::path::Path;
 
 use anyhow::Result;
 use plskit::{
-    ConfirmatoryArgs, Pls3ConfirmatoryTestOpts, Pls3FitOpts, TransformWhich,
-    pls3_confirmatory_test, pls3_fit, pls3_transform,
+    ConfirmatoryArgs, Pls3ConfirmatoryTestOpts, Pls3FitOpts, TransformWhich, gram_matrix,
+    pls3_confirmatory_test, pls3_confirmatory_test_gram, pls3_fit, pls3_transform,
 };
 
+use crate::cases::pls1_confirmatory_test::write_k_set;
 use crate::cases::{
     CasePaths, faer_col_to_array, faer_mat_to_array, ndarray_to_faer_mat, scalar_f64, scalar_i64,
     synth_xy,
@@ -201,10 +202,12 @@ pub fn transform_basic_n80_p6_q3_k2(root: &Path) -> Result<Case> {
 
 /// Synth shape and permutation counts for one `pls3_confirmatory_test`
 /// `split_exact` case. `auto` requests `test_method=auto` instead, on a
-/// design that resolves to `split_exact`.
+/// design that resolves to `split_exact`. `gram` passes `gram_matrix(X)`
+/// in place of X (kwarg `"gram": true`).
 struct Pls3SplitExactCase<'a> {
     name: &'a str,
     auto: bool,
+    gram: bool,
     n: usize,
     p: usize,
     q: usize,
@@ -235,33 +238,36 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
 
     let xf = ndarray_to_faer_mat(&x);
     let yf = ndarray_to_faer_mat(&y);
-    let r = pls3_confirmatory_test(
-        xf.as_ref(),
-        yf.as_ref(),
-        1,
-        Pls3ConfirmatoryTestOpts {
-            args: if c.auto {
-                ConfirmatoryArgs::Auto {
-                    n_perm: c.n_perm,
-                    n_splits: c.n_splits,
-                }
-            } else {
-                ConfirmatoryArgs::SplitExact {
-                    n_perm: c.n_perm,
-                    n_splits: c.n_splits,
-                }
-            },
-            seed: Some(CASE_SEED),
-            ..Pls3ConfirmatoryTestOpts::default()
+    let opts = Pls3ConfirmatoryTestOpts {
+        args: if c.auto {
+            ConfirmatoryArgs::Auto {
+                n_perm: c.n_perm,
+                n_splits: c.n_splits,
+            }
+        } else {
+            ConfirmatoryArgs::SplitExact {
+                n_perm: c.n_perm,
+                n_splits: c.n_splits,
+            }
         },
-    )?;
+        seed: Some(CASE_SEED),
+        ..Pls3ConfirmatoryTestOpts::default()
+    };
+    let r = if c.gram {
+        pls3_confirmatory_test_gram(&gram_matrix(xf.as_ref(), false)?, yf.as_ref(), 1, opts)?
+    } else {
+        pls3_confirmatory_test(xf.as_ref(), yf.as_ref(), 1, opts)?
+    };
 
     {
         let mut w = NpzWriter::create(&paths.abs_outputs)?;
         w.add_f64("pvalue", &scalar_f64(r.pvalue))?;
-        w.add_f64("statistic", &scalar_f64(r.statistic))?;
+        w.add_f64(
+            "statistic",
+            &scalar_f64(r.statistic.expect("PLS3 tests one k")),
+        )?;
         w.add_string("test_method", &r.test_method)?;
-        w.add_i64("k", &scalar_i64(i64::try_from(r.k)?))?;
+        write_k_set(&mut w, &r)?;
         w.add_i64(
             "n_perm",
             &scalar_i64(i64::try_from(
@@ -289,12 +295,18 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
         function: function.into(),
         inputs: paths.rel_inputs,
         outputs: paths.rel_outputs,
-        kwargs: serde_json::json!({
-            "k": 1,
-            "test_method": if c.auto { "auto" } else { "split_exact" },
-            "args": {"n_perm": c.n_perm, "n_splits": c.n_splits},
-            "seed": CASE_SEED
-        }),
+        kwargs: {
+            let mut kw = serde_json::json!({
+                "k": 1,
+                "test_method": if c.auto { "auto" } else { "split_exact" },
+                "args": {"n_perm": c.n_perm, "n_splits": c.n_splits},
+                "seed": CASE_SEED
+            });
+            if c.gram {
+                kw["gram"] = serde_json::Value::Bool(true);
+            }
+            kw
+        },
         hashes: Hashes {
             inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
@@ -313,6 +325,7 @@ pub fn confirmatory_split_exact(root: &Path) -> Result<Case> {
         &Pls3SplitExactCase {
             name: "pls3_confirmatory_split_exact",
             auto: false,
+            gram: false,
             n: 80,
             p: 6,
             q: 3,
@@ -323,8 +336,8 @@ pub fn confirmatory_split_exact(root: &Path) -> Result<Case> {
 }
 
 /// Case: `pls3_confirmatory_test` with `test_method=auto`, `n_perm=200`,
-/// `n_splits=30`, `seed=42` on n=80, p=6, q=3. n is below the cutoff of 250,
-/// so the rule resolves to `split_exact`.
+/// `n_splits=30`, `seed=42` on n=80, p=6, q=3. `auto` runs `split_exact` on
+/// every PLS3 design.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or the test fails.
@@ -334,6 +347,7 @@ pub fn confirmatory_auto_split_exact(root: &Path) -> Result<Case> {
         &Pls3SplitExactCase {
             name: "pls3_confirmatory_auto_split_exact",
             auto: true,
+            gram: false,
             n: 80,
             p: 6,
             q: 3,
@@ -363,6 +377,28 @@ pub fn confirmatory_split_exact_wide(root: &Path) -> Result<Case> {
         &Pls3SplitExactCase {
             name: "pls3_confirmatory_split_exact_wide",
             auto: false,
+            gram: false,
+            n: 30,
+            p: 100,
+            q: 3,
+            n_perm: 100,
+            n_splits: 30,
+        },
+    )
+}
+
+/// Case: `pls3_confirmatory_test` on `gram_matrix(X)` in place of X, with
+/// the design and counts of [`confirmatory_split_exact_wide`].
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or the test fails.
+pub fn confirmatory_gram_split_exact(root: &Path) -> Result<Case> {
+    split_exact_case(
+        root,
+        &Pls3SplitExactCase {
+            name: "pls3_confirmatory_test_gram_split_exact",
+            auto: false,
+            gram: true,
             n: 30,
             p: 100,
             q: 3,
@@ -414,9 +450,12 @@ pub fn confirmatory_split_nb(root: &Path) -> Result<Case> {
     {
         let mut w = NpzWriter::create(&paths.abs_outputs)?;
         w.add_f64("pvalue", &scalar_f64(r.pvalue))?;
-        w.add_f64("statistic", &scalar_f64(r.statistic))?;
+        w.add_f64(
+            "statistic",
+            &scalar_f64(r.statistic.expect("PLS3 tests one k")),
+        )?;
         w.add_string("test_method", &r.test_method)?;
-        w.add_i64("k", &scalar_i64(i64::try_from(r.k)?))?;
+        write_k_set(&mut w, &r)?;
         // No `n_perm` key: split_nb runs no permutations. `stable_rank` is
         // what the gate saw, mirroring `cases/pls1_confirmatory_test.rs`.
         w.add_i64(

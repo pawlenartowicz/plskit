@@ -13,11 +13,12 @@ pls1_perm_null(
   pre_standardized = FALSE,
   seed = NULL,
   verbose = FALSE,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 )
 }
 \arguments{
-\item{X, y, k, n_perm, return_perm_matrix, pre_standardized, seed, verbose, weights}{See the canonical reference.}
+\item{X, y, k, n_perm, return_perm_matrix, pre_standardized, seed, verbose, weights, covariates}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("perm_null_result", "plskit_result")}.

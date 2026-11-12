@@ -34,6 +34,7 @@ pub fn k1(root: &Path) -> Result<Case> {
         y_faer.as_ref(),
         1,
         None,
+        None,
         FindKeepOptimalOpts {
             seed: Some(42),
             ..Default::default()

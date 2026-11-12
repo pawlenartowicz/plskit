@@ -1,6 +1,6 @@
 name: MC calibration gate
 
-# Runs the #[ignore]d Monte-Carlo calibration tests on a weekly schedule
+# Runs the #[ignore]d Monte-Carlo calibration tests on a monthly schedule
 # and on demand, plus a beta-rustc tripwire for upcoming compiler
 # regressions. Kept out of ci.yml so the schedule trigger does not fire
 # the full per-push CI suite.
@@ -8,9 +8,9 @@ name: MC calibration gate
 # What runs: `cargo test -p plskit --release -- --ignored --nocapture`.
 # `--ignored` runs ONLY the #[ignore]d tests of every test target of the
 # package, and picks up future ones without editing this file. Today that is
-# the Monte-Carlo calibration gate (tests/coverage_mc.rs's CI-coverage grid)
-# plus three gram_p tools: the tall-shape sweep (tall_shapes_n_over_p_sweep),
-# which asserts its fallback-rate bounds, and the work-floor benchmark
+# the Monte-Carlo calibration gate (tests/coverage_mc.rs's CI-coverage grid),
+# the k-set level check under the null (tests/calibration_mc.rs's
+# k_set_level_under_null, about 10 min), plus two gram_p benchmarks, the work-floor benchmark
 # (gram_p_work_floor_benchmark) and the route boundary benchmark
 # (gram_p_route_boundary_benchmark, about 25 s), which print measurements
 # and assert nothing a running test does not. `--nocapture`
@@ -21,7 +21,7 @@ name: MC calibration gate
 
 on:
   schedule:
-    - cron: '0 4 * * 0'   # weekly, Sunday 04:00 UTC
+    - cron: '0 4 1 * *'   # monthly, 1st of the month 04:00 UTC
   workflow_dispatch:        # manual trigger — run on demand before releases
 
 jobs:

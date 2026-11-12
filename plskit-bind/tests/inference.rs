@@ -6,7 +6,7 @@
 mod common;
 
 use common::*;
-use plskit_bind::{MatF64, Value, VecF64, check_record};
+use plskit_bind::{MatF64, Outcome, Value, VecF64, check_record};
 
 fn args(fields: Vec<(&str, Value<'static>)>) -> Value<'static> {
     Value::Record(rec(fields))
@@ -280,7 +280,6 @@ fn perm_alpha_record_and_errors() {
     };
     assert_eq!((alpha.nrows(), alpha.ncols()), (n, 2));
     assert!(matches!(field(r, "k_used"), Value::IntVec(v) if *v == [1, 0]));
-    assert!(matches!(field(r, "resolved"), Value::BoolVec(v) if *v == [true, true]));
     assert_eq!((i(r, "k"), i(r, "n_features")), (1, 200));
 
     let e = err(
@@ -288,16 +287,17 @@ fn perm_alpha_record_and_errors() {
         vec![
             ("gram", gram()),
             ("Y", outcomes()),
-            ("k", Value::I64(2)),
+            ("k", Value::I64(11)),
             ("n_features", Value::I64(200)),
         ],
     );
     assert_eq!(e.code, "invalid_argument");
-    assert!(e.message.contains("supports k = 1 only"), "{}", e.message);
+    assert!(e.message.contains("serves k <= 10"), "{}", e.message);
     let e = err("pls1_perm_alpha", vec![("gram", gram()), ("Y", outcomes())]);
     assert_eq!(e.code, "invalid_argument");
     assert!(
-        e.message.contains("missing required argument 'n_features'"),
+        e.message
+            .contains("n_features is required with a gram matrix"),
         "{}",
         e.message
     );
@@ -307,4 +307,192 @@ fn perm_alpha_record_and_errors() {
     );
     assert_eq!(e.code, "invalid_argument");
     assert_eq!(e.message, "Y must be 2-D, got 1-D");
+}
+
+/// `gram_matrix(X)`'s record and `y` on a wide design.
+fn gram_record() -> (Value<'static>, Value<'static>, Value<'static>) {
+    let (x, y) = data(30, 80, 3);
+    let g = ok("gram_matrix", vec![("X", x.clone())]);
+    (x, y, g.result)
+}
+
+fn split_exact_on(fields: Vec<(&'static str, Value<'static>)>) -> Outcome {
+    let mut v = vec![
+        ("k", Value::I64(1)),
+        ("test_method", Value::text("split_exact")),
+        ("args", exact_args()),
+        ("seed", Value::U64(3)),
+    ];
+    v.extend(fields);
+    ok("pls1_confirmatory_test", v)
+}
+
+/// The object and the raw matrix with `n_features` give the X call's
+/// result; the PLS3 test and `pls1_perm_alpha` take both forms too.
+#[test]
+fn gram_takes_the_object_or_a_matrix_with_n_features() {
+    let (x, y, g) = gram_record();
+    let Value::Record(gr) = &g else { panic!() };
+    let raw = field(gr, "gram").clone();
+    let on_x = split_exact_on(vec![("X", x.clone()), ("y", y.clone())]);
+    let on_obj = split_exact_on(vec![("gram", g.clone()), ("y", y.clone())]);
+    let on_raw = split_exact_on(vec![
+        ("gram", raw.clone()),
+        ("n_features", Value::I64(80)),
+        ("y", y.clone()),
+    ]);
+    let stat = |o: &Outcome| {
+        let Value::F64(s) = field(record(o), "statistic") else {
+            panic!()
+        };
+        *s
+    };
+    assert!((stat(&on_x) - stat(&on_obj)).abs() <= 1e-12 * stat(&on_x).abs());
+    assert!(same(&on_obj.result, &on_raw.result));
+
+    let yy = block_y(30, 3, &x, 4);
+    for gram in [
+        vec![("gram", g.clone())],
+        vec![("gram", raw.clone()), ("n_features", Value::I64(80))],
+    ] {
+        let mut v = vec![
+            ("Y", yy.clone()),
+            ("args", exact_args()),
+            ("seed", Value::U64(3)),
+        ];
+        v.extend(gram);
+        check_record(record(&ok("pls3_confirmatory_test", v))).unwrap();
+    }
+    let Value::Vec(yv) = &y else { panic!() };
+    let ym = Value::Mat(MatF64::Owned {
+        data: yv.as_slice().to_vec(),
+        nrows: 30,
+        ncols: 1,
+    });
+    let a = ok(
+        "pls1_perm_alpha",
+        vec![("gram", g.clone()), ("Y", ym.clone()), ("k", Value::I64(2))],
+    );
+    check_record(record(&a)).unwrap();
+}
+
+#[test]
+fn gram_refuses_weights() {
+    let (_, y, g) = gram_record();
+    let e = err(
+        "pls1_confirmatory_test",
+        vec![
+            ("gram", g),
+            ("y", y),
+            ("weights", Value::Vec(VecF64::Owned(vec![1.0; 30]))),
+        ],
+    );
+    assert_eq!(e.code, "invalid_argument");
+    assert!(
+        e.message.contains("weights do not combine with gram"),
+        "{}",
+        e.message
+    );
+}
+
+/// A bind call that must fail: the function, its arguments and a part of
+/// the message.
+type Case = (
+    &'static str,
+    Vec<(&'static str, Value<'static>)>,
+    &'static str,
+);
+
+/// One of `X` and `gram`, `y` always, `n_features` only with a raw
+/// matrix, and no scaling flag with the object.
+#[test]
+fn gram_argument_combinations_are_checked() {
+    let (x, y, g) = gram_record();
+    let Value::Record(gr) = &g else { panic!() };
+    let raw = field(gr, "gram").clone();
+    let cases: Vec<Case> = vec![
+        (
+            "pls1_confirmatory_test",
+            vec![("X", x.clone()), ("gram", g.clone()), ("y", y.clone())],
+            "not both",
+        ),
+        (
+            "pls1_confirmatory_test",
+            vec![("y", y.clone())],
+            "pass X or gram",
+        ),
+        (
+            "pls1_confirmatory_test",
+            vec![("gram", g.clone())],
+            "missing required argument 'y'",
+        ),
+        (
+            "pls1_confirmatory_test",
+            vec![
+                ("X", x.clone()),
+                ("y", y.clone()),
+                ("n_features", Value::I64(80)),
+            ],
+            "only with a gram matrix",
+        ),
+        (
+            "pls1_confirmatory_test",
+            vec![
+                ("gram", g.clone()),
+                ("y", y.clone()),
+                ("n_features", Value::I64(80)),
+            ],
+            "records it",
+        ),
+        (
+            "pls1_confirmatory_test",
+            vec![
+                ("gram", g.clone()),
+                ("y", y.clone()),
+                ("pre_standardized", Value::Bool(true)),
+            ],
+            "pre_standardized is not taken",
+        ),
+        (
+            "pls1_confirmatory_test",
+            vec![("gram", raw.clone()), ("y", y.clone())],
+            "n_features is required",
+        ),
+        (
+            "pls1_confirmatory_test",
+            vec![
+                ("gram", g.clone()),
+                ("y", y.clone()),
+                ("ci", Value::Bool(true)),
+            ],
+            "ci does not combine",
+        ),
+        (
+            "pls3_confirmatory_test",
+            vec![
+                ("gram", g.clone()),
+                ("Y", block_y(30, 3, &x, 4)),
+                ("pre_standardized_X", Value::Bool(true)),
+            ],
+            "pre_standardized_X is not taken",
+        ),
+        (
+            "pls1_perm_alpha",
+            vec![
+                ("gram", g.clone()),
+                ("Y", block_y(30, 3, &x, 4)),
+                ("n_features", Value::I64(80)),
+            ],
+            "records it",
+        ),
+    ];
+    for (name, fields, want) in cases {
+        let e = err(name, fields);
+        assert_eq!(e.code, "invalid_argument", "{name}: {}", e.message);
+        assert!(
+            e.message.contains(want),
+            "{name}: {} (want {want:?})",
+            e.message
+        );
+    }
 }

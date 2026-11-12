@@ -44,6 +44,7 @@ fn spls1_fit_case(root: &Path, c: &Spls1FitCase<'_>) -> Result<Case> {
         KSpec::Fixed(c.k),
         c.keep,
         None,
+        None,
         FitOpts::default(),
     )?;
 

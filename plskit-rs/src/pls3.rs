@@ -235,9 +235,8 @@ impl Pls3Model {
 /// guard in `fit::pls1_kernel`: below it the component is numerical dust
 /// and is dropped rather than reported, so a zero-variance block truncates
 /// instead of emitting NaN saliences. The Gram route in
-/// `dual_route::pls3_split_zbars_columns` keeps its own formula only where
-/// it can prove `σ₁` clears this floor by a wide margin (see "Truncation"
-/// there), and recomputes every other column on the primal route.
+/// `dual_route::pls3_split_zbars_columns` applies it to its own `σ₁` (see
+/// "Truncation" there).
 ///
 /// Every component, the first included, must also clear
 /// [`sigma_rel_floor`], which is what catches the structurally zero
@@ -292,10 +291,9 @@ pub(crate) const SIGMA_FLOOR: f64 = 1e-14;
 /// rounding noise, returns `k_used = 0` (the zero model `pls1_fit` returns
 /// on the same input at `q = 1`) rather than a noise LV1 pointing nowhere
 /// in particular. The Gram route in `dual_route::pls3_split_zbars_columns`
-/// cannot resolve `σ₁` to the accuracy this floor needs, so it keeps its
-/// own formula only on columns where it can prove the primal fit keeps LV1,
-/// and recomputes every other column on the primal route (see
-/// "Truncation" there).
+/// applies this floor to its own `σ₁`, which it resolves only to the
+/// rounding of the Gram matrix, so on such a Y its value can differ from
+/// this fit's (see "Truncation" there).
 ///
 /// `spls3_fit` applies the same floor, computed from the same blocks: its
 /// `A` is this `A`, and each deflation `A ← A − σ u v'` adds rounding of
@@ -607,7 +605,7 @@ fn prepare(
             None,
         )
     } else {
-        let fx = crate::linalg::fit_x_moments(x, None, None, par);
+        let fx = crate::linalg::fit_x_moments(x, None, par);
         let ratio = fx.max_mean_ratio();
         // Written so that a NaN ratio takes the copy. So does `n - 1 < k`:
         // the dense fit then always truncates, and would be refitted on
@@ -677,8 +675,21 @@ fn dense_components(
     par: Par,
     rel_floor: impl FnOnce() -> f64,
 ) -> PlsKitResult<(Mat<f64>, Mat<f64>, Col<f64>)> {
-    let svd = crate::linalg::thin_svd(a, par)
-        .map_err(|_| PlsKitError::Internal("SVD of X'Y failed to converge in pls3_fit".into()))?;
+    Ok(components_of_svd(&dense_svd(a, par)?, k, rel_floor))
+}
+
+/// The thin SVD [`dense_components`] truncates.
+fn dense_svd(a: MatRef<'_, f64>, par: Par) -> PlsKitResult<crate::linalg::ThinSvd> {
+    crate::linalg::thin_svd(a, par)
+        .map_err(|_| PlsKitError::Internal("SVD of X'Y failed to converge in pls3_fit".into()))
+}
+
+/// [`dense_components`] on its SVD `svd`.
+fn components_of_svd(
+    svd: &crate::linalg::ThinSvd,
+    k: usize,
+    rel_floor: impl FnOnce() -> f64,
+) -> (Mat<f64>, Mat<f64>, Col<f64>) {
     let sigma = svd.s.as_ref();
     // `1 <= k <= min(p, q)` (checked in `prepare`, or by
     // `pls3_lv1_prestd`'s caller or `pls3_lv1_from_cross_cov`'s caller),
@@ -693,7 +704,7 @@ fn dense_components(
     let mut u = svd.u.subcols(0, k_used).to_owned();
     let mut v = svd.v.subcols(0, k_used).to_owned();
     pin_component_signs(&mut u, &mut v);
-    Ok((u, v, Col::<f64>::from_fn(k_used, |i| sigma[i])))
+    (u, v, Col::<f64>::from_fn(k_used, |i| sigma[i]))
 }
 
 /// LV1 saliences `(u₁, v₁)` of already-standardized blocks, or `None` when
@@ -750,41 +761,67 @@ pub(crate) fn pls3_lv1_prestd(
         1.0,
         Par::Seq,
     );
-    let (kx, ky) = (keep_x.unwrap_or(p), keep_y.unwrap_or(q));
     // `Prepared::rel_floor` on these blocks: under `pre_standardized_*` the
     // blocks the fits form `A` from are the caller's, i.e. `xs` and `ys`.
     let rel_floor = || sigma_rel_floor(xs.nrows(), p, q, xs_fro, ys.norm_l2());
-    let (u, v) = if kx == p && ky == q {
-        let (u, v, _) = dense_components(a.as_ref(), 1, Par::Seq, rel_floor)?;
-        (u, v)
+    Ok(pls3_lv1_from_cross_cov(a, keep_x, keep_y, max_iter, tol, rel_floor)?.map(|l| (l.u, l.v)))
+}
+
+/// LV1 of a cross-product, from [`pls3_lv1_from_cross_cov`].
+pub(crate) struct Lv1 {
+    pub(crate) u: Col<f64>,
+    pub(crate) v: Col<f64>,
+    pub(crate) sigma: f64,
+    /// Dense: the second singular value of `a` (`0` when `a` has one row
+    /// or column). Sparse: `None`.
+    pub(crate) sigma2: Option<f64>,
+    /// Whether the sparse alternation converged; `true` when dense.
+    pub(crate) converged: bool,
+}
+
+/// The component stage of [`pls3_lv1_prestd`] on a cross-product
+/// `a = X̃'Ỹ` the caller formed: [`Lv1`], or `None` when no first
+/// component clears [`SIGMA_FLOOR`] and `rel_floor()`. Dense
+/// (`dense_components`) when neither keep-count selects fewer than all
+/// columns, else the sparse alternation (`sparse_components`), which reads
+/// `a` alone; `Par::Seq`, signs pinned. For callers that form `a` without
+/// holding `X̃`. `a` must be finite and have at least one row and one
+/// column.
+///
+/// # Errors
+/// `Internal` when an SVD fails to converge.
+#[allow(clippy::many_single_char_names)]
+pub(crate) fn pls3_lv1_from_cross_cov(
+    a: Mat<f64>,
+    keep_x: Option<usize>,
+    keep_y: Option<usize>,
+    max_iter: usize,
+    tol: f64,
+    rel_floor: impl Fn() -> f64,
+) -> PlsKitResult<Option<Lv1>> {
+    let (p, q) = (a.nrows(), a.ncols());
+    let (kx, ky) = (keep_x.unwrap_or(p), keep_y.unwrap_or(q));
+    let (u, v, sigma, sigma2, converged) = if kx == p && ky == q {
+        let svd = dense_svd(a.as_ref(), Par::Seq)?;
+        let sigma2 = if svd.s.nrows() > 1 { svd.s[1] } else { 0.0 };
+        let (u, v, sigma) = components_of_svd(&svd, 1, rel_floor);
+        (u, v, sigma, Some(sigma2), true)
     } else {
-        let (u, v, _, _) = sparse_components(a, 1, kx, ky, max_iter, tol, Par::Seq, rel_floor)?;
-        (u, v)
+        let (u, v, sigma, (converged, _)) =
+            sparse_components(a, 1, kx, ky, max_iter, tol, Par::Seq, rel_floor)?;
+        let converged = converged.first().copied().unwrap_or(true);
+        (u, v, sigma, None, converged)
     };
     if u.ncols() == 0 {
         return Ok(None);
     }
-    Ok(Some((u.col(0).to_owned(), v.col(0).to_owned())))
-}
-
-/// LV1 of a dense cross-product `a = X̃'Ỹ` the caller formed: `(v₁, σ₁)`,
-/// or `None` when no first component clears [`SIGMA_FLOOR`] and
-/// `rel_floor`. The component stage [`pls3_lv1_prestd`] runs on a dense
-/// request (`dense_components`, `Par::Seq`, signs pinned), for a caller
-/// that accumulates `a` without holding `X̃`. `a` must be finite and have
-/// at least one row and one column.
-///
-/// # Errors
-/// `Internal` when the SVD fails to converge.
-pub(crate) fn pls3_lv1_from_cross_cov(
-    a: MatRef<'_, f64>,
-    rel_floor: f64,
-) -> PlsKitResult<Option<(Col<f64>, f64)>> {
-    let (_, v, sigma) = dense_components(a, 1, Par::Seq, || rel_floor)?;
-    if v.ncols() == 0 {
-        return Ok(None);
-    }
-    Ok(Some((v.col(0).to_owned(), sigma[0])))
+    Ok(Some(Lv1 {
+        u: u.col(0).to_owned(),
+        v: v.col(0).to_owned(),
+        sigma: sigma[0],
+        sigma2,
+        converged,
+    }))
 }
 
 /// Bytes of the large buffers one LV1 fit holds at once on a `p × q`
@@ -2761,6 +2798,7 @@ mod tests {
             x.as_ref(),
             y1.col(0),
             crate::fit::KSpec::Fixed(1),
+            None,
             None,
             crate::fit::FitOpts::default(),
         )

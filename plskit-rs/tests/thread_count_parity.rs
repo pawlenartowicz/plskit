@@ -145,6 +145,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
                 y.as_ref(),
                 KSpec::Fixed(k),
                 None,
+                None,
                 FitOpts::default(),
             )
             .unwrap()
@@ -168,6 +169,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
             y5.as_ref(),
             KSpec::Fixed(5),
             None,
+            None,
             FitOpts::default(),
         )
         .unwrap()
@@ -185,6 +187,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
             x_wide_t.transpose(),
             y_wide.as_ref(),
             KSpec::Fixed(3),
+            None,
             None,
             FitOpts::default(),
         )
@@ -209,6 +212,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
             y_std.as_ref(),
             KSpec::Fixed(3),
             None,
+            None,
             FitOpts {
                 pre_standardized: true,
                 ..FitOpts::default()
@@ -225,6 +229,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
             y.as_ref(),
             KSpec::Fixed(5),
             Some(w.as_ref()),
+            None,
             FitOpts::default(),
         )
         .unwrap()
@@ -235,6 +240,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
             y.as_ref(),
             KSpec::Fixed(5),
             100,
+            None,
             None,
             FitOpts::default(),
         )
@@ -259,6 +265,7 @@ fn pls1_fit_weighted_row_major_is_pool_size_invariant() {
             y.as_ref(),
             KSpec::Fixed(3),
             Some(w.as_ref()),
+            None,
             FitOpts::default(),
         )
         .unwrap()
@@ -362,8 +369,10 @@ fn confirmatory(
         ConfirmatoryTestInput::Raw {
             x: x.as_ref(),
             y: y.as_ref(),
-            k,
+            k: Some(&[k]),
             weights: weights.map(Col::as_ref),
+            covariates: None,
+            null_y: None,
         },
         ConfirmatoryTestOpts {
             args,
@@ -429,8 +438,10 @@ fn split_exact_primal_is_pool_size_invariant() {
             ConfirmatoryTestInput::Raw {
                 x: xk.as_ref(),
                 y: yk.as_ref(),
-                k: 1,
+                k: Some(&[1]),
                 weights: None,
+                covariates: None,
+                null_y: None,
             },
             ConfirmatoryTestOpts {
                 args: ConfirmatoryArgs::SplitExact {
@@ -464,7 +475,7 @@ fn split_exact_nspace_is_pool_size_invariant() {
         confirmatory(&x, &y, 2, None, split_exact, None, 32)
     });
     // Same route on a rank-1 X: k = 2 exceeds the rank, so every column
-    // leaves the kernel unresolved and runs the primal fallback map.
+    // truncates at the kernel's floor.
     let (left, right) = (synth(40, 2, 0.0, 33).0, synth(2000, 2, 0.0, 34).0);
     let x1 = Mat::<f64>::from_fn(40, 2000, |i, j| left[(i, 0)] * right[(j, 0)]);
     c.check("split_exact n-space rank-1 40x2000 k=2", || {
@@ -504,7 +515,7 @@ fn other_pls1_confirmatory_methods_are_pool_size_invariant() {
     });
     // Pool: the `split_nb` auto-gate's `stable_rank`.
     c.check("split_nb_gate 300x400", || {
-        split_nb_gate(xt.as_ref().subrows(0, 300).subcols(0, 400), None).unwrap()
+        split_nb_gate(xt.as_ref().subrows(0, 300).subcols(0, 400), None, false).unwrap()
     });
     // Guard only: a 10x4000 validation fold is under the GEMV split.
     c.check("raw_perm 40x4000 k=3", || {
@@ -584,7 +595,7 @@ fn other_pls1_confirmatory_methods_are_pool_size_invariant() {
     // summed over several column blocks (40 rows, 6,552-column blocks,
     // four of them).
     c.check("split_nb_gate 40x20000", || {
-        split_nb_gate(xb.as_ref(), None).unwrap()
+        split_nb_gate(xb.as_ref(), None, false).unwrap()
     });
     c.finish();
 }
@@ -608,12 +619,12 @@ fn perm_null_is_pool_size_invariant() {
     // Pool: the reference fit runs under `ParChoice::Auto` (n·d·k >= 1e6).
     let (x, y) = synth(2000, 600, 1.0, 9);
     c.check("perm_null 2000x600 k=2", || {
-        pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, perm_opts(), Some(15)).unwrap()
+        pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, None, perm_opts(), Some(15)).unwrap()
     });
     // Guard only: wide at k = 3, the primal permutation refits (Seq).
     let (x, y) = synth(40, 4000, 1.0, 10);
     c.check("perm_null 40x4000 k=3", || {
-        pls1_perm_null(x.as_ref(), y.as_ref(), 3, None, perm_opts(), Some(16)).unwrap()
+        pls1_perm_null(x.as_ref(), y.as_ref(), 3, None, None, perm_opts(), Some(16)).unwrap()
     });
     // Guard only (not shown to be pool-sensitive): the public
     // calls on the n-space and the p-space Gram routes (shapes pinned in
@@ -623,7 +634,7 @@ fn perm_null_is_pool_size_invariant() {
     // and `gram_p::tests_block::c_build_is_thread_count_invariant_at_the_route_shapes`.
     let (x, y) = synth(40, 2000, 1.0, 12);
     c.check("perm_null n-space 40x2000 k=2", || {
-        pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, perm_opts(), Some(17)).unwrap()
+        pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, None, perm_opts(), Some(17)).unwrap()
     });
     // `n_perm = 300`: at `perm_opts()`'s 100 this shape is under the p-space
     // work floor and runs the primal route.
@@ -633,7 +644,7 @@ fn perm_null_is_pool_size_invariant() {
             n_perm: 300,
             ..perm_opts()
         };
-        pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, opts, Some(18)).unwrap()
+        pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, None, opts, Some(18)).unwrap()
     });
     c.finish();
 }
@@ -653,12 +664,12 @@ fn perm_alpha_is_pool_size_invariant() {
         1.0,
         faer::Par::Seq,
     );
-    // The pool comparison must carry resolved columns to mean anything: an
-    // all-unresolved output would compare equal across pools vacuously.
+    // The pool comparison must carry fitted columns to mean anything: an
+    // all-zero output would compare equal across pools vacuously.
     let out = pls1_perm_alpha(g.as_ref(), yy.as_ref(), 1, 2000).unwrap();
     assert!(
-        out.resolved.iter().all(|&r| r),
-        "perm_alpha 40x2000 m=64: unresolved columns"
+        out.k_used.iter().all(|&k| k == 1),
+        "perm_alpha 40x2000 m=64: unfitted columns"
     );
     c.check("perm_alpha 40x2000 m=64", || {
         pls1_perm_alpha(g.as_ref(), yy.as_ref(), 1, 2000).unwrap()
@@ -678,6 +689,7 @@ fn find_k_is_pool_size_invariant() {
             yt.as_ref(),
             3,
             None,
+            None,
             FindKOptimalOpts {
                 selector: Selector::Bic,
                 seed: Some(1),
@@ -693,6 +705,7 @@ fn find_k_is_pool_size_invariant() {
             xt.as_ref(),
             yt.as_ref(),
             3,
+            None,
             None,
             FindKOptimalOpts {
                 selector: Selector::R2Se,
@@ -717,6 +730,7 @@ fn find_k_is_pool_size_invariant() {
             yt.as_ref(),
             3,
             None,
+            None,
             FindKOptimalOpts {
                 selector: Selector::R2Se,
                 seed: Some(3),
@@ -731,6 +745,7 @@ fn find_k_is_pool_size_invariant() {
             xt.as_ref(),
             yt.as_ref(),
             2,
+            None,
             None,
             FindKSequenceOpts {
                 test_method: ConfirmatoryMethod::SplitNb,
@@ -752,6 +767,7 @@ fn find_k_is_pool_size_invariant() {
             y.as_ref(),
             3,
             None,
+            None,
             FindKOptimalOpts {
                 selector: Selector::R2Se,
                 n_folds: 5,
@@ -766,6 +782,7 @@ fn find_k_is_pool_size_invariant() {
             x.as_ref(),
             y.as_ref(),
             3,
+            None,
             None,
             FindKSequenceOpts {
                 test_method: ConfirmatoryMethod::SplitExact,
@@ -826,6 +843,7 @@ fn sparse_weighted_sequence_is_pool_size_invariant() {
                     3,
                     3,
                     Some(ws.as_ref()),
+                    None,
                     FindKSequenceOpts {
                         test_method,
                         n_perm: 50,

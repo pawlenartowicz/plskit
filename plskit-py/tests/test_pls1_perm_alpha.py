@@ -20,8 +20,8 @@ def test_alpha_maps_onto_pls1_fit_coef():
     r = pls1_perm_alpha(G, Y, n_features=X.shape[1])
     assert isinstance(r, PermAlphaResult)
     assert r.alpha.shape == (40, 3)
-    assert r.k_used.dtype == np.int64 and r.resolved.dtype == np.bool_
-    assert r.resolved.all() and (r.k_used == 1).all()
+    assert r.k_used.dtype == np.int64
+    assert (r.k_used == 1).all()
     assert (r.k, r.n_features) == (1, 500)
     for j in range(3):
         coef = plskit.pls1_fit(X, Y[:, j], k=1).coef
@@ -35,13 +35,12 @@ def test_an_all_zero_outcome_is_the_zero_model():
     X, _, G, Y = _design()
     Y[:, 1] = 0.0
     r = pls1_perm_alpha(G, Y, n_features=X.shape[1])
-    assert r.resolved.tolist() == [True, True, True]
     assert r.k_used.tolist() == [1, 0, 1]
     assert (r.alpha[:, 1] == 0.0).all()
     assert not np.signbit(r.alpha[:, 1]).any()
 
 
-def test_an_outcome_orthogonal_to_the_block_is_unresolved():
+def test_an_outcome_orthogonal_to_the_block_is_fitted_from_gram_alone():
     rng = np.random.default_rng(1)
     n, p = 40, 10
     X = rng.standard_normal((n, p))
@@ -53,16 +52,17 @@ def test_an_outcome_orthogonal_to_the_block_is_unresolved():
         e -= Q @ (Q.T @ e)
     Y = np.column_stack([2.0 * Xs[:, 0] + rng.standard_normal(n), e])
     r = pls1_perm_alpha(Xs @ Xs.T, Y, n_features=p)
-    assert r.k_used.dtype == np.int64 and r.resolved.dtype == np.bool_
-    assert r.resolved.tolist() == [True, False]
-    assert r.k_used.tolist() == [1, 0]
-    assert np.isnan(r.alpha[:, 1]).all()
+    assert r.k_used.dtype == np.int64
+    # gram resolves the orthogonal outcome's ||Xs'z|| only to its rounding,
+    # so that column keeps at most one component, with a finite alpha.
+    assert r.k_used[0] == 1 and r.k_used[1] <= 1
+    assert np.isfinite(r.alpha).all()
 
 
 @pytest.mark.parametrize(
     "change, code, message",
     [
-        (lambda G, Y: (G, Y, {"k": 2}), "invalid_argument", "supports k = 1 only"),
+        (lambda G, Y: (G, Y, {"k": 11}), "invalid_argument", "serves k <= 10"),
         (lambda G, Y: (G + np.triu(np.full_like(G, 1e-3), 1), Y, {}),
          "invalid_input", "not symmetric"),
         (lambda G, Y: (G, Y[:, 0], {}), "invalid_argument", "Y must be 2-D"),

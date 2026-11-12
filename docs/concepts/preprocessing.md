@@ -111,6 +111,8 @@ The √w row-scaling is **not** preprocessing — it is the Cholesky factor
 of the weighted least-squares problem and stays inside the fit, applied
 even when `pre_standardized=True`.
 
+With `covariates`, the covariates are removed after this standardization, from the standardized X and from y (see [Covariates](PLS1/covariates.md)). Under `pre_standardized=True` X is used as given and the covariates are removed from it.
+
 ## Common gotchas
 
 - **Half-treated X (e.g. mean-centered but not scaled)** —
@@ -139,3 +141,5 @@ already-treated data through `preprocess`. Common recipes that are
 | Robust (median/MAD) | Robust center + scale | `pre_standardized=True` |
 | SNV | Per-row mean-center + scale | `pre_standardized=True` |
 | MSC | Multiplicative scatter correction | `pre_standardized=True` |
+
+In the held-out tests (`split_exact`, `split_nb`, `e` and `raw_perm` in `pls1_confirmatory_test`, `pls3_confirmatory_test`, and the steps of `pls1_find_k_sequence` / `spls1_find_k_sequence`), the flag (`pre_standardized_X` / `pre_standardized_Y` in PLS3) only skips the one scaling over all rows: each split or fold still centres its training part with its own means and its held-out part with the training means, and nothing is scaled per split or fold. The cross-validation folds of `pls1_find_k_optimal`, `spls1_find_k_optimal` and `spls1_find_keep_optimal` and `split_nb_gate` read `X` the same way. In `find_k_sequence` the flag governs the `split_nb` gate and step 1; steps from 2 on test the deflated residual on the scale step 1 used, each part only centred. `score`, the reference fit and `ci` of `pls1_confirmatory_test` use `X` and `y` exactly as given under the flag.

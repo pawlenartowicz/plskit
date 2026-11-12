@@ -6,88 +6,83 @@
 //! `√w`-scaled when weighted) while only the outcome changes. This module
 //! builds `C = Xs'Xs` (`p × p`) once per block and runs the shared PLS1
 //! component loop (`fit::pls1_component_loop`) on it, so a replicate costs
-//! one GEMV `s = Xs'ys` (under the `Par` of the site's Primal fit) plus
+//! one GEMV `s₁ = Xs'ys` (formed by the caller, [`first_product`]) plus
 //! `O(k·p²)`, against the X backend's `(2k + 1)·n·p`.
 //!
-//! **The X backend stays primary.** `use_gram_p_route` admits an input
-//! only when its cost rule favours this route and the loop does enough
-//! work to matter; everything else never builds `C`. The route is one arm
-//! (`GramP`) of the replicate drivers in `signal_test.rs` and
-//! `perm_null.rs`; this module holds no loop.
+//! `use_gram_p_route` admits an input only when its cost rule favours this
+//! route and the loop does enough work to matter; everything else never
+//! builds `C`. The route is one arm (`GramP`) of the replicate drivers in
+//! `signal_test.rs` and `perm_null.rs`; this module holds no loop.
 //!
-//! **The route changes no decision.** The gates rest on first-order running
-//! bounds and a conditioning ratio gate. A replicate whose truncation
-//! decision or conditioning this backend cannot certify is recomputed by
-//! the Primal arm of its site, so its output is the Primal route's to the
-//! bit. The accuracy of resolved replicates is validated by the calibration
-//! sweep (`tests_sweep`), not gated per replicate.
+//! **Every replicate is decided from `C`.** The loop truncates as the X
+//! backend does: it stops at the first component whose `‖s_a‖` is below
+//! `max(NIPALS_ABS_FLOOR, w_rel_floor(n, p, ‖Xs‖_F, ‖ys‖))` or whose
+//! `t't = r'Cr` is below `NIPALS_ABS_FLOOR`, and keeps the components
+//! before it (none is the zero model). No replicate is recomputed on X.
+//! Near those floors (an outcome orthogonal to `Xs`, the components past
+//! its rank) `C`'s rounding and X's can decide differently, so the two
+//! backends can keep different numbers of components there; [`K_GRAM_MAX`]
+//! records the agreement the calibration sweep (`tests_sweep`) measures
+//! elsewhere.
+//!
+//! **Precision.** `Ĉᵢⱼ` carries rounding of about `n·u·‖xᵢ‖·‖xⱼ‖`
+//! (`u = 2⁻⁵³`), relative to the column norms, and `C` squares the
+//! condition number of `Xs`. A fit whose components reach a direction in
+//! which columns nearly coincide loses accuracy against the X backend:
+//! with one such pair at `k = p`, for any `p`, and earlier when several
+//! pairs nearly coincide (two pairs `1e-4` apart at `p = 8`: `|Δr|` about
+//! `1e-9` from `k = 7`). [`K_GRAM_MAX`] does not bound that loss. A row far
+//! from the rest dominates every column norm and buries the other rows'
+//! part of `C`.
 
 use faer::linalg::matmul::matmul;
 use faer::{Accum, Col, ColRef, Mat, MatRef, Par};
 
-use crate::dual_route::{ABS_BAND, RESOLVE_BAND};
 use crate::fit::{
-    ComponentBackend, Gate, LoopOutcome, NIPALS_ABS_FLOOR, ParChoice, Scored, pls1_coef_at_k,
-    pls1_component_loop, resolve_par, w_rel_floor,
+    ComponentBackend, Gate, LoopOutcome, ParChoice, Scored, pls1_coef_at_k, pls1_component_loop,
+    resolve_par, w_rel_floor,
 };
-
-/// Unit roundoff of f64, `2⁻⁵³`: the `u` of the rounding bounds in this
-/// module.
-const U: f64 = f64::EPSILON * 0.5;
 
 /// Largest feature count the route accepts. `C` is `p²` f64s, 128 MB at
 /// the cap, and one block is alive at a time.
 pub(crate) const GRAM_P_MAX: usize = 4000;
 
-/// Largest component count the route accepts. At `k = 4` ordinary families
-/// fall back above 1% (`n_much_larger_than_p`, `5000 × 8`: both replicates
-/// fall back at component 4), so the cap is 3.
-/// `python3 scripts/gate_feasibility.py gram_p` covers that `n ≫ p` shape
-/// alongside the tall corpus fixture blocks, the memprobe shape
-/// `10 000 × 500` and an ordinary `500 × 20` block, and prints the same
-/// value: the largest `k ≤ 20` whose fallback rate on ordinary data is at
-/// most 1% at every one of those shapes, for every `k` up to it. The
-/// calibration sweep
-/// (`gram_p::tests_sweep::gram_backend_matches_x_backend_across_design_families`)
-/// may only lower it further.
-/// Calibration range: at `k = 3` the decision gates fall back on most
-/// replicates once `n/p` is above about 2000 (measured with the recursion
-/// in `scripts/gate_feasibility.py`: `20 000 × 8` at 7%, `100 000 × 8` at 100%), which costs a
-/// wasted attempt before the Primal arm but never a wrong answer; `k = 2`
-/// never fell back on any shape tried.
-pub(crate) const K_GRAM_MAX: usize = 3;
+/// Largest component count the route accepts: the largest `k ≤ 10` up to
+/// which the calibration sweep
+/// (`gram_p::tests_sweep::gram_p_matches_x_backend_up_to_k_gram_max`, 35
+/// designs from `200 × 10` to `100 000 × 8`, dense, sparse and weighted)
+/// meets `|Δcoef| ≤ 1e-10·max(1, ‖coef‖_∞)` on all rows and `|Δr| ≤ 1e-12`
+/// on a split against the X backend, on every fit where both keep the same
+/// number of components. Worst errors per `k`:
+///
+/// | k | worst `|Δcoef|/max(1, ‖coef‖_∞)` | worst `|Δr|` |
+/// |---|---|---|
+/// | 1 | 1.2e-14 (`n_much_larger_than_p`) | 8.9e-16 (`n_much_larger_than_p`) |
+/// | 2 | 1.2e-14 (`n_much_larger_than_p`) | 1.0e-15 (`n_much_larger_than_p`) |
+/// | 3 | 1.2e-14 (`n_much_larger_than_p`) | 6.7e-16 (`n_much_larger_than_p`) |
+/// | 4 | 1.2e-14 (`n_much_larger_than_p`) | 5.6e-16 (`n_much_larger_than_p`) |
+/// | 5 | 1.2e-14 (`n_much_larger_than_p`) | 4.4e-16 (`ordinary`) |
+/// | 6 | 1.5e-14 (`collinear_1e6`) | 5.6e-16 (`collinear_1e6`) |
+/// | 7 | 5.4e-13 (`collinear_pair_1e-2`) | 6.7e-16 (`collinear_pair_1e-2`) |
+/// | 8 | 2.7e-12 (`collinear_pair_1e-3`) | 1.6e-15 (`collinear_pair_1e-2`) |
+/// | 9 | 9.3e-10 (`collinear_pair_1e-4`) | 1.4e-13 (`collinear_pair_1e-3`) |
+/// | 10 | 7.7e-8 (`collinear_pair_1e-4`) | 6.6e-12 (`collinear_pair_1e-4`) |
+///
+/// The two backends kept the same component count on every fit of the
+/// sweep. Past `k = 8` the `collinear_pair` designs (two of 10 columns
+/// `1e-4` apart) reach the direction of their difference. The cap is
+/// therefore the sweep's, set by that family's `p = 10`, and is no accuracy
+/// bound for X with nearly coinciding columns: such a fit loses accuracy at
+/// `k = p` for any `p`, and earlier with several such pairs (see the module
+/// doc).
+pub(crate) const K_GRAM_MAX: usize = 8;
 
 /// Least X-backend work per block, `B·(2k + 1)·n_tr·p` multiply-adds, for
 /// which the route is taken. Below it the whole loop costs milliseconds on
-/// the X backend, and without it the gated path would become the default
-/// for ordinary small data (every existing corpus fixture clears the cost
-/// rule alone). Set from `gram_p_work_floor_benchmark`.
+/// the X backend, and without it this route would become the default for
+/// ordinary small data (every existing corpus fixture clears the cost rule
+/// alone). Set from `gram_p_work_floor_benchmark`.
 pub(crate) const GRAM_P_MIN_WORK: f64 = 1e8;
-
-/// Largest `n_tr / p` a `k = 3` attempt is offered at. Below `K_GRAM_MAX`
-/// the loop's decision gates (`gate_s`'s `SNorm` and `gate_tt`'s `Tt`, see
-/// [`GramPBlock::fit_replicate_diag`]) fall back on a rounding-driven share
-/// of replicates that grows with `n_tr / p`: the per-component bounds carry
-/// a `c2_norm·δr` term where `c2_norm` tracks `‖Xs‖_F² ≈ n_tr·p`, so a
-/// larger training block leaves less of `RESOLVE_BAND`'s margin for the
-/// third component to clear. The wasted attempt (the `s1 = Xs'ys` GEMV,
-/// about `1/(2k + 1)` of a primal replicate) is cheap next to a primal
-/// replicate, so the route still wins up to a high fallback rate: with a
-/// fallback share `f` of `B` replicates, the Gram route's total work is
-/// about `B·f·(1 + 1/(2k + 1))` primal-replicate units against the
-/// primal-only `B·1`, so it pays while `f < (2k + 1)/(2k + 2)` (`7/8` at
-/// `k = 3`).
-///
-/// Measured with `tests_sweep::tall_shapes_n_over_p_sweep` (300 permuted
-/// replicates per cell, `p ∈ {4, 8, 16}`, `n_tr/p` from 1000 to 20000): the
-/// fallback rate crosses `7/8` at `n_tr/p` of about 7300 (`p = 4`), 5300-6800
-/// (`p = 8`) and 3900 (`p = 16`), so the break-even ratio falls as `p`
-/// grows and no single-`p` measurement covers the family. `3000` sits under
-/// every measured break-even with a comfortable margin (fallback at most
-/// 20% at `n_tr/p = 3000` across the three `p`, an over 4x net win even in
-/// the worst cell) while still admitting `n_tr/p = 2500`
-/// (`20000×8` at `k = 3`: 7.9x faster with a 1.5% fallback rate); the calibration sweep may only lower it further.
-pub(crate) const GRAM_P_TALL_RATIO_MAX_K3: f64 = 3000.0;
 
 /// Cost of building `C = Xs'Xs` per multiply-add, in units of one
 /// multiply-add of an X-backend pass (`Xs'v` or `Xs·v`): the build is one
@@ -124,8 +119,7 @@ const GRAM_P_PRODUCT_COST: f64 = 1.3;
 /// products, the Gram backend pays when
 /// `a·n·p² + b·B·k·p² < 2·B·k·n·p`, that is
 /// `p·(a·n_tr + b·B·k) < 2·B·k·n_tr`. That implies `p < (2/b)·n_tr`
-/// (about `1.54·n_tr`), while `dual_route::use_dual_route` implies
-/// `n_tr < p`; in the band between, the n-space route is cheaper on both
+/// (about `1.54·n_tr`), while the n-space rules admit only `n_tr < p`; in the band between, the n-space route is cheaper on both
 /// counts and the route selectors try it first. On top of the cost rule:
 /// `1 ≤ k ≤ min(p, K_GRAM_MAX)`, `p ≤ GRAM_P_MAX`, and the X backend's work
 /// `B·(2k + 1)·n_tr·p` at least `GRAM_P_MIN_WORK`.
@@ -144,30 +138,18 @@ const GRAM_P_PRODUCT_COST: f64 = 1.3;
 /// 91.3 s for the unweighted count (`a = b = 1`, which kept the X backend on
 /// 61 shapes where the Gram backend was faster by more than 2%, up to 2x)
 /// and 84.9 s for a per-shape oracle. To re-fit on other hardware, run the
-/// benchmark over such a sweep and repeat the fit; the rule only picks the
-/// faster of two routes that agree, so a stale fit costs time, never
-/// accuracy.
-///
-/// At `k ≥ 3` the cost rule alone is not enough: on a very tall design
-/// (`n_tr / p` past [`GRAM_P_TALL_RATIO_MAX_K3`]) the third component's
-/// decision gates fall back on so many replicates that the wasted attempts
-/// outweigh the rule's projected saving (see
-/// `GRAM_P_TALL_RATIO_MAX_K3`'s doc comment for the calibration). That check
-/// costs nothing at `k ≤ 2`, where the gates never fell back at any
-/// measured shape.
+/// benchmark over such a sweep and repeat the fit; a stale fit costs time
+/// only.
 ///
 /// Evaluated in f64 like `use_dual_route`: at every shape a caller can
 /// afford to run, the products stay inside f64's range with room to spare,
-/// and a rounding could only pick the slower of two routes that agree.
+/// and a rounding could only pick the slower of two routes.
 #[allow(clippy::many_single_char_names)]
 fn use_gram_p_route(n_tr: usize, p: usize, n_replicates: usize, k: usize) -> bool {
     if p > GRAM_P_MAX || k > K_GRAM_MAX || k > p {
         return false;
     }
     let (n_f, p_f, b_f, k_f) = (n_tr as f64, p as f64, n_replicates as f64, k as f64);
-    if k >= 3 && n_f > GRAM_P_TALL_RATIO_MAX_K3 * p_f {
-        return false;
-    }
     let pays = gram_p_cost_rule(n_f, p_f, b_f, k_f);
     let work = b_f * (2.0 * k_f + 1.0) * n_f * p_f;
     pays && work >= GRAM_P_MIN_WORK
@@ -197,335 +179,91 @@ pub(crate) fn gram_p_eligible(
         && use_gram_p_route(n_tr, p, n_replicates, k)
 }
 
-/// Product cap of the power iteration in [`c2_norm_estimate`].
-const POWER_MAX_ITERS: usize = 50;
-
-/// Stop rule of the power iteration in [`c2_norm_estimate`]: `λ̂` moved by
-/// at most this fraction of itself.
-const POWER_REL_TOL: f64 = 1e-3;
-
-/// The `‖C‖₂` the first-order bounds use: `min(2·λ̂, ‖Xs‖_F²)`.
-///
-/// `λ̂` is the Rayleigh quotient `v'Cv` of a power iteration on `Ĉ`
-/// (`Par::Seq`, start `1/√p` in every entry, at most `POWER_MAX_ITERS`
-/// products, stopping once `λ̂` moves by at most `POWER_REL_TOL` of itself).
-/// Power iteration estimates `λ_max` from below, hence the factor 2;
-/// `‖Xs‖_F² = tr C ≥ ‖C‖₂` caps it, and is the value whenever `λ̂` is not
-/// positive (a zero `C`, or a start with no component along any nonzero
-/// direction of `C`). A first-order estimate, not a guaranteed bound.
-/// Transcribed in `scripts/gate_feasibility.py` (`c2_norm_estimate`):
-/// change both together.
-fn c2_norm_estimate(c: MatRef<'_, f64>, x_fro: f64) -> f64 {
-    let p = c.nrows();
-    let fro2 = x_fro * x_fro;
-    let start = 1.0 / (p as f64).sqrt();
-    let mut v = Col::<f64>::from_fn(p, |_| start);
-    let mut w = Col::<f64>::zeros(p);
-    let mut lambda = 0.0_f64;
-    for _ in 0..POWER_MAX_ITERS {
-        matmul(
-            w.as_mut().as_mat_mut(),
-            Accum::Replace,
-            c,
-            v.as_ref().as_mat(),
-            1.0,
-            Par::Seq,
-        );
-        let lambda_new: f64 = (0..p).map(|j| v[j] * w[j]).sum();
-        let w_norm = w.norm_l2();
-        if w_norm.is_nan() || w_norm <= 0.0 {
-            lambda = lambda_new;
-            break;
-        }
-        let inv = 1.0 / w_norm;
-        for j in 0..p {
-            v[j] = w[j] * inv;
-        }
-        let done = (lambda_new - lambda).abs() <= POWER_REL_TOL * lambda_new;
-        lambda = lambda_new;
-        if done {
-            break;
-        }
-    }
-    if lambda.is_nan() || lambda <= 0.0 {
-        return fro2;
-    }
-    (2.0 * lambda).min(fro2)
+/// `ŝ₁ = Xs'ys`, the first product of the X backend's fit of `ys` on the
+/// same view (`fit::pls1_kernel`'s `s₁` on a column-major `Xs`), under the
+/// `Par` that fit resolves from `primal_par` and `k`. The callers pass it to
+/// [`GramPBlock::fit`], so the first weight vector is the X backend's bits.
+pub(crate) fn first_product(
+    xs: MatRef<'_, f64>,
+    ys: ColRef<'_, f64>,
+    primal_par: ParChoice,
+    k: usize,
+) -> Col<f64> {
+    let par = resolve_par(primal_par, xs.nrows(), xs.ncols(), k);
+    let mut s = Col::<f64>::zeros(xs.ncols());
+    matmul(
+        s.as_mut().as_mat_mut(),
+        Accum::Replace,
+        xs.transpose(),
+        ys.as_mat(),
+        1.0,
+        par,
+    );
+    s
 }
 
 /// One fixed block of a replicate loop, prepared for the p-space Gram
-/// backend: `C = Xs'Xs` and the scalars the first-order bounds need. Built
+/// backend: `C = Xs'Xs` and the scalars the truncation floor reads. Built
 /// once per block by the `GramP` arm of the site's block constructor and
 /// shared read-only by every worker; per replicate only `O(k·p)` vectors
 /// are allocated.
-pub(crate) struct GramPBlock<'a> {
-    /// The block the X backend runs on (`n × p`); each replicate reads it
-    /// once for `s = Xs'ys`.
-    xs: MatRef<'a, f64>,
+pub(crate) struct GramPBlock {
     /// `Ĉ = Xs'Xs` as computed.
     c: Mat<f64>,
+    /// The row count of `Xs`, the `n` of the relative floor.
+    n: usize,
     /// `‖Xs‖_F`: the `norm_l2` call the X backend makes on the same view,
     /// so `w_floor` is bit-identical across backends.
     x_fro: f64,
-    /// [`c2_norm_estimate`] of `Ĉ`: the `‖C‖₂` of the first-order bounds.
-    c2_norm: f64,
-    /// The `ParChoice` of the site's Primal fit on this block (the fit a
-    /// replicate the gates refuse runs). `ŝ₁ = Xs'ys` is formed with
-    /// `resolve_par(primal_par, n, p, k)`, the `Par` that fit resolves.
-    primal_par: ParChoice,
 }
 
-impl<'a> GramPBlock<'a> {
+impl GramPBlock {
     /// Build `C` for the block `xs` with `par` (the driver passes
-    /// `fit::par_fixed()`), and its `‖C‖₂`
-    /// estimate (sequential). `tests_block::c_build_is_thread_count_invariant_at_the_route_shapes`
-    /// pins that every `par` gives the same bits. `primal_par` is the
-    /// `ParChoice` the site's Primal fit runs with (see
-    /// [`Self::fit_replicate_diag`]).
-    pub(crate) fn new(xs: MatRef<'a, f64>, par: Par, primal_par: ParChoice) -> Self {
+    /// `fit::par_fixed()`).
+    /// `tests_block::c_build_is_thread_count_invariant_at_the_route_shapes`
+    /// pins that every `par` gives the same bits.
+    pub(crate) fn new(xs: MatRef<'_, f64>, par: Par) -> Self {
         let p = xs.ncols();
         let mut c = Mat::<f64>::zeros(p, p);
         matmul(c.as_mut(), Accum::Replace, xs.transpose(), xs, 1.0, par);
-        let x_fro = xs.norm_l2();
-        let c2_norm = c2_norm_estimate(c.as_ref(), x_fro);
         Self {
-            xs,
             c,
-            x_fro,
-            c2_norm,
-            primal_par,
+            n: xs.nrows(),
+            x_fro: xs.norm_l2(),
         }
     }
 
-    /// `‖Xs‖_F` (`xs.norm_l2()`), for a site's Primal fallback, which would
-    /// otherwise take the same norm of the same view again.
-    pub(crate) fn x_fro(&self) -> f64 {
-        self.x_fro
+    /// The block of a training half whose `C = Xs'Xs` was formed elsewhere
+    /// (from the cells of the split design, `cell_sums::cell_grams`), with
+    /// `n` rows and `x_fro = ‖Xs‖_F` as the caller formed it.
+    pub(crate) fn from_gram(c: Mat<f64>, n: usize, x_fro: f64) -> Self {
+        Self { c, n, x_fro }
     }
-}
 
-/// Conditioning floor of the ratio gate: component `a` stays on this
-/// backend only when `tt_a ≥ RATIO_MIN·‖Xs‖_F²·‖r_a‖²`, that is, when the
-/// Rayleigh quotient of `C` along `r_a` is at least `RATIO_MIN` of
-/// `tr C = ‖Xs‖_F²`.
-///
-/// `C` squares the condition number of `Xs`, and the first-order bounds do
-/// not model the accuracy lost along a nearly singular direction of `C`:
-/// the relative error of `tt_a` and `p_a` grows like `u·tr C` over that
-/// Rayleigh quotient. The gate sends such replicates to the Primal arm
-/// (never to a truncation), which also covers rank-deficient `C` without an
-/// eigenvalue test. It is a guard, not a bound: the calibration sweep
-/// (`tests_sweep`) calibrates it, raising it only, so that every design
-/// family whose replicates resolve meets the tolerance with a 10× margin.
-/// Shared with `scripts/gate_feasibility.py`
-/// (`GRAM_P_RATIO_MIN`): change both together.
-pub(crate) const RATIO_MIN: f64 = 1e-6;
-
-/// First-order bound on the difference between the Gram route's and the
-/// Primal route's centered test-half scores `X̃_te·coef` at `split_exact`:
-///
-/// ```text
-/// D = ‖X_te‖_F·(2·e_coef + 2·(p + 2)·u·‖coef‖) + 2·(n_te + 2)·u·‖s_te‖
-/// ```
-///
-/// `e_coef` is the first-order estimate of each route's `coef` error
-/// against the exact reference (`GramFit::coef_err`), so their `coef`s
-/// differ by about twice it; each route's GEMV `X_te·coef` adds at most
-/// `p·u·‖X_te‖_F·‖coef‖`, and each centering `(n_te + 2)·u·‖s_te‖`.
-/// `t_norm` is `‖s_te‖`, the norm of the uncentered test-half scores. The
-/// score gate uses it to protect the score-degeneracy decision only.
-pub(crate) fn score_discrepancy_bound(
-    xte_fro: f64,
-    coef_err: f64,
-    coef_norm: f64,
-    p: usize,
-    n_te: usize,
-    t_norm: f64,
-) -> f64 {
-    xte_fro * (2.0 * coef_err + 2.0 * (p as f64 + 2.0) * U * coef_norm)
-        + 2.0 * (n_te as f64 + 2.0) * U * t_norm
-}
-
-/// Why a replicate was handed to the Primal arm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GateFail {
-    /// `‖select(s_a)‖` (`a ≥ 2`) within `RESOLVE_BAND` of twice its bound,
-    /// or of the floors.
-    SNorm,
-    /// The keep-boundary gap (`a ≥ 2`) within `RESOLVE_BAND` of twice the
-    /// per-entry bound of `s_a`.
-    KeepGap,
-    /// `tt` within `RESOLVE_BAND` of twice its bound, or of the absolute
-    /// floor.
-    Tt,
-    /// `tt_a` below `RATIO_MIN·‖Xs‖_F²·‖r_a‖²`: `r_a` points into a nearly
-    /// singular direction of `C`.
-    Ratio,
-    /// The loop stopped at some `a ≥ 2` with no gate refusing first. The
-    /// gates make it unreachable; kept so such a stop is never `Resolved`.
-    LateStop,
-}
-
-/// A replicate the Gram backend resolved.
-pub(crate) struct GramFit {
-    /// `W (P'W)⁻¹ Q` through `fit::pls1_coef_at_k`, as on the X backend.
-    pub(crate) coef: Col<f64>,
-    /// Components kept; equal to the X backend's.
-    pub(crate) k_used: usize,
-    /// Weight vectors `W`; the tests read the first column, which is the X
-    /// backend's bits. Test-only, like `bounds` below.
-    #[cfg(test)]
-    pub(crate) w: Mat<f64>,
-    /// First-order estimate of `‖coef − coef*‖₂`, either backend against
-    /// the exact reference (see `fit_replicate_diag`); read by the
-    /// `split_exact` score gate through [`score_discrepancy_bound`].
-    pub(crate) coef_err: f64,
-    /// `(tt_a, δtt_a, δp_a)` per component: a diagnostic, reproduced by
-    /// `scripts/gate_feasibility.py` (`tests_kernel::bounds_match_gate_feasibility_script`).
-    /// Test-only: production replicates neither fill nor allocate it.
-    #[cfg(test)]
-    pub(crate) bounds: Vec<(f64, f64, f64)>,
-}
-
-impl GramPBlock<'_> {
-    /// One replicate on the Gram backend, with the reason when it is not
-    /// resolved. `ys` is the replicate's outcome as the X backend would
-    /// receive it (standardized, `√w`-scaled exactly as the block).
-    ///
-    /// # Reference and notation
-    /// `u = 2⁻⁵³`, `F = ‖Xs‖_F`, `Xs` is `n × p`. Both backends start from
-    /// the same bits: `ŝ₁ = Xs'ys` is the same GEMV on the same view under
-    /// the same `Par` (the one the site's Primal fit resolves from
-    /// `primal_par`), `w_floor` the same function of the same `‖Xs‖_F` and `‖ys‖`,
-    /// and `ŵ₁ = r̂₁` the same `select_and_normalize` of `ŝ₁`. The reference
-    /// is exact arithmetic continued from those shared bits. Every bound
-    /// below is a first-order estimate of one backend's distance from that
-    /// reference for either backend (where their local rounding differs,
-    /// the sum is taken), so the two backends differ by about twice it. It
-    /// is not a worst-case bound: second-order terms are dropped and
-    /// `‖C‖₂` is estimated. The reference obeys these identities:
-    /// `s_{a+1} = s_a − (s_a'w_a)·p_a`, `r_a = w_a − R_{<a}(P_{<a}'w_a)`,
-    /// `tt_a = r_a'C r_a = ‖Xs r_a‖²`, `p_a = C r_a / tt_a`, and
-    /// `q_a·tt_a = s_a'w_a = ŝ₁'r_a = ys'Xs r_a` up to `ŝ₁ ≠ Xs'ys`.
-    ///
-    /// # Forming `C`
-    /// `Ĉᵢⱼ` is a length-`n` dot product in some order, so
-    /// `|ΔCᵢⱼ| ≤ n·u·‖xᵢ‖·‖xⱼ‖`; for any `r`, `|r'ΔC r| ≤ n·u·F²·‖r‖²` and
-    /// `‖ΔC‖_F ≤ n·u·F²`. `c₂` is the block's `c2_norm`,
-    /// `min(2·λ̂, F²)` from a power iteration (`c2_norm_estimate`).
-    ///
-    /// # Local rounding at component `a`
-    /// Gram: `c = Ĉr` (`p·u·F²·‖r‖` plus `ΔC·r`), `tt = r'c`, `p = c·(1/tt)`.
-    /// X: `t = Xs r` (`‖Δt‖ ≤ p·u·F·‖r‖`), `tt = t't`, `p = Xs't·(1/tt)`.
-    /// With `‖t‖ ≤ F·‖r‖` and `‖c‖ ≤ F²·‖r‖`, both obey
-    ///
-    /// ```text
-    /// L_tt = (n + 2p + 4)·u·F²·‖r‖²
-    /// L_p  = (n + p + 2)·u·F²·‖r‖/tt + 2·u·‖p‖
-    /// L_qt = (2n + p + 3)·u·‖ys‖·F·‖r‖ + (p + 3)·u·‖ŝ‖
-    /// ```
-    ///
-    /// `L_qt` covers the factor `q·tt` of the `s` update: the Gram backend's
-    /// `ŝ'ŵ` (`p·u·‖ŝ‖`) plus the X backend's `ys't` (the dot, the
-    /// rounding of `t`, and `Xs'ys` versus `ŝ₁`).
-    ///
-    /// # Propagation (first order), `ρ = ‖R_{<a}‖_F·‖P_{<a}‖_F`
-    ///
-    /// ```text
-    /// δs₁ = δw₁ = δr₁ = 0
-    /// δw_a  = 2·δs_a/σ_a + (p + 2)·u                σ_a = ‖select(ŝ_a)‖
-    /// δr_a  = δw_a·(1 + ρ) + Σ_{j<a} (δr_j·‖p_j‖ + ‖r_j‖·δp_j) + (p + a + 2)·u·(1 + ρ)
-    /// δtt_a = L_tt + c₂·δr_a·(2‖r_a‖ + δr_a)
-    /// δp_a  = L_p + c₂·δr_a/tt_a + ‖p_a‖·δtt_a/tt_a
-    /// δqt_a = δs_a + ‖ŝ_a‖·δw_a + ‖ŝ₁‖·δr_a + L_qt
-    /// δq_a  = δqt_a/tt_a + |q_a|·δtt_a/tt_a
-    /// δs_{a+1} = δs_a + |q_a·tt_a|·δp_a + ‖p_a‖·δqt_a + 2·u·(‖ŝ_a‖ + |q_a·tt_a|·‖p_a‖)
-    /// ```
-    ///
-    /// Each line differences one reference identity, keeps first-order
-    /// terms, and adds the local rounding of the operation that produced
-    /// the quantity. The running sums carry every earlier component's error
-    /// into later ones (the history), so no separate history term is added.
-    /// `δs_a` bounds every entry of `ŝ_a` as well (`‖·‖∞ ≤ ‖·‖₂`): it is the
-    /// per-entry bound the keep gap uses. With a shared support (the gap
-    /// gate), selection is a coordinate projection and does not enlarge
-    /// `δs_a`. `scripts/gate_feasibility.py` (`gram_p_gates`) transcribes
-    /// this recursion; `tests_kernel::bounds_match_gate_feasibility_script`
-    /// holds the two together.
-    ///
-    /// # Gates (decisions only)
-    /// Each is an `a >= b` conjunction, so a NaN fails it.
-    /// - `a ≥ 2`, before selection: `σ_a ≥ RESOLVE_BAND·2δs_a`,
-    ///   `σ_a ≥ RESOLVE_BAND·w_floor`, `σ_a ≥ ABS_BAND·NIPALS_ABS_FLOOR`,
-    ///   and with `keep`, the gap between the `keep`-th and `(keep+1)`-th
-    ///   largest `|ŝ_a|` at least `RESOLVE_BAND·2δs_a`. Past them the X
-    ///   backend selects the same support and its selected norm is at least
-    ///   `(1 − 1/RESOLVE_BAND)·σ_a ≥ 3·w_floor`, so it keeps the component.
-    ///   The `w_floor` term also covers the X backend's error as
-    ///   `w_rel_floor` measures it (its `first_noise_max` figure), in
-    ///   case the first-order model misses a term.
-    /// - Every `a`, after `tt`: `tt ≥ RESOLVE_BAND·2δtt` and
-    ///   `tt ≥ ABS_BAND·NIPALS_ABS_FLOOR` (the `tt` floor decision), then
-    ///   the ratio gate `tt ≥ RATIO_MIN·F²·‖r‖²` (conditioning).
-    /// - `a = 1`: the `‖ŝ₁‖` floor test and the selection are the X
-    ///   backend's on the same bits (`ŝ₁` under the Primal fit's `Par`), so
-    ///   no band; a stop there is `Resolved` with `k_used = 0`.
-    ///
-    /// This backend never decides a stop at `a ≥ 2`: at a noise component
-    /// its `‖ŝ_a‖` lies within its own bound, so any component inside or
-    /// below a band sends the replicate to the Primal arm. There is no
-    /// per-replicate accuracy gate: `δtt/tt` and `δp/‖p‖` compound
-    /// geometrically across components and would refuse ordinary data at
-    /// `k ≥ 2`. Accuracy is validated empirically by `tests_sweep` (families
-    /// including collinear `κ(Xs)` up to 1e6, rank-deficient, duplicated
-    /// rows and columns), as `dual_route.rs` does for its routes.
-    ///
-    /// # `coef`
-    /// In exact arithmetic `W (P'W)⁻¹ = R`, so `coef = R·q` and
-    ///
-    /// ```text
-    /// e_coef = Σ_a (δr_a·|q_a| + ‖r_a‖·δq_a) + (3k + p + 4)·u·√k·‖P‖_F·‖R‖_F·Σ_a ‖r_a‖·|q_a|
-    /// ```
-    ///
-    /// the last term the forward error of `pls1_coef_at_k`'s `k × k` solve,
-    /// with `cond(P'W)` bounded by `√k·‖P‖_F·‖R‖_F`. A first-order
-    /// diagnostic: only the `split_exact` score gate reads it, through
-    /// [`score_discrepancy_bound`].
-    ///
-    /// # Conditioning
-    /// `C` squares the condition number of `Xs`. `L_tt/tt` is about
-    /// `(n + 2p)·u·F²·‖r‖²/(r'C r)`, large when `r` points into a nearly
-    /// singular direction; the `tt` band refuses a replicate only past `1/8`
-    /// relative error, and [`RATIO_MIN`] refuses the directions whose
-    /// Rayleigh quotient is a tiny fraction of `tr C`.
-    #[allow(clippy::similar_names)]
-    pub(crate) fn fit_replicate_diag(
+    /// The PLS1 fit of one replicate from `C`: `s1` is `Xs'ys`
+    /// ([`first_product`] on the block's `Xs`, or any other evaluation of
+    /// the same product) and `ys_norm` is `‖ys‖`, `ys` the replicate's
+    /// outcome as the X backend would receive it (standardized,
+    /// `√w`-scaled exactly as the block). The component loop and its
+    /// truncation rule are the X backend's (see the module doc); only
+    /// `t't = r'Cr`, `p = Cr/t't` and `q = s'w/t't` are formed from `C`.
+    /// The caller decides non-finite outcomes before calling: a NaN in
+    /// `s1` passes every floor test, as in the X backend, and gives a NaN
+    /// `coef`.
+    pub(crate) fn fit(
         &self,
-        ys: ColRef<'_, f64>,
+        s1: ColRef<'_, f64>,
+        ys_norm: f64,
         k: usize,
         keep: Option<usize>,
-    ) -> Result<GramFit, GateFail> {
-        let n = self.xs.nrows();
-        let p = self.xs.ncols();
-        // s₁ = Xs'ys, the call `fit::pls1_kernel` makes for its first `s`
-        // when the site's Primal fit (`fit::pls1_fit_prepared_fro` with
-        // `primal_par`, `k`) runs on the same view: the same `Par`, the same
-        // bits.
-        let s1_par = resolve_par(self.primal_par, n, p, k);
-        let mut s0 = Col::<f64>::zeros(p);
-        matmul(
-            s0.as_mut().as_mat_mut(),
-            Accum::Replace,
-            self.xs.transpose(),
-            ys.as_mat(),
-            1.0,
-            s1_par,
-        );
-        let ys_norm = ys.norm_l2();
-        let w_floor = w_rel_floor(n, p, self.x_fro, ys_norm);
-        let mut backend = GramBackend::new(self, ys_norm, w_floor);
-        match pls1_component_loop(&mut backend, s0, w_floor, k, keep) {
-            LoopOutcome::Unresolved => Err(backend.fail.unwrap_or(GateFail::LateStop)),
+    ) -> GramFit {
+        let p = self.c.nrows();
+        let w_floor = w_rel_floor(self.n, p, self.x_fro, ys_norm);
+        let mut backend = GramBackend {
+            c: self.c.as_ref(),
+            cr: Col::<f64>::zeros(p),
+        };
+        match pls1_component_loop(&mut backend, s1.to_owned(), w_floor, k, keep) {
             LoopOutcome::Done {
                 p: p_mat,
                 w: w_mat,
@@ -533,182 +271,62 @@ impl GramPBlock<'_> {
                 ..
             } => {
                 let k_used = w_mat.ncols();
-                if k_used != 0 && k_used != k {
-                    return Err(GateFail::LateStop);
-                }
-                let coef = pls1_coef_at_k(&w_mat, &p_mat, &q, k_used, Par::Seq);
-                let coef_err = backend.coef_err(k_used);
-                Ok(GramFit {
-                    coef,
+                GramFit {
+                    coef: pls1_coef_at_k(&w_mat, &p_mat, &q, k_used, Par::Seq),
                     k_used,
-                    #[cfg(test)]
                     w: w_mat,
-                    coef_err,
-                    #[cfg(test)]
-                    bounds: std::mem::take(&mut backend.bounds),
-                })
+                    p: p_mat,
+                    q,
+                }
+            }
+            LoopOutcome::Unresolved => {
+                unreachable!("the Gram backend never returns Gate::Unresolved")
             }
         }
     }
-
-    /// [`Self::fit_replicate_diag`] without the reason.
-    pub(crate) fn fit_replicate_full(
-        &self,
-        ys: ColRef<'_, f64>,
-        k: usize,
-        keep: Option<usize>,
-    ) -> Option<GramFit> {
-        self.fit_replicate_diag(ys, k, keep).ok()
-    }
-
-    /// `coef` and `k_used` for one replicate, or `None` when unresolved (the
-    /// caller then runs the Primal arm's body).
-    pub(crate) fn fit_replicate(
-        &self,
-        ys: ColRef<'_, f64>,
-        k: usize,
-        keep: Option<usize>,
-    ) -> Option<(Col<f64>, usize)> {
-        self.fit_replicate_full(ys, k, keep)
-            .map(|f| (f.coef, f.k_used))
-    }
 }
 
-/// `(‖select(s)‖, gap)`: the norm of the `keep` largest-magnitude entries
-/// and the gap between the `keep`-th and `(keep+1)`-th largest `|s|`.
-/// Dense (`None`, or `keep ≥ p`): the full norm and an infinite gap. Order
-/// statistics are exact values, so a partial selection reads the numbers a
-/// full sort would.
-pub(crate) fn selected_norm_and_gap(s: &Col<f64>, keep: Option<usize>) -> (f64, f64) {
+/// One replicate's fit on the Gram backend.
+pub(crate) struct GramFit {
+    /// `W (P'W)⁻¹ Q` through `fit::pls1_coef_at_k`, as on the X backend; zero
+    /// for the zero model.
+    pub(crate) coef: Col<f64>,
+    /// Components kept, `0..=k`.
+    pub(crate) k_used: usize,
+    /// Weight vectors `W`, `(p, k_used)`; the first column is the X
+    /// backend's bits.
+    pub(crate) w: Mat<f64>,
+    /// X-loadings `P`, `(p, k_used)`.
+    pub(crate) p: Mat<f64>,
+    /// y-loadings `Q`, `(k_used,)`.
+    pub(crate) q: Col<f64>,
+}
+
+/// `‖select(s)‖`: the norm of the `keep` largest-magnitude entries; dense
+/// (`None`, or `keep ≥ p`), the full norm. Order statistics are exact
+/// values, so a partial selection reads the numbers a full sort would.
+pub(crate) fn selected_norm(s: &Col<f64>, keep: Option<usize>) -> f64 {
     let p = s.nrows();
     match keep {
         Some(kp) if kp < p => {
             let mut mags: Vec<f64> = (0..p).map(|j| s[j].abs()).collect();
             mags.select_nth_unstable_by(kp, |a, b| b.total_cmp(a));
-            let kth_next = mags[kp];
-            let kth = mags[..kp].iter().copied().fold(f64::INFINITY, f64::min);
-            let sel2: f64 = mags[..kp].iter().map(|m| m * m).sum();
-            (sel2.sqrt(), kth - kth_next)
+            mags[..kp].iter().map(|m| m * m).sum::<f64>().sqrt()
         }
-        _ => (s.norm_l2(), f64::INFINITY),
+        _ => s.norm_l2(),
     }
 }
 
-/// Per-replicate state of the Gram backend: the block, the replicate's
-/// scalars, and the running first-order bounds of
-/// [`GramPBlock::fit_replicate_diag`].
-#[allow(clippy::struct_field_names)]
+/// The Gram backend of [`pls1_component_loop`]: `C` and the current
+/// component's `Ĉr`, which `loading` reuses.
 struct GramBackend<'b> {
     c: MatRef<'b, f64>,
-    n: usize,
-    p: usize,
-    x_fro: f64,
-    /// The block's `‖C‖₂` estimate, `c₂` of the recursion.
-    c2_norm: f64,
-    ys_norm: f64,
-    w_floor: f64,
-    /// `Ĉr` of the current component; `loading` reuses it.
     cr: Col<f64>,
-    s1_norm: f64,
-    s_norm: f64,
-    d_s: f64,
-    d_w: f64,
-    d_r: f64,
-    d_tt: f64,
-    d_p: f64,
-    r_norm: f64,
-    tt: f64,
-    p_norm: f64,
-    /// `‖R_{<a}‖_F²`, `‖P_{<a}‖_F²`.
-    r_fro2: f64,
-    p_fro2: f64,
-    /// `Σ_{j<a} (δr_j·‖p_j‖ + ‖r_j‖·δp_j)`.
-    rot_prop: f64,
-    /// `Σ_a (δr_a·|q_a| + ‖r_a‖·δq_a)`.
-    coef_prop: f64,
-    /// `Σ_a ‖r_a‖·|q_a|`.
-    coef_scale: f64,
-    /// `(tt_a, δtt_a, δp_a)` per component that reached `gate_tt`
-    /// (test-only, `GramFit::bounds`).
-    #[cfg(test)]
-    bounds: Vec<(f64, f64, f64)>,
-    fail: Option<GateFail>,
 }
 
-impl<'b> GramBackend<'b> {
-    fn new(block: &'b GramPBlock<'_>, ys_norm: f64, w_floor: f64) -> Self {
-        let p = block.c.nrows();
-        Self {
-            c: block.c.as_ref(),
-            n: block.xs.nrows(),
-            p,
-            x_fro: block.x_fro,
-            c2_norm: block.c2_norm,
-            ys_norm,
-            w_floor,
-            cr: Col::<f64>::zeros(p),
-            s1_norm: 0.0,
-            s_norm: 0.0,
-            d_s: 0.0,
-            d_w: 0.0,
-            d_r: 0.0,
-            d_tt: 0.0,
-            d_p: 0.0,
-            r_norm: 0.0,
-            tt: 0.0,
-            p_norm: 0.0,
-            r_fro2: 0.0,
-            p_fro2: 0.0,
-            rot_prop: 0.0,
-            coef_prop: 0.0,
-            coef_scale: 0.0,
-            #[cfg(test)]
-            bounds: Vec::new(),
-            fail: None,
-        }
-    }
-
-    fn coef_err(&self, k_used: usize) -> f64 {
-        let k = k_used as f64;
-        self.coef_prop
-            + (3.0 * k + self.p as f64 + 4.0)
-                * U
-                * k.sqrt()
-                * self.p_fro2.sqrt()
-                * self.r_fro2.sqrt()
-                * self.coef_scale
-    }
-}
-
-// The names follow the doc comment's formulas (s, w, q, n, p; d_tt, d_p).
-#[allow(clippy::many_single_char_names, clippy::similar_names)]
 impl ComponentBackend for GramBackend<'_> {
-    fn gate_s(&mut self, a: usize, s: &Col<f64>, keep: Option<usize>) -> Gate {
-        let (sel_norm, gap) = selected_norm_and_gap(s, keep);
-        self.s_norm = s.norm_l2();
-        if a == 1 {
-            // ŝ₁ (formed under the Primal fit's `Par`), w_floor and the
-            // selection are the X backend's own bits.
-            self.s1_norm = self.s_norm;
-            self.d_w = 0.0;
-            return Gate::Continue;
-        }
-        self.d_w = 2.0 * self.d_s / sel_norm + (self.p as f64 + 2.0) * U;
-        let band = RESOLVE_BAND * 2.0 * self.d_s;
-        let s_ok = sel_norm >= band
-            && sel_norm >= RESOLVE_BAND * self.w_floor
-            && sel_norm >= ABS_BAND * NIPALS_ABS_FLOOR;
-        let gap_ok = gap >= band;
-        if s_ok && gap_ok {
-            Gate::Continue
-        } else {
-            self.fail = Some(if s_ok {
-                GateFail::KeepGap
-            } else {
-                GateFail::SNorm
-            });
-            Gate::Unresolved
-        }
+    fn gate_s(&mut self, _a: usize, _s: &Col<f64>, _keep: Option<usize>) -> Gate {
+        Gate::Continue
     }
 
     fn score(&mut self, r: &Col<f64>) -> Scored {
@@ -720,67 +338,21 @@ impl ComponentBackend for GramBackend<'_> {
             1.0,
             Par::Seq,
         );
-        let tt: f64 = (0..self.p).map(|j| r[j] * self.cr[j]).sum();
+        let tt: f64 = (0..self.cr.nrows()).map(|j| r[j] * self.cr[j]).sum();
         Scored { tt, t: None }
     }
 
-    fn gate_tt(&mut self, a: usize, r: &Col<f64>, tt: f64) -> Gate {
-        let (n, p) = (self.n as f64, self.p as f64);
-        let fro2 = self.x_fro * self.x_fro;
-        let r_norm = r.norm_l2();
-        let d_r = if a == 1 {
-            0.0
-        } else {
-            let rho = self.r_fro2.sqrt() * self.p_fro2.sqrt();
-            self.d_w * (1.0 + rho) + self.rot_prop + (p + a as f64 + 2.0) * U * (1.0 + rho)
-        };
-        let l_tt = (n + 2.0 * p + 4.0) * U * fro2 * r_norm * r_norm;
-        let d_tt = l_tt + self.c2_norm * d_r * (2.0 * r_norm + d_r);
-        let p_norm = self.cr.norm_l2() / tt;
-        let l_p = (n + p + 2.0) * U * fro2 * r_norm / tt + 2.0 * U * p_norm;
-        let d_p = l_p + self.c2_norm * d_r / tt + p_norm * d_tt / tt;
-        self.r_norm = r_norm;
-        self.tt = tt;
-        self.p_norm = p_norm;
-        self.d_r = d_r;
-        self.d_tt = d_tt;
-        self.d_p = d_p;
-        #[cfg(test)]
-        self.bounds.push((tt, d_tt, d_p));
-        let decided = tt >= RESOLVE_BAND * 2.0 * d_tt && tt >= ABS_BAND * NIPALS_ABS_FLOOR;
-        let conditioned = tt >= RATIO_MIN * fro2 * r_norm * r_norm;
-        if decided && conditioned {
-            Gate::Continue
-        } else {
-            self.fail = Some(if decided {
-                GateFail::Ratio
-            } else {
-                GateFail::Tt
-            });
-            Gate::Unresolved
-        }
+    fn gate_tt(&mut self, _a: usize, _r: &Col<f64>, _tt: f64) -> Gate {
+        Gate::Continue
     }
 
     fn loading(&mut self, _r: &Col<f64>, _t: Option<&Col<f64>>, inv_tt: f64) -> Col<f64> {
-        Col::<f64>::from_fn(self.p, |j| self.cr[j] * inv_tt)
+        Col::<f64>::from_fn(self.cr.nrows(), |j| self.cr[j] * inv_tt)
     }
 
     fn q(&mut self, s: &Col<f64>, w: &Col<f64>, _t: Option<&Col<f64>>, inv_tt: f64) -> f64 {
-        let sw: f64 = (0..self.p).map(|j| s[j] * w[j]).sum();
-        let q = sw * inv_tt;
-        let (n, p) = (self.n as f64, self.p as f64);
-        let qt = (q * self.tt).abs();
-        let l_qt = (2.0 * n + p + 3.0) * U * self.ys_norm * self.x_fro * self.r_norm
-            + (p + 3.0) * U * self.s_norm;
-        let d_qt = self.d_s + self.s_norm * self.d_w + self.s1_norm * self.d_r + l_qt;
-        let d_q = d_qt / self.tt + q.abs() * self.d_tt / self.tt;
-        self.d_s += qt * self.d_p + self.p_norm * d_qt + 2.0 * U * (self.s_norm + qt * self.p_norm);
-        self.r_fro2 += self.r_norm * self.r_norm;
-        self.p_fro2 += self.p_norm * self.p_norm;
-        self.rot_prop += self.d_r * self.p_norm + self.r_norm * self.d_p;
-        self.coef_prop += self.d_r * q.abs() + self.r_norm * d_q;
-        self.coef_scale += self.r_norm * q.abs();
-        q
+        let sw: f64 = (0..s.nrows()).map(|j| s[j] * w[j]).sum();
+        sw * inv_tt
     }
 }
 
@@ -842,36 +414,6 @@ mod tests_route_rule {
     }
 
     #[test]
-    fn very_tall_k3_falls_back_past_the_ratio_cap() {
-        // p = 8, B = 300, k = 3: the cost rule and work floor hold on both
-        // sides (checked as premises), so the ratio cap alone decides.
-        let (p, b, k) = (8usize, 300usize, 3usize);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let n_at_cap = GRAM_P_TALL_RATIO_MAX_K3 as usize * p;
-        let rule = |n: usize| gram_p_cost_rule(n as f64, p as f64, b as f64, k as f64);
-        let work = |n: usize| b as f64 * (2.0 * k as f64 + 1.0) * n as f64 * p as f64;
-        assert!(rule(n_at_cap) && rule(n_at_cap + p), "premise: cost rule");
-        assert!(
-            work(n_at_cap) >= GRAM_P_MIN_WORK && work(n_at_cap + p) >= GRAM_P_MIN_WORK,
-            "premise: work floor"
-        );
-        // Just inside the ratio cap (n_tr / p == GRAM_P_TALL_RATIO_MAX_K3):
-        // still offered.
-        assert!(use_gram_p_route(n_at_cap, p, b, k));
-        // One p past it (n_tr / p > GRAM_P_TALL_RATIO_MAX_K3): refused.
-        assert!(!use_gram_p_route(n_at_cap + p, p, b, k));
-        // k = 2 at the same shapes is untouched by the ratio cap.
-        assert!(use_gram_p_route(n_at_cap, p, b, 2));
-        assert!(use_gram_p_route(n_at_cap + p, p, b, 2));
-        // A measured win this cap must keep: n_tr / p = 2500 at k = 3
-        // (20 000 × 8: 7.9x faster, 1.5% fallback).
-        assert!(use_gram_p_route(20_000, 8, 1000, 3));
-        // A measured loss this cap must refuse: n_tr / p = 12500
-        // (100 000 × 8: fallback about 100%).
-        assert!(!use_gram_p_route(100_000, 8, 300, 3));
-    }
-
-    #[test]
     fn degenerate_inputs_stay_on_the_x_backend() {
         // The shape the rows below put a zero into is on the Gram route.
         assert!(use_gram_p_route(10_000, 10, 1000, 2));
@@ -890,11 +432,6 @@ mod tests_route_rule {
 mod tests_block {
     use super::*;
     use crate::test_support::{linear_y, prepared, unif};
-
-    fn lambda_max(c: &Mat<f64>) -> f64 {
-        let ev = c.self_adjoint_eigenvalues(faer::Side::Lower).expect("evd");
-        *ev.last().expect("p ≥ 1")
-    }
 
     #[test]
     fn c_build_is_thread_count_invariant_at_the_route_shapes() {
@@ -916,15 +453,13 @@ mod tests_block {
         ] {
             let x = unif(n, p, 31);
             let (xs, _) = prepared(&x, &linear_y(&x, 1.0, 32), None);
-            let seq = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
+            let seq = GramPBlock::new(xs.as_ref(), Par::Seq);
             for threads in [2usize, 7] {
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
                     .build()
                     .expect("pool");
-                let par = pool.install(|| {
-                    GramPBlock::new(xs.as_ref(), crate::fit::par_fixed(), ParChoice::Seq)
-                });
+                let par = pool.install(|| GramPBlock::new(xs.as_ref(), crate::fit::par_fixed()));
                 for j in 0..p {
                     for i in 0..p {
                         assert_eq!(
@@ -934,69 +469,8 @@ mod tests_block {
                         );
                     }
                 }
-                assert_eq!(
-                    par.c2_norm.to_bits(),
-                    seq.c2_norm.to_bits(),
-                    "{n}×{p}: c2_norm"
-                );
             }
         }
-    }
-
-    #[test]
-    #[allow(clippy::float_cmp)] // the cap is `min(2·λ̂, fro2)`, compared exactly
-    fn c2_norm_is_bracketed_by_the_top_eigenvalue_and_the_trace() {
-        // Uniform, a constant (zero after standardization) column, p = 1,
-        // two exactly opposite columns (the all-ones start is orthogonal to
-        // C's top direction), and a κ = 1e6 block.
-        let mut designs: Vec<(&str, Mat<f64>)> = Vec::new();
-        let x = unif(500, 20, 35);
-        designs.push(("uniform", prepared(&x, &linear_y(&x, 1.0, 36), None).0));
-        let mut xc = unif(400, 10, 37);
-        for i in 0..400 {
-            xc[(i, 3)] = 2.5;
-        }
-        designs.push((
-            "constant_column",
-            prepared(&xc, &linear_y(&xc, 1.0, 38), None).0,
-        ));
-        let x1 = unif(3000, 1, 39);
-        designs.push(("p1", prepared(&x1, &linear_y(&x1, 1.0, 40), None).0));
-        let (xs1, _, _) = crate::linalg::standardize(unif(600, 1, 41).as_ref());
-        designs.push((
-            "opposite_columns",
-            Mat::<f64>::from_fn(
-                600,
-                2,
-                |i, j| if j == 0 { xs1[(i, 0)] } else { -xs1[(i, 0)] },
-            ),
-        ));
-        designs.push((
-            "kappa_1e6",
-            crate::test_support::conditioned(400, 20, 1e6, 42),
-        ));
-        for (label, xs) in &designs {
-            let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
-            let fro2 = block.x_fro * block.x_fro;
-            let lam = lambda_max(&block.c);
-            assert!(block.c2_norm <= fro2, "{label}: capped by tr C");
-            assert!(
-                lam <= block.c2_norm * (1.0 + 1e-12),
-                "{label}: λ_max {lam:e} above the estimate {:e}",
-                block.c2_norm
-            );
-            assert!(
-                block.c2_norm == fro2 || block.c2_norm <= 2.0 * lam * (1.0 + 1e-12),
-                "{label}: estimate {:e} above 2·λ_max {:e} and below tr C",
-                block.c2_norm,
-                2.0 * lam
-            );
-        }
-        assert_eq!(
-            c2_norm_estimate(Mat::<f64>::zeros(3, 3).as_ref(), 2.0),
-            4.0,
-            "zero C falls back to x_fro²"
-        );
     }
 }
 
@@ -1004,8 +478,20 @@ mod tests_block {
 mod tests_kernel {
     use super::*;
     use crate::fit::{ParChoice, pls1_fit_prepared_fro};
-    use crate::test_support::{linear_y, prepared, unif, unif_col};
-    use faer::{Col, Mat};
+    use crate::test_support::{linear_y, prepared, unif};
+    use faer::Col;
+
+    /// The Gram fit of `ys` on the block of `xs`, from the X backend's `s₁`.
+    pub(super) fn gram_fit(
+        block: &GramPBlock,
+        xs: MatRef<'_, f64>,
+        ys: ColRef<'_, f64>,
+        k: usize,
+        keep: Option<usize>,
+    ) -> GramFit {
+        let s1 = first_product(xs, ys, ParChoice::Seq, k);
+        block.fit(s1.as_ref(), ys.norm_l2(), k, keep)
+    }
 
     /// `max_j |a_j − b_j| ≤ 1e-10·max(1, ‖b‖∞)`, `b` the X backend's.
     fn assert_coef_close(a: &Col<f64>, b: &Col<f64>, what: &str) {
@@ -1032,10 +518,8 @@ mod tests_kernel {
             ("weighted", Some(&w), None),
         ] {
             let (xs, ys) = prepared(&x, &y, wopt);
-            let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
-            let g = block
-                .fit_replicate_diag(ys.as_ref(), 2, keep)
-                .expect("resolves");
+            let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+            let g = gram_fit(&block, xs.as_ref(), ys.as_ref(), 2, keep);
             let xf = pls1_fit_prepared_fro(
                 xs.as_ref(),
                 ys.as_ref(),
@@ -1056,72 +540,12 @@ mod tests_kernel {
     }
 
     #[test]
-    fn a_non_finite_outcome_is_never_resolved() {
-        // Fail closed: a NaN or infinite entry in ys must reach the Primal
-        // arm (which reports it), never a Gram fit or a zero model.
-        let x = unif(300, 12, 23);
-        let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 24), None);
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
-        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let mut yb = ys.clone();
-            yb[7] = bad;
-            for keep in [None, Some(4)] {
-                for k in 1..=K_GRAM_MAX {
-                    assert!(
-                        block.fit_replicate_diag(yb.as_ref(), k, keep).is_err(),
-                        "ys[7] = {bad}, k = {k}, keep = {keep:?}: resolved"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn the_ratio_gate_refuses_a_nearly_collinear_direction() {
-        // Two columns 1e-3 apart: C's small eigenvalue is about 2.5e-7 of
-        // tr C, under RATIO_MIN, while the tt band still decides at a = 2
-        // (δtt/tt about 2e-2 against the band's 1/8). The transcription in
-        // `scripts/gate_feasibility.py` gives Ratio at a = 2 on every draw of this design.
-        let x1 = unif(1000, 1, 13);
-        let e = unif_col(1000, 14);
-        let x = Mat::<f64>::from_fn(1000, 2, |i, j| {
-            if j == 0 {
-                x1[(i, 0)]
-            } else {
-                x1[(i, 0)] + 1e-3 * e[i]
-            }
-        });
-        let y = Col::<f64>::from_fn(1000, |i| x1[(i, 0)] + 10.0 * e[i]);
-        let (xs, ys) = prepared(&x, &y, None);
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
-        assert!(
-            block.fit_replicate_diag(ys.as_ref(), 1, None).is_ok(),
-            "k = 1 resolves"
-        );
-        let r = block.fit_replicate_diag(ys.as_ref(), 2, None);
-        assert!(matches!(r, Err(GateFail::Ratio)), "{:?}", r.err());
-    }
-
-    #[test]
-    fn a_keep_boundary_inside_rounding_falls_back() {
-        // Columns 15..30 duplicate 0..15, so from a = 2 on every |s| entry
-        // has a twin and an odd keep puts the boundary between twins, a tie
-        // the two backends need not break alike.
-        let x0 = unif(400, 15, 7);
-        let x = Mat::<f64>::from_fn(400, 30, |i, j| x0[(i, j % 15)]);
-        let (xs, ys) = prepared(&x, &linear_y(&x0, 1.0, 8), None);
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
-        let r = block.fit_replicate_diag(ys.as_ref(), 3, Some(3));
-        assert!(matches!(r, Err(GateFail::KeepGap)), "{:?}", r.err());
-    }
-
-    #[test]
     #[allow(clippy::float_cmp)] // exact zeros of a constant column, by construction
     fn single_feature_and_constant_column_match_the_x_backend() {
         // p = 1.
         let x = unif(3000, 1, 9);
         let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 10), None);
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
+        let block = GramPBlock::new(xs.as_ref(), Par::Seq);
         let xf = pls1_fit_prepared_fro(
             xs.as_ref(),
             ys.as_ref(),
@@ -1131,11 +555,9 @@ mod tests_kernel {
             xs.norm_l2(),
         )
         .expect("X backend");
-        let (coef, k_used) = block
-            .fit_replicate(ys.as_ref(), 1, None)
-            .expect("p = 1 resolves");
-        assert_eq!(k_used, xf.k_used);
-        assert_coef_close(&coef, &xf.coef, "p = 1");
+        let g = gram_fit(&block, xs.as_ref(), ys.as_ref(), 1, None);
+        assert_eq!(g.k_used, xf.k_used);
+        assert_coef_close(&g.coef, &xf.coef, "p = 1");
         // A constant column standardizes to an exact zero column, so C has
         // a zero row and column.
         let mut x = unif(400, 10, 11);
@@ -1144,8 +566,8 @@ mod tests_kernel {
         }
         let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 12), None);
         assert!((0..400).all(|i| xs[(i, 3)] == 0.0), "premise");
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
-        for k in 1..=K_GRAM_MAX {
+        let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+        for k in 1..=K_GRAM_MAX.min(9) {
             let xf = pls1_fit_prepared_fro(
                 xs.as_ref(),
                 ys.as_ref(),
@@ -1155,89 +577,85 @@ mod tests_kernel {
                 xs.norm_l2(),
             )
             .expect("X backend");
-            match block.fit_replicate_diag(ys.as_ref(), k, None) {
-                Ok(g) => {
-                    assert_eq!(g.k_used, xf.k_used, "k={k}");
-                    assert_coef_close(&g.coef, &xf.coef, &format!("k={k}"));
-                }
-                Err(f) => assert!(k > 2, "k={k} falls back ({f:?}) on well-posed data"),
-            }
+            let g = gram_fit(&block, xs.as_ref(), ys.as_ref(), k, None);
+            assert_eq!(g.k_used, xf.k_used, "k={k}");
+            assert_coef_close(&g.coef, &xf.coef, &format!("k={k}"));
         }
     }
 
     #[test]
-    // The reference values are pasted as `scripts/gate_feasibility.py` prints them (clippy 1.85
-    // misreads their zero-padded exponents as excessive precision); the design names follow
-    // the formulas (n, p, x, y, i, j).
-    #[allow(
-        clippy::unreadable_literal,
-        clippy::excessive_precision,
-        clippy::many_single_char_names
-    )]
-    fn bounds_match_gate_feasibility_script() {
-        // Printed by `python3 scripts/gate_feasibility.py gram_p --reference`:
-        // `(tt_a, δtt_a, δp_a)` for a = 1..=3 on the
-        // closed-form design below, with the ‖C‖₂ estimate. The script
-        // transcribes this backend's recursion, so the two agree to
-        // rounding; a mismatch means one transcription left the formulas of
-        // `fit_replicate_diag`'s doc comment.
-        const SCRIPT_C2_NORM: f64 = 1719.5640898689182;
-        const SCRIPT_REFERENCE: &[(f64, f64, f64)] = &[
-            (
-                599.6834622091338,
-                2.2808421817899206e-10,
-                7.820128791640594e-13,
-            ),
-            (
-                466.82408412069884,
-                5.1466229828362756e-08,
-                1.6251478230266874e-10,
-            ),
-            (
-                651.4987223020075,
-                3.018567086830902e-05,
-                6.930737553433065e-08,
-            ),
-        ];
-        let (n, p) = (400usize, 12usize);
-        let x = Mat::<f64>::from_fn(n, p, |i, j| {
-            let (fi, fj) = (i as f64, j as f64);
-            ((fi + 1.0) * (fj + 1.0) * 0.37).sin() + 0.5 * (1.1 * fi - 0.7 * fj).cos()
-        });
-        let (xs, _, _) = crate::linalg::standardize(x.as_ref());
-        let y = Col::<f64>::from_fn(n, |i| (0.9 * i as f64 + 0.3).cos() + 0.5 * xs[(i, 0)]);
-        let (ys, _, _) = crate::linalg::standardize1(y.as_ref());
-        let rel = |a: f64, b: f64| (a - b).abs() / b.abs();
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
-        assert!(
-            rel(block.c2_norm, SCRIPT_C2_NORM) <= 1e-12,
-            "c2_norm {:e} vs script {SCRIPT_C2_NORM:e}",
-            block.c2_norm
-        );
-        let g = block
-            .fit_replicate_diag(ys.as_ref(), 3, None)
-            .expect("the reference design resolves at k = 3");
-        assert_eq!(g.bounds.len(), SCRIPT_REFERENCE.len());
-        for (a, (&(tt, d_tt, d_p), &(s_tt, s_dtt, s_dp))) in
-            g.bounds.iter().zip(SCRIPT_REFERENCE).enumerate()
-        {
-            for (what, got, want) in [("tt", tt, s_tt), ("d_tt", d_tt, s_dtt), ("d_p", d_p, s_dp)] {
-                assert!(
-                    rel(got, want) <= 1e-12,
-                    "component {}: {what} {got:e} vs script {want:e}",
-                    a + 1
-                );
+    #[allow(clippy::float_cmp)] // the zero model's coefficients are exact zeros
+    fn a_zero_outcome_and_an_orthogonal_outcome_give_the_zero_model() {
+        // `ys = 0` (a constant outcome after standardization) and an outcome
+        // orthogonal to every column of `Xs` up to rounding: `s₁` is the X
+        // backend's, so both backends stop at a = 1.
+        let x = unif(500, 12, 13);
+        let (xs, _) = prepared(&x, &linear_y(&x, 1.0, 14), None);
+        let orth = crate::test_support::orthogonal_y(&xs, 15);
+        let (ys_orth, _, _) = crate::linalg::standardize1(orth.as_ref());
+        let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+        for (label, ys) in [("zero", Col::<f64>::zeros(500)), ("orthogonal", ys_orth)] {
+            for k in [1usize, 2, 5] {
+                let g = gram_fit(&block, xs.as_ref(), ys.as_ref(), k, None);
+                let xf = pls1_fit_prepared_fro(
+                    xs.as_ref(),
+                    ys.as_ref(),
+                    k,
+                    None,
+                    ParChoice::Seq,
+                    xs.norm_l2(),
+                )
+                .expect("X backend");
+                assert_eq!((g.k_used, xf.k_used), (0, 0), "{label}, k = {k}");
+                assert!((0..12).all(|j| g.coef[j] == 0.0), "{label}, k = {k}");
             }
         }
     }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::many_single_char_names,
+    clippy::similar_names,
+    clippy::cast_precision_loss
+)]
 mod tests_sweep {
     use super::*;
     use crate::fit::{ParChoice, pls1_fit_prepared_fro};
+    use crate::signal_test::{
+        SplitIdx, prepare_split, split_column_r, split_column_r_gram_p, split_train_target,
+    };
     use crate::test_support::{conditioned, linear_y, orthogonal_y, prepared, unif, unif_col};
     use std::collections::BTreeMap;
+
+    /// The component counts the sweep measures.
+    const K_SWEEP_MAX: usize = 10;
+
+    /// The agreement tolerances: `|Δcoef| ≤ COEF_TOL·max(1, ‖coef‖_∞)` and
+    /// `|Δr| ≤ R_TOL`.
+    const COEF_TOL: f64 = 1e-10;
+    const R_TOL: f64 = 1e-12;
+
+    /// One design: raw `x` and `y` (the coefficients are compared on
+    /// `prepared(x, y, w)`, the split on `prepare_split` of `x` with the
+    /// all-row scale), weights and `keep`.
+    struct Design {
+        family: &'static str,
+        x: Mat<f64>,
+        y: Col<f64>,
+        w: Option<Col<f64>>,
+        keep: Option<usize>,
+    }
+
+    fn design(family: &'static str, x: Mat<f64>, y: Col<f64>) -> Design {
+        Design {
+            family,
+            x,
+            y,
+            w: None,
+            keep: None,
+        }
+    }
 
     /// `y = Σ_{l<m} (l + 1)·u_l` over the leading left singular vectors of
     /// `xs`: exactly `m` components are real.
@@ -1250,130 +668,32 @@ mod tests_sweep {
         })
     }
 
-    #[derive(Default)]
-    struct Tally {
-        total: usize,
-        resolved: usize,
-        fails: BTreeMap<String, usize>,
-        fails_by_k: BTreeMap<usize, usize>,
-        /// Largest `max_j |coef_gram − coef_x| / max(1, ‖coef_x‖∞)` over
-        /// resolved replicates (the tolerance is 1e-10).
-        max_err: f64,
+    /// Rank-`r` `n × p` matrix `A·B` with uniform factors.
+    fn low_rank(n: usize, p: usize, r: usize, seed: u64) -> Mat<f64> {
+        let a = unif(n, r, seed);
+        let b = unif(r, p, seed + 1);
+        crate::linalg::mat_mul(a.as_ref(), b.as_ref(), Par::Seq)
     }
 
-    impl Tally {
-        fn fallback_rate(&self) -> f64 {
-            (self.total - self.resolved) as f64 / self.total.max(1) as f64
-        }
-    }
-
-    /// One replicate on both backends: gate soundness (a Resolved replicate
-    /// has the X backend's `k_used`) is asserted at once; the normalized
-    /// `coef` error and the outcome are tallied.
-    fn check_one(
-        t: &mut Tally,
-        label: &str,
-        block: &GramPBlock<'_>,
-        xs: MatRef<'_, f64>,
-        ys: ColRef<'_, f64>,
-        k: usize,
-        keep: Option<usize>,
-    ) {
-        let x = pls1_fit_prepared_fro(xs, ys, k, keep, ParChoice::Seq, xs.norm_l2())
-            .expect("X backend fit");
-        t.total += 1;
-        match block.fit_replicate_diag(ys, k, keep) {
-            Ok(g) => {
-                assert_eq!(
-                    g.k_used, x.k_used,
-                    "{label}, k={k}, keep={keep:?}: Resolved with k_used {} where the X \
-                     backend has {} (an unsound decision gate: fix it, never recalibrate)",
-                    g.k_used, x.k_used
-                );
-                assert!(
-                    (0..xs.ncols()).all(|j| g.coef[j].is_finite()),
-                    "{label}, k={k}: non-finite coef"
-                );
-                let scale = (0..xs.ncols())
-                    .map(|j| x.coef[j].abs())
-                    .fold(1.0_f64, f64::max);
-                let err = (0..xs.ncols())
-                    .map(|j| (g.coef[j] - x.coef[j]).abs())
-                    .fold(0.0_f64, f64::max)
-                    / scale;
-                t.resolved += 1;
-                t.max_err = t.max_err.max(err);
-            }
-            Err(f) => {
-                *t.fails.entry(format!("{f:?}")).or_default() += 1;
-                *t.fails_by_k.entry(k).or_default() += 1;
-            }
-        }
-    }
-
-    /// Every k from 1 to `min(k_max, K_GRAM_MAX, p)` on one design: the
-    /// component counts the route can reach.
-    fn run_design(
-        t: &mut Tally,
-        label: &str,
-        xs: &Mat<f64>,
-        ys: &Col<f64>,
-        k_max: usize,
-        keep: Option<usize>,
-    ) {
-        let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
-        for k in 1..=k_max.min(K_GRAM_MAX).min(xs.ncols()) {
-            check_one(t, label, &block, xs.as_ref(), ys.as_ref(), k, keep);
-        }
-    }
-
-    fn report(title: &str, tallies: &BTreeMap<&'static str, Tally>) {
-        eprintln!("== {title} (RATIO_MIN = {RATIO_MIN:e}, K_GRAM_MAX = {K_GRAM_MAX})");
-        eprintln!("family\ttotal\tresolved\tfallback\tmax_err\tby_gate\tby_k");
-        for (name, t) in tallies {
-            eprintln!(
-                "{name}\t{}\t{}\t{:.4}\t{:.3e}\t{:?}\t{:?}",
-                t.total,
-                t.resolved,
-                t.fallback_rate(),
-                t.max_err,
-                t.fails,
-                t.fails_by_k
-            );
-        }
-    }
-
-    #[test]
     #[allow(clippy::too_many_lines)]
-    fn gram_backend_matches_x_backend_across_design_families() {
-        let mut tallies: BTreeMap<&'static str, Tally> = BTreeMap::new();
+    fn designs() -> Vec<Design> {
+        let mut out = Vec::new();
         // Ordinary: signal and null outcomes.
-        for seed in 0..4u64 {
+        for seed in 0..3u64 {
             let x = unif(400, 30, 100 + seed);
-            for y in [linear_y(&x, 1.0, 200 + seed), unif_col(400, 300 + seed)] {
-                let (xs, ys) = prepared(&x, &y, None);
-                run_design(
-                    tallies.entry("ordinary").or_default(),
-                    "ordinary",
-                    &xs,
-                    &ys,
-                    20,
-                    None,
-                );
-            }
+            out.push(design("ordinary", x.clone(), linear_y(&x, 1.0, 200 + seed)));
+            out.push(design("ordinary", x, unif_col(400, 300 + seed)));
         }
-        // n ≫ p.
+        // n ≫ p, up to the release-gate shape.
         for seed in 0..2u64 {
             let x = unif(5000, 8, 110 + seed);
-            let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 210 + seed), None);
-            run_design(
-                tallies.entry("n_much_larger_than_p").or_default(),
-                "n>>p",
-                &xs,
-                &ys,
-                8,
-                None,
-            );
+            let y = linear_y(&x, 1.0, 210 + seed);
+            out.push(design("n_much_larger_than_p", x, y));
+        }
+        {
+            let x = unif(100_000, 8, 112);
+            let y = linear_y(&x, 1.0, 212);
+            out.push(design("n_much_larger_than_p", x, y));
         }
         // Rank-deficient: columns 20..30 are sums of earlier ones (rank 20).
         {
@@ -1383,31 +703,14 @@ mod tests_sweep {
                     x[(i, j)] = x[(i, j - 20)] + x[(i, j - 19)];
                 }
             }
-            let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 220), None);
-            run_design(
-                tallies.entry("rank_deficient").or_default(),
-                "rank_deficient",
-                &xs,
-                &ys,
-                20,
-                None,
-            );
+            let y = linear_y(&x, 1.0, 220);
+            out.push(design("rank_deficient", x, y));
         }
-        // y exhausted: rank 39 of 40, y independent of X (fit.rs design).
+        // y exhausted: X of rank 4, y independent of X, so the components
+        // past the fourth sit at the floor.
         {
-            let mut x = unif(2000, 40, 11);
-            for i in 0..2000 {
-                x[(i, 39)] = x[(i, 0)] + x[(i, 1)];
-            }
-            let (xs, ys) = prepared(&x, &unif_col(2000, 12), None);
-            run_design(
-                tallies.entry("y_exhausted").or_default(),
-                "y_exhausted",
-                &xs,
-                &ys,
-                20,
-                None,
-            );
+            let x = low_rank(400, 20, 4, 121);
+            out.push(design("y_exhausted", x, unif_col(400, 221)));
         }
         // Weak signal: 1e-3 of the signal on top of noise.
         for seed in 0..2u64 {
@@ -1415,28 +718,20 @@ mod tests_sweep {
             let e = unif_col(400, 230 + seed);
             let s = linear_y(&x, 0.0, 0);
             let y = Col::<f64>::from_fn(400, |i| e[i] + 1e-3 * s[i]);
-            let (xs, ys) = prepared(&x, &y, None);
-            run_design(
-                tallies.entry("weak_signal").or_default(),
-                "weak_signal",
-                &xs,
-                &ys,
-                20,
-                None,
-            );
+            out.push(design("weak_signal", x, y));
         }
-        // Collinear columns, κ(Xs) = 1e2, 1e4, 1e6.
+        // Collinear columns, κ(X) = 1e2, 1e4, 1e6.
         for (tag, kappa) in [
             ("collinear_1e2", 1e2),
             ("collinear_1e4", 1e4),
             ("collinear_1e6", 1e6),
         ] {
-            let xs = conditioned(400, 20, kappa, 140);
-            let (ys, _, _) = crate::linalg::standardize1(linear_y(&xs, 0.1, 240).as_ref());
-            run_design(tallies.entry(tag).or_default(), tag, &xs, &ys, 20, None);
+            let x = conditioned(400, 20, kappa, 140);
+            let y = linear_y(&x, 0.1, 240);
+            out.push(design(tag, x, y));
         }
-        // A nearly collinear pair inside an ordinary block (the ratio
-        // gate's case), at 1e-2, 1e-3 and 1e-4 apart.
+        // A nearly collinear pair inside an ordinary block, 1e-2 to 1e-4
+        // apart.
         for (tag, eps) in [
             ("collinear_pair_1e-2", 1e-2),
             ("collinear_pair_1e-3", 1e-3),
@@ -1447,8 +742,8 @@ mod tests_sweep {
             for i in 0..1000 {
                 x[(i, 1)] = x[(i, 0)] + eps * e[i];
             }
-            let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 245), None);
-            run_design(tallies.entry(tag).or_default(), tag, &xs, &ys, 10, None);
+            let y = linear_y(&x, 1.0, 245);
+            out.push(design(tag, x, y));
         }
         // Duplicated rows.
         {
@@ -1456,80 +751,43 @@ mod tests_sweep {
             let x = Mat::<f64>::from_fn(300, 20, |i, j| x0[(i % 150, j)]);
             let y0 = linear_y(&x0, 1.0, 250);
             let y = Col::<f64>::from_fn(300, |i| y0[i % 150]);
-            let (xs, ys) = prepared(&x, &y, None);
-            run_design(
-                tallies.entry("duplicated_rows").or_default(),
-                "duplicated_rows",
-                &xs,
-                &ys,
-                20,
-                None,
-            );
+            out.push(design("duplicated_rows", x, y));
         }
-        // y orthogonal to X: the zero model, decided exactly at a = 1.
-        for seed in [41u64, 43, 45] {
+        // y orthogonal to every column of X (and to 1) up to rounding.
+        for seed in [41u64, 43] {
             let x = unif(200, 10, seed);
             let (xs0, _, _) = crate::linalg::standardize(x.as_ref());
-            let (xs, ys) = prepared(&x, &orthogonal_y(&xs0, seed + 1), None);
-            run_design(
-                tallies.entry("y_orthogonal").or_default(),
-                "y_orthogonal",
-                &xs,
-                &ys,
-                10,
-                None,
-            );
+            let y = orthogonal_y(&xs0, seed + 1);
+            out.push(design("y_orthogonal", x, y));
         }
-        // y in the span of the first m = 2 directions.
+        // y in the span of the first m = 2 directions of the standardized X:
+        // the components past the second sit at the floor.
         {
             let x = unif(500, 30, 21);
             let (xs, _, _) = crate::linalg::standardize(x.as_ref());
-            let (ys, _, _) = crate::linalg::standardize1(span_y(&xs, 2).as_ref());
-            run_design(
-                tallies.entry("y_in_span_m2").or_default(),
-                "y_in_span_m2",
-                &xs,
-                &ys,
-                10,
-                None,
-            );
+            let y = span_y(&xs, 2);
+            out.push(design("y_in_span_m2", x, y));
         }
         // Sparse keep, signal and null.
         for keep in [1usize, 5, 15, 29] {
             let x = unif(400, 30, 160);
-            let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 260), None);
-            run_design(
-                tallies.entry("sparse_keep").or_default(),
-                "sparse_keep",
-                &xs,
-                &ys,
-                10,
-                Some(keep),
-            );
-            let (xs, ys) = prepared(&x, &unif_col(400, 261), None);
-            run_design(
-                tallies.entry("sparse_keep").or_default(),
-                "sparse_keep",
-                &xs,
-                &ys,
-                10,
-                Some(keep),
-            );
+            for y in [linear_y(&x, 1.0, 260), unif_col(400, 261)] {
+                out.push(Design {
+                    keep: Some(keep),
+                    ..design("sparse_keep", x.clone(), y)
+                });
+            }
         }
         // Duplicated columns under keep: exact ties at the boundary.
         {
             let x0 = unif(400, 15, 170);
             let x = Mat::<f64>::from_fn(400, 30, |i, j| x0[(i, j % 15)]);
-            let (xs, ys) = prepared(&x, &linear_y(&x0, 1.0, 270), None);
+            let y = linear_y(&x0, 1.0, 270);
             for keep in [3usize, 10] {
-                run_design(
-                    tallies.entry("duplicated_columns_keep").or_default(),
-                    "dup_cols_keep",
-                    &xs,
-                    &ys,
-                    6,
-                    Some(keep),
-                );
+                out.push(Design {
+                    keep: Some(keep),
+                    ..design("duplicated_columns_keep", x.clone(), y.clone())
+                });
             }
         }
         // Weighted, every 7th weight zero; dense and sparse.
@@ -1543,176 +801,193 @@ mod tests_sweep {
                     0.5 + (i % 5) as f64 * 0.3
                 }
             });
-            let (xs, ys) = prepared(&x, &y, Some(&w));
-            run_design(
-                tallies.entry("weighted_zero_weights").or_default(),
-                "weighted",
-                &xs,
-                &ys,
-                20,
-                None,
-            );
-            run_design(
-                tallies.entry("weighted_zero_weights_keep").or_default(),
-                "weighted_keep",
-                &xs,
-                &ys,
-                10,
-                Some(10),
-            );
+            for keep in [None, Some(10)] {
+                out.push(Design {
+                    w: Some(w.clone()),
+                    keep,
+                    ..design("weighted_zero_weights", x.clone(), y.clone())
+                });
+            }
         }
+        out
+    }
 
-        report("design family sweep", &tallies);
-        for (fam, t) in &tallies {
-            assert!(
-                t.max_err <= 1e-10,
-                "{fam}: a resolved replicate is {:e}·max(1, ‖coef‖∞) from the X backend, \
-                 outside the 1e-10 tolerance: raise RATIO_MIN (see \
-                 gram_p::tests_sweep::gram_backend_matches_x_backend_across_design_families)",
-                t.max_err
+    /// Worst errors of one (k, family) cell on the fits where both backends
+    /// keep the same component count.
+    #[derive(Default)]
+    struct Cell {
+        coef: f64,
+        r: f64,
+    }
+
+    /// One fit where the two backends keep different component counts.
+    struct Flip {
+        family: &'static str,
+        design: usize,
+        k: usize,
+        /// `"coef"` (all rows) or `"r"` (the split's training half).
+        on: &'static str,
+        gram: usize,
+        x: usize,
+        /// `|Δcoef| / max(1, ‖coef‖_∞)` or `|Δr|`.
+        err: f64,
+    }
+
+    /// The fits where `C`'s rounding and X's may decide a component
+    /// differently: the components past the rank of X (rank 4 in
+    /// `y_exhausted`) or past the span of `y` (2 in `y_in_span_m2`), where
+    /// `‖s_a‖` is rounding, and an outcome orthogonal to X.
+    fn flip_expected(family: &str, k: usize) -> bool {
+        family == "y_orthogonal"
+            || (family == "y_exhausted" && k > 4)
+            || (family == "y_in_span_m2" && k > 2)
+    }
+
+    /// `|Δcoef| / max(1, ‖b‖_∞)`.
+    fn coef_err(a: &Col<f64>, b: &Col<f64>) -> f64 {
+        let scale = (0..b.nrows()).map(|j| b[j].abs()).fold(1.0_f64, f64::max);
+        (0..a.nrows())
+            .map(|j| (a[j] - b[j]).abs())
+            .fold(0.0_f64, f64::max)
+            / scale
+    }
+
+    /// Every design, `k = 1..=min(10, p)`: the Gram backend against the X
+    /// backend on the same block. Coefficients on all rows (`prepared`);
+    /// `r` on the split of the first half against the second,
+    /// `split_column_r_gram_p` against `split_column_r` on `prepare_split`'s
+    /// halves. On the fits where both keep the same component count, every
+    /// family meets `|Δcoef| ≤ 1e-10·max(1, ‖coef‖_∞)` and `|Δr| ≤ 1e-12` at
+    /// every `k ≤ K_GRAM_MAX`; a fit where the counts differ is listed, and
+    /// is allowed only where [`flip_expected`] says. `cargo test -p plskit
+    /// --release gram_p_matches_x_backend -- --nocapture` prints the table.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn gram_p_matches_x_backend_up_to_k_gram_max() {
+        let mut cells: BTreeMap<(usize, &'static str), Cell> = BTreeMap::new();
+        let mut flips: Vec<Flip> = Vec::new();
+        let mut seen: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let primal = |xs: MatRef<'_, f64>, ys: ColRef<'_, f64>, k: usize, keep| {
+            pls1_fit_prepared_fro(xs, ys, k, keep, ParChoice::Seq, xs.norm_l2()).expect("X backend")
+        };
+        let gram = |block: &GramPBlock, xs: MatRef<'_, f64>, ys: ColRef<'_, f64>, k, keep| {
+            let s1 = first_product(xs, ys, ParChoice::Seq, k);
+            block.fit(s1.as_ref(), ys.norm_l2(), k, keep)
+        };
+        for d in designs() {
+            let design = {
+                let c = seen.entry(d.family).or_default();
+                *c += 1;
+                *c - 1
+            };
+            let (n, p) = (d.x.nrows(), d.x.ncols());
+            let (xs, ys) = prepared(&d.x, &d.y, d.w.as_ref());
+            let block = GramPBlock::new(xs.as_ref(), Par::Seq);
+            let wn =
+                d.w.as_ref()
+                    .map(|w| crate::linalg::normalize_weights(w.as_ref()).expect("weights"));
+            let scale =
+                crate::linalg::held_out_scale(d.x.as_ref(), wn.as_ref().map(Col::as_ref), false);
+            let n_tr = n - n / 2;
+            let half = SplitIdx {
+                tr: (0..n_tr).collect(),
+                te: (n_tr..n).collect(),
+            };
+            let prep = prepare_split(
+                d.x.as_ref(),
+                &half,
+                wn.as_ref().map(Col::as_ref),
+                scale.as_ref(),
+            );
+            let block_h = GramPBlock::new(prep.xs_tr.as_ref(), Par::Seq);
+            let y_of = |i: usize| d.y[i];
+            let ys_h = split_train_target(&prep, &half, &y_of);
+            for k in 1..=K_SWEEP_MAX.min(p) {
+                let cell = cells.entry((k, d.family)).or_default();
+                let xf = primal(xs.as_ref(), ys.as_ref(), k, d.keep);
+                let gf = gram(&block, xs.as_ref(), ys.as_ref(), k, d.keep);
+                let err = coef_err(&gf.coef, &xf.coef);
+                if gf.k_used == xf.k_used {
+                    cell.coef = cell.coef.max(err);
+                } else {
+                    flips.push(Flip {
+                        family: d.family,
+                        design,
+                        k,
+                        on: "coef",
+                        gram: gf.k_used,
+                        x: xf.k_used,
+                        err,
+                    });
+                }
+                let r_x = split_column_r(&prep, &half, &y_of, &[k], d.keep)[0];
+                let r_g = split_column_r_gram_p(&block_h, &prep, &half, &y_of, &[k], d.keep)[0];
+                let ku_x = primal(prep.xs_tr.as_ref(), ys_h.as_ref(), k, d.keep).k_used;
+                let ku_g = gram(&block_h, prep.xs_tr.as_ref(), ys_h.as_ref(), k, d.keep).k_used;
+                if ku_g == ku_x {
+                    cell.r = cell.r.max((r_g - r_x).abs());
+                } else {
+                    flips.push(Flip {
+                        family: d.family,
+                        design,
+                        k,
+                        on: "r",
+                        gram: ku_g,
+                        x: ku_x,
+                        err: (r_g - r_x).abs(),
+                    });
+                }
+            }
+        }
+        let meets = |k: usize| {
+            cells
+                .range((k, "")..(k + 1, ""))
+                .all(|(_, c)| c.coef <= COEF_TOL && c.r <= R_TOL)
+        };
+        let k_max = (1..=K_SWEEP_MAX)
+            .take_while(|&k| meets(k))
+            .last()
+            .unwrap_or(0);
+        eprintln!("k  family                    |dcoef|/max(1,|coef|)  |dr|   (equal counts)");
+        for ((k, family), c) in &cells {
+            eprintln!("{k:>2} {family:<25} {:>21.1e}  {:.1e}", c.coef, c.r);
+        }
+        eprintln!("/// | k | worst |Δcoef|/max(1, ‖coef‖_∞) | worst |Δr| |");
+        for k in 1..=K_SWEEP_MAX {
+            let row = cells.range((k, "")..(k + 1, ""));
+            let worst = |f: &dyn Fn(&Cell) -> f64| {
+                row.clone().fold(
+                    ("", 0.0_f64),
+                    |a, ((_, fam), c)| {
+                        if f(c) > a.1 { (*fam, f(c)) } else { a }
+                    },
+                )
+            };
+            let (fc, wc) = worst(&|c| c.coef);
+            let (fr, wr) = worst(&|c| c.r);
+            eprintln!("/// | {k} | {wc:.1e} (`{fc}`) | {wr:.1e} (`{fr}`) |");
+        }
+        eprintln!("/// Flips (family, design, k, on, kept Gram / X, error):");
+        for f in &flips {
+            eprintln!(
+                "/// - {} {}, k = {}, {}: {} / {}, {:.1e}",
+                f.family, f.design, f.k, f.on, f.gram, f.x, f.err
             );
         }
-        let global_err = tallies.values().map(|t| t.max_err).fold(0.0_f64, f64::max);
+        eprintln!("largest k meeting the tolerances at every k up to it: {k_max}");
+        let unexpected: Vec<String> = flips
+            .iter()
+            .filter(|f| !flip_expected(f.family, f.k))
+            .map(|f| format!("{} {} k={} {}", f.family, f.design, f.k, f.on))
+            .collect();
         assert!(
-            global_err <= 1e-11,
-            "max normalized |Δcoef| {global_err:e} over the sweep leaves under a 10x margin to \
-             1e-10: raise RATIO_MIN (see \
-             gram_p::tests_sweep::gram_backend_matches_x_backend_across_design_families)"
+            unexpected.is_empty(),
+            "component counts differ outside the expected families: {unexpected:?}"
         );
-        for fam in [
-            "ordinary",
-            "n_much_larger_than_p",
-            "weak_signal",
-            "weighted_zero_weights",
-        ] {
-            let t = &tallies[fam];
-            assert!(
-                t.fallback_rate() <= 0.01,
-                "{fam}: fallback rate {} on ordinary data ({:?}, by k {:?}): lower \
-                 K_GRAM_MAX (see gram_p::tests_sweep::gram_backend_matches_x_backend_across_design_families)",
-                t.fallback_rate(),
-                t.fails,
-                t.fails_by_k
-            );
-        }
-        let orth = &tallies["y_orthogonal"];
         assert_eq!(
-            orth.resolved, orth.total,
-            "a stop at a = 1 is decided exactly"
+            k_max, K_GRAM_MAX,
+            "K_GRAM_MAX must be the largest k up to which the sweep meets the tolerances"
         );
-    }
-
-    #[test]
-    #[ignore = "slow calibration sweep: n/p at k = 3 (and k = 2) on very tall designs. Run with \
-                `cargo test -p plskit --release tall_shapes_n_over_p_sweep -- --ignored \
-                --nocapture`."]
-    fn tall_shapes_n_over_p_sweep() {
-        // n/p ratios from 1000 to 20000, p in {4, 8, 16}, k = 3 and k = 2
-        // (control). One block, 300 permuted replicates of a real signal
-        // outcome per cell, on the perm_null path's own shape.
-        let ratios = [
-            1000usize, 2000, 2500, 3000, 3500, 4000, 5000, 6000, 7000, 8000, 12500, 16000, 20000,
-        ];
-        let ps = [4usize, 8, 16];
-        let mut tallies: BTreeMap<&'static str, Tally> = BTreeMap::new();
-        for &p in &ps {
-            for &ratio in &ratios {
-                let n = ratio * p;
-                let x = unif(n, p, 500 + p as u64);
-                let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 600 + p as u64), None);
-                let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
-                for &k in &[3usize, 2] {
-                    let label = format!("p{p}_ratio{ratio}_k{k}");
-                    let t = tallies
-                        .entry(Box::leak(label.into_boxed_str()))
-                        .or_default();
-                    for b in 0..300u64 {
-                        let perm = crate::resample::permutation_from_seed(n, 10_000 + b);
-                        let yb = Col::<f64>::from_fn(n, |i| ys[perm[i]]);
-                        check_one(t, "sweep", &block, xs.as_ref(), yb.as_ref(), k, None);
-                    }
-                }
-            }
-        }
-        report("n/p sweep at k = 3 and k = 2", &tallies);
-        // The two measurements the route rule rests on: `k = 2` never falls
-        // back (`K_GRAM_MAX`'s calibration range), and `k = 3` stays far
-        // under the 7/8 break-even up to `GRAM_P_TALL_RATIO_MAX_K3`. The
-        // worst measured cell is 0.20 (p = 16 at n/p = 3000); the bound
-        // leaves room for a few replicates to flip under another
-        // platform's rounding.
-        for &p in &ps {
-            for &ratio in &ratios {
-                let cell = |k: usize| &tallies[format!("p{p}_ratio{ratio}_k{k}").as_str()];
-                let k2 = cell(2);
-                assert_eq!(
-                    k2.resolved, k2.total,
-                    "p={p}, n/p={ratio}, k=2: fell back ({:?})",
-                    k2.fails
-                );
-                if ratio as f64 <= GRAM_P_TALL_RATIO_MAX_K3 {
-                    let k3 = cell(3);
-                    assert!(
-                        k3.fallback_rate() <= 0.30,
-                        "p={p}, n/p={ratio}, k=3: fallback rate {} ({:?}): lower \
-                         GRAM_P_TALL_RATIO_MAX_K3",
-                        k3.fallback_rate(),
-                        k3.fails
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn fallback_is_rare_on_ordinary_data_at_route_shapes() {
-        // The fixture blocks and the memprobe shape at their k, permuted
-        // outcomes as the replicate loops feed them.
-        let mut tallies: BTreeMap<&'static str, Tally> = BTreeMap::new();
-        for (tag, n, p, k, keep, reps) in [
-            (
-                "perm_null_n2000_p50_k3",
-                2000usize,
-                50usize,
-                3usize,
-                None,
-                200usize,
-            ),
-            ("raw_perm_fold_n1600_p50_k2", 1600, 50, 2, None, 200),
-            (
-                "split_half_n1000_p200_k1_keep10",
-                1000,
-                200,
-                1,
-                Some(10usize),
-                200,
-            ),
-            ("memprobe_n10000_p500_k3", 10_000, 500, 3, None, 20),
-        ] {
-            let x = unif(n, p, 190);
-            let (xs, ys) = prepared(&x, &linear_y(&x, 2.0, 290), None);
-            let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
-            let t = tallies.entry(tag).or_default();
-            for b in 0..reps {
-                let perm = crate::resample::permutation_from_seed(n, 1000 + b as u64);
-                let yb = Col::<f64>::from_fn(n, |i| ys[perm[i]]);
-                check_one(t, tag, &block, xs.as_ref(), yb.as_ref(), k, keep);
-            }
-        }
-        report("route shapes", &tallies);
-        for (tag, t) in &tallies {
-            assert!(
-                t.max_err <= 1e-10,
-                "{tag}: max_err {:e} outside tolerance",
-                t.max_err
-            );
-            assert!(
-                t.fallback_rate() <= 0.01,
-                "{tag}: fallback rate {} ({:?}): see gram_p::tests_sweep::fallback_is_rare_on_ordinary_data_at_route_shapes",
-                t.fallback_rate(),
-                t.fails
-            );
-        }
     }
 }
 
@@ -1726,6 +1001,26 @@ mod tests_site_route {
     use crate::signal_test::{
         ReplicateRoute, raw_perm_route, split_exact_refit_route, with_gram_routes_disabled,
     };
+
+    #[test]
+    fn k3_at_high_tall_ratio_takes_gram_p() {
+        // 100 000 × 8 at k = 3, n_tr/p from 6250 to 12 500: every site's
+        // selector takes the Gram-p route.
+        let (n, p, n_perm, k) = (100_000usize, 8usize, 300usize, 3usize);
+        assert!(use_gram_p_route(n, p, n_perm, k));
+        assert_eq!(
+            perm_null_route(n, p, n_perm, k, false),
+            ReplicateRoute::GramP
+        );
+        assert_eq!(
+            raw_perm_route(n, 5, p, n_perm, k, None, false),
+            ReplicateRoute::GramP
+        );
+        assert_eq!(
+            split_exact_refit_route(n, p, n_perm, 32, k, None, false, false),
+            ReplicateRoute::GramP
+        );
+    }
 
     #[test]
     fn weighted_replicates_prefer_gram_p_in_the_overlap_band() {
@@ -1764,12 +1059,12 @@ mod tests_site_route {
         );
         // split_exact: n = 2000, so n_train = 1000.
         assert!(
-            nspace_eligible_split_exact(1000, 1200, 5000, 2, true),
+            nspace_eligible_split_exact(2000, 1200, 5000, 32, 2, true, false),
             "premise"
         );
         assert!(gram_p_eligible(1000, 1200, 5001, 2, None), "premise");
         assert_eq!(
-            split_exact_refit_route(2000, 1200, 5000, 2, None, false),
+            split_exact_refit_route(2000, 1200, 5000, 32, 2, None, false, false),
             ReplicateRoute::Nspace
         );
     }
@@ -1780,7 +1075,7 @@ mod tests_site_route {
         // Gram-eligible tall shape.
         assert!(gram_p_eligible(1000, 50, 1001, 1, None), "premise");
         assert_eq!(
-            split_exact_refit_route(2000, 50, 1000, 1, None, false),
+            split_exact_refit_route(2000, 50, 1000, 32, 1, None, false, false),
             ReplicateRoute::Special
         );
     }
@@ -1812,7 +1107,7 @@ mod tests_site_route {
                 "keep {keep:?}"
             );
             assert_eq!(
-                split_exact_refit_route(2000, 50, 1000, 2, keep, false),
+                split_exact_refit_route(2000, 50, 1000, 32, 2, keep, false, false),
                 ReplicateRoute::Primal,
                 "keep {keep:?}"
             );
@@ -1852,8 +1147,7 @@ mod bench_work_floor {
     use std::time::Instant;
 
     // One fixed block per shape, single thread: B X-backend fits (with
-    // `‖Xs‖_F` taken once for the block) against one C build plus B Gram fits
-    // (X-backend fallbacks included). Run with
+    // `‖Xs‖_F` taken once for the block) against one C build plus B Gram fits. Run with
     // `cargo test -p plskit --release gram_p_work_floor_benchmark -- --ignored --nocapture`.
     #[test]
     #[ignore = "benchmark: sets GRAM_P_MIN_WORK"]
@@ -1870,7 +1164,7 @@ mod bench_work_floor {
             (5000, 100, 3, 1000),
             (10_000, 500, 3, 100),
         ];
-        eprintln!("n_tr\tp\tk\tB\twork\tcost_rule\tx_ms\tgram_ms\tspeedup\tsaved_ms\tfallbacks");
+        eprintln!("n_tr\tp\tk\tB\twork\tcost_rule\tx_ms\tgram_ms\tspeedup\tsaved_ms");
         for (n, p, k, b) in shapes {
             let x = unif(n, p, 91);
             let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 92), None);
@@ -1892,30 +1186,17 @@ mod bench_work_floor {
             }
             let x_ms = t0.elapsed().as_secs_f64() * 1e3;
             let t1 = Instant::now();
-            let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
-            let mut fallbacks = 0usize;
+            let block = GramPBlock::new(xs.as_ref(), Par::Seq);
             for yb in &perms {
-                if black_box(block.fit_replicate(yb.as_ref(), k, None)).is_none() {
-                    fallbacks += 1;
-                    black_box(
-                        pls1_fit_prepared_fro(
-                            xs.as_ref(),
-                            yb.as_ref(),
-                            k,
-                            None,
-                            ParChoice::Seq,
-                            block.x_fro(),
-                        )
-                        .expect("X backend"),
-                    );
-                }
+                let s1 = first_product(xs.as_ref(), yb.as_ref(), ParChoice::Seq, k);
+                black_box(block.fit(s1.as_ref(), yb.norm_l2(), k, None));
             }
             let g_ms = t1.elapsed().as_secs_f64() * 1e3;
             let (nf, pf, bf, kf) = (n as f64, p as f64, b as f64, k as f64);
             let work = bf * (2.0 * kf + 1.0) * nf * pf;
             let rule = gram_p_cost_rule(nf, pf, bf, kf);
             eprintln!(
-                "{n}\t{p}\t{k}\t{b}\t{work:.1e}\t{rule}\t{x_ms:.1}\t{g_ms:.1}\t{:.2}\t{:.1}\t{fallbacks}",
+                "{n}\t{p}\t{k}\t{b}\t{work:.1e}\t{rule}\t{x_ms:.1}\t{g_ms:.1}\t{:.2}\t{:.1}",
                 x_ms / g_ms,
                 x_ms - g_ms
             );
@@ -1939,7 +1220,7 @@ mod bench_work_floor {
     // `p·(n_tr + B·k) = 2·B·k·n_tr` (`p` at 0.8x to 1.5x of that value),
     // single thread: B X-backend fits with `‖Xs‖_F` taken once, as
     // `perm_null`'s Primal arm runs them, against one C build plus B Gram
-    // fits (fallbacks included), medians of 3.
+    // fits, medians of 3.
     // `GRAM_P_BENCH_SHAPES="n,p,k,B;..."` replaces the default shapes; the
     // sweep that fitted `use_gram_p_route`'s cost coefficients passes its
     // own (see "Fitting `a` and `b`" there). Run
@@ -1976,7 +1257,7 @@ mod bench_work_floor {
                 .collect()
         };
         let shapes = std::env::var("GRAM_P_BENCH_SHAPES").map_or_else(|_| default_shapes(), parse);
-        eprintln!("n_tr\tp\tk\tB\trule\tx_ms\tgram_ms\tspeedup\tfallbacks");
+        eprintln!("n_tr\tp\tk\tB\trule\tx_ms\tgram_ms\tspeedup");
         for (n, p, k, b) in shapes {
             let x = unif(n, p, 91);
             let (xs, ys) = prepared(&x, &linear_y(&x, 1.0, 92), None);
@@ -2003,30 +1284,16 @@ mod bench_work_floor {
                     );
                 }
             });
-            let mut fallbacks = 0usize;
             let g_ms = median_ms(3, || {
-                fallbacks = 0;
-                let block = GramPBlock::new(xs.as_ref(), Par::Seq, ParChoice::Seq);
+                let block = GramPBlock::new(xs.as_ref(), Par::Seq);
                 for yb in &perms {
-                    if black_box(block.fit_replicate(yb.as_ref(), k, None)).is_none() {
-                        fallbacks += 1;
-                        black_box(
-                            crate::fit::pls1_fit_prepared_fro(
-                                xs.as_ref(),
-                                yb.as_ref(),
-                                k,
-                                None,
-                                ParChoice::Seq,
-                                block.x_fro(),
-                            )
-                            .expect("X backend"),
-                        );
-                    }
+                    let s1 = first_product(xs.as_ref(), yb.as_ref(), ParChoice::Seq, k);
+                    black_box(block.fit(s1.as_ref(), yb.norm_l2(), k, None));
                 }
             });
             let rule = use_gram_p_route(n, p, b, k);
             eprintln!(
-                "{n}\t{p}\t{k}\t{b}\t{rule}\t{x_ms:.1}\t{g_ms:.1}\t{:.2}\t{fallbacks}",
+                "{n}\t{p}\t{k}\t{b}\t{rule}\t{x_ms:.1}\t{g_ms:.1}\t{:.2}",
                 x_ms / g_ms
             );
         }

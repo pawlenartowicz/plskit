@@ -25,8 +25,7 @@ LAPACK crate.
 
 - **It is part of the public API.** Engine functions take and return
   `faer` matrices, and the crate re-exports `Mat`, `MatRef`, `Col` and
-  `ColRef`. A `faer` minor bump is therefore a `plskit` major bump. The
-  requirement `0.24` accepts patch releases only.
+  `ColRef`. The requirement `0.24` accepts patch releases only.
 - **SIMD is chosen at run time.** `faer` dispatches its kernels through
   `pulp`, so one binary uses the instruction sets of the machine it runs
   on ([Building from source](building.md)).

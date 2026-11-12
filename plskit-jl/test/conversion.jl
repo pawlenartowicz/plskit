@@ -53,7 +53,7 @@ end
                                                   test_method="split_nb", alpha=0.05,
                                                   seed=42))
     @test seq.seed === UInt64(42)
-    @test occursin("seed         0x000000000000002a", sprint(show, MIME"text/plain"(), seq))
+    @test occursin("seed          0x000000000000002a", sprint(show, MIME"text/plain"(), seq))
 end
 
 @testset "array conversion does not alias NumPy's memory" begin

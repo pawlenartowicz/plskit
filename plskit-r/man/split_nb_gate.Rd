@@ -4,10 +4,10 @@
 \alias{split_nb_gate}
 \title{Query the split_nb auto-gate}
 \usage{
-split_nb_gate(X, weights = NULL)
+split_nb_gate(X, weights = NULL, pre_standardized = FALSE)
 }
 \arguments{
-\item{X, weights}{See the canonical reference.}
+\item{X, weights, pre_standardized}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("split_nb_gate_result", "plskit_result")}.

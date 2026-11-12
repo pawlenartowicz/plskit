@@ -44,6 +44,7 @@ pub fn varimax_d6_k2(root: &Path) -> Result<Case> {
         y_faer.as_ref(),
         KSpec::Fixed(2),
         None,
+        None,
         FitOpts::default(),
     )?;
 

@@ -16,15 +16,15 @@ use std::path::Path;
 /// `synth_data(40, 60, 2, 4.0, 42)` design. `p = 60` keeps `alpha` near
 /// `1e-2`, where the array tolerance binds. `Y` holds four outcomes: `y`,
 /// `y` with its rows reversed, an all-zero column (the zero model) and `y`
-/// rotated by 7 rows. No column is unresolved: a gate decision at a band
-/// edge can differ across hosts.
+/// rotated by 7 rows.
 ///
 /// Inputs: `gram` `(40, 40)`, `Y` `(40, 4)`.
-/// Outputs: `alpha`, `k_used`, `resolved` (0/1), `k`, `n_features`.
+/// Outputs: `alpha`, `k_used`, `k`, `n_features`.
 ///
 /// # Errors
 /// Returns an error if the fixture files cannot be written, if
-/// `pls1_perm_alpha` fails, or if the columns do not resolve as described.
+/// `pls1_perm_alpha` fails, or if the columns do not keep the components
+/// described.
 #[allow(clippy::many_single_char_names)]
 pub fn n40_p60_m4_k1(root: &Path) -> Result<Case> {
     let name = "pls1_perm_alpha_n40_p60_m4_k1";
@@ -57,9 +57,8 @@ pub fn n40_p60_m4_k1(root: &Path) -> Result<Case> {
 
     let r = pls1_perm_alpha(gram.as_ref(), outcomes.as_ref(), 1, p)?;
     anyhow::ensure!(
-        r.resolved == [true; 4] && r.k_used == [1, 1, 0, 1],
-        "{name}: expected three resolved columns and one zero model, got resolved {:?}, k_used {:?}",
-        r.resolved,
+        r.k_used == [1, 1, 0, 1],
+        "{name}: expected three fitted columns and one zero model, got k_used {:?}",
         r.k_used
     );
     {
@@ -71,10 +70,6 @@ pub fn n40_p60_m4_k1(root: &Path) -> Result<Case> {
             .map(|&v| i64::try_from(v))
             .collect::<Result<Vec<_>, _>>()?;
         w.add_i64("k_used", &i64_vec(k_used))?;
-        w.add_i64(
-            "resolved",
-            &i64_vec(r.resolved.iter().map(|&b| i64::from(b)).collect()),
-        )?;
         w.add_i64("k", &scalar_i64(i64::try_from(r.k)?))?;
         w.add_i64("n_features", &scalar_i64(i64::try_from(r.n_features)?))?;
         w.finish()?;

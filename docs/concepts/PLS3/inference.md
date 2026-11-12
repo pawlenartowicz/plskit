@@ -7,10 +7,12 @@ as `pls1_confirmatory_test`.
 
 ## The statistic
 
-On each of `n_splits` random half-splits of the rows (default 50):
+On each of `n_splits` random half-splits of the rows (default 32):
 
-1. Standardize the training half on its own moments and the test half
-   with the training moments.
+1. Centre the training half with its own means and the test half with
+   those same means. Each block was standardized once over all rows
+   beforehand, so nothing is rescaled per split (see
+   [Other things to know](#other-things-to-know)).
 2. Fit PLS3 at `k = 1` on the training half to get `(u₁, v₁)`.
 3. Project the **held-out** rows and correlate the two score vectors:
    `r = cor(X̃_te u₁, Ỹ_te v₁)`.
@@ -33,16 +35,18 @@ intervals on the saliences, which is one reason the family offers none
 ## Two methods
 
 `test_method` is keyword-only and defaults to `"auto"`, which runs
-`split_exact` or `split_nb` by the rule in
-[`test_method="auto"`](../PLS1/inference.md#test_methodauto)
-(`n_eff` is `n` here). `result.test_method` reports the method that ran.
+`split_exact` on every design (see
+[`test_method="auto"`](../PLS1/inference.md#test_methodauto)).
+`result.test_method` reports the method that ran.
+
+`"auto"` runs `split_exact` here. The standard error of `split_nb` is too large where the correlation between its splits is below 1/2, which holds on every `pls3_confirmatory_test` design measured. Under the null its rejection rate at α = 0.05 is 0 to 2.5% at `n ≥ 100` with `p ≥ n/2`, and 4.0% to 6.2% on `X` of low effective rank. On `pls1_confirmatory_test` with one `k`, `"auto"` takes `split_nb` above its sample-size floor, trading a little power for about a tenth (`k = 1`) to a fortieth (`k ≥ 2`) of the time; see [`test_method="auto"`](../PLS1/inference.md#test_methodauto).
 
 | | `split_exact` (recommended) | `split_nb` |
 |---|---|---|
 | Reference | permutation | Nadeau-Bengio corrected t |
 | Validity | exact whenever rows are exchangeable under the null | asymptotic |
 | Cost | up to `(n_perm + 1) × n_splits` fits (default `n_perm = 1000`) | `n_splits` fits |
-| `args` | `{"n_perm": 1000, "n_splits": 50}` | `{"n_splits": 50, "force": False}` |
+| `args` | `{"n_perm": 1000, "n_splits": 32}` | `{"n_splits": 32, "force": False}` |
 
 Both compute the same statistic on the same splits and differ only in the
 reference they compare it against. Both p-values are one-sided: only a
@@ -58,10 +62,12 @@ split-to-split scatter into the null. The p-value is
 
 **`split_nb`** skips the permutations and compares the Fisher-z average
 against a t reference whose spread is inflated by PLS1's Nadeau-Bengio
-correction. Part of that transfers cleanly to two blocks: conditional on
-the training half, `u₁` and `v₁` are fixed, so on one split the two
-held-out score vectors are fixed linear combinations of independent
-test-half rows and `r` follows the ordinary null correlation law. The
+correction. Part of that transfers to two blocks: conditional on X, the
+training half and the all-row scales, one held-out score vector is fixed
+and the rows of the other are exchangeable, so on one split `r` follows
+the ordinary null correlation law to the same approximation as in PLS1.
+With both `pre_standardized_X` and `pre_standardized_Y` set the statement
+is exact. The
 between-split correction does not follow from that argument; it is PLS1's
 heuristic, and its use here rests on the developers' simulations
 (Gaussian, heavy-tailed, low-stable-rank and real two-block designs), in
@@ -70,22 +76,13 @@ when `split_exact` is too slow; prefer `split_exact` otherwise.
 
 ## The `split_nb` auto-gate runs on X only
 
-An explicit `split_nb` request first goes through the same auto-gate as
-`pls1_confirmatory_test`, applied to the standardized X. The gate flags a
-design when any of these holds:
+An explicit `split_nb` request first goes through the same auto-gate as `pls1_confirmatory_test`, applied to X as the test reads it (standardized once over all rows, or only centred under `pre_standardized_X`). The gate flags a design when any of these holds:
 
 - `n < 25` (with no weights, `n_eff` is the row count),
 - the stable rank of X is below 3,
 - X has 4 columns or fewer.
 
-A flagged design runs `split_exact` instead, with `n_perm = 1000` and your
-`n_splits`. `result.test_method` then reports `"split_exact"`, and Python emits
-a `UserWarning`. `args={"force": True}` skips the reroute and runs `split_nb`
-anyway. `result.stable_rank` is set on an explicit `split_nb`
-request, and on an `"auto"` request that reached the stable-rank check
-(p > 4, n_eff ≥ 250); `None` otherwise. It is what the gate saw.
-It is NaN when the Gram matrix of the standardized `X` is not finite. The gate
-then fires.
+A flagged design runs `split_exact` instead, with `n_perm = 1000` and your `n_splits`. `result.test_method` then reports `"split_exact"`, and Python emits a `UserWarning`. `args={"force": True}` skips the reroute and runs `split_nb` anyway. `result.stable_rank` is set on an explicit `split_nb` request and `None` otherwise. It is what the gate saw. It is NaN when the Gram matrix of `X` so read is not finite. The gate then fires.
 
 Y is deliberately never gated. In ordinary PLSC `q` is small (a handful of
 behavioural measures), so a stable-rank floor of 3 on Y would flag nearly
@@ -130,9 +127,13 @@ first.
 
 ## Other things to know
 
-- `pre_standardized_X` / `pre_standardized_Y` are accepted but have **no
-  effect** on either method: every training half is re-standardized on its
-  own rows, and the gate standardizes X itself.
+- Each block is standardized once over all rows, as in `pls3_fit`; each
+  split then centres its training rows with their own means and its
+  held-out rows with those same means, and nothing is scaled per split.
+  `pre_standardized_X` / `pre_standardized_Y` skip that one standardization
+  for their block, which is then used as given and only centred. Y's scale
+  comes from its rows before any permutation. The `split_nb` gate reads X
+  under the same rule.
 - Minimum sizes: `n ≥ 6`, `n_splits ≥ 2`, `n_perm ≥ 1`; smaller values
   raise `invalid_argument`.
 - On the result, `n_eff` equals `n`, `ci` is `None`, `n_perm` is `None`

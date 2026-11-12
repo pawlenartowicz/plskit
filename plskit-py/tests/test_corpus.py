@@ -94,6 +94,20 @@ def _resolve_corpus_weights(case, kw, inputs):
     return kw
 
 
+def _resolve_corpus_arrays(case, kw, inputs):
+    """`covariates` ("Z") and `null_y` ("Ynull") in manifest kwargs are
+    descriptor strings for the NPZ arrays of the same names, cross-checked as
+    the weights descriptor is."""
+    for key, descriptor in (("covariates", "Z"), ("null_y", "Ynull")):
+        has_descriptor = kw.get(key) == descriptor
+        assert has_descriptor == (key in inputs), (
+            f"{case['name']}: manifest {key} descriptor and NPZ {key} array disagree"
+        )
+        if has_descriptor:
+            kw[key] = inputs[key]
+    return kw
+
+
 def _fields(rec):
     if isinstance(rec, dict):
         return rec
@@ -180,6 +194,7 @@ def test_corpus_case(case):
     X = inputs.get("X")
     y = inputs.get("y")
     kwargs = _resolve_corpus_weights(case, dict(case["kwargs"]), inputs)
+    kwargs = _resolve_corpus_arrays(case, kwargs, inputs)
 
     if fn == "pls1_fit":
         # Every manifest kwarg goes through, `seed` included: with a string
@@ -192,8 +207,13 @@ def test_corpus_case(case):
         # error here is a regression, not a stale fixture.
         r = plskit.pls1_fit(X, y, **kwargs)
     elif fn == "pls1_confirmatory_test":
-        k = kwargs.pop("k")
-        r = plskit.pls1_confirmatory_test(X, y, k, **kwargs)
+        k = kwargs.pop("k", None)  # an int, a list, or absent (the default set)
+        if kwargs.pop("gram", False):
+            # The call takes gram_matrix(X, pre_standardized) in place of X.
+            g = plskit.gram_matrix(X, pre_standardized=kwargs.pop("pre_standardized", False))
+            r = plskit.pls1_confirmatory_test(y=y, k=k, gram=g, **kwargs)
+        else:
+            r = plskit.pls1_confirmatory_test(X, y, k, **kwargs)
     elif fn == "pls1_find_k_optimal":
         k_max = kwargs.pop("k_max")
         r = plskit.pls1_find_k_optimal(X, y, k_max, **kwargs)
@@ -201,8 +221,13 @@ def test_corpus_case(case):
         k_max = kwargs.pop("k_max")
         r = plskit.pls1_find_k_sequence(X, y, k_max, **kwargs)
     elif fn == "pls1_predict":
-        model = plskit.pls1_fit(inputs["X_train"], inputs["y_train"], k=int(kwargs["k"]))
-        r = {"y_pred": plskit.pls1_predict(model, inputs["X_new"]), "model": model}
+        # `covariates` are the training rows', `covariates_new` the new rows'.
+        z = kwargs.get("covariates")
+        z_new = inputs.get("covariates_new") if z is not None else None
+        model = plskit.pls1_fit(inputs["X_train"], inputs["y_train"], k=int(kwargs["k"]),
+                                covariates=z)
+        r = {"y_pred": plskit.pls1_predict(model, inputs["X_new"], covariates=z_new),
+             "model": model}
     elif fn == "rotate":
         model = plskit.pls1_fit(X, y, k=int(kwargs["k"]))
         r = plskit.rotate(model.W, method=kwargs.get("method", "varimax"))
@@ -226,6 +251,8 @@ def test_corpus_case(case):
         r = plskit.pls1_perm_alpha(
             inputs["gram"], inputs["Y"], k=kwargs["k"], n_features=kwargs["n_features"]
         )
+    elif fn == "gram_matrix":
+        r = plskit.gram_matrix(X, **kwargs)
     elif fn == "spls1_fit":
         # `seed` here is the data-generation seed: spls1_fit is deterministic
         # and takes none (the Rust corpus arm ignores it too).
@@ -258,7 +285,11 @@ def test_corpus_case(case):
         r = plskit.spls3_fit(X, inputs["Y"], k, keep_X=keep_X, keep_Y=keep_Y, **kwargs)
     elif fn == "pls3_confirmatory_test":
         k = kwargs.pop("k")
-        r = plskit.pls3_confirmatory_test(X, inputs["Y"], k, **kwargs)
+        if kwargs.pop("gram", False):
+            g = plskit.gram_matrix(X)
+            r = plskit.pls3_confirmatory_test(Y=inputs["Y"], k=k, gram=g, **kwargs)
+        else:
+            r = plskit.pls3_confirmatory_test(X, inputs["Y"], k, **kwargs)
     else:
         pytest.fail(f"{case['name']}: no Python arm for manifest function {fn!r}")
 

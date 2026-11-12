@@ -361,6 +361,7 @@ fn zero_component_fit_returns_empty_factor_matrices() {
         y.as_ref(),
         KSpec::Fixed(2),
         None,
+        None,
         FitOpts::default(),
     )
     .unwrap();
@@ -616,6 +617,7 @@ fn compare_with_reference(ds: &Design) -> Option<[f64; 3]> {
         ds.y.as_ref(),
         KSpec::Fixed(ds.k),
         ds.w.as_ref().map(Col::as_ref),
+        None,
         FitOpts {
             keep: ds.keep,
             check_n_eff: false,
@@ -715,8 +717,8 @@ fn k1_public_fit_is_bit_identical_to_reference() {
                         keep,
                         ..FitOpts::default()
                     };
-                    let m =
-                        pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(1), weights, opts).unwrap();
+                    let m = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(1), weights, None, opts)
+                        .unwrap();
                     let par = resolve_par(choice, n, d, 1);
                     let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 1, keep, par)
                         .unwrap();
@@ -785,7 +787,7 @@ fn non_column_major_views_agree_with_reference() {
                 par: ParChoice::Seq,
                 keep: None,
             };
-            let m = pls1_fit(xv, yv, KSpec::Fixed(k), None, opts).expect("fit");
+            let m = pls1_fit(xv, yv, KSpec::Fixed(k), None, None, opts).expect("fit");
             let old = nipals_pls1_reference(xv, yv, k, None, Par::Seq).expect("reference");
             let new: Parts = (
                 m.t_scores.clone(),
@@ -891,6 +893,7 @@ fn half_zero_weights_match_reference_dense_and_sparse() {
             y.as_ref(),
             KSpec::Fixed(6),
             Some(w.as_ref()),
+            None,
             FitOpts {
                 keep,
                 ..FitOpts::default()

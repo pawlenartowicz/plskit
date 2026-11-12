@@ -312,6 +312,25 @@ def test_split_nb_gate_reads_weights():
     assert weighted.n_eff < 40.0
 
 
+def test_split_nb_gate_reads_pre_standardized():
+    # One column scaled by 30 sinks the stable rank of X read as given, which
+    # only the flagged query and the flagged test see.
+    X, y = _data()
+    X = X.copy()
+    X[:, 0] *= 30.0
+    assert plskit.split_nb_gate(X).fires is False
+    q = plskit.split_nb_gate(X, pre_standardized=True)
+    assert q.fires is True
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = plskit.pls1_confirmatory_test(
+            X, y, k=1, test_method="split_nb", args={"n_splits": 20},
+            pre_standardized=True, seed=7,
+        )
+    assert r.test_method == "split_exact"
+    assert q.stable_rank == r.stable_rank
+
+
 def test_split_nb_gate_validates_its_input():
     X, _ = _data()
     bad = X.copy()
@@ -395,7 +414,7 @@ def test_args_none_and_whole_float_counts_are_accepted():
     d = plskit.pls1_confirmatory_test(
         _X, _Y, 1, test_method="split_nb", args={"n_splits": None}, seed=7,
     )
-    assert d.n_splits == 50
+    assert d.n_splits == 32
 
 
 @pytest.mark.parametrize("seed", [2**64 - 1, np.uint64(2**64 - 1), 0, 7.0])
@@ -407,8 +426,8 @@ def test_the_full_seed_range_is_accepted_and_echoed(seed):
 # ── test_method="auto" (the default) ────────────────────────────────────────
 
 
-def _large_data(n=300, d=10, seed=5):
-    """n_eff >= 250, p <= 100n, well-conditioned X: "auto" resolves to split_nb."""
+def _large_data(n=1200, d=10, seed=5):
+    """n_eff > 1000, p <= 100n, well-conditioned X: "auto" resolves to split_nb."""
     return _data(n=n, d=d, snr=0.5, seed=seed)
 
 
@@ -416,14 +435,14 @@ def test_auto_is_the_default_and_resolves_per_design():
     X, y = _data()
     with _no_warning():
         small = plskit.pls1_confirmatory_test(
-            X, y, args={"n_perm": 100, "n_splits": 20}, seed=7,
+            X, y, k=1, args={"n_perm": 100, "n_splits": 20}, seed=7,
         )
     assert small.test_method == "split_exact"
     assert small.n_perm == 100
 
     X, y = _large_data()
     with _no_warning():
-        large = plskit.pls1_confirmatory_test(X, y, args={"n_splits": 10}, seed=7)
+        large = plskit.pls1_confirmatory_test(X, y, k=1, args={"n_splits": 10}, seed=7)
     assert large.test_method == "split_nb"
     assert large.n_perm is None
     assert isinstance(large.stable_rank, float)
@@ -432,7 +451,7 @@ def test_auto_is_the_default_and_resolves_per_design():
 def test_auto_accepts_n_perm_and_n_splits_but_not_force():
     X, y = _data()
     r = plskit.pls1_confirmatory_test(
-        X, y, test_method="auto", args={"n_perm": 60, "n_splits": 12}, seed=7,
+        X, y, k=1, test_method="auto", args={"n_perm": 60, "n_splits": 12}, seed=7,
     )
     assert (r.n_perm, r.n_splits) == (60, 12)
     with pytest.raises(plskit.PlsKitError, match="does not accept arg 'force'") as ei:
@@ -445,5 +464,45 @@ def test_auto_accepts_n_perm_and_n_splits_but_not_force():
 def test_auto_validates_n_perm_on_a_design_that_resolves_to_split_nb():
     X, y = _large_data()
     with pytest.raises(plskit.PlsKitError) as ei:
-        plskit.pls1_confirmatory_test(X, y, args={"n_perm": 0, "n_splits": 10}, seed=7)
+        plskit.pls1_confirmatory_test(X, y, k=1, args={"n_perm": 0, "n_splits": 10}, seed=7)
+    assert ei.value.code == "invalid_argument"
+
+
+# ── k: one integer or a set ────────────────────────────────────────────────
+
+_EXACT_SMALL = {"test_method": "split_exact", "args": {"n_perm": 19, "n_splits": 5}, "seed": 1}
+
+
+def test_k_set_list_range_numpy_agree():
+    X, y = _data()
+    a = plskit.pls1_confirmatory_test(X, y, k=[1, 2, 3], **_EXACT_SMALL)
+    assert a.k == [1, 2, 3]
+    assert a.statistic is None
+    assert sorted(a.pvalues_by_k) == [1, 2, 3] and sorted(a.statistics_by_k) == [1, 2, 3]
+    assert plskit.pls1_confirmatory_test(X, y, k=range(1, 4), **_EXACT_SMALL) == a
+    assert plskit.pls1_confirmatory_test(X, y, k=np.arange(1, 4), **_EXACT_SMALL) == a
+
+
+def test_scalar_k_returns_one_element_list():
+    X, y = _data()
+    r = plskit.pls1_confirmatory_test(X, y, k=2, **_EXACT_SMALL)
+    assert r.k == [2]
+    assert isinstance(r.statistic, float)
+    assert r.pvalues_by_k == {2: r.pvalue}
+    assert r.statistics_by_k == {2: r.statistic}
+
+
+def test_default_k_set():
+    X, y = _data(n=60, d=20)
+    r = plskit.pls1_confirmatory_test(X, y, **_EXACT_SMALL)
+    assert r.k == list(range(1, 9))
+    assert r.statistic is None
+
+
+def test_k_set_refused_with_split_nb():
+    X, y = _data()
+    with pytest.raises(
+        plskit.PlsKitError, match="a set of more than one k does not combine with split_nb"
+    ) as ei:
+        plskit.pls1_confirmatory_test(X, y, k=[1, 2], test_method="split_nb", seed=1)
     assert ei.value.code == "invalid_argument"

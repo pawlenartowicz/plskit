@@ -47,7 +47,7 @@ def test_sequence_auto_is_the_default_and_resolves_per_design():
         )
     assert small.test_method == "split_exact"
 
-    X, y = _data(n=300, d=10)
+    X, y = _data(n=1200, d=10)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         large = plskit.pls1_find_k_sequence(
@@ -77,7 +77,7 @@ def test_sequence_auto_args_reject_force_in_both_sequence_functions():
 
 
 def test_pls1_fit_sequence_runs_auto_when_find_k_args_set_no_test_method():
-    X, y = _data(n=300, d=10)
+    X, y = _data(n=1200, d=10)
     m = plskit.pls1_fit(
         X, y, k="sequence", k_max=2, find_k_args={"args": {"n_splits": 10}}, seed=7
     )

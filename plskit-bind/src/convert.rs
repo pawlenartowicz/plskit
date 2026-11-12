@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use faer::{Col, Mat};
 use plskit::{
     CIScalar, ConfirmatoryCI, ConfirmatoryTestOutput, FactorsOutput, FindKOptimalOutput,
-    FindKSequenceOutput, FindKeepOptimalOutput, PcaBasisOutput, PermAlphaOutput, PermNullOutput,
-    Pls1Model, Pls3Model, Pls3Scores, ProfilesFindNOutput,
+    FindKSequenceOutput, FindKeepOptimalOutput, GramMatrixOutput, PcaBasisOutput, PermAlphaOutput,
+    PermNullOutput, Pls1Model, Pls3Model, Pls3Scores, ProfilesFindNOutput,
 };
 
 use crate::coerce;
@@ -50,6 +50,8 @@ pub(crate) fn pls1_model(m: &Pls1Model, selection_result: Value<'static>) -> Rec
         .field("n_eff", Value::F64(m.n_eff))
         .field("selection_result", selection_result)
         .field("keep", opt(m.keep, count))
+        .field("covariate_coef", opt(m.covariate_coef.as_ref(), col))
+        .field("n_covariates", opt(m.n_covariates, count))
 }
 
 /// The record passed as `name`, checked to be untagged or tagged `ty`.
@@ -154,6 +156,8 @@ pub(crate) fn pls1_model_from_record(r: &Record<'_>) -> Result<Pls1Model, BindEr
         weights: opt_col(r, "weights")?,
         n_eff: need_f64(r, "n_eff")?,
         keep: opt_usize(r, "keep")?,
+        covariate_coef: opt_col(r, "covariate_coef")?,
+        n_covariates: opt_usize(r, "n_covariates")?,
     })
 }
 
@@ -199,9 +203,18 @@ fn confirmatory_ci(ci: ConfirmatoryCI) -> Value<'static> {
 pub(crate) fn confirmatory_test(r: ConfirmatoryTestOutput) -> Record<'static> {
     Record::typed("ConfirmatoryTestResult")
         .field("pvalue", Value::F64(r.pvalue))
-        .field("statistic", Value::F64(r.statistic))
+        .field("statistic", opt(r.statistic, Value::F64))
         .field("test_method", Value::text(&r.test_method))
-        .field("k", count(r.k))
+        .field(
+            "k",
+            Value::IntVec(
+                r.k.iter()
+                    .map(|&k| i64::try_from(k).unwrap_or(i64::MAX))
+                    .collect(),
+            ),
+        )
+        .field("pvalues_by_k", score_map(&r.pvalues_by_k))
+        .field("statistics_by_k", score_map(&r.statistics_by_k))
         .field("n_perm", opt(r.n_perm, count))
         .field("n_splits", opt(r.n_splits, count))
         .field("seed", Value::U64(r.seed))
@@ -209,6 +222,7 @@ pub(crate) fn confirmatory_test(r: ConfirmatoryTestOutput) -> Record<'static> {
         .field("rho_hat", opt(r.rho_hat, Value::F64))
         .field("stable_rank", opt(r.stable_rank, Value::F64))
         .field("ci", opt(r.ci, confirmatory_ci))
+        .field("n_covariates", opt(r.n_covariates, count))
 }
 
 /// `PermNullResult`. The engine's permutation matrix is row-major
@@ -224,6 +238,7 @@ pub(crate) fn perm_null(out: PermNullOutput) -> Record<'static> {
         beta_perm_sd,
         beta_perm_z,
         beta_perm_matrix,
+        n_covariates,
     } = out;
     let matrix = opt(beta_perm_matrix, |flat| {
         let d = flat.len() / n_perm.max(1);
@@ -243,6 +258,7 @@ pub(crate) fn perm_null(out: PermNullOutput) -> Record<'static> {
         .field("beta_perm_z", floats(beta_perm_z))
         .field("beta_perm_matrix", matrix)
         .field("n_eff", Value::F64(n_eff))
+        .field("n_covariates", opt(n_covariates, count))
 }
 
 /// `PermAlphaResult`.
@@ -250,7 +266,6 @@ pub(crate) fn perm_alpha(out: PermAlphaOutput) -> Record<'static> {
     let PermAlphaOutput {
         alpha,
         k_used,
-        resolved,
         k,
         n_features,
     } = out;
@@ -265,7 +280,6 @@ pub(crate) fn perm_alpha(out: PermAlphaOutput) -> Record<'static> {
                     .collect(),
             ),
         )
-        .field("resolved", Value::BoolVec(resolved))
         .field("k", count(k))
         .field("n_features", count(n_features))
 }
@@ -291,6 +305,7 @@ pub(crate) fn find_k_optimal(r: &FindKOptimalOutput) -> Record<'static> {
         .field("seed", Value::U64(r.seed))
         .field("n_eff", Value::F64(r.n_eff))
         .field("stable_rank", opt(r.stable_rank, Value::F64))
+        .field("n_covariates", opt(r.n_covariates, count))
 }
 
 /// `FindKSequenceResult`.
@@ -303,6 +318,7 @@ pub(crate) fn find_k_sequence(r: &FindKSequenceOutput) -> Record<'static> {
         .field("seed", Value::U64(r.seed))
         .field("n_eff", Value::F64(r.n_eff))
         .field("stable_rank", opt(r.stable_rank, Value::F64))
+        .field("n_covariates", opt(r.n_covariates, count))
 }
 
 /// `FindKeepOptimalResult`.
@@ -323,6 +339,7 @@ pub(crate) fn find_keep_optimal(r: &FindKeepOptimalOutput) -> Record<'static> {
         )
         .field("seed", Value::U64(r.seed))
         .field("n_eff", Value::F64(r.n_eff))
+        .field("n_covariates", opt(r.n_covariates, count))
 }
 
 /// `PLS3Result`; `rotation_spec` is null until the model is rotated.
@@ -395,6 +412,7 @@ pub(crate) fn factors(f: &FactorsOutput, rotation_spec: Value<'static>) -> Recor
         .field("coef", col(&f.coef))
         .field("pre_standardized", Value::Bool(f.pre_standardized))
         .field("rotation_spec", rotation_spec)
+        .field("covariate_adjusted", Value::Bool(f.covariate_adjusted))
 }
 
 /// `FactorsOutput` from a `FactorsResult` record. `rotation_spec` is not read.
@@ -404,6 +422,24 @@ pub(crate) fn factors_from_record(r: &Record<'_>) -> Result<FactorsOutput, BindE
         w: need_mat(r, "W")?,
         size: need_col(r, "size")?,
         coef: need_col(r, "coef")?,
+        pre_standardized: need_bool(r, "pre_standardized")?,
+        covariate_adjusted: need_bool(r, "covariate_adjusted")?,
+    })
+}
+
+/// `GramMatrixResult`.
+pub(crate) fn gram_matrix(out: &GramMatrixOutput) -> Record<'static> {
+    Record::typed("GramMatrixResult")
+        .field("gram", mat(&out.gram))
+        .field("n_features", count(out.n_features))
+        .field("pre_standardized", Value::Bool(out.pre_standardized))
+}
+
+/// A `GramMatrixResult` passed back.
+pub(crate) fn gram_matrix_from_record(r: &Record<'_>) -> Result<GramMatrixOutput, BindError> {
+    Ok(GramMatrixOutput {
+        gram: need_mat(r, "gram")?,
+        n_features: need_usize(r, "n_features")?,
         pre_standardized: need_bool(r, "pre_standardized")?,
     })
 }

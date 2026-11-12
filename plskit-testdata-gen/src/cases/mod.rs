@@ -6,6 +6,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 pub mod factors;
+pub mod gram_matrix;
 pub mod pls1_confirmatory_test;
 pub mod pls1_find_k_optimal;
 pub mod pls1_find_k_sequence;
@@ -67,14 +68,20 @@ pub(crate) use synth_helpers::{
     scalar_f64, scalar_i64, synth_data, synth_xy,
 };
 
-/// A case's input arrays: `X`, `y` and, for weighted cases, `weights`.
+/// A case's input arrays: `X`, `y` and, when a case has them, `weights`,
+/// `covariates` and `null_y`.
 ///
 /// [`Xyw::write`] stores them in that order, the order every single-response
 /// case writes, so two cases that share an inputs file write the same bytes.
+#[derive(Default)]
 pub(crate) struct Xyw {
     pub x: ndarray::Array2<f64>,
     pub y: ndarray::Array1<f64>,
     pub w: Option<ndarray::Array1<f64>>,
+    /// Covariates `Z`, `(n, p_z)`; written as `covariates`.
+    pub z: Option<ndarray::Array2<f64>>,
+    /// Caller-built null outcomes `(n, B)`; written as `null_y`.
+    pub null_y: Option<ndarray::Array2<f64>>,
 }
 
 impl Xyw {
@@ -85,6 +92,12 @@ impl Xyw {
         w.add_f64("y", &self.y.clone().into_dyn())?;
         if let Some(wt) = &self.w {
             w.add_f64("weights", &wt.clone().into_dyn())?;
+        }
+        if let Some(z) = &self.z {
+            w.add_f64("covariates", &z.clone().into_dyn())?;
+        }
+        if let Some(ny) = &self.null_y {
+            w.add_f64("null_y", &ny.clone().into_dyn())?;
         }
         w.finish()
     }
@@ -97,8 +110,48 @@ impl Xyw {
         ndarray_to_faer_col(&self.y)
     }
 
+    pub(crate) fn z_faer(&self) -> Option<faer::Mat<f64>> {
+        self.z.as_ref().map(ndarray_to_faer_mat)
+    }
+
+    pub(crate) fn null_y_faer(&self) -> Option<faer::Mat<f64>> {
+        self.null_y.as_ref().map(ndarray_to_faer_mat)
+    }
+
     pub(crate) fn w_faer(&self) -> Option<faer::Col<f64>> {
         self.w.as_ref().map(ndarray_to_faer_col)
+    }
+}
+
+/// Covariates of the covariate fixtures: three columns, `(X[:, 0] + noise,
+/// 0.5·X[:, 1] + noise, a copy of column 0)`. The third column is aliased
+/// with the first, so the engine drops it and reports `0` for it in
+/// `covariate_coef`. Columns 0 and 1 are signal columns of
+/// `synth_data(.., k_signal = 2, ..)`, so adjusting for them moves the fit.
+pub(crate) fn synth_covariates(x: &ndarray::Array2<f64>, seed: u64) -> ndarray::Array2<f64> {
+    use rand::{RngExt, SeedableRng};
+    use rand_distr::StandardNormal;
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    let n = x.nrows();
+    let mut z = ndarray::Array2::<f64>::zeros((n, 3));
+    for i in 0..n {
+        z[(i, 0)] = x[(i, 0)] + 0.5 * rng.sample::<f64, _>(StandardNormal);
+        z[(i, 1)] = 0.5 * x[(i, 1)] + rng.sample::<f64, _>(StandardNormal);
+        z[(i, 2)] = z[(i, 0)];
+    }
+    z
+}
+
+/// Add the descriptors of a case's `covariates` and `null_y` arrays to its
+/// manifest kwargs: `"covariates": "Z"` and `"null_y": "Ynull"` name the npz
+/// arrays `covariates` and `null_y`, as `"weights": "nonuniform"` names
+/// `weights`.
+pub(crate) fn array_descriptors(kwargs: &mut serde_json::Value, data: &Xyw) {
+    if data.z.is_some() {
+        kwargs["covariates"] = serde_json::json!("Z");
+    }
+    if data.null_y.is_some() {
+        kwargs["null_y"] = serde_json::json!("Ynull");
     }
 }
 
@@ -127,6 +180,7 @@ pub(crate) fn weighted_n80_d6() -> Xyw {
         x,
         y,
         w: Some(perm_null_weights(80)),
+        ..Default::default()
     }
 }
 
@@ -146,6 +200,7 @@ pub(crate) fn weighted_prestd_n80_d6() -> Xyw {
         x: ndarray::Array2::from_shape_fn((xs.nrows(), xs.ncols()), |(i, j)| xs[(i, j)]),
         y: ndarray::Array1::from_shape_fn(ys.nrows(), |i| ys[i]),
         w: raw.w,
+        ..Default::default()
     }
 }
 
@@ -348,7 +403,7 @@ mod synth_helpers {
 /// # Errors
 /// Returns an error if any case fails to write its fixture files.
 // `?` operators inside individual push calls prevent collapsing to `vec![]`.
-#[allow(clippy::vec_init_then_push)]
+#[allow(clippy::vec_init_then_push, clippy::too_many_lines)]
 pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     let mut cases = Vec::new();
 
@@ -362,6 +417,8 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_fit::pre_standardized_weighted_n50_d10_k3(root)?);
     cases.push(pls1_fit::offset_n50_d10_k3(root)?);
     cases.push(pls1_fit::mean_heavy_weighted_n50_d10_k3(root)?);
+    cases.push(pls1_fit::covariates_n50_d10_k2(root)?);
+    cases.push(pls1_fit::covariates_weighted_n50_d10_k2(root)?);
 
     cases.push(pls1_find_k_optimal::r2_se(root)?);
     cases.push(pls1_find_k_optimal::r2_max(root)?);
@@ -374,6 +431,7 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_find_k_sequence::split_exact(root)?);
     cases.push(pls1_find_k_sequence::e(root)?);
     cases.push(pls1_find_k_sequence::auto(root)?);
+    cases.push(pls1_find_k_sequence::covariates(root)?);
 
     cases.push(pls1_confirmatory_test::raw_perm(root)?);
     cases.push(pls1_confirmatory_test::split_nb(root)?);
@@ -400,8 +458,27 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_confirmatory_test::weighted_split_nb_ci(root)?);
     cases.push(pls1_confirmatory_test::weighted_prestd_split_nb_ci(root)?);
     cases.push(pls1_confirmatory_test::weighted_score_wide_pre_standardized(root)?);
+    cases.push(pls1_confirmatory_test::gram_split_exact_k1(root)?);
+    cases.push(pls1_confirmatory_test::gram_split_exact_k2(root)?);
+    cases.push(pls1_confirmatory_test::gram_split_nb(root)?);
+    cases.push(pls1_confirmatory_test::gram_raw_perm(root)?);
+    cases.push(pls1_confirmatory_test::gram_score(root)?);
+    cases.push(pls1_confirmatory_test::split_exact_covariates(root)?);
+    cases.push(pls1_confirmatory_test::raw_perm_covariates(root)?);
+    cases.push(pls1_confirmatory_test::split_exact_covariates_weighted(
+        root,
+    )?);
+    cases.push(pls1_confirmatory_test::gram_split_exact_covariates(root)?);
+    cases.push(pls1_confirmatory_test::split_exact_null_y(root)?);
+    cases.push(pls1_confirmatory_test::kset_split_exact(root)?);
+    cases.push(pls1_confirmatory_test::kset_raw_perm(root)?);
+    cases.push(pls1_confirmatory_test::kset_default_auto(root)?);
+    cases.push(pls1_confirmatory_test::kset_weighted_split_exact(root)?);
+    cases.push(pls1_confirmatory_test::gram_kset_split_exact(root)?);
+    cases.push(pls1_confirmatory_test::kset_wide_split_exact(root)?);
 
     cases.push(pls1_predict::basic_n80_d6_k2(root)?);
+    cases.push(pls1_predict::covariates_n80_d6_k2(root)?);
     cases.push(rotate::varimax_d6_k2(root)?);
     cases.push(factors::pls1_n50_d10_k2_n3(root)?);
     cases.push(factors::find_n_n100_d12_k2(root)?);
@@ -415,7 +492,10 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_perm_null::pre_standardized_n80_d6_k2(root)?);
     cases.push(pls1_perm_null::weighted_n40_d1_k1(root)?);
     cases.push(pls1_perm_null::weighted_prestd_n80_d6_k2(root)?);
+    cases.push(pls1_perm_null::covariates_n80_d6_k2(root)?);
     cases.push(pls1_perm_alpha::n40_p60_m4_k1(root)?);
+    cases.push(gram_matrix::n40_d120(root, false)?);
+    cases.push(gram_matrix::n40_d120(root, true)?);
 
     cases.push(spls1_fit::wide_n30_d100_k2_keep8(root)?);
     cases.push(spls1_fit::small_n50_d10_k2_keep3(root)?);
@@ -440,6 +520,7 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls3::confirmatory_split_exact_wide(root)?);
     cases.push(pls3::confirmatory_split_nb(root)?);
     cases.push(pls3::confirmatory_auto_split_exact(root)?);
+    cases.push(pls3::confirmatory_gram_split_exact(root)?);
 
     cases.push(spls3_fit::small_n50_p10_q4_keep3_2_k2(root)?);
     cases.push(spls3_fit::dense_endpoint_n50_p10_q4_k2(root)?);

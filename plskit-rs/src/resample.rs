@@ -1,7 +1,7 @@
 //! Resampling engines used by signal_test, sequential, and find_k.
 //! Crate-internal — public surface is the callers.
 
-use faer::{Col, ColRef};
+use faer::{Col, Mat, MatMut, MatRef};
 use rand::seq::SliceRandom;
 
 use crate::rng::{Rng, child_rng, child_seeds};
@@ -259,17 +259,26 @@ pub(crate) fn fill_pending<T: Send>(
         .collect()
 }
 
-/// The outcome columns of a replicate loop: column 0 is `y`, column
-/// `c ≥ 1` is `y` permuted by `permutation_from_seed(n, seeds[c - 1])`.
-/// The runner draws `seeds` once, before it chooses a route, so every route
-/// sees the same permutations at a given seed, and a unit builds the column
-/// it needs with [`Columns::column`] instead of the loop holding a `B·n`
-/// buffer.
+/// The per-column hook of [`Columns`]: `f(c, block)` rewrites null column
+/// `c` (an `n × q` block) in place after its rows are permuted.
+pub(crate) type NullMap<'a> = &'a (dyn Fn(usize, MatMut<'_, f64>) + Sync);
+
+/// The outcome columns of a replicate loop, the one place every route takes
+/// its null columns from: column 0 is `y`, column `c ≥ 1` is `y` with its
+/// rows permuted by `permutation_from_seed(n, seeds[c - 1])`, then passed
+/// through `null_map(c, ..)` when there is one. The runner draws `seeds`
+/// once, before it chooses a route, so every route sees the same null
+/// columns at a given seed, and a unit builds the column it needs with
+/// [`Columns::column`] or [`Columns::block`] instead of the loop holding a
+/// `B·n·q` buffer.
 pub(crate) struct Columns<'a> {
-    /// The observed outcome, raw.
-    pub(crate) y: ColRef<'a, f64>,
+    /// The observed outcome, raw or standardized, as the runner fits it,
+    /// `n × q` (`q = 1` for PLS1).
+    pub(crate) y: MatRef<'a, f64>,
     /// One child seed per null column.
     pub(crate) seeds: &'a [u64],
+    /// Applied to every null column, never to column 0.
+    pub(crate) null_map: Option<NullMap<'a>>,
 }
 
 impl Columns<'_> {
@@ -278,16 +287,44 @@ impl Columns<'_> {
         self.seeds.len() + 1
     }
 
-    /// Column `c` (length n): `y` for `c = 0`, else `y[perm[i]]` with
-    /// `perm = permutation_from_seed(n, seeds[c - 1])`.
-    pub(crate) fn column(&self, c: usize) -> Col<f64> {
+    /// Column `c`, `n × q`: `y` for `c = 0`, else `y[perm[i], j]` with
+    /// `perm = permutation_from_seed(n, seeds[c - 1])`, then `null_map`.
+    pub(crate) fn block(&self, c: usize) -> Mat<f64> {
         let y = self.y;
         if c == 0 {
-            y.to_owned()
-        } else {
-            let perm = permutation_from_seed(y.nrows(), self.seeds[c - 1]);
-            Col::<f64>::from_fn(y.nrows(), |i| y[perm[i]])
+            return y.to_owned();
         }
+        let perm = permutation_from_seed(y.nrows(), self.seeds[c - 1]);
+        let mut m = Mat::<f64>::from_fn(y.nrows(), y.ncols(), |i, j| y[(perm[i], j)]);
+        if let Some(f) = self.null_map {
+            f(c, m.as_mut());
+        }
+        m
+    }
+
+    /// Column `c` of a `q = 1` outcome, length n: [`Columns::block`]'s
+    /// only column, built without the `n × 1` matrix.
+    pub(crate) fn column(&self, c: usize) -> Col<f64> {
+        assert_eq!(self.y.ncols(), 1, "Columns::column needs a q = 1 outcome");
+        let y = self.y.col(0);
+        if c == 0 {
+            return y.to_owned();
+        }
+        let perm = permutation_from_seed(y.nrows(), self.seeds[c - 1]);
+        let mut col = Col::<f64>::from_fn(y.nrows(), |i| y[perm[i]]);
+        if let Some(f) = self.null_map {
+            f(c, col.as_mat_mut());
+        }
+        col
+    }
+
+    /// Columns `c0..c1` of a `q = 1` outcome side by side, `n × (c1 − c0)`.
+    pub(crate) fn matrix(&self, c0: usize, c1: usize) -> Mat<f64> {
+        let mut m = Mat::<f64>::zeros(self.y.nrows(), c1 - c0);
+        for c in c0..c1 {
+            m.col_mut(c - c0).copy_from(self.column(c));
+        }
+        m
     }
 }
 
@@ -307,33 +344,145 @@ pub(crate) fn parallel_for_each_seeded<T: Send>(
         .collect()
 }
 
-/// `child_seeds(parent, n_rows)` first (the same parent consumption as `parallel_for_each_seeded`), then a
-/// row-major `n_rows × row_len` buffer allocated once and filled in place,
-/// row `i` by `f(i, &mut child_rng(seeds[i]), row)`, in parallel chunks.
-/// Row `i` sees the same stream whichever worker runs it, so the buffer is
+/// A row-major `n_rows × row_len` buffer allocated once and filled in
+/// place, row `i` by `f(i, row)`, in parallel chunks. No randomness: row
+/// `i` is `f(i, ..)`'s whichever worker runs it, so the buffer is
 /// byte-identical across thread counts, and no per-row allocation outlives
 /// its row. `f` must write every entry of its row.
 /// With `row_len == 0` the buffer is empty and `f` is not called.
-pub(crate) fn parallel_fill_rows_seeded(
-    parent: &mut Rng,
+pub(crate) fn parallel_fill_rows(
     n_rows: usize,
     row_len: usize,
-    f: impl Fn(usize, &mut Rng, &mut [f64]) + Sync,
+    f: impl Fn(usize, &mut [f64]) + Sync,
 ) -> Vec<f64> {
     use rayon::prelude::*;
-    let seeds = child_seeds(parent, n_rows);
     let mut buf = vec![0.0_f64; n_rows * row_len];
     if row_len == 0 {
         return buf;
     }
     buf.par_chunks_mut(row_len)
-        .zip(seeds.par_iter())
         .enumerate()
-        .for_each(|(i, (row, s))| {
-            let mut crng = child_rng(*s);
-            f(i, &mut crng, row);
-        });
+        .for_each(|(i, row)| f(i, row));
     buf
+}
+
+/// H, the number of cells in the balanced split design: the smallest power of
+/// two, at least 2, with `H/2 ≥ n_splits`, so that there are `n_splits`
+/// distinct odd-weight masks to draw.
+pub(crate) fn design_cells(n_splits: usize) -> usize {
+    2 * n_splits.next_power_of_two()
+}
+
+/// Balanced splits over random cells of rows (balanced repeated replication).
+/// `H = design_cells(J)` cells of `m` rows each; cell `c` is
+/// `cell_rows[c*m .. (c+1)*m]`. The other rows are `leftovers`, in increasing
+/// order. Split `j` puts cell `c` on its training side when
+/// `((c & masks[j]).count_ones() + flips[j]) % 2 == 0`, which is exactly
+/// `H/2` cells, and adds its own random pick of leftover rows.
+pub(crate) struct SplitDesign {
+    /// Rows per cell.
+    pub(crate) m: usize,
+    /// The `H·m` cell rows, cell by cell.
+    pub(crate) cell_rows: Vec<usize>,
+    /// The rows in no cell, in increasing order.
+    pub(crate) leftovers: Vec<usize>,
+    /// One distinct odd-weight mask in `1..H` per split.
+    pub(crate) masks: Vec<u32>,
+    /// One flip bit per split; without it cell 0 would train in every split.
+    pub(crate) flips: Vec<bool>,
+    /// The training and test row indices per split.
+    pub(crate) splits: Vec<SplitIdx>,
+}
+
+impl SplitDesign {
+    /// H, the number of cells ([`design_cells`] of the split count).
+    pub(crate) fn cells(&self) -> usize {
+        design_cells(self.masks.len())
+    }
+}
+
+/// One split-half partition of the row indices `0..n`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SplitIdx {
+    pub(crate) tr: Vec<usize>,
+    pub(crate) te: Vec<usize>,
+}
+
+/// Draw `n_splits` balanced splits of `0..n` with `n_train` training rows
+/// each. With `H = design_cells(n_splits)` and `n_B = n − n_train`,
+/// `m = min(⌊n/H⌋, ⌊2·n_B/H⌋)`; each split takes `H/2` cells and
+/// `n_train − H·m/2` of the `n − H·m` leftover rows.
+///
+/// Draw order from `rng`: the per-split child seeds as
+/// `parallel_for_each_seeded` draws them, one shuffle of `0..n` whose first
+/// `H·m` entries are the cell rows, the masks (drawn without replacement from
+/// the odd-weight values in `1..H`), then the flip bits. Split `j` picks its
+/// leftover training rows with `one_split(r, n_train − H·m/2, child_j)` over
+/// the leftovers, so when `m = 0` the splits are J independent random halves,
+/// exactly those `parallel_for_each_seeded(rng, n_splits, |_, c| one_split(n, n_train, c))`
+/// draws.
+///
+/// Training indices are the training cells' rows in cell order, then the
+/// leftover picks; test indices are the rest in the same order.
+///
+/// # Panics
+/// Unless `n/2 ≤ n_train ≤ n` (the cells would put more rows on the
+/// training side than the split takes), or when `H` exceeds `u32`.
+pub(crate) fn balanced_splits(
+    n: usize,
+    n_train: usize,
+    n_splits: usize,
+    rng: &mut Rng,
+) -> SplitDesign {
+    use rand::RngExt as _;
+    assert!(
+        n / 2 <= n_train && n_train <= n,
+        "balanced_splits needs n/2 <= n_train <= n"
+    );
+    let h = design_cells(n_splits);
+    let h32 = u32::try_from(h).expect("design_cells(n_splits) fits in u32");
+    let m = (n / h).min(2 * (n - n_train) / h);
+    let leftover_train = n_train - h * m / 2;
+    let picks = parallel_for_each_seeded(rng, n_splits, |_, c| {
+        one_split(n - h * m, leftover_train, c)
+    });
+    let mut cell_rows = permute_indices(n, rng);
+    let mut leftovers = cell_rows.split_off(h * m);
+    leftovers.sort_unstable();
+    let mut masks: Vec<u32> = (1..h32).filter(|s| s.count_ones() % 2 == 1).collect();
+    masks.shuffle(rng);
+    masks.truncate(n_splits);
+    let flips: Vec<bool> = (0..n_splits).map(|_| rng.random()).collect();
+    let splits = picks
+        .into_iter()
+        .enumerate()
+        .map(|(j, (pick_tr, pick_te))| {
+            let mut tr = Vec::with_capacity(n_train);
+            let mut te = Vec::with_capacity(n - n_train);
+            // With m = 0 every cell is empty; skip the J·H loop.
+            let cells = if m == 0 { 0 } else { h32 };
+            for c in 0..cells {
+                let side = if ((c & masks[j]).count_ones() + u32::from(flips[j])) % 2 == 0 {
+                    &mut tr
+                } else {
+                    &mut te
+                };
+                let c = c as usize;
+                side.extend_from_slice(&cell_rows[c * m..(c + 1) * m]);
+            }
+            tr.extend(pick_tr.iter().map(|&i| leftovers[i]));
+            te.extend(pick_te.iter().map(|&i| leftovers[i]));
+            SplitIdx { tr, te }
+        })
+        .collect();
+    SplitDesign {
+        m,
+        cell_rows,
+        leftovers,
+        masks,
+        flips,
+        splits,
+    }
 }
 
 #[cfg(test)]
@@ -516,21 +665,69 @@ mod tests {
         let y = faer::Col::<f64>::from_fn(13, |i| i as f64 * 0.5 - 2.0);
         let seeds = [3_u64, 99, 7];
         let cols = Columns {
-            y: y.as_ref(),
+            y: y.as_ref().as_mat(),
             seeds: &seeds,
+            null_map: None,
         };
         assert_eq!(cols.len(), 4);
         let c0 = cols.column(0);
         assert!((0..13).all(|i| c0[i].to_bits() == y[i].to_bits()));
+        let all = cols.matrix(1, 4);
+        assert_eq!(all.ncols(), 3);
         for (c, s) in seeds.iter().enumerate() {
             let perm = permutation_from_seed(13, *s);
             let col = cols.column(c + 1);
             assert!(
-                (0..13).all(|i| col[i].to_bits() == y[perm[i]].to_bits()),
+                (0..13).all(|i| col[i].to_bits() == y[perm[i]].to_bits()
+                    && all[(i, c)].to_bits() == col[i].to_bits()),
                 "column {}",
                 c + 1
             );
         }
+    }
+
+    #[test]
+    fn columns_apply_the_null_map_to_null_columns_only() {
+        let y = faer::Mat::<f64>::from_fn(13, 2, |i, j| i as f64 * 0.5 - 2.0 + 10.0 * j as f64);
+        let seeds = [3_u64, 99, 7];
+        // Adds 1000·c to every entry of null column c.
+        let shift = |c: usize, mut m: faer::MatMut<'_, f64>| {
+            for j in 0..m.ncols() {
+                for i in 0..m.nrows() {
+                    m[(i, j)] += 1000.0 * c as f64;
+                }
+            }
+        };
+        let cols = Columns {
+            y: y.as_ref(),
+            seeds: &seeds,
+            null_map: Some(&shift),
+        };
+        assert!(cols.block(0) == y, "column 0 stays y");
+        for (c, s) in seeds.iter().enumerate().map(|(c, s)| (c + 1, s)) {
+            let perm = permutation_from_seed(13, *s);
+            let want = faer::Mat::<f64>::from_fn(13, 2, |i, j| y[(perm[i], j)] + 1000.0 * c as f64);
+            assert!(
+                cols.block(c) == want,
+                "null column {c}: permuted, then mapped"
+            );
+        }
+        // The q = 1 accessors take the same path.
+        let y1 = faer::Col::<f64>::from_fn(13, |i| i as f64);
+        let cols1 = Columns {
+            y: y1.as_ref().as_mat(),
+            seeds: &seeds,
+            null_map: Some(&shift),
+        };
+        let m = cols1.matrix(0, 4);
+        for c in 0..4 {
+            assert!(
+                cols1.column(c).as_ref() == cols1.block(c).col(0),
+                "column {c}"
+            );
+            assert!(m.col(c) == cols1.block(c).col(0), "matrix column {c}");
+        }
+        assert!(cols1.column(0) == y1, "column 0 stays y");
     }
 
     fn demo_row(i: usize, rng: &mut Rng) -> Vec<f64> {
@@ -541,40 +738,227 @@ mod tests {
     }
 
     #[test]
-    fn parallel_fill_rows_seeded_is_parallel_for_each_seeded_flattened() {
-        use rand::Rng as _;
-        let (_, mut a) = resolve_seed(Some(8)).unwrap();
-        let (_, mut b) = resolve_seed(Some(8)).unwrap();
-        let rows = parallel_for_each_seeded(&mut a, 37, demo_row);
-        let flat = parallel_fill_rows_seeded(&mut b, 37, 5, |i, rng, out| {
-            out.copy_from_slice(&demo_row(i, rng));
+    fn parallel_fill_rows_puts_row_i_at_offset_i() {
+        let flat = parallel_fill_rows(37, 5, |i, out| {
+            for (j, v) in out.iter_mut().enumerate() {
+                *v = (i * 10 + j) as f64;
+            }
         });
-        let expected: Vec<f64> = rows.concat();
-        assert_eq!(
-            flat.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
-        );
-        // Same parent consumption.
-        assert_eq!(a.next_u64(), b.next_u64());
+        let expected: Vec<f64> = (0..37_usize)
+            .flat_map(|i| (0..5_usize).map(move |j| (i * 10 + j) as f64))
+            .collect();
+        assert_eq!(flat, expected);
     }
 
     #[test]
-    fn parallel_fill_rows_seeded_handles_empty_shapes() {
-        use rand::Rng as _;
+    fn parallel_fill_rows_handles_empty_shapes() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let calls = AtomicUsize::new(0);
-        let (_, mut p) = resolve_seed(Some(5)).unwrap();
-        let (_, mut q) = resolve_seed(Some(5)).unwrap();
-        let zero_rows = parallel_fill_rows_seeded(&mut p, 0, 4, |_, _, _| {
+        let zero_rows = parallel_fill_rows(0, 4, |_, _| {
             calls.fetch_add(1, Ordering::Relaxed);
         });
         assert_eq!(zero_rows, Vec::<f64>::new());
-        let zero_cols = parallel_fill_rows_seeded(&mut p, 3, 0, |_, _, _| {
+        let zero_cols = parallel_fill_rows(3, 0, |_, _| {
             calls.fetch_add(1, Ordering::Relaxed);
         });
         assert_eq!(zero_cols, Vec::<f64>::new());
         assert_eq!(calls.load(Ordering::Relaxed), 0);
-        let _ = child_seeds(&mut q, 3); // the seeds of the 3 × 0 call
-        assert_eq!(p.next_u64(), q.next_u64());
+    }
+
+    fn design_at(n: usize, n_train: usize, n_splits: usize, seed: u64) -> SplitDesign {
+        let (_, mut rng) = resolve_seed(Some(seed)).unwrap();
+        balanced_splits(n, n_train, n_splits, &mut rng)
+    }
+
+    fn trains(d: &SplitDesign, c: usize, j: usize) -> bool {
+        let c = u32::try_from(c).unwrap();
+        ((c & d.masks[j]).count_ones() + u32::from(d.flips[j])) % 2 == 0
+    }
+
+    #[test]
+    fn design_cells_is_the_smallest_power_of_two_with_enough_odd_masks() {
+        assert_eq!(
+            [1, 2, 3, 50, 64, 65].map(design_cells),
+            [2, 4, 8, 128, 128, 256]
+        );
+    }
+
+    /// At the default J the design has H = 64 cells: from n = 64 each cell
+    /// holds a row, below that the splits are independent halves (m = 0).
+    #[test]
+    fn design_cells_at_default_j_is_64() {
+        use crate::signal_test::{ConfirmatoryArgs, ConfirmatoryMethod};
+        let ConfirmatoryArgs::SplitExact { n_splits, .. } =
+            ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::SplitExact)
+        else {
+            unreachable!()
+        };
+        assert_eq!(design_cells(n_splits), 64);
+        for (n, m) in [(63, 0), (64, 1)] {
+            let d = design_at(n, split_sizes(n, 1).0, n_splits, 3);
+            assert_eq!(d.m, m, "n={n}");
+            assert_eq!(d.cell_rows.len(), 64 * m, "n={n}");
+        }
+    }
+
+    #[test]
+    fn every_split_is_a_partition_of_the_planned_size() {
+        let shapes = [6, 127, 128, 129, 255, 256, 1000, 1001].map(|n| (n, n / 2));
+        for (n, n_train) in shapes.into_iter().chain([(300, 202)]) {
+            for n_splits in [1, 50, 64, 65] {
+                for seed in 0..5 {
+                    let d = design_at(n, n_train, n_splits, seed);
+                    let at = format!("n={n} n_train={n_train} J={n_splits} seed={seed}");
+                    assert_eq!(d.cell_rows.len(), design_cells(n_splits) * d.m, "{at}");
+                    assert!(d.leftovers.is_sorted(), "{at}");
+                    let mut rows: Vec<usize> =
+                        d.cell_rows.iter().chain(&d.leftovers).copied().collect();
+                    rows.sort_unstable();
+                    assert_eq!(rows, (0..n).collect::<Vec<_>>(), "{at}");
+                    assert_eq!(d.splits.len(), n_splits, "{at}");
+                    for SplitIdx { tr, te } in &d.splits {
+                        assert_eq!(tr.len(), n_train, "{at}");
+                        assert_eq!(te.len(), n - n_train, "{at}");
+                        let mut all: Vec<usize> = tr.iter().chain(te).copied().collect();
+                        all.sort_unstable();
+                        assert_eq!(all, (0..n).collect::<Vec<_>>(), "{at}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn masks_are_distinct_odd_weight_and_cells_split_in_half() {
+        for n_splits in [1, 50, 64, 65] {
+            let h = design_cells(n_splits);
+            for seed in 0..5 {
+                let d = design_at(1000, 500, n_splits, seed);
+                let mut distinct = d.masks.clone();
+                distinct.sort_unstable();
+                distinct.dedup();
+                assert_eq!(distinct.len(), n_splits);
+                assert!(
+                    d.masks
+                        .iter()
+                        .all(|&s| s.count_ones() % 2 == 1 && (s as usize) < h)
+                );
+                assert_eq!(d.flips.len(), n_splits);
+                let rows_of = |cells: &[usize]| -> Vec<usize> {
+                    cells
+                        .iter()
+                        .flat_map(|&c| d.cell_rows[c * d.m..(c + 1) * d.m].iter().copied())
+                        .collect()
+                };
+                for (j, SplitIdx { tr, te }) in d.splits.iter().enumerate() {
+                    let at = format!("J={n_splits} seed={seed} split={j}");
+                    let (cells, test_cells): (Vec<usize>, Vec<usize>) =
+                        (0..h).partition(|&c| trains(&d, c, j));
+                    assert_eq!(cells.len(), h / 2, "{at}");
+                    // Index order: each side's cells' rows in cell order, then its leftovers.
+                    let (rows, test_rows) = (rows_of(&cells), rows_of(&test_cells));
+                    assert_eq!(tr[..rows.len()], rows[..], "{at}");
+                    assert_eq!(te[..test_rows.len()], test_rows[..], "{at}");
+                    let mut tails: Vec<usize> = tr[rows.len()..]
+                        .iter()
+                        .chain(&te[test_rows.len()..])
+                        .copied()
+                        .collect();
+                    tails.sort_unstable();
+                    assert_eq!(tails, d.leftovers, "{at}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pairs_of_splits_overlap_in_exact_quarters_of_the_cell_rows() {
+        use std::collections::HashSet;
+        let d = design_at(1000, 500, 50, 3);
+        assert_eq!(d.m, 7);
+        let cell: HashSet<usize> = d.cell_rows.iter().copied().collect();
+        let trained: Vec<HashSet<usize>> = d
+            .splits
+            .iter()
+            .map(|sp| sp.tr.iter().copied().filter(|r| cell.contains(r)).collect())
+            .collect();
+        for i in 0..trained.len() {
+            for j in i + 1..trained.len() {
+                assert_eq!(
+                    trained[i].intersection(&trained[j]).count(),
+                    128 * 7 / 4,
+                    "splits {i}, {j}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_cell_trains_in_every_split() {
+        for seed in 0..20 {
+            let d = design_at(1000, 500, 50, seed);
+            let mut tested = vec![false; 1000];
+            for &r in d.splits.iter().flat_map(|sp| &sp.te) {
+                tested[r] = true;
+            }
+            assert!(d.cell_rows.iter().all(|&r| tested[r]), "seed={seed}");
+        }
+    }
+
+    #[test]
+    fn shrinks_m_when_the_training_side_is_large() {
+        for (n, n_train, m) in [(300, 202, 1), (1000, 500, 7), (70, 42, 0)] {
+            assert_eq!(design_at(n, n_train, 50, 0).m, m, "n={n} n_train={n_train}");
+        }
+    }
+
+    #[test]
+    fn below_h_rows_the_splits_are_independent_halves() {
+        let (_, mut rng) = resolve_seed(Some(17)).unwrap();
+        let mut rng_copy = rng.clone();
+        let d = balanced_splits(100, 50, 50, &mut rng);
+        assert_eq!(d.m, 0);
+        let halves = parallel_for_each_seeded(&mut rng_copy, 50, |_, c| one_split(100, 50, c));
+        let halves: Vec<SplitIdx> = halves
+            .into_iter()
+            .map(|(tr, te)| SplitIdx { tr, te })
+            .collect();
+        assert_eq!(d.splits, halves);
+    }
+
+    #[test]
+    fn the_design_draws_seeds_then_cells_then_masks_then_flips() {
+        use rand::{Rng as _, RngExt as _};
+        let (n, n_train, n_splits, cell_rows) = (1000, 500, 50, 128 * 7);
+        let (_, mut rng) = resolve_seed(Some(23)).unwrap();
+        let mut replay = rng.clone();
+        let d = balanced_splits(n, n_train, n_splits, &mut rng);
+        let seeds = child_seeds(&mut replay, n_splits);
+        let mut rows = permute_indices(n, &mut replay);
+        let mut leftovers = rows.split_off(cell_rows);
+        leftovers.sort_unstable();
+        let mut masks: Vec<u32> = (1..128_u32).filter(|s| s.count_ones() % 2 == 1).collect();
+        masks.shuffle(&mut replay);
+        masks.truncate(n_splits);
+        let flips: Vec<bool> = (0..n_splits).map(|_| replay.random()).collect();
+        assert_eq!(d.cell_rows, rows);
+        assert_eq!(d.masks, masks);
+        assert_eq!(d.flips, flips);
+        assert_eq!(
+            rng.next_u64(),
+            replay.next_u64(),
+            "nothing is drawn after the flips"
+        );
+        // Each split's leftover picks come from its own child seed, after its cell rows.
+        for (j, SplitIdx { tr, te }) in d.splits.iter().enumerate() {
+            let (train_picks, test_picks) = one_split(
+                n - cell_rows,
+                n_train - cell_rows / 2,
+                &mut child_rng(seeds[j]),
+            );
+            let mapped = |p: &[usize]| p.iter().map(|&i| leftovers[i]).collect::<Vec<_>>();
+            assert_eq!(tr[cell_rows / 2..], mapped(&train_picks)[..], "split {j}");
+            assert_eq!(te[cell_rows / 2..], mapped(&test_picks)[..], "split {j}");
+        }
     }
 }

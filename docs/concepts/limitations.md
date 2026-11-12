@@ -69,9 +69,7 @@ to the page that explains it.
 
 ## Cost
 
-- `split_exact` refits for every permutation at `k ≥ 2`, with a sparse
-  `keep`, and in `pls3_confirmatory_test`: about `n_perm × n_splits` fits.
-- `pls1_perm_alpha` works at `k = 1` only.
+- `split_exact` refits for every permutation at `k ≥ 2`, with a sparse `keep`, and in `pls3_confirmatory_test`: about `n_perm × n_splits` fits. On tall `X` with at least 64 rows (at the default `n_splits`), `pls3_confirmatory_test` forms each fit from per-split sums when they fit the memory budget, so it reads the rows once per permutation rather than once per fit.
 - A copy of `X` larger than half the memory budget makes the units that
   copy `X` run one at a time ([when to change it](threads.md#when-to-change-it)).
 

@@ -5,9 +5,9 @@
 \title{Confirmatory test of a PLS1 signal}
 \usage{
 pls1_confirmatory_test(
-  X,
-  y,
-  k = 1L,
+  X = NULL,
+  y = NULL,
+  k = NULL,
   test_method = "auto",
   args = NULL,
   ci = FALSE,
@@ -19,11 +19,15 @@ pls1_confirmatory_test(
   seed = NULL,
   verbose = FALSE,
   weights = NULL,
-  max_skip_rate = NULL
+  max_skip_rate = NULL,
+  covariates = NULL,
+  null_y = NULL,
+  gram = NULL,
+  n_features = NULL
 )
 }
 \arguments{
-\item{X, y, k, test_method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, verbose, weights, max_skip_rate}{See the canonical reference.}
+\item{X, y, k, test_method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, verbose, weights, max_skip_rate, covariates, null_y, gram, n_features}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("confirmatory_test_result", "plskit_result")}.

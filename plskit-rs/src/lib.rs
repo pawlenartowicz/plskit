@@ -9,6 +9,11 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_precision_loss)] // sample-size usize → f64 casts are routine in math kernels
 
+/// Every split's training sums from the cells of the balanced split design,
+/// through one Walsh–Hadamard transform, for the tall held-out routes.
+pub(crate) mod cell_sums;
+/// Covariate adjustment: weighted least-squares residuals on `[1, Z]`.
+pub mod covariates;
 /// Dual (Gram) execution routes for resampling loops, including the
 /// n-space PLS1 kernel for `k ≥ 1`. Crate-internal: the route is chosen by
 /// the engine from `(n_tr, p, B)` and the per-replicate multiplicity, and
@@ -31,6 +36,10 @@ mod fixture_route_pins;
 /// the engine from `(n_tr, p, B, k)` and is not observable from any public
 /// surface.
 pub(crate) mod gram_p;
+/// The all-row Gram matrix `X̃X̃'` of the held-out tests and the per-split
+/// kernels taken from its blocks. Only `gram_matrix` and its output are on
+/// the public surface.
+pub(crate) mod held_out_gram;
 /// Low-level linear algebra helpers (standardize, row-subset, etc.).
 pub mod linalg;
 /// PCA basis of standardized `X`.
@@ -92,14 +101,17 @@ pub use find_k::{
     pls1_find_k_sequence, spls1_find_k_optimal, spls1_find_k_sequence, spls1_find_keep_optimal,
 };
 pub use fit::{FitOpts, KSpec, ParChoice, Pls1Model, pls1_fit, spls1_fit};
+pub use held_out_gram::{GramMatrixOutput, gram_matrix};
 pub use pca::{PcaBasisOutput, pca_basis};
-pub use perm_alpha::{PermAlphaOutput, pls1_perm_alpha};
+pub use perm_alpha::{PermAlphaOutput, pls1_perm_alpha, pls1_perm_alpha_gram};
 pub use perm_null::{PermNullOpts, PermNullOutput, pls1_perm_null};
 pub use pls3::{
     Pls3FitOpts, Pls3Model, Pls3Scores, TransformWhich, pls3_fit, pls3_transform, plssvd_fit,
     plssvd_transform, spls3_fit,
 };
-pub use pls3_signal_test::{Pls3ConfirmatoryTestOpts, pls3_confirmatory_test};
+pub use pls3_signal_test::{
+    Pls3ConfirmatoryTestOpts, pls3_confirmatory_test, pls3_confirmatory_test_gram,
+};
 pub use predict::pls1_predict;
 pub use preprocess::{PreprocessInput, PreprocessResult, preprocess};
 pub use rotate::{RotateOutput, RotationMethod, VarimaxArgs, rotate};

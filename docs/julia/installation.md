@@ -41,7 +41,7 @@ make the version number a false claim.
 ```julia
 using PLSKit
 PLSKit.PLSKIT_PY_VERSION
-pls1_fit(randn(30, 4), randn(30)).k_used   # 1
+pls1_fit(randn(30, 4), randn(30); k=1).k_used   # 1
 ```
 
 ## From a checkout (contributors)

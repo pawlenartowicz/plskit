@@ -85,13 +85,14 @@ pub(crate) fn preprocess(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     ))
 }
 
-/// `pls1_fit(X, y, k=1, *, k_max=None, find_k_args=None,
-/// pre_standardized=False, seed=None, weights=None)`.
+/// `pls1_fit(X, y, k="optimal", *, k_max=None, find_k_args=None,
+/// pre_standardized=False, seed=None, weights=None, covariates=None)`.
 ///
-/// `k` is an integer, or `"optimal"` / `"sequence"` (then `k_max` is
-/// required and `find_k_args` is forwarded to the selection). With an
-/// integer `k`, a non-null `k_max` or `find_k_args` raises
-/// `invalid_argument`, and `seed` is accepted and ignored.
+/// `k` is an integer, or `"optimal"` / `"sequence"` (then `k_max` defaults
+/// to `plskit::find_k::pls1_default_k_max` and `find_k_args` is forwarded
+/// to the selection). With an integer `k`, a non-null `k_max` or
+/// `find_k_args` raises `invalid_argument`, and `seed` is accepted and
+/// ignored.
 pub(crate) fn pls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = inp.vec("y")?;
@@ -101,11 +102,13 @@ pub(crate) fn pls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let pre_standardized = inp.bool("pre_standardized")?;
     let seed = inp.seed()?;
     let w = inp.opt_vec("weights")?;
+    let z = inp.opt_covariates()?;
     inp.finish()?;
     let d = find_k::Data {
         x: x.as_mat(),
         y: y.as_col(),
         weights: w.as_ref().map(VecF64::as_col),
+        covariates: z.as_ref().map(MatF64::as_mat),
     };
     let (k_int, selection, warnings) = match k {
         Value::Str(mode) => find_k::select_k(d, &mode, k_max, find_k_args, pre_standardized, seed)?,
@@ -125,6 +128,7 @@ pub(crate) fn pls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
         d.y,
         KSpec::Fixed(k_int),
         d.weights,
+        d.covariates,
         FitOpts {
             pre_standardized,
             ..FitOpts::default()
@@ -136,18 +140,24 @@ pub(crate) fn pls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     })
 }
 
-/// `pls1_predict(model, X_new)`; returns a plain vector.
+/// `pls1_predict(model, X_new, *, covariates=None)`; returns a plain vector.
 pub(crate) fn pls1_predict(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let model = inp.take("model");
     let x_new = inp.mat("X_new")?;
+    let z = inp.opt_covariates()?;
     inp.finish()?;
     let rec = convert::model_record(model, "PLS1Result", "model")?;
     let m = convert::pls1_model_from_record(&rec)?;
-    let yhat = engine(plskit::pls1_predict(&m, x_new.as_mat()))?;
+    let yhat = engine(plskit::pls1_predict(
+        &m,
+        x_new.as_mat(),
+        z.as_ref().map(MatF64::as_mat),
+    ))?;
     Ok(Outcome::new(col(&yhat)))
 }
 
-/// `spls1_fit(X, y, k, keep, *, pre_standardized=False, weights=None)`.
+/// `spls1_fit(X, y, k, keep, *, pre_standardized=False, weights=None,
+/// covariates=None)`.
 pub(crate) fn spls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = inp.vec("y")?;
@@ -155,6 +165,7 @@ pub(crate) fn spls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let keep = inp.usize("keep")?;
     let pre_standardized = inp.bool("pre_standardized")?;
     let w = inp.opt_vec("weights")?;
+    let z = inp.opt_covariates()?;
     inp.finish()?;
     let m = engine(plskit::spls1_fit(
         x.as_mat(),
@@ -162,6 +173,7 @@ pub(crate) fn spls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
         KSpec::Fixed(k),
         keep,
         w.as_ref().map(VecF64::as_col),
+        z.as_ref().map(MatF64::as_mat),
         FitOpts {
             pre_standardized,
             ..FitOpts::default()

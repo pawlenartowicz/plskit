@@ -493,3 +493,11 @@ fn non_finite_x_is_invalid_input_with_either_setting() {
         assert_eq!(rotate_err(&w, f).code, "invalid_input");
     }
 }
+
+#[test]
+fn pls3_result_refuses_covariates() {
+    let (x, m3) = pls3_fit(2);
+    let z = mat_of((0..60).map(|i| f64::from(i % 7)).collect(), 60, 1);
+    let e = rotate_err(&m3, vec![("X", x), ("covariates", z)]);
+    assert_eq!(e.code, "invalid_argument", "{}", e.message);
+}

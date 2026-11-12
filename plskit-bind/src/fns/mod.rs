@@ -36,7 +36,12 @@ pub(crate) fn with_warning(rec: Record<'static>, warning: Option<Record<'static>
 
 /// PLS3's `Y`: 2-D only, with a hint when a vector arrives.
 pub(crate) fn pls3_y<'a>(inp: &mut Inputs<'a>) -> Result<MatF64<'a>, BindError> {
-    match inp.take("Y") {
+    pls3_y_value(inp.take("Y"))
+}
+
+/// [`pls3_y`] on a value already taken.
+pub(crate) fn pls3_y_value(v: Value<'_>) -> Result<MatF64<'_>, BindError> {
+    match v {
         Value::Vec(_) | Value::IntVec(_) => Err(BindError::invalid_argument(
             "Y must be 2-D, got 1-D. A single-column outcome is a PLS1 problem — use pls1_fit.",
         )),

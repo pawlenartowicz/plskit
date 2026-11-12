@@ -62,7 +62,7 @@ check that the install works, and a quickstart with a first session
 
 The rows are split at random into two halves, PLS is fitted on one half,
 and the correlation between its predictions and the true outcome is
-computed on the other. This is repeated over many splits, 50 by default,
+computed on the other. This is repeated over many splits, 32 by default,
 and the correlations are averaged. `split_exact` calibrates that average
 by shuffling the outcome on the same splits; `split_nb` uses the
 Nadeau–Bengio corrected t-test instead. The default,

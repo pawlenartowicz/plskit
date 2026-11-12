@@ -1,5 +1,5 @@
 //! Unit tests for the n-space PLS1 route: eligibility, the Gram builders
-//! and their thread-count invariance, the `‖G‖₂` bound, and the kernel.
+//! and their thread-count invariance, and the kernel.
 #![allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
 #![allow(
     clippy::many_single_char_names,
@@ -87,6 +87,23 @@ fn raw_perm_starts_at_k_two_and_respects_the_smallest_training_fold() {
 }
 
 #[test]
+fn raw_perm_nspace_rule_crosses_over_at_the_one_gram_cost() {
+    // 60 x 100, 5 folds (n_tr 48, n_val 12), k = 2: 60²·100/2 +
+    // 5·B'·(2·48² + 12·48) against 5·B'·(4·48 + 12)·100 pays from B' = 3.
+    assert!(!nspace_eligible_raw_perm(60, 5, 100, 1, 2, true));
+    assert!(nspace_eligible_raw_perm(60, 5, 100, 2, 2, true));
+}
+
+#[test]
+fn split_exact_nspace_rule_crosses_over_at_the_one_gram_cost() {
+    // 60 x 40, J = 10 (halves of 30), k = 2: without the gate's G the route
+    // pays from B' = 3; holding it, from B' = 1.
+    assert!(!nspace_eligible_split_exact(60, 40, 1, 10, 2, true, false));
+    assert!(nspace_eligible_split_exact(60, 40, 2, 10, 2, true, false));
+    assert!(nspace_eligible_split_exact(60, 40, 0, 10, 2, true, true));
+}
+
+#[test]
 fn k_is_the_per_replicate_multiplicity_of_the_flop_rule() {
     // n = 60, p = 100, B = 100: at k = 1 the Gram costs more than it saves
     // (60·(100 + 100) = 12 000 ≥ 100·100), at k = 2 it pays
@@ -152,59 +169,6 @@ fn gram_products_are_thread_count_invariant_at_the_route_shapes() {
     }
 }
 
-/// `‖G‖₂` of `G = xs·xs'`: the largest squared singular value of `xs`.
-fn spectral(xs: &Mat<f64>) -> f64 {
-    let s = xs.thin_svd().expect("svd").S().column_vector().to_owned();
-    let top = (0..s.nrows()).map(|i| s[i]).fold(0.0_f64, f64::max);
-    top * top
-}
-
-#[test]
-fn gram_norm_bound_brackets_the_spectral_norm() {
-    let base = uniform(20, 1500, 3);
-    let designs: Vec<(&str, Mat<f64>)> = vec![
-        ("40 x 2000", standardize(uniform(40, 2000, 1).as_ref()).0),
-        ("60 x 3000", standardize(uniform(60, 3000, 2).as_ref()).0),
-        (
-            "duplicated rows",
-            standardize(Mat::<f64>::from_fn(40, 1500, |i, j| base[(i % 20, j)]).as_ref()).0,
-        ),
-        (
-            "rank 3",
-            standardize((uniform(30, 3, 4).as_ref() * uniform(3, 800, 5).as_ref()).as_ref()).0,
-        ),
-    ];
-    for (what, xs) in &designs {
-        let x_fro = xs.norm_l2();
-        let g = gram_of(xs.as_ref(), Par::Seq);
-        let bound = gram_norm_bound(g.as_ref(), x_fro);
-        let exact = spectral(xs);
-        assert!(bound >= exact, "{what}: {bound:e} < ‖G‖₂ = {exact:e}");
-        assert!(
-            bound <= 2.0 * exact * (1.0 + 1e-12),
-            "{what}: {bound:e} > 2‖G‖₂"
-        );
-        assert!(bound <= x_fro * x_fro, "{what}: above ‖X̃‖_F²");
-        // Sequential and deterministic.
-        assert_eq!(
-            bound.to_bits(),
-            gram_norm_bound(g.as_ref(), x_fro).to_bits(),
-            "{what}"
-        );
-    }
-    // A zero Gram and a NaN Gram fall back to ‖X̃‖_F².
-    assert_eq!(
-        gram_norm_bound(Mat::<f64>::zeros(5, 5).as_ref(), 0.0).to_bits(),
-        0.0_f64.to_bits()
-    );
-    let mut nan = Mat::<f64>::zeros(5, 5);
-    nan[(1, 1)] = f64::NAN;
-    assert_eq!(
-        gram_norm_bound(nan.as_ref(), 3.0).to_bits(),
-        9.0_f64.to_bits()
-    );
-}
-
 fn standardized(n: usize, p: usize, seed: u64) -> Mat<f64> {
     standardize(uniform(n, p, seed).as_ref()).0
 }
@@ -228,21 +192,6 @@ fn primal(xs: &Mat<f64>, z: &Col<f64>, k: usize) -> PreparedFit {
     .expect("primal fit")
 }
 
-/// Primal-side absolute error of `‖X_a'y_a‖` as a multiple of
-/// `w_rel_floor`, adopted from the floor's measured margin: the larger of
-/// the two margins measured in `fit::w_rel_floor`'s doc, `0.020×` for the
-/// first noise component over all components and `0.33×` for an outcome
-/// orthogonal to `X` at the first component.
-const PRIMAL_W_MARGIN: f64 = 0.33;
-
-#[test]
-fn primal_margin_leaves_the_floor_gate_a_factor_two() {
-    // Past gate 1 the exact wn is at least √(1 − 1/BOUND_BAND) of the
-    // computed one; past gate 3 the computed one is RESOLVE_BAND × floor.
-    let exact_min = (1.0 - 1.0 / BOUND_BAND).sqrt() * RESOLVE_BAND;
-    assert!(exact_min - PRIMAL_W_MARGIN >= 2.0, "{exact_min}");
-}
-
 #[test]
 fn an_exactly_zero_outcome_is_the_zero_model() {
     let xs = standardized(20, 500, 4);
@@ -256,8 +205,8 @@ fn an_exactly_zero_outcome_is_the_zero_model() {
 }
 
 /// A block built from `G` alone holds the same `G` bits and `p`, an
-/// `x_fro` equal to `‖X̃‖_F` to rounding, and gives the same `alpha` bits
-/// where both blocks resolve: `x_fro` reaches only the gates.
+/// `x_fro` equal to `‖X̃‖_F` to rounding, and gives the same `alpha` bits:
+/// `x_fro` reaches only the relative floor.
 #[test]
 fn a_block_from_the_gram_matrix_gives_the_alpha_bits_of_the_block_from_x() {
     let (n, p) = (40_usize, 2000_usize);
@@ -289,107 +238,7 @@ fn a_block_from_the_gram_matrix_gives_the_alpha_bits_of_the_block_from_x() {
                 &col_vals(b.as_ref()),
                 &format!("seed {seed}"),
             ),
-            _ => panic!("seed {seed}: both blocks must resolve an ordinary outcome at k = 1"),
+            _ => panic!("seed {seed}: both blocks must keep one component"),
         }
-    }
-}
-
-#[test]
-fn a_non_finite_gram_is_unresolved() {
-    let xs = standardized(20, 500, 5);
-    let mut g = gram_of(xs.as_ref(), Par::Seq);
-    g[(0, 0)] = f64::NAN;
-    let x_fro = xs.norm_l2();
-    let block = NspaceBlock {
-        g: g.as_ref(),
-        x_fro,
-        g2: gram_norm_bound(g.as_ref(), x_fro),
-        p: 500,
-    };
-    let z = outcome(&xs, 1.0, 105);
-    assert!(matches!(
-        pls1_nspace_kernel(&block, z.as_ref(), 2),
-        NspaceOutcome::Unresolved
-    ));
-}
-
-#[test]
-fn out_of_contract_shapes_are_unresolved() {
-    let xs = standardized(8, 200, 6);
-    let gram = NspaceGram::new(xs.as_ref(), Par::Seq);
-    let z = outcome(&xs, 1.0, 106);
-    for k in [0_usize, 8, 9] {
-        assert!(
-            matches!(
-                pls1_nspace_kernel(&gram.block(), z.as_ref(), k),
-                NspaceOutcome::Unresolved
-            ),
-            "k={k}"
-        );
-    }
-    let z_wrong_rows = outcome(&standardized(9, 200, 6), 1.0, 106);
-    assert!(matches!(
-        pls1_nspace_kernel(&gram.block(), z_wrong_rows.as_ref(), 2),
-        NspaceOutcome::Unresolved
-    ));
-}
-
-/// Printed by `python3 scripts/gate_feasibility.py nspace --reference`.
-const SCRIPT_G2: f64 = 2303.608226002213;
-/// `(E_w(a), E_t(a), rho_a)` for `a = 1..=4`.
-// Clippy 1.85 flags zero-padded exponents (`e-06`) as excessive precision
-// even though the digits round-trip; the values stay as the script prints them.
-#[allow(clippy::excessive_precision)]
-const SCRIPT_REFERENCE: [(f64, f64, f64); 4] = [
-    (
-        5.563549621001585e-10,
-        7.735252438578756e-06,
-        1.8070190394459611e-12,
-    ),
-    (
-        3.4107066852834623e-08,
-        8.744123329737737e-05,
-        2.3776744383566945e-10,
-    ),
-    (
-        4.416140783316025e-06,
-        0.010184348434120104,
-        1.7510497446785014e-07,
-    ),
-    (
-        0.0032314024669681933,
-        7.443899012915223,
-        8.529328862808795e-05,
-    ),
-];
-
-#[test]
-fn history_bounds_match_gate_feasibility_script() {
-    // `reference_design` of scripts/gate_feasibility.py, rebuilt here; the
-    // kernel's per-component bounds must equal the script's (up to BLAS and
-    // libm rounding), so the script that set K_DUAL_MAX models this recursion.
-    let (n, p) = (24_usize, 300_usize);
-    let x = Mat::<f64>::from_fn(n, p, |i, j| {
-        ((i as f64 + 1.0) * (j as f64 + 1.0) * 0.37).sin()
-            + 0.5 * (1.1 * i as f64 - 0.7 * j as f64).cos()
-    });
-    let xs = standardize(x.as_ref()).0;
-    let y = Col::<f64>::from_fn(n, |i| (0.9 * i as f64 + 0.3).cos() + 0.5 * xs[(i, 0)]);
-    let z = standardize1(y.as_ref()).0;
-    let gram = NspaceGram::new(xs.as_ref(), Par::Seq);
-    let block = gram.block();
-    let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs();
-    assert!(
-        close(block.g2, SCRIPT_G2),
-        "‖G‖₂ bound {:e} vs {SCRIPT_G2:e}",
-        block.g2
-    );
-    let (out, trace) = pls1_nspace_kernel_traced(&block, z.as_ref(), 4);
-    assert!(matches!(out, NspaceOutcome::Resolved { k_used: 4, .. }));
-    assert_eq!(trace.len(), 4);
-    for (a, (t, &(e_w, e_t, rho))) in trace.iter().zip(SCRIPT_REFERENCE.iter()).enumerate() {
-        assert!(close(t.e_w, e_w), "a={}: E_w {:e} vs {e_w:e}", a + 1, t.e_w);
-        assert!(close(t.e_t, e_t), "a={}: E_t {:e} vs {e_t:e}", a + 1, t.e_t);
-        assert!(close(t.rho, rho), "a={}: rho {:e} vs {rho:e}", a + 1, t.rho);
     }
 }

@@ -9,6 +9,7 @@ values are represented.
   from the R `pls` package convention on purpose, and there is no alias.
 - Whole-number doubles are accepted where an integer is expected
   (`k = 3` and `k = 3L` are the same); `k = 2.5` raises `invalid_argument`.
+- `k` of `pls1_confirmatory_test` takes a set as an integer vector (`k = 1:8`, or whole doubles such as `c(1, 2, 3)`); `NULL`, the default, is the default set ([A set of `k`](../concepts/PLS1/inference.md#a-set-of-k)). The result's `k` is an integer vector, `pvalues_by_k` and `statistics_by_k` are named numeric vectors (names `"1"`, `"2"`, ...), and `statistic` is a retained `NULL` for a set of more than one `k`.
 - `X` may be a numeric matrix or a `data.frame` whose columns are all
   numeric or logical (converted with `as.matrix`); a data.frame with any
   other column raises `invalid_argument`. Integer data is converted to
@@ -83,6 +84,8 @@ optional `X` gives the target) or a weight matrix (returns a
 `rotate_result`). A result edited by hand so
 that it no longer forms a valid model raises `invalid_argument`; an
 unclassed copy (`unclass(fit)`) still works.
+
+Python's `result.subset(rows)` on a `GramMatrixResult` is the S3 method `subset(g, rows)` on a `gram_matrix_result`. `rows` are 1-based row numbers.
 
 ## Seeds
 

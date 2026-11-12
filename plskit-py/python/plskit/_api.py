@@ -7,7 +7,7 @@ import functools
 import json
 import sys
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Literal
 
@@ -21,6 +21,7 @@ from plskit._results import (
     FindKOptimalResult,
     FindKeepOptimalResult,
     FindKSequenceResult,
+    GramMatrixResult,
     PCABasisResult,
     PermAlphaResult,
     PermNullResult,
@@ -206,7 +207,7 @@ def _aligned_model(value, path: str = "model", depth: int = 0):
 def _make_result(type_name: str, fields: dict):
     """The result class `type_name` built from the fields the extension
     returns. The extension hands over `PLS3Result.converged` and `n_iter` and
-    `PermAlphaResult.k_used` and `resolved` as lists and `RotationSpec.args`
+    `PermAlphaResult.k_used` as lists and `RotationSpec.args`
     as a dict; they become bool and int64 arrays and a read-only mapping."""
     if type_name == "PLS3Result":
         if fields["converged"] is not None:
@@ -215,7 +216,6 @@ def _make_result(type_name: str, fields: dict):
             fields["n_iter"] = np.asarray(fields["n_iter"], dtype=np.int64)
     elif type_name == "PermAlphaResult":
         fields["k_used"] = np.asarray(fields["k_used"], dtype=np.int64)
-        fields["resolved"] = np.asarray(fields["resolved"], dtype=bool)
     elif type_name == "RotationSpec":
         fields["args"] = MappingProxyType(fields["args"])
     return getattr(_results, type_name)(**fields)
@@ -269,13 +269,14 @@ def preprocess(
 def pls1_fit(
     X: np.ndarray,
     y: np.ndarray,
-    k: int | Literal["optimal", "sequence"] = 1,
+    k: int | Literal["optimal", "sequence"] = "optimal",
     *,
     k_max: int | None = None,
     find_k_args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
     weights: np.ndarray | None = None,
+    covariates: np.ndarray | None = None,
 ) -> PLS1Result:
     """Fit a PLS1 model.
 
@@ -285,17 +286,24 @@ def pls1_fit(
         Predictor matrix. Standardized internally unless `pre_standardized=True`.
     y : np.ndarray, shape (n,)
         Response vector.
-    k : int | 'optimal' | 'sequence', default 1
-        Number of PLS components. Pass ``'optimal'`` or ``'sequence'`` to
-        select k automatically (requires ``k_max``). A float must be whole
-        (``2.0``, not ``2.7``).
+    k : int | 'optimal' | 'sequence', default 'optimal'
+        Number of PLS components, or ``'optimal'`` / ``'sequence'`` to
+        select it by `pls1_find_k_optimal` (selector ``'r2_se'`` unless
+        ``find_k_args`` says otherwise) / `pls1_find_k_sequence` and fit at
+        the selected k. A y with no first component (constant, or
+        orthogonal to X) raises ``PlsKitError(code="optimal_no_component")``
+        under ``'optimal'``; an int k fits the ``k_used = 0`` zero model.
+        A float must be whole (``2.0``, not ``2.7``).
     k_max : int | None
-        Maximum k to try when ``k='optimal'`` or ``k='sequence'``. Must be
-        ``None`` when ``k`` is an int.
+        Maximum k to try when ``k='optimal'`` or ``k='sequence'``. ``None``
+        means ``min(9, p)``, lowered further so that the weights' effective
+        n and the covariates' residual degrees of freedom both stay at least
+        ``k_max + 1``, and never below 1. Must be ``None`` when ``k`` is an
+        int.
     find_k_args : dict | None
         Extra kwargs forwarded to `pls1_find_k_optimal` / `pls1_find_k_sequence`.
         Allowed keys are the public params of the target function *except*
-        ``seed``, ``pre_standardized`` and ``weights`` — pass those on
+        ``seed``, ``pre_standardized``, ``weights`` and ``covariates`` — pass those on
         ``pls1_fit`` directly — and ``verbose``, which the selection run
         does not take. Unknown keys
         raise ``PlsKitError(code="invalid_args")`` listing the allowed set.
@@ -307,23 +315,54 @@ def pls1_fit(
         cache pattern.
     seed : int | None
         RNG seed forwarded to ``pls1_find_k_optimal`` / ``pls1_find_k_sequence``
-        when ``k`` is a string.
+        when ``k`` is a string. Without a seed (the default call included)
+        the selection draws its folds from OS entropy, so the chosen k can
+        differ between runs; ``selection_result.seed`` repeats a run.
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
         docs/concepts/PLS1/weights.md.
+    covariates : np.ndarray | None, shape (n, p_z) or (n,), default None
+        Covariates to adjust for; a 1-D array is one covariate. An intercept
+        is always added, and a column that is constant or a linear
+        combination of the intercept and earlier columns is dropped. X is
+        standardized first, then X and y are replaced by their (weighted)
+        least-squares residuals on ``[1, Z]`` over all rows. See
+        docs/concepts/PLS1/covariates.md.
 
     Returns
     -------
     PLS1Result
+        With covariates, ``covariate_coef`` holds their coefficients (0 at a
+        dropped column), ``intercept`` and ``beta`` give
+        ``y_hat = intercept + X @ beta + Z @ covariate_coef``, and the other
+        fields describe the adjusted data.
     """
     return _call("pls1_fit", X=X, y=y, k=k, k_max=k_max, find_k_args=find_k_args,
-                 pre_standardized=pre_standardized, seed=seed, weights=weights)
+                 pre_standardized=pre_standardized, seed=seed, weights=weights,
+                 covariates=covariates)
 
 
 @_convert_errors
-def pls1_predict(model: PLS1Result, X_new: np.ndarray) -> np.ndarray:
-    return _call("pls1_predict", model=model, X_new=X_new)
+def pls1_predict(
+    model: PLS1Result,
+    X_new: np.ndarray,
+    *,
+    covariates: np.ndarray | None = None,
+) -> np.ndarray:
+    """Predict y for new rows: ``intercept + X_new @ beta``, plus
+    ``covariates @ covariate_coef`` for a model fitted with covariates.
+
+    Parameters
+    ----------
+    model : PLS1Result
+    X_new : np.ndarray, shape (m, d)
+    covariates : np.ndarray | None, shape (m, p_z) or (m,), default None
+        The covariates of the new rows, with the columns the model was
+        fitted with. Required for a model fitted with covariates, refused
+        otherwise.
+    """
+    return _call("pls1_predict", model=model, X_new=X_new, covariates=covariates)
 
 
 @_convert_errors
@@ -495,8 +534,8 @@ def plssvd_transform(
 
 @_convert_errors
 def pls3_confirmatory_test(
-    X: np.ndarray,
-    Y: np.ndarray,
+    X: np.ndarray | None = None,
+    Y: np.ndarray | None = None,
     k: int = 1,
     *,
     test_method: Literal["auto", "split_exact", "split_nb"] = "auto",
@@ -505,6 +544,8 @@ def pls3_confirmatory_test(
     pre_standardized_Y: bool = False,
     seed: int | None = None,
     verbose: bool = False,
+    gram: GramMatrixResult | np.ndarray | None = None,
+    n_features: int | None = None,
 ) -> ConfirmatoryTestResult:
     """Confirmatory PLS3 omnibus test at LV1.
 
@@ -520,20 +561,18 @@ def pls3_confirmatory_test(
 
     Parameters
     ----------
-    X : np.ndarray, shape (n, p)
+    X : np.ndarray, shape (n, p), or None
+        Pass ``X`` or ``gram``, not both.
     Y : np.ndarray, shape (n, q)
+        Required.
     k : int, default 1
         Must be 1. Above LV1 the training-half component ordering need not
         survive to the test half, and whether the statistic should then be
         per-component or subspace-level is not settled.
     test_method : {'auto', 'split_exact', 'split_nb'}, default 'auto'
-        ``'auto'`` runs ``'split_exact'`` or ``'split_nb'``, chosen once per
-        call from X (never Y), and ``result.test_method`` says which ran. It
-        picks ``'split_exact'`` when the ``'split_nb'`` auto-gate flags the
-        design (validity), or when ``n`` is below 250 (power); otherwise
-        ``'split_nb'``. Unlike ``pls1_confirmatory_test``, a very wide X does
-        not pick ``'split_exact'``: in PLS3 it refits for every permutation,
-        so there it costs more than ``'split_nb'``. The thresholds may change between versions. See
+        ``'auto'`` runs ``'split_exact'`` on every design, and
+        ``result.test_method`` says so; ``'split_nb'`` runs only when
+        requested. This may change between versions. See
         docs/concepts/PLS1/inference.md.
 
         ``'split_exact'``: the p-value comes from
@@ -548,10 +587,13 @@ def pls3_confirmatory_test(
 
         Both sides of the correlation are estimated on the training half,
         where PLS1 has an observed outcome on one side. The per-split null
-        still carries over: conditional on the training half the two
-        held-out score vectors are fixed linear combinations of independent
-        test-half rows, so under the null ``r`` on one split follows the
-        ordinary null correlation law. The between-split correction the
+        still carries over: conditional on X, the training half and the
+        all-row scales, one held-out score vector is fixed and the rows of
+        the other are exchangeable, so under the null ``r`` on one split
+        follows the ordinary null correlation law to the same approximation
+        as in PLS1. With both ``pre_standardized_X`` and
+        ``pre_standardized_Y`` set the statement is exact. The
+        between-split correction the
         p-value uses is PLS1's Nadeau-Bengio heuristic, which is not derived
         for two blocks; its transfer is supported empirically only. Measured
         on Gaussian, heavy-tailed, low-stable-rank and real two-block
@@ -575,17 +617,33 @@ def pls3_confirmatory_test(
         not supply.
     args : dict | None
         ``'split_exact'``: ``{'n_perm': int, 'n_splits': int}``, defaults
-        1000 and 50. ``'split_nb'``: ``{'n_splits': int, 'force': bool}``,
-        defaults 50 and False. ``'auto'``: ``{'n_perm': int, 'n_splits': int}``,
-        defaults 1000 and 50; ``n_perm`` is ignored when ``'split_nb'`` runs.
+        1000 and 32. ``'split_nb'``: ``{'n_splits': int, 'force': bool}``,
+        defaults 32 and False. ``'auto'``: ``{'n_perm': int, 'n_splits': int}``,
+        defaults 1000 and 32; ``n_perm`` is ignored when ``'split_nb'`` runs.
     pre_standardized_X, pre_standardized_Y : bool, default False
-        Accepted but have no effect on either method: each training half is
-        re-standardized with its own moments regardless, and the gate
-        standardizes X itself. Kept on the signature so it does not
-        change when a method that reads them lands.
+        Skip the one standardization of that block over all rows. Without
+        the flag, the block's columns are divided once by their standard
+        deviations over all ``n`` rows, as in ``pls3_fit``; each split then
+        centres its training rows with their own means and its held-out
+        rows with those same means, and nothing is scaled per split. With
+        the flag, the block is used as given and each split only centres.
+        Y's scale comes from its rows before any permutation, so permuting
+        rows does not change it. The ``'split_nb'`` gate reads X under the
+        same rule.
     seed : int | None
         RNG seed. ``None`` draws from OS entropy and records the value on
         ``result.seed``.
+    gram : GramMatrixResult | np.ndarray | None
+        The Gram matrix of X in place of ``X``: ``gram_matrix(X)``'s result,
+        or an ``(n, n)`` array ``X̃ @ X̃.T`` with ``n_features``. It is centred
+        over its rows (so ``result.subset(rows)`` is accepted) and checked on
+        its entries, and both methods run from it: on ``gram_matrix(X, ...)``
+        the result equals the call on ``X`` at the same seed, to rounding.
+        ``pre_standardized_X`` is read from the result (passing it raises
+        ``invalid_argument``); with an array it says how ``X̃`` was scaled.
+    n_features : int | None
+        The column count of ``X̃``, required with an array ``gram`` and
+        refused with a ``GramMatrixResult``, which records it.
 
     Returns
     -------
@@ -594,18 +652,19 @@ def pls3_confirmatory_test(
         (weights are not implemented). ``rho_hat`` is populated for
         ``'split_nb'`` only, and only when the test half has at least 4 rows.
         ``stable_rank`` is not ``None`` on an explicit ``'split_nb'``
-        request, and on an ``"auto"`` request that reached the stable-rank
-        check (p > 4, n_eff ≥ 250); ``None`` otherwise. ``n_perm``
+        request and ``None`` on every ``"auto"`` request. ``n_perm``
         is ``None`` for ``'split_nb'``, which runs no permutations.
     """
     return _call("pls3_confirmatory_test", X=X, Y=Y, k=k, test_method=test_method,
                  args=args, pre_standardized_X=pre_standardized_X,
-                 pre_standardized_Y=pre_standardized_Y, seed=seed, verbose=verbose)
+                 pre_standardized_Y=pre_standardized_Y, seed=seed, verbose=verbose,
+                 gram=gram, n_features=n_features)
 
 
 @_convert_errors
 def pls1_confirmatory_test(
-    X: np.ndarray, y: np.ndarray, k: int = 1,
+    X: np.ndarray | None = None, y: np.ndarray | None = None,
+    k: int | Sequence[int] | range | None = None,
     *,
     test_method: Literal[
         "auto", "raw_perm", "split_nb", "split_exact", "score", "e"
@@ -621,17 +680,39 @@ def pls1_confirmatory_test(
     verbose: bool = False,
     weights: np.ndarray | None = None,
     max_skip_rate: float | None = None,
+    covariates: np.ndarray | None = None,
+    null_y: np.ndarray | None = None,
+    gram: GramMatrixResult | np.ndarray | None = None,
+    n_features: int | None = None,
 ) -> ConfirmatoryTestResult:
-    """Run the confirmatory PLS1 omnibus test at fixed K.
+    """Run the confirmatory PLS1 omnibus test at one K or over a set of K.
+
+    With a set, the test asks whether X predicts y at some k in the set and
+    returns one p-value, combined over the set by min-p (Westfall and Young):
+    each permutation's smallest per-k p is compared with the observed one.
+    The set is fixed before the test sees y, so the test stays
+    confirmatory. The test names no k to fit at: fit with ``pls1_fit(X, y)``,
+    which chooses its own k.
 
     Parameters
     ----------
-    X : np.ndarray, shape (n, d)
-        Predictor matrix.
+    X : np.ndarray, shape (n, d), or None
+        Predictor matrix. Pass ``X`` or ``gram``, not both.
     y : np.ndarray, shape (n,)
-        Response vector.
-    k : int, default 1
-        Number of components to test.
+        Response vector. Required.
+    k : int | Sequence[int] | range | None, default None
+        The component counts to test: one integer, or a set (a list, a
+        ``range`` or an integer array). A set is sorted; an empty set, a
+        duplicate or a k of 0 raises ``invalid_argument``, and a set past a
+        limit of the method (``k <= d``, the split sizes, ``k <= 10`` with
+        ``gram``) is an error, never cut. ``None`` is ``1..8``, cut at
+        ``min(8, d, n // 2 - 2)`` and below the weights' effective n
+        (``n_eff >= k + 1``) and the covariates' residual df, never below 1;
+        it is ``{1}`` for ``'split_nb'``, ``'score'``, ``'e'`` and
+        ``ci=True``, which refuse a set of more than one k. ``'auto'`` with
+        more than one k runs ``'split_exact'``, which refits for every
+        permutation: on data where ``'auto'`` would pick ``'split_nb'`` the
+        default call costs much more than ``k=1, test_method='split_nb'``.
     test_method : str, default 'auto'
         Test method: ``'auto'``, ``'raw_perm'``, ``'split_nb'``,
         ``'split_exact'``, ``'score'``, or ``'e'``.
@@ -639,9 +720,9 @@ def pls1_confirmatory_test(
         ``'auto'`` runs ``'split_exact'`` or ``'split_nb'``, chosen once per
         call from X and ``weights`` (never y), and ``result.test_method`` says
         which ran. It picks ``'split_exact'`` when the ``'split_nb'``
-        auto-gate flags the design (validity), when ``n_eff`` is below 250
-        (power), or, at ``k=1`` without ``keep``, when p exceeds 100 times n
-        (cost: there ``'split_exact'`` costs about as much as ``'split_nb'``
+        auto-gate flags the design (validity), when ``n_eff`` is at or below
+        1000 at ``k=1`` without ``keep`` or below 250 otherwise (power), or,
+        at ``k=1`` without ``keep``, when p exceeds 100 times n (cost: there ``'split_exact'`` costs about as much as ``'split_nb'``
         on very wide X; with ``k >= 2`` or a sparse ``keep`` it refits for
         every permutation and costs more, so this clause does not apply);
         otherwise ``'split_nb'``. The
@@ -656,8 +737,10 @@ def pls1_confirmatory_test(
         relative to p with a flat X spectrum. The auto-gate checks only a
         coarse version of that: it flags a design whose X has 4 columns or
         fewer, whose effective sample size ``n_eff`` is below 25, or whose
-        standardized X (weighted, when ``weights`` is given) has a stable
-        rank below 3. A flagged explicit ``'split_nb'`` request runs
+        X, as the tests read it (standardized once over all rows, weighted
+        when ``weights`` is given, or only centred under
+        ``pre_standardized``), has a stable rank below 3. A flagged explicit
+        ``'split_nb'`` request runs
         ``'split_exact'`` (``n_perm=1000``) instead (``result.test_method`` says so, and Python
         warns). A design that passes the gate is not thereby shown to be in
         the regime above. Pass ``args={'force': True}`` to run
@@ -670,8 +753,9 @@ def pls1_confirmatory_test(
         weights count as none) or the test half is too small.
         ``stable_rank`` is not ``None`` on an explicit ``'split_nb'``
         request, and on an ``"auto"`` request that reached the stable-rank
-        check (p > 4, n_eff ≥ 250, and p ≤ 100·n at ``k=1`` without
-        ``keep``); ``None`` otherwise.
+        check (p > 4, ``n_eff`` above 1000 at ``k=1`` without ``keep``, at
+        least 250 otherwise, and p ≤ 100·n at ``k=1`` without ``keep``);
+        ``None`` otherwise.
     args : dict | None
         Method-specific kwargs (e.g. ``{'n_perm': 500}`` for ``raw_perm``,
         ``{'force': True}`` for ``split_nb``; ``'auto'`` takes ``n_perm`` and
@@ -680,6 +764,33 @@ def pls1_confirmatory_test(
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
         docs/concepts/PLS1/weights.md.
+    covariates : np.ndarray | None, shape (n, p_z) or (n,), default None
+        Covariates to adjust for; a 1-D array is one covariate. An intercept
+        is always added, and a column that is constant or a linear
+        combination of the intercept and earlier columns is dropped. X is
+        standardized first, then X and y are replaced by their (weighted)
+        least-squares residuals on ``[1, Z]`` over all rows. See
+        docs/concepts/PLS1/covariates.md.
+        Taken by ``'split_exact'`` and ``'raw_perm'``, whose null columns
+        are then Freedman–Lane residuals (approximately exact, not exact);
+        ``'auto'`` runs ``'split_exact'``, and ``'split_nb'``, ``'score'``
+        and ``'e'`` raise ``invalid_argument``. With ``gram`` the Gram
+        matrix is adjusted as ``M_Z @ G @ M_Z``, Z having one row per row of
+        ``gram``.
+    null_y : np.ndarray | None, shape (n, B), default None
+        Your own null outcomes, one per column, for ``'split_exact'`` only:
+        the statistic of each column, on the same splits as ``y``, makes the
+        null distribution, and ``p = (#{null >= observed} + 1) / (B + 1)``
+        at one ``k``; over a set the reported p is the min-p p over the set
+        (per-k p in ``pvalues_by_k``).
+        ``args`` then takes no ``n_perm`` (``invalid_args``), and
+        ``covariates`` are refused.
+    ci : bool, default False
+        If True, run an independent resampling pass after the test and fill
+        ``result.ci`` (a ``ConfirmatoryCI``). ``ci`` is beta, not to be
+        trusted yet: it scales each half with its own moments, while the
+        held-out tests scale once over all rows, so it does not estimate
+        exactly what they report.
     n_boot : int | None, default None
         Number of subsampling resamples for the ``ci`` branch. ``None`` uses
         the engine default, 1000. Inert when ``ci=False``.
@@ -700,16 +811,41 @@ def pls1_confirmatory_test(
         default, 0.01. The CI loop fails with ``PlsKitResamplingDegenerate``
         if ``skipped / total > max_skip_rate``.
     pre_standardized : bool, default False
-        If True, skip standardization — X and y are assumed already zero-mean,
-        unit-variance.
+        If True, X and y are assumed already zero-mean, unit-variance:
+        ``'score'``, the reference fit and the ``ci`` branch use them exactly
+        as given, with no centring or scaling. In ``'split_exact'``,
+        ``'split_nb'`` (and its gate), ``'e'`` and ``'raw_perm'`` the flag
+        skips the one standardization of X over all rows. Without it, X is
+        divided once by its column standard deviations over all ``n`` rows
+        (weighted when ``weights`` is given). Either way each split or fold
+        centres its training part with its own means and its held-out part
+        with the training means, and nothing is scaled per split.
     seed : int | None
         RNG seed.
+    gram : GramMatrixResult | np.ndarray | None
+        The Gram matrix of X in place of ``X``: ``gram_matrix(X)``'s result,
+        or an ``(n, n)`` array ``X̃ @ X̃.T`` with ``n_features``. It is centred
+        over its rows (so ``result.subset(rows)`` is accepted) and checked on
+        its entries, and every method runs from it: on
+        ``gram_matrix(X, pre_standardized=flag)`` the result equals the call
+        on ``X`` with ``pre_standardized=flag`` at the same seed, to
+        rounding. ``'score'`` reads the centred matrix, so there it equals
+        the call on ``X`` centred over all rows. ``pre_standardized`` is read
+        from the result (passing ``True`` raises ``invalid_argument``); with
+        an array it says how ``X̃`` was scaled. ``weights``, ``ci=True`` and
+        ``k`` above 10 raise ``invalid_argument``.
+    n_features : int | None
+        The column count of ``X̃``, required with an array ``gram`` and
+        refused with a ``GramMatrixResult``, which records it.
     """
+    if isinstance(k, range):
+        k = list(k)
     return _call("pls1_confirmatory_test", X=X, y=y, k=k, test_method=test_method,
                  args=args, ci=ci, n_boot=n_boot, m_rate=m_rate, level=level,
                  max_failure_rate=max_failure_rate, pre_standardized=pre_standardized,
                  seed=seed, verbose=verbose, weights=weights,
-                 max_skip_rate=max_skip_rate)
+                 max_skip_rate=max_skip_rate, covariates=covariates,
+                 null_y=null_y, gram=gram, n_features=n_features)
 
 
 @_convert_errors
@@ -717,29 +853,33 @@ def split_nb_gate(
     X: np.ndarray,
     *,
     weights: np.ndarray | None = None,
+    pre_standardized: bool = False,
 ) -> SplitNbGateResult:
     """Ask whether the ``split_nb`` auto-gate flags a design, without testing.
 
     Reports the decision ``pls1_confirmatory_test`` and the ``find_k``
-    functions make internally, so you can see it before paying for a run.
-    ``fires=True`` means a ``'split_nb'`` request on this X reroutes to
-    ``'split_exact'`` unless you pass ``args={'force': True}``.
-
-    Standardizes X itself (weighted moments when ``weights`` is
-    given), as the embedded gates do. Only X and the weights enter the rule —
-    y does not.
+    functions make on a call with the same ``pre_standardized``, so you can
+    see it before paying for a run. ``fires=True`` means a ``'split_nb'``
+    request on this X reroutes to ``'split_exact'`` unless you pass
+    ``args={'force': True}``. Only X and the weights enter the rule; y does
+    not.
 
     Parameters
     ----------
     X : np.ndarray, shape (n, p)
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
+    pre_standardized : bool, default False
+        If True, X is read as given and only centred, as the tests read it
+        under the same flag. Without it, X is standardized once over all
+        rows (weighted moments when ``weights`` is given).
 
     Returns
     -------
     SplitNbGateResult
     """
-    return _call("split_nb_gate", X=X, weights=weights)
+    return _call("split_nb_gate", X=X, weights=weights,
+                 pre_standardized=pre_standardized)
 
 
 @_convert_errors
@@ -753,6 +893,7 @@ def pls1_find_k_optimal(
     seed: int | None = None,
     verbose: bool = False,
     weights: np.ndarray | None = None,
+    covariates: np.ndarray | None = None,
 ) -> FindKOptimalResult:
     """Select the optimal number of PLS1 components K*.
 
@@ -784,8 +925,16 @@ def pls1_find_k_optimal(
         (for ``split_nb``/``split_exact``), ``force`` (for ``split_nb``).
         Diagnostic keys require ``diagnostic`` to be set.
     pre_standardized : bool, default False
-        If True, skip standardization — X and y are assumed already zero-mean,
-        unit-variance.
+        If True, the cross-validation folds of ``'r2_se'`` and ``'r2_max'``
+        read X as given and only centre each part, the training rows with
+        their own means and the held-out rows with those same means.
+        Without the flag the folds read X divided once by its column
+        standard deviations over all rows (weighted when ``weights`` is
+        given), and centre each part. Each fold standardizes y either way,
+        and ``'bic'`` standardizes X itself either way. For the
+        ``diagnostic`` the flag governs the ``'split_nb'`` gate and step 1;
+        steps from 2 on test the deflated residual on the scale step 1
+        used, as in ``pls1_find_k_sequence``.
     seed : int | None
         RNG seed.
     verbose : bool, default False
@@ -794,6 +943,10 @@ def pls1_find_k_optimal(
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
         docs/concepts/PLS1/weights.md.
+    covariates : np.ndarray | None, shape (n, p_z) or (n,), default None
+        Covariates removed from X and y before selection, as in
+        ``pls1_fit``; the diagnostic follows the ``pls1_confirmatory_test``
+        rules for covariates.
 
     Returns
     -------
@@ -801,7 +954,7 @@ def pls1_find_k_optimal(
     """
     return _call("pls1_find_k_optimal", X=X, y=y, k_max=k_max, selector=selector,
                  diagnostic=diagnostic, args=args, pre_standardized=pre_standardized,
-                 seed=seed, verbose=verbose, weights=weights)
+                 seed=seed, verbose=verbose, weights=weights, covariates=covariates)
 
 
 @_convert_errors
@@ -815,6 +968,7 @@ def pls1_find_k_sequence(
     seed: int | None = None,
     verbose: bool = False,
     weights: np.ndarray | None = None,
+    covariates: np.ndarray | None = None,
 ) -> FindKSequenceResult:
     """Select K* via a sequential closed test on the PLS1 component chain.
 
@@ -840,7 +994,7 @@ def pls1_find_k_sequence(
         design; ``'split_nb'`` is the cheaper asymptotic alternative, meant
         for n large relative to p with a flat X spectrum. Its auto-gate flags
         only X with 4 columns or fewer, ``n_eff`` below 25, or a stable rank
-        of the standardized X below 3 (see ``pls1_confirmatory_test``), and
+        of X as the tests read it below 3 (see ``pls1_confirmatory_test``), and
         is evaluated once for the whole sequence: a flagged explicit
         ``'split_nb'`` request runs ``'split_exact'`` for every step and
         ``result.test_method`` says so.
@@ -848,13 +1002,17 @@ def pls1_find_k_sequence(
         Significance threshold for rejection. ``None`` uses the engine
         default, 0.05.
     args : dict | None
-        Method-specific kwargs (e.g. ``{'n_splits': 50}``, or
+        Method-specific kwargs (e.g. ``{'n_splits': 32}``, or
         ``{'force': True}`` to run ``split_nb`` past the auto-gate;
         ``'auto'`` takes ``n_perm`` and ``n_splits`` only, and ``n_perm`` is
         ignored when ``'split_nb'`` runs).
     pre_standardized : bool, default False
-        If True, skip standardization — X and y are assumed already zero-mean,
-        unit-variance.
+        Governs the ``'split_nb'`` gate and step 1. Without the flag, X and y
+        are standardized once over all rows (weighted when ``weights`` is
+        given); with it, they are used as given. Either way each test only
+        centres its training part with its own means and its held-out part
+        with the training means. Steps from 2 on test the deflated
+        residual on the scale step 1 used, each part only centred.
     seed : int | None
         RNG seed.
     verbose : bool, default False
@@ -863,6 +1021,10 @@ def pls1_find_k_sequence(
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
         docs/concepts/PLS1/weights.md.
+    covariates : np.ndarray | None, shape (n, p_z) or (n,), default None
+        Covariates removed from X and y before selection, as in
+        ``pls1_fit``; each step's test follows the ``pls1_confirmatory_test``
+        rules for covariates.
 
     Returns
     -------
@@ -870,7 +1032,7 @@ def pls1_find_k_sequence(
     """
     return _call("pls1_find_k_sequence", X=X, y=y, k_max=k_max, test_method=test_method,
                  alpha=alpha, args=args, pre_standardized=pre_standardized, seed=seed,
-                 verbose=verbose, weights=weights)
+                 verbose=verbose, weights=weights, covariates=covariates)
 
 
 @_convert_errors
@@ -882,6 +1044,7 @@ def spls1_fit(
     *,
     pre_standardized: bool = False,
     weights: np.ndarray | None = None,
+    covariates: np.ndarray | None = None,
 ) -> PLS1Result:
     """Fit a sparse PLS1 model (hard keep-count selection on the weight vector).
 
@@ -906,6 +1069,8 @@ def spls1_fit(
         If True, skip standardization.
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights; ``None`` means uniform.
+    covariates : np.ndarray | None, shape (n, p_z) or (n,), default None
+        As on ``pls1_fit``.
 
     Returns
     -------
@@ -915,7 +1080,8 @@ def spls1_fit(
         (post-selection inference); see ``docs/concepts/PLS1/sparse.md``.
     """
     return _call("spls1_fit", X=X, y=y, k=k, keep=keep,
-                 pre_standardized=pre_standardized, weights=weights)
+                 pre_standardized=pre_standardized, weights=weights,
+                 covariates=covariates)
 
 
 @_convert_errors
@@ -928,6 +1094,7 @@ def spls1_find_keep_optimal(
     seed: int | None = None,
     verbose: bool = False,
     weights: np.ndarray | None = None,
+    covariates: np.ndarray | None = None,
 ) -> FindKeepOptimalResult:
     """Tune the spls1 keep-count at fixed ``k`` (CV R² with the 1-SE rule).
 
@@ -945,7 +1112,7 @@ def spls1_find_keep_optimal(
         Fixed component count for every fit in the sweep.
     args : dict | None
         ``{'n_folds': int}`` (default 5).
-    seed, verbose, weights
+    seed, verbose, weights, covariates
         As on ``pls1_find_k_optimal``.
 
     Returns
@@ -953,7 +1120,7 @@ def spls1_find_keep_optimal(
     FindKeepOptimalResult
     """
     return _call("spls1_find_keep_optimal", X=X, y=y, k=k, args=args, seed=seed,
-                 verbose=verbose, weights=weights)
+                 verbose=verbose, weights=weights, covariates=covariates)
 
 
 @_convert_errors
@@ -967,6 +1134,7 @@ def spls1_find_k_optimal(
     seed: int | None = None,
     verbose: bool = False,
     weights: np.ndarray | None = None,
+    covariates: np.ndarray | None = None,
 ) -> FindKOptimalResult:
     """`pls1_find_k_optimal` with the inner fitter swapped to the sparse fit
     at the caller's fixed ``keep``. Same selectors, diagnostic, and result
@@ -982,7 +1150,7 @@ def spls1_find_k_optimal(
     return _call("spls1_find_k_optimal", X=X, y=y, k_max=k_max, keep=keep,
                  selector=selector, diagnostic=diagnostic, args=args,
                  pre_standardized=pre_standardized, seed=seed, verbose=verbose,
-                 weights=weights)
+                 weights=weights, covariates=covariates)
 
 
 @_convert_errors
@@ -996,6 +1164,7 @@ def spls1_find_k_sequence(
     seed: int | None = None,
     verbose: bool = False,
     weights: np.ndarray | None = None,
+    covariates: np.ndarray | None = None,
 ) -> FindKSequenceResult:
     """`pls1_find_k_sequence` with the inner fitter swapped to the sparse fit
     at the caller's fixed ``keep``: each step deflates on the sparse residual
@@ -1005,7 +1174,7 @@ def spls1_find_k_sequence(
     return _call("spls1_find_k_sequence", X=X, y=y, k_max=k_max, keep=keep,
                  test_method=test_method, alpha=alpha, args=args,
                  pre_standardized=pre_standardized, seed=seed, verbose=verbose,
-                 weights=weights)
+                 weights=weights, covariates=covariates)
 
 
 @_convert_errors
@@ -1017,6 +1186,7 @@ def rotate(
     L: np.ndarray | None = None,
     args: dict | None = None,
     pre_standardized: bool | None = None,
+    covariates: np.ndarray | None = None,
 ):
     """Rotate a `FactorsResult`, a `PLS3Result` or a matrix.
 
@@ -1041,6 +1211,12 @@ def rotate(
         ``True`` uses `X` as given, ``False`` standardizes it. ``None``
         follows the result, or is ``False`` for an array. A mismatch with
         the fit is the caller's responsibility. Refused for a `PLS3Result`.
+    covariates : np.ndarray | None, shape (n, p_z) or (n,), default None
+        Covariates removed from the target: ``M_Z @ Xs @ W``, the
+        least-squares residuals of ``Xs @ W`` on ``[1, Z]``. Required with
+        `X` for a `FactorsResult` made with covariates, refused for one made
+        without them and for a `PLS3Result`; optional for a matrix. Refused
+        without `X`.
 
     Returns
     -------
@@ -1049,7 +1225,7 @@ def rotate(
         that rotation spreads its zeros.
     """
     return _call("rotate", model_or_W=model_or_W, X=X, method=method, L=L,
-                 args=args, pre_standardized=pre_standardized)
+                 args=args, pre_standardized=pre_standardized, covariates=covariates)
 
 
 @_convert_errors
@@ -1074,6 +1250,7 @@ def factors(
     model_or_coef, X: np.ndarray, n: int,
     *,
     pre_standardized: bool | None = None,
+    covariates: np.ndarray | None = None,
 ) -> FactorsResult:
     """Split a coefficient vector into `n` orthogonal parts that sum to it.
 
@@ -1097,14 +1274,20 @@ def factors(
         ``True`` uses `X` as given, ``False`` standardizes it. ``None``
         follows the fit, or is ``False`` for a vector. A mismatch with the
         fit is the caller's responsibility.
+    covariates : np.ndarray | None, shape (N, p_z) or (N,), default None
+        Covariates removed from `X` (standardized without weights, then
+        least-squares residuals on ``[1, Z]``) before the basis is taken.
+        Required for a fit with covariates, refused for a fit without them;
+        optional for a vector, whose source the caller knows.
 
     Returns
     -------
     FactorsResult
         Not rotated, in block order. ``size`` is nonnegative.
+        ``covariate_adjusted`` says whether covariates were removed.
     """
     return _call("factors", model_or_coef=model_or_coef, X=X, n=n,
-                 pre_standardized=pre_standardized)
+                 pre_standardized=pre_standardized, covariates=covariates)
 
 
 @_convert_errors
@@ -1158,7 +1341,8 @@ def profiles(
     model_or_coef : PLS1Result | np.ndarray, shape (D,)
         A fit from `pls1_fit` or `spls1_fit`, or a coefficient vector on the
         standardized scale: ``model.coef``, not ``model.beta``. A weighted
-        fit is refused. With a vector,
+        fit, and a fit with covariates, are refused (use `factors` and
+        `rotate` with ``covariates``). With a vector,
         ``ProfilesResult.model`` is ``None``.
     X : np.ndarray, shape (N, D)
         The data of the fit.
@@ -1191,7 +1375,7 @@ def profiles_search(
     Parameters
     ----------
     model, X, rotation, args :
-        As in `profiles`.
+        As in `profiles`. A model fitted with covariates is refused.
     y : np.ndarray, shape (n,)
         The outcome of the fit.
     n_max : int, default 9
@@ -1217,11 +1401,16 @@ def pls1_perm_null(
     seed: int | None = None,
     verbose: bool = False,
     weights: np.ndarray | None = None,
+    covariates: np.ndarray | None = None,
 ) -> PermNullResult:
     """Permutation-null engine for PLS1 β. Signed per-voxel z + optional perm matrix.
 
     Pair with `pls1_confirmatory_test(test_method="split_exact")` as an omnibus gate
     before spending the `n_perm` permutation budget at fMRI scale.
+
+    It takes X, not a Gram matrix: its per-feature outputs need X. A caller
+    who holds only the Gram matrix gets the dual coefficients of the fit from
+    `pls1_perm_alpha`.
 
     Parameters
     ----------
@@ -1248,20 +1437,24 @@ def pls1_perm_null(
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are NOT permuted — `w[i]` stays tied to row `i` regardless
         of which `y` value lands there under the permutation.
+    covariates : np.ndarray | None, shape (n, p_z) or (n,), default None
+        Covariates removed from X and y as in ``pls1_fit``; the null
+        columns are Freedman–Lane residuals and the β maps are computed on
+        the adjusted X.
     """
     return _call("pls1_perm_null", X=X, y=y, k=k, n_perm=n_perm,
                  return_perm_matrix=return_perm_matrix,
                  pre_standardized=pre_standardized, seed=seed, verbose=verbose,
-                 weights=weights)
+                 weights=weights, covariates=covariates)
 
 
 @_convert_errors
 def pls1_perm_alpha(
-    gram: np.ndarray,
+    gram: GramMatrixResult | np.ndarray,
     Y: np.ndarray,
     k: int = 1,
     *,
-    n_features: int,
+    n_features: int | None = None,
 ) -> PermAlphaResult:
     """PLS1 dual coefficients for many outcomes, from a Gram matrix.
 
@@ -1273,32 +1466,69 @@ def pls1_perm_alpha(
 
     Parameters
     ----------
-    gram : np.ndarray, shape (n, n)
+    gram : GramMatrixResult | np.ndarray, shape (n, n)
+        A ``GramMatrixResult`` (``gram_matrix(X)``, or its
+        ``subset(rows)``): centred over its rows first, then checked for a
+        non-negative diagonal, symmetry and
+        ``|gram[i, j]| <= sqrt(gram[i, i] * gram[j, j])``, so a subset and
+        a matrix built under ``pre_standardized`` are accepted; ``X̃`` is
+        then its rows of ``X̃`` centred by their own means. Or an array
         ``X̃ @ X̃.T`` for a block whose columns are centred and scaled as
         ``plskit.preprocess`` scales them (sum of squares ``n``), computed in
-        float64. Checked for a non-negative diagonal (exactly) and for
-        symmetry, ``|gram[i, j]| <= sqrt(gram[i, i] * gram[j, j])``,
+        float64, which is not centred here and gets every check: a
+        non-negative diagonal (exactly), symmetry,
+        ``|gram[i, j]| <= sqrt(gram[i, i] * gram[j, j])``,
         ``trace(gram) <= n * n_features`` and row sums near zero, each to
-        rounding; ``PlsKitError(code="invalid_input")`` otherwise.
+        rounding. ``PlsKitError(code="invalid_input")`` when a check fails.
     Y : np.ndarray, shape (n, m)
         One raw outcome per column; each column is standardized inside.
     k : int, default 1
-        Number of components. Only ``1`` is accepted.
-    n_features : int
+        Number of components, 1 to 10.
+    n_features : int | None
         Number of columns of ``X̃`` summed into ``gram``, constant ones
-        included.
+        included. Required with an array ``gram``, refused with a
+        ``GramMatrixResult``, which records it.
 
     Returns
     -------
     PermAlphaResult
-        ``resolved[j]`` is False, ``alpha[:, j]`` NaN and ``k_used[j]`` 0
-        where the fit of column ``j`` cannot be certified from ``gram``
-        alone. The zero model (a zero column with ``k_used[j] = 0``) comes
+        Each fit, its truncation included, is decided from ``gram`` alone.
+        The zero model (a zero column with ``k_used[j] = 0``) comes
         from an outcome that standardizes to exact zeros (all zeros, or a
         constant whose computed mean is exact), and from a ``gram`` whose
         every entry is exactly zero (every outcome then gets it).
     """
     return _call("pls1_perm_alpha", gram=gram, Y=Y, k=k, n_features=n_features)
+
+
+@_convert_errors
+def gram_matrix(X: np.ndarray, *, pre_standardized: bool = False) -> GramMatrixResult:
+    """The all-row Gram matrix of `X` as the held-out tests read it.
+
+    ``gram = X̃ @ X̃.T``, where ``X̃`` is `X` centred over all rows and
+    divided by its column standard deviations (population, as
+    `preprocess` scales them), or only centred when ``pre_standardized``.
+    These are the bits the held-out tests compute from `X` without
+    weights, so the matrix can be computed once and reused across calls.
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (n, d)
+        At least 2 rows and 1 column; NaN or infinity raises
+        ``PlsKitError(code="non_finite_input")``. No columns, or a Gram
+        matrix that overflows (entries of about 1e154 or more under
+        ``pre_standardized``), raises ``PlsKitError(code="invalid_input")``.
+    pre_standardized : bool, default False
+        If True, `X` is read as given and only centred.
+
+    Returns
+    -------
+    GramMatrixResult
+        ``gram`` ``(n, n)``, ``n_features`` (``d``) and
+        ``pre_standardized``. ``result.subset(rows)`` gives the Gram matrix
+        of a row subsample on the same all-row centring and scale.
+    """
+    return _call("gram_matrix", X=X, pre_standardized=pre_standardized)
 
 
 __all__ = [
@@ -1314,6 +1544,7 @@ __all__ = [
     "spls1_find_k_sequence",
     "pls1_perm_null",
     "pls1_perm_alpha",
+    "gram_matrix",
     "rotate",
     "factors",
     "pca_basis",

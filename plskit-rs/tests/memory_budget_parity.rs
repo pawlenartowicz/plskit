@@ -182,8 +182,10 @@ fn pls1_test(
         ConfirmatoryTestInput::Raw {
             x: x.as_ref(),
             y: y.as_ref(),
-            k,
+            k: Some(&[k]),
             weights: weights.map(Col::as_ref),
+            covariates: None,
+            null_y: None,
         },
         ConfirmatoryTestOpts {
             args,
@@ -249,10 +251,11 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
     let split_copy = split_blocks(PP);
     let fold_copy = fold_blocks(PP);
     let fold_fit_copy = copy(P_FOLD_TR, PP);
-    // A Gram-route unit: `G` (`n_tr × n_tr`), `M` (`n_te × n_tr`) and the
-    // stream blocks.
+    // A Gram-route unit: `G` (`n_tr × n_tr`), `M` (`n_te × n_tr`) and, on
+    // a split, the stream blocks; a fold takes its `G` and `M` from the
+    // all-row Gram matrix.
     let split_gram = split_blocks(P_SPLIT_TR) + stream_blocks(P_SPLIT_TR, PN - P_SPLIT_TR);
-    let fold_gram = fold_blocks(P_FOLD_TR) + stream_blocks(P_FOLD_TR, PN - P_FOLD_TR);
+    let fold_gram = fold_blocks(P_FOLD_TR);
     let wide_fold_copy = fold_blocks(PP_WIDE);
     let lv1_pls3 = lv1(PP, PQ);
     let raw_perm = |n_perm, n_folds| ConfirmatoryArgs::RawPerm { n_perm, n_folds };
@@ -284,12 +287,12 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
                 ))
             },
         ),
-        // `split_nb_correlations_nr`'s second pass: a constant X leaves
-        // every split undecided: the halves of X and one PLS1 fit. Its first
-        // pass runs one split at a time at this budget.
+        // `split_nb_correlations_nr` on route G, which decides a constant X
+        // from the blocks of the gate's Gram matrix: each split's `K_A`
+        // (`20 × 20`) and `M` (`20 × 20`).
         case(
             "pls1 split_nb k=1 constant X",
-            split_copy + pls1_fit_bytes(PP, 1),
+            2 * copy(P_SPLIT_TR, P_SPLIT_TR),
             2,
             move || split_nb_out(&pls1_test(&d.xc, y, 1, None, SPLIT_NB, None, 13)),
         ),
@@ -303,22 +306,19 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
             2,
             move || format!("{:?}", pls1_test(x, y, 2, None, SPLIT_EXACT, None, 14)),
         ),
-        // The no-refit route's first pass on route B (20·20·(400 + 20) <
-        // 40·400·20): the stream blocks and `M`. A random X leaves nothing
-        // for `fill_pending`.
+        // The no-refit route on route G (`40²·400/2 + 5·800·20` multiply-adds
+        // against route A's `5·40·400·20`): each split's `K_A` and `M`.
         case(
             "split_exact k=1",
-            stream_blocks(P_SPLIT_TR, PN - P_SPLIT_TR) + copy(PN - P_SPLIT_TR, P_SPLIT_TR),
+            2 * copy(P_SPLIT_TR, P_SPLIT_TR),
             2,
             move || format!("{:?}", pls1_test(x, y, 1, None, SPLIT_EXACT, None, 15)),
         ),
-        // `split_perm_nr_zbars`' second pass: every split undecided. The
-        // halves of X and one PLS1 fit per thread (19 + 1 columns); sized on
-        // the pool of 4, so the pool of 1 runs three units. Its first pass
-        // runs one split at a time at this budget.
+        // The same route on a constant X, which route G decides as the zero
+        // model on every split.
         case(
             "split_exact k=1 constant X",
-            split_copy + MAX_THREADS * pls1_fit_bytes(PP, 1),
+            2 * copy(P_SPLIT_TR, P_SPLIT_TR),
             2,
             move || format!("{:?}", pls1_test(&d.xc, y, 1, None, SPLIT_EXACT, None, 16)),
         ),
@@ -403,24 +403,22 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
             2,
             move || split_nb_out(&pls3_test(&d.x3, &d.y3, SPLIT_NB, Some(40), None, 21)),
         ),
-        // The streamed route's first pass: the stream blocks and one LV1
-        // fit. A random X leaves nothing for `fill_pending`.
+        // The streamed route: the stream blocks and one LV1 fit.
         case(
             "pls3 split_nb dense",
             stream_blocks(P_SPLIT_TR, PN - P_SPLIT_TR) + lv1_pls3,
             2,
             move || split_nb_out(&pls3_test(&d.x3, &d.y3, SPLIT_NB, None, None, 22)),
         ),
-        // `pls3_split_lv_correlations_streamed`' second pass: every split
-        // undecided. Its first pass runs one split at a time at this budget.
+        // The streamed route on a constant X: every split is the zero model.
         case(
             "pls3 split_nb dense constant X",
-            split_copy + lv1_pls3,
+            stream_blocks(P_SPLIT_TR, PN - P_SPLIT_TR) + lv1_pls3,
             2,
             move || split_nb_out(&pls3_test(&d.xc, &d.y3, SPLIT_NB, None, None, 23)),
         ),
-        // `pls3_split_zbars_columns`' first pass (the Gram route, 20·(60 +
-        // 400) < 400·60).
+        // `pls3_split_zbars_columns` (the Gram route, 20·(60 + 400) <
+        // 400·60).
         case("pls3 split_exact dense", split_gram, 2, move || {
             format!("{:?}", pls3_test(&d.x3, &d.y3, SPLIT_EXACT, None, None, 24))
         }),
@@ -438,14 +436,11 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
                 )
             },
         ),
-        // Both passes of `pls3_split_zbars_columns`. On a constant X the
-        // dense arm decides every column (exactly 0); a sparse Y side falls
-        // back at its selection band (every `|v|` is 0), so every column
-        // of every split is pending. Pass 1 runs four units at this budget,
-        // pass 2 two (three on the pool of 1).
+        // `pls3_split_zbars_columns` on a constant X with a sparse Y side:
+        // every column is the zero model.
         case(
             "pls3 split_exact constant X wide keep_y=1",
-            split_gram.max(split_blocks(PP_WIDE) + MAX_THREADS * lv1(PP_WIDE, PQ)),
+            split_gram,
             2,
             move || {
                 format!(
@@ -477,6 +472,7 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
                     x.as_ref(),
                     y.as_ref(),
                     2,
+                    None,
                     None,
                     FindKeepOptimalOpts {
                         n_folds: P_UNITS,
@@ -521,6 +517,7 @@ fn find_k(
         y.as_ref(),
         2,
         w.map(Col::as_ref),
+        None,
         FindKOptimalOpts {
             selector: Selector::R2Se,
             n_folds: P_UNITS,
@@ -552,6 +549,7 @@ fn bad_budget_message(x: &Mat<f64>, y: &Col<f64>) -> String {
         x.as_ref(),
         y.as_ref(),
         KSpec::Fixed(2),
+        None,
         None,
         FitOpts::default(),
     ) {

@@ -45,6 +45,7 @@ TITLES = {
     "pls1_perm_null": "Permutation null of PLS1 coefficients",
     "pls3_confirmatory_test": "Confirmatory test of a PLS3 signal",
     "pls1_perm_alpha": "Dual coefficients of PLS1 fits from a Gram matrix",
+    "gram_matrix": "The all-row Gram matrix the held-out tests compute",
     "rotate": "Rotate a factors result, a PLS3 model or a weight matrix",
     "factors": "Split a coefficient vector into factors on the basis of X",
     "pca_basis": "Right singular vectors of a standardized matrix",

@@ -41,6 +41,6 @@ end
 @testset "a failing call restores Python's filters too" begin
     X, y = pls1_data()
     before = pylen(pyimport("warnings").filters)
-    @test plskit_error(() -> pls1_fit(X, y[1:59])).code === :dimension_mismatch
+    @test plskit_error(() -> pls1_fit(X, y[1:59]; k=1)).code === :dimension_mismatch
     @test pylen(pyimport("warnings").filters) == before
 end

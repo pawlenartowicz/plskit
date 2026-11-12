@@ -3,7 +3,7 @@
 
 d <- make_xy()
 test_fn <- function(seed) {
-  pls1_confirmatory_test(d$X, d$y, test_method = "split_exact",
+  pls1_confirmatory_test(d$X, d$y, k = 1L, test_method = "split_exact",
                          args = list(n_perm = 100, n_splits = 5), seed = seed)
 }
 

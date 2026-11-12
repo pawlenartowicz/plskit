@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 import numpy as np
+
+from plskit._errors import PlsKitError
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,8 @@ class PLS1Result:
     n_eff: float
     selection_result: FindKOptimalResult | FindKSequenceResult | None = None
     keep: int | None = None          # spls1 keep-count; None for dense pls1_fit
+    covariate_coef: np.ndarray | None = None  # (p_z,); 0 at a dropped (aliased) column; None without covariates
+    n_covariates: int | None = None  # rank([1, Z]) - 1; None without covariates
 
 
 @dataclass(frozen=True)
@@ -85,10 +89,12 @@ class ConfirmatoryCI:
 
 @dataclass(frozen=True)
 class ConfirmatoryTestResult:
-    pvalue: float
-    statistic: float
+    pvalue: float             # for a set of k, the min-p combined p over the set
+    statistic: float | None   # None for a set of more than one k
     test_method: str          # what actually ran, never "auto": "raw_perm" | "split_nb" | "split_exact" | "score" | "e"
-    k: int                    # the K tested
+    k: list[int]              # the tested set, sorted ascending; one k gives a one-element list
+    pvalues_by_k: dict[int, float]     # each k's unadjusted per-k p
+    statistics_by_k: dict[int, float]  # each k's statistic
     n_perm: int | None
     n_splits: int | None
     seed: int
@@ -99,13 +105,16 @@ class ConfirmatoryTestResult:
     # interpretation to offer), and None for "split_nb" itself when the
     # weights are non-uniform or the test half is too small.
     rho_hat: float | None = None
-    # Stable rank of the standardized X, as seen by the split_nb auto-gate.
-    # Not None on an explicit "split_nb" request — whether the gate fired or
-    # not, and also under args={"force": True} — and on an "auto" request
-    # that reached the stable-rank check (p > 4, n_eff >= 250, and, on a
-    # PLS1 request at k=1 without keep, p <= 100*n); None otherwise.
+    # Stable rank of X as the split_nb auto-gate read it (standardized once
+    # over all rows, or only centred under pre_standardized).
+    # Not None on an explicit "split_nb" request (whether the gate fired or
+    # not, and also under args={"force": True}), and on a PLS1 "auto"
+    # request with one k that reached the stable-rank check (p > 4, n_eff above 1000 at k=1
+    # without keep, at least 250 otherwise, and, at k=1 without keep, p <= 100*n); None otherwise, and on every
+    # pls3_confirmatory_test "auto" request.
     stable_rank: float | None = None
     ci: ConfirmatoryCI | None = None
+    n_covariates: int | None = None  # rank([1, Z]) - 1; None without covariates
 
 
 @dataclass(frozen=True)
@@ -119,11 +128,13 @@ class FindKOptimalResult:
     diagnostic: str | None   # which diagnostic actually ran; a flagged "split_nb" reads "split_exact"
     seed: int
     n_eff: float = float("nan")
-    # Stable rank of the standardized X, as the sequence-level auto-gate saw
-    # it. Same meaning as on ConfirmatoryTestResult: not None whenever
+    # Stable rank of X as the sequence-level auto-gate read it (standardized
+    # once over all rows, or only centred under pre_standardized). Same
+    # meaning as on ConfirmatoryTestResult: not None whenever
     # "split_nb" was the REQUESTED diagnostic, fired or not, including under
     # args={"force": True}. None otherwise, and None when no diagnostic ran.
     stable_rank: float | None = None
+    n_covariates: int | None = None  # rank([1, Z]) - 1; None without covariates
 
 
 @dataclass(frozen=True)
@@ -136,15 +147,17 @@ class FindKSequenceResult:
     n_eff: float = float("nan")
     # As on ConfirmatoryTestResult: not None on an explicit "split_nb"
     # request, and on an "auto" request that reached the stable-rank check
-    # (p > 4, n_eff >= 250, and p <= 100*n without keep); None otherwise.
+    # (p > 4, n_eff above 1000 without keep, at least 250 with it, and
+    # p <= 100*n without keep); None otherwise.
     stable_rank: float | None = None
+    n_covariates: int | None = None  # rank([1, Z]) - 1; None without covariates
 
 
 @dataclass(frozen=True)
 class SplitNbGateResult:
     """Output of `split_nb_gate` — what the auto-gate sees on a design."""
     fires: bool               # True → an explicit "split_nb" request here reroutes to "split_exact"
-    stable_rank: float        # stable rank of the standardized X; NaN when its Gram matrix is not finite (the gate then fires)
+    stable_rank: float        # stable rank of X as the tests read it (standardized, or only centred under pre_standardized); NaN when its Gram matrix is not finite (the gate then fires)
     n_eff: float              # Kish's effective sample size; equals n for uniform/absent weights
 
 
@@ -158,6 +171,7 @@ class FindKeepOptimalResult:
     keep_grid: list[int]      # the grid actually swept (geometric, endpoints 1 and n_features); [] when keep_star == 0
     seed: int
     n_eff: float = float("nan")
+    n_covariates: int | None = None  # rank([1, Z]) - 1; None without covariates
 
 
 @dataclass(frozen=True)
@@ -181,6 +195,7 @@ class PermNullResult:
     beta_perm_z: np.ndarray         # shape (D,); signed = β_ref / β_perm_sd
     beta_perm_matrix: np.ndarray | None  # shape (n_perm, D) when return_perm_matrix=True
     n_eff: float = float("nan")
+    n_covariates: int | None = None  # rank([1, Z]) - 1; None without covariates
 
 
 @dataclass(frozen=True)
@@ -189,16 +204,54 @@ class PermAlphaResult:
 
     Column `j` of `alpha` gives `coef = X̃.T @ alpha[:, j]` on the
     standardized scale (`PLS1Result.coef`), for the block `X̃` whose Gram
-    matrix was passed. Where `resolved[j]` is False the fit cannot be
-    certified from the Gram matrix alone: `alpha[:, j]` is NaN and
-    `k_used[j]` is 0; refit that column with `pls1_fit` on the raw block `X`
-    that `X̃` standardizes.
+    matrix was passed. Each fit, its truncation included, is decided from
+    the Gram matrix alone.
     """
     alpha: np.ndarray       # shape (n, m)
-    k_used: np.ndarray      # shape (m,), int64; k where resolved, 0 for a zero model (an outcome that standardizes to exact zeros, i.e. all zeros or a constant whose computed mean is exact, or every outcome on a `gram` whose every entry is exactly zero) and for an unresolved column
-    resolved: np.ndarray    # shape (m,), bool
+    k_used: np.ndarray      # shape (m,), int64; k, fewer when the fit stops at a truncation exit, 0 for a zero model (an outcome that standardizes to exact zeros, i.e. all zeros or a constant whose computed mean is exact, or every outcome on a `gram` whose every entry is exactly zero)
     k: int
     n_features: int
+
+
+@dataclass(frozen=True)
+class GramMatrixResult:
+    """Output of `gram_matrix`: the all-row Gram matrix of `X` as the held-out tests read it.
+
+    Pass it as ``gram=`` to `pls1_confirmatory_test`, `pls3_confirmatory_test`
+    and `pls1_perm_alpha` in place of `X`.
+    """
+    gram: np.ndarray        # shape (n, n); X̃ @ X̃.T, X̃ = X centred over all rows and divided by its column SDs (population), or only centred under pre_standardized
+    n_features: int         # columns of X, constant columns included
+    pre_standardized: bool  # whether X was read as given (only centred)
+
+    def subset(self, rows) -> GramMatrixResult:
+        """``gram[rows][:, rows]``, with the same ``n_features`` and
+        ``pre_standardized``: the Gram matrix of the rows ``rows`` of ``X̃``,
+        which keep the all-row centring and scale (they are not re-centred).
+
+        ``rows`` are 0-based row indices, in the order given; a repeated row
+        is repeated. Raises ``PlsKitError(code="invalid_argument")`` when
+        ``rows`` is not a 1-D sequence of integers in ``0 .. n - 1``, or
+        holds fewer than 2 entries.
+        """
+        idx = np.asarray(rows)
+        n = self.gram.shape[0]
+        if idx.ndim != 1 or (idx.size and idx.dtype.kind not in "iu"):
+            raise PlsKitError(
+                "rows must be a 1-D sequence of integer row indices",
+                code="invalid_argument",
+            )
+        if idx.size < 2:
+            raise PlsKitError(
+                f"rows must hold at least 2 rows, got {idx.size}",
+                code="invalid_argument",
+            )
+        if idx.min() < 0 or idx.max() >= n:
+            raise PlsKitError(
+                f"rows must index the {n} rows of the Gram matrix",
+                code="invalid_argument",
+            )
+        return replace(self, gram=self.gram[np.ix_(idx, idx)])
 
 
 @dataclass(frozen=True)
@@ -279,6 +332,7 @@ class FactorsResult:
     coef: np.ndarray                   # (D,); the input, carried for `rotate`
     pre_standardized: bool             # whether the X it was made from was used as given
     rotation_spec: RotationSpec | None = None   # None until rotated
+    covariate_adjusted: bool = False   # whether covariates were removed from X before the basis was taken
 
 
 @dataclass(frozen=True)

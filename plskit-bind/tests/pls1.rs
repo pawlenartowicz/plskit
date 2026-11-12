@@ -21,13 +21,16 @@ fn unknown_function_is_invalid_argument() {
 #[test]
 fn missing_or_null_required_argument() {
     let (x, _) = data(60, 6, 1);
-    let e = err("pls1_fit", vec![("X", x.clone())]);
+    let e = err("pls1_fit", vec![("X", x.clone()), ("k", Value::I64(1))]);
     assert!(
         e.message.contains("missing required argument 'y'"),
         "{}",
         e.message
     );
-    let e = err("pls1_fit", vec![("X", x), ("y", Value::Null)]);
+    let e = err(
+        "pls1_fit",
+        vec![("X", x), ("y", Value::Null), ("k", Value::I64(1))],
+    );
     assert_eq!(e.code, "invalid_argument");
 }
 
@@ -123,9 +126,17 @@ fn null_optional_argument_takes_its_default() {
 
     let a = ok(
         "pls1_fit",
-        vec![("X", x.clone()), ("y", y.clone()), ("k", Value::Null)],
+        vec![
+            ("X", x.clone()),
+            ("y", y.clone()),
+            ("k", Value::Null),
+            ("seed", Value::U64(1)),
+        ],
     );
-    let b = ok("pls1_fit", vec![("X", x), ("y", y)]);
+    let b = ok(
+        "pls1_fit",
+        vec![("X", x), ("y", y), ("seed", Value::U64(1))],
+    );
     assert!(same(&a.result, &b.result));
 }
 
@@ -263,7 +274,11 @@ fn engine_errors_keep_their_code_and_details() {
     data[0] = f64::NAN;
     let nan_x = Value::Mat(MatF64::Owned { data, nrows, ncols });
     assert_eq!(
-        err("pls1_fit", vec![("X", nan_x), ("y", y.clone())]).code,
+        err(
+            "pls1_fit",
+            vec![("X", nan_x), ("y", y.clone()), ("k", Value::I64(1))]
+        )
+        .code,
         "non_finite_input"
     );
 
@@ -274,6 +289,7 @@ fn engine_errors_keep_their_code_and_details() {
         vec![
             ("X", x),
             ("y", y),
+            ("k", Value::I64(1)),
             ("weights", Value::Vec(VecF64::Owned(w))),
         ],
     );
@@ -337,6 +353,7 @@ fn bool_vectors_are_data_and_bool_flags_stay_flags() {
         vec![
             ("X", x.clone()),
             ("y", Value::BoolVec(y_bool)),
+            ("k", Value::I64(1)),
             ("weights", Value::BoolVec(vec![true; 60])),
         ],
     );
@@ -345,6 +362,7 @@ fn bool_vectors_are_data_and_bool_flags_stay_flags() {
         vec![
             ("X", x.clone()),
             ("y", Value::Vec(VecF64::Owned(y_01))),
+            ("k", Value::I64(1)),
             ("weights", Value::Vec(VecF64::Owned(vec![1.0; 60]))),
         ],
     );
@@ -352,7 +370,11 @@ fn bool_vectors_are_data_and_bool_flags_stay_flags() {
 
     let e = err(
         "pls1_fit",
-        vec![("X", Value::BoolVec(vec![true; 60])), ("y", y.clone())],
+        vec![
+            ("X", Value::BoolVec(vec![true; 60])),
+            ("y", y.clone()),
+            ("k", Value::I64(1)),
+        ],
     );
     assert_eq!(e.code, "invalid_argument");
     assert_eq!(e.message, "X must be 2-D, got 1-D");
@@ -362,6 +384,7 @@ fn bool_vectors_are_data_and_bool_flags_stay_flags() {
         vec![
             ("X", x),
             ("y", y),
+            ("k", Value::I64(1)),
             ("pre_standardized", Value::BoolVec(vec![true, false])),
         ],
     );
@@ -371,4 +394,54 @@ fn bool_vectors_are_data_and_bool_flags_stay_flags() {
         "{}",
         e.message
     );
+}
+
+// A vector of covariates is one column, and the fitted model passed back to
+// `pls1_predict` keeps its covariate coefficients.
+#[test]
+fn covariates_vector_is_one_column_and_survive_the_model_record() {
+    let (x, y) = data(60, 6, 1);
+    let mut rng = Rng::new(9);
+    let z: Vec<f64> = (0..60).map(|_| rng.next()).collect();
+    let fit = |z: Value<'static>| {
+        ok(
+            "pls1_fit",
+            vec![
+                ("X", x.clone()),
+                ("y", y.clone()),
+                ("k", Value::I64(2)),
+                ("covariates", z),
+            ],
+        )
+    };
+    let a = fit(Value::Vec(VecF64::Owned(z.clone())));
+    let b = fit(Value::Mat(MatF64::Owned {
+        data: z.clone(),
+        nrows: 60,
+        ncols: 1,
+    }));
+    assert!(same(&a.result, &b.result));
+    let r = record(&a);
+    check_record(r).unwrap();
+    assert_eq!(i(r, "n_covariates"), 1);
+    let beta = floats(field(r, "beta"));
+    let gamma = floats(field(r, "covariate_coef"));
+    let Value::F64(b0) = *field(r, "intercept") else {
+        panic!("intercept")
+    };
+    let Value::Mat(xm) = &x else { panic!("X") };
+    let xd = xm.col_major();
+    let yhat = ok(
+        "pls1_predict",
+        vec![
+            ("model", a.result.clone()),
+            ("X_new", x.clone()),
+            ("covariates", Value::Vec(VecF64::Owned(z.clone()))),
+        ],
+    );
+    let got = floats(&yhat.result);
+    for row in 0..60 {
+        let want = b0 + (0..6).map(|j| xd[row + 60 * j] * beta[j]).sum::<f64>() + z[row] * gamma[0];
+        assert!((got[row] - want).abs() < 1e-10 * want.abs().max(1.0));
+    }
 }

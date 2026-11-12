@@ -59,15 +59,23 @@ fn main() -> Result<(), PlsKitError> {
     let y = Col::<f64>::from_fn(200, |i| x[(i, 0)] + x[(i, 1)] + 0.5 * noise(i, 99));
 
     // Fit at a fixed number of components and predict.
-    let model = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(3), None, FitOpts::default())?;
-    let y_hat = pls1_predict(&model, x.as_ref())?;
+    let model = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(3), None, None, FitOpts::default())?;
+    let y_hat = pls1_predict(&model, x.as_ref(), None)?;
     println!("beta[0] = {:.3}, y_hat[0] = {:.3}", model.beta[0], y_hat[0]);
 
-    // Confirmatory test for any signal; k = 1 with split_exact is recommended.
+    // Confirmatory test for signal at some k in the default set (1..=8, cut
+    // by the design); split_exact is the recommended method.
     let test = pls1_confirmatory_test(
-        ConfirmatoryTestInput::Raw { x: x.as_ref(), y: y.as_ref(), k: 1, weights: None },
+        ConfirmatoryTestInput::Raw {
+            x: x.as_ref(),
+            y: y.as_ref(),
+            k: None,
+            weights: None,
+            covariates: None,
+            null_y: None,
+        },
         ConfirmatoryTestOpts {
-            args: ConfirmatoryArgs::SplitExact { n_perm: 1000, n_splits: 50 },
+            args: ConfirmatoryArgs::SplitExact { n_perm: 1000, n_splits: 32 },
             seed: Some(42),
             ..ConfirmatoryTestOpts::default()
         },
@@ -97,7 +105,7 @@ variant. PLS2 and multi-block PLS are planned.
 - **PLS3 / PLSSVD:** `pls3_fit` (alias `plssvd_fit`), `pls3_transform`
   (alias `plssvd_transform`), sparse `spls3_fit` (new in 0.6.0).
 - **Inference:** `pls1_confirmatory_test`, `pls3_confirmatory_test`,
-  `split_nb_gate`, `pls1_perm_null`, `pls1_perm_alpha`.
+  `split_nb_gate`, `pls1_perm_null`, `pls1_perm_alpha`, `gram_matrix`.
 - **Interpretive:** `rotate`, `factors`, `pca_basis`, `profiles_find_n`.
 
 Each function exports its own options and output types alongside it
@@ -108,7 +116,7 @@ Every error is a `PlsKitError`. Its `.code()` is a stable string, the
 same one the other languages report:
 
 ```rust
-match pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(500), None, FitOpts::default()) {
+match pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(500), None, None, FitOpts::default()) {
     Err(e) if e.code() == "k_exceeds_max" => eprintln!("{e}"), // k=500 exceeds maximum 20
     Err(e) => return Err(e),
     Ok(model) => { /* ... */ }
@@ -120,23 +128,18 @@ match pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(500), None, FitOpts::default
 The public API takes and returns `faer` matrices and columns. The crate
 re-exports `Mat`, `MatRef`, `Col`, and `ColRef`, so downstream code can
 `use plskit::{Mat, Col}` without adding `faer` to its own
-`Cargo.toml`. A `faer` minor bump is treated as a `plskit` major bump.
+`Cargo.toml`.
 
 ## Threads and memory
 
-plskit runs its parallel work on the caller's current Rayon pool, so a
-call made inside `rayon::ThreadPool::install` uses that pool's threads.
-The environment variable `PLSKIT_NUM_THREADS` caps the thread count, and
-`PLSKIT_MEMORY_BUDGET` sets the memory budget of the resampling loops
-(default 2 GiB). Results depend on neither. See
-[Threads and memory](../docs/concepts/threads.md).
+plskit runs its parallel work on the caller's current Rayon pool, so a call made inside `rayon::ThreadPool::install` uses that pool's threads. The environment variable `PLSKIT_NUM_THREADS` caps the thread count, and `PLSKIT_MEMORY_BUDGET` sets the memory budget of the resampling loops (default 2 GiB). Results do not depend on the thread count, and agree across budgets to the last bits. See [Threads and memory](../docs/concepts/threads.md).
 
 ## Versioning
 
-A `faer` minor bump is a `plskit` major bump. Function names, argument
+Function names, argument
 names and output fields are stable across versions, but defaults,
 algorithms and implementation details may shift numbers between
-releases: pin the version (`plskit = "=0.8.0"`) if you need numerical
+releases: pin the version (`plskit = "=0.9.0"`) if you need numerical
 reproducibility. The [root README](../README.md#versioning) explains how
 the engine and wrapper versions relate.
 

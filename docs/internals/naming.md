@@ -43,11 +43,11 @@ Format: `name` | description | functions where used.
 
 | name | description | functions |
 |---|---|---|
-| `X` | predictor matrix `(n, p)`, float64 | `pls1_fit`, `spls1_fit`, `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_perm_null`, `split_nb_gate`, `preprocess`, `nested_cv_r2_ci`, `anisotropic_null`, `bootstrap_saliences`, `grassmannian_alignment_test` |
+| `X` | predictor matrix `(n, p)`, float64 | `pls1_fit`, `spls1_fit`, `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_perm_null`, `split_nb_gate`, `gram_matrix`, `preprocess`, `nested_cv_r2_ci`, `anisotropic_null`, `bootstrap_saliences`, `grassmannian_alignment_test` |
 | `y` | target vector `(n,)`, float64 | `pls1_fit`, `spls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_perm_null`, `nested_cv_r2_ci`, `grassmannian_alignment_test` |
 | `Y` | target matrix `(n, q)` fitted jointly (PLS2/3), or `(n, m)` with one PLS1 outcome per column (`pls1_perm_alpha`), float64 | `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls3_confirmatory_test`, `preprocess`, `bootstrap_saliences` (PLS2/3 path), `pls1_perm_alpha` |
-| `gram` | Gram matrix `X̃ X̃'` `(n, n)` of a standardized block the caller holds, float64 | `pls1_perm_alpha` |
-| `n_features` | number of columns of `X̃` summed into `gram`, constant columns included | `pls1_perm_alpha` |
+| `gram` | Gram matrix `X̃ X̃'` `(n, n)` in place of `X`: a `GramMatrixResult` from `gram_matrix`, or a float64 array with `n_features` | `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_perm_alpha` |
+| `n_features` | number of columns of `X̃` summed into `gram`, constant columns included; required with an array `gram`, refused with a `GramMatrixResult`, which records it | `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_perm_alpha` |
 | `X_new` | held-out predictor matrix | `pls1_predict`, `pls2_predict`, `pls3_transform` |
 | `Y_new` | held-out Y for symmetric transform | `pls3_transform` |
 | `model` | fitted result object | `pls1_predict`, `pls2_predict`, `pls3_transform` |
@@ -58,14 +58,15 @@ Format: `name` | description | functions where used.
 | `L` | loading basis on which simple-structure is computed (default identity) | `rotate` |
 | `v0` | target direction `(p,)` for direction-level test | `grassmannian_alignment_test` |
 | `weights` | length-n float64 vector; optional; default `None` = uniform; row-scales `(X, y/Y)` by `√w` (WLS-style precision/sampling weights) | `pls1_fit`, `spls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_perm_null`, `split_nb_gate`, `preprocess`, `pls3_fit` and `spls3_fit` (accepted, must be `None`) |
+| `covariates` | `(n, p_Z)` float64 matrix or length-n vector `Z`; optional; default `None`; X is standardized, then X and y are replaced by their (weighted) residuals on `[1, Z]` | `pls1_fit`, `spls1_fit`, `pls1_predict`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_perm_null`, `factors`, `rotate` |
+| `null_y` | `(n, B)` float64 matrix of the caller's null outcomes, which replace the permutations of `split_exact`; optional; default `None` | `pls1_confirmatory_test` |
 | `keep` | sparse keep-count (spls1 family): number of nonzero `\|w\|` coordinates retained per component, hard-thresholded; `keep = n_features` reproduces the dense fit bit-exactly | `spls1_fit`, `spls1_find_k_optimal`, `spls1_find_k_sequence` |
 | `keep_X` | sparse X-side keep-count (spls3 family): non-zeros per column of `U`; `keep_X = n_features` reproduces the dense fit bit-exactly | `spls3_fit` |
 | `keep_Y` | sparse Y-side keep-count (spls3 family): non-zeros per column of `V` | `spls3_fit` |
 
-`split_nb_gate(X, weights=None)` is the one entry point that takes `X`
-without `y`: the `split_nb` auto-gate rule reads only the design.
+`split_nb_gate(X, weights=None, pre_standardized=False)` and `gram_matrix(X, pre_standardized=False)` are the entry points that take `X` without `y`: the `split_nb` auto-gate rule reads only the design, and `gram_matrix` returns the all-row Gram matrix the held-out tests compute from it. Its `GramMatrixResult` has one method, `subset(rows)`, which returns the Gram matrix of a row subsample as another `GramMatrixResult`.
 
-`pls1_perm_alpha(gram, Y, k=1, *, n_features)` is the one entry point that fits without `X` (the others that take no `X`, `pls1_predict` and `pls3_transform` / `plssvd_transform`, read a fitted `model`): the caller holds the block and passes its Gram matrix in place of `X`.
+`pls1_perm_alpha(gram, Y, k=1, *, n_features=None)` fits without `X` (the others that take no `X`, `pls1_predict` and `pls3_transform` / `plssvd_transform`, read a fitted `model`): the caller passes the Gram matrix of the block in place of `X`. `pls1_confirmatory_test` and `pls3_confirmatory_test` take the same `gram=` in place of `X`; there `X` and `y` / `Y` have the default `None`, `y` / `Y` is required, and exactly one of `X` and `gram` is passed.
 
 `pls1_confirmatory_test` takes `(X, y, k)` directly — there is no `model` overload (the test refuses to consume a model whose K was selected on the same data).
 
@@ -75,7 +76,7 @@ without `y`: the `split_nb` auto-gate rule reads only the design.
 
 | name | description | functions |
 |---|---|---|
-| `k` | number of components to fit/test, or `"optimal"` / `"sequence"` (string modes on `pls1_fit` only) | `pls1_fit`, `spls1_fit`, `pls2_fit`, `pls3_fit`, `spls3_fit`, `spls1_find_keep_optimal`, `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_perm_null`, `pls1_perm_alpha` |
+| `k` | number of components to fit/test, or `"optimal"` / `"sequence"` (string modes on `pls1_fit` only), or a set of them (`pls1_confirmatory_test` only) | `pls1_fit`, `spls1_fit`, `pls2_fit`, `pls3_fit`, `spls3_fit`, `spls1_find_keep_optimal`, `pls1_confirmatory_test`, `pls3_confirmatory_test`, `pls1_perm_null`, `pls1_perm_alpha` |
 | `k_max` | upper bound on k for K-selection | `pls1_find_k_optimal`, `pls1_find_k_sequence`, `pls1_fit(k="optimal" \| "sequence")`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `nested_cv_r2_ci` *(planned)* |
 
 ### 3. Resampling counts
@@ -128,9 +129,9 @@ There is no `at` argument (legacy `"fitted_k"` / `"first_k"` / `"postselection"`
 
 | name | description | functions |
 |---|---|---|
-| `pre_standardized` | skip X+Y centering/scaling (unified PLS1 flag); weights are normalized either way | `pls1_fit`, `spls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_perm_null`, `factors`, `profiles`, `rotate` |
-| `pre_standardized_X` | skip X centering/scaling | `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls3_confirmatory_test` (accepted, no effect) |
-| `pre_standardized_Y` | skip Y centering/scaling | `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls3_confirmatory_test` (accepted, no effect) |
+| `pre_standardized` | skip X+Y centering/scaling (unified PLS1 flag); weights are normalized either way. With `gram=` it says how `X̃` was scaled for an array and is refused with a `GramMatrixResult` | `pls1_fit`, `spls1_fit`, `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `pls1_confirmatory_test`, `pls1_perm_null`, `split_nb_gate`, `gram_matrix`, `factors`, `profiles`, `rotate` |
+| `pre_standardized_X` | skip X centering/scaling | `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls3_confirmatory_test` (skips the one scaling over all rows; each split still centres) |
+| `pre_standardized_Y` | skip Y centering/scaling | `pls2_fit`, `pls3_fit`, `spls3_fit`, `pls3_confirmatory_test` (skips the one scaling over all rows; each split still centres) |
 
 ### 8. Algorithm internals
 
@@ -222,7 +223,8 @@ What ships today, on both the Rust core (`lib.rs`) and the Python wrapper
 - **sPLS3**, the two-sided sparse keep-count family: `spls3_fit`.
 - **`split_nb_gate`**, a standalone read of the `split_nb` auto-gate rule
   (`X` only, no `y`).
-- **`pls1_perm_alpha`**, PLS1 dual coefficients for many outcomes from a caller's Gram matrix (`gram`, `Y`, `n_features`; no `X`).
+- **`pls1_perm_alpha`**, PLS1 dual coefficients for many outcomes from a Gram matrix (`gram`, `Y`, `n_features`; no `X`).
+- **`gram_matrix`**, the all-row Gram matrix of `X` the held-out tests compute (`X`, `pre_standardized`; no `y`), returned as `GramMatrixResult` (`gram`, `n_features`, `pre_standardized`, method `subset(rows)`).
 
 What is **not yet implemented**, and where this convention is
 forward-looking, is the Pillar-1 / Pillar-3 surface: `bootstrap_saliences`,

@@ -116,7 +116,12 @@ pub fn split_exact_keep3(root: &Path) -> Result<Case> {
 /// synth case in this module except the tall one and `e_keep3`.
 fn synth(synth_n: usize) -> Xyw {
     let (x, y) = synth_data(synth_n, SYNTH_D, SYNTH_K_SIGNAL, SYNTH_SNR, SYNTH_SEED);
-    Xyw { x, y, w: None }
+    Xyw {
+        x,
+        y,
+        w: None,
+        ..Default::default()
+    }
 }
 
 /// Shared body of every case in this module: write the inputs (idempotent,
@@ -172,6 +177,7 @@ fn sequence_call(data: &Xyw, opts: FindKSequenceOpts) -> Result<FindKSequenceOut
         K_MAX,
         KEEP,
         w.as_ref().map(faer::Col::as_ref),
+        None,
         opts,
     )?)
 }
@@ -229,7 +235,12 @@ pub fn e_keep3(root: &Path) -> Result<Case> {
         root,
         name,
         "spls1_find_k_sequence_weak_inputs",
-        &Xyw { x, y, w: None },
+        &Xyw {
+            x,
+            y,
+            w: None,
+            ..Default::default()
+        },
         FindKSequenceOpts {
             test_method: ConfirmatoryMethod::E,
             seed: Some(42),
@@ -367,6 +378,7 @@ pub fn split_exact_tall_keep10(root: &Path) -> Result<Case> {
         y_faer.as_ref(),
         TALL_K_MAX,
         TALL_KEEP,
+        None,
         None,
         FindKSequenceOpts {
             test_method: ConfirmatoryMethod::SplitExact,

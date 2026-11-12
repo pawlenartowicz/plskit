@@ -4,13 +4,15 @@
 > the methods paper. Until then, see the
 > [Python API → pls1_confirmatory_test(ci=True)](../../python/api.md)
 > and the [results](../../python/results.md) page for the implemented surface.
+>
+> `ci` is beta, not to be trusted yet: it scales each half with its own moments, while the held-out tests scale once over all rows, so it does not estimate exactly what they report.
 
 Topics this page will cover:
 
 - Rotation-invariant subsample CIs: why naïve bootstrap CIs on `W`, `β`, or
   loadings fail under sign / rotation indeterminacy, and how
   `plskit` works around it
-- Composite CI: `holdout_corr`, a Fisher-z Wald CI on the held-out correlation of a fit trained on half the rows, the quantity the split tests estimate
+- Composite CI: `holdout_corr`, a Fisher-z Wald CI on the held-out correlation of a fit trained on half the rows, each half scaled with its own moments
 - Per-variable CIs: `leverage_ci_lower` / `leverage_ci_upper` with `leverage_se` (a normal-theory bootstrap interval centered on the full-data leverage, clamped to [0, 1]), and the per-variable subsampling z for β, `beta_sign_z` / `beta_sign_z_signed`
 - Per-coordinate β CI: `beta_ci_lower` / `beta_ci_upper` with `beta_se` (PLS1-only; β is invariant under PLS1 rotations)
 - Why no alignment step is needed: leverage and β do not change under within-subspace rotation of `W`, so resampled fits are compared without Procrustes alignment

@@ -46,8 +46,14 @@ const CORPUS_CASES = [
     "pls3_confirmatory_split_nb",
     "pls1_confirmatory_split_nb_ci",
     "pls1_confirmatory_auto_split_exact",
+    "pls1_confirmatory_test_gram_split_exact_k1",
+    "pls1_confirmatory_kset_split_exact",
     "pls1_perm_null_basic_n80_d6_k2",
+    "pls1_fit_covariates",
+    "pls1_predict_covariates",
+    "pls1_confirmatory_split_exact_null_y",
     "pls1_perm_alpha_n40_p60_m4_k1",
+    "gram_matrix_n40_d120_pre_standardized",
     "rotate_varimax_d6_k2",
     "factors_pls1_n50_d10_k2_n3",
     "profiles_find_n_n100_d12_k2",
@@ -65,6 +71,7 @@ function jsonval(x::Py)
     pyisinstance(x, pybuiltins.int) && return pyconvert(Int, x)
     pyisinstance(x, pybuiltins.float) && return pyconvert(Float64, x)
     pyisinstance(x, pybuiltins.str) && return pyconvert(String, x)
+    pyisinstance(x, pybuiltins.list) && return [jsonval(v) for v in x]
     pyisinstance(x, pybuiltins.dict) &&
         return Dict{String,Any}(pyconvert(String, k) => jsonval(x[k]) for k in x)
     error("unexpected JSON value $(x)")
@@ -118,11 +125,21 @@ function corpus_weights(case, inputs)
     return get(inputs, "weights", nothing)
 end
 
+# `"covariates": "Z"` and `"null_y": "Ynull"` in the manifest kwargs name the
+# npz arrays `covariates` and `null_y`, cross-checked as `weights` is.
+function corpus_array(case, inputs, key, descriptor)
+    has_descriptor = get(case["kwargs"], key, nothing) == descriptor
+    @assert has_descriptor == haskey(inputs, key) "$(case["name"]): $key descriptor and NPZ disagree"
+    return get(inputs, key, nothing)
+end
+
 # Call `f` with every argument by name, splitting positionals from
 # keywords the way the rendered stub declares them.
 function call_by_name(fname::AbstractString, named::Dict{Symbol,Any})
     f = getfield(PLSKit, Symbol(fname))
-    pos = Base.method_argnames(only(methods(f)))[2:end]
+    # The rendered stub; call.jl adds positional methods to two functions.
+    m = only(filter(m -> endswith(String(m.file), "generated.jl"), methods(f)))
+    pos = Base.method_argnames(m)[2:end]
     args = [named[p] for p in pos]
     kws = [k => v for (k, v) in named if !(k in pos)]
     return f(args...; kws...)
@@ -135,8 +152,11 @@ function run_case(case, inputs)
     fn = case["function"]
     kw = case["kwargs"]
     if fn == "pls1_predict"
-        fit = pls1_fit(inputs["X_train"], inputs["y_train"]; k=kw["k"])
-        return vcat(record(fit), [("y_pred", pls1_predict(fit, inputs["X_new"]))])
+        z = corpus_array(case, inputs, "covariates", "Z")
+        z_new = z === nothing ? nothing : inputs["covariates_new"]
+        fit = pls1_fit(inputs["X_train"], inputs["y_train"]; k=kw["k"], covariates=z)
+        return vcat(record(fit),
+                    [("y_pred", pls1_predict(fit, inputs["X_new"]; covariates=z_new))])
     elseif fn == "rotate"
         fit = pls1_fit(inputs["X"], inputs["y"]; k=kw["k"])
         return record(rotate(fit.W; method=kw["method"]))
@@ -154,13 +174,23 @@ function run_case(case, inputs)
         return record(pls1_perm_alpha(inputs["gram"], inputs["Y"]; k=kw["k"],
                                       n_features=kw["n_features"]))
     end
-    named = Dict{Symbol,Any}(:X => inputs["X"])
+    # `"gram": true`: the call takes gram_matrix(X, pre_standardized) in place of X.
+    gram = get(kw, "gram", false) === true
+    named = gram ?
+        Dict{Symbol,Any}(:gram => gram_matrix(inputs["X"];
+                                             pre_standardized=get(kw, "pre_standardized", false))) :
+        Dict{Symbol,Any}(:X => inputs["X"])
     haskey(inputs, "y") && (named[:y] = inputs["y"])
     haskey(inputs, "Y") && (named[:Y] = inputs["Y"])
     w = corpus_weights(case, inputs)
     w === nothing || (named[:weights] = w)
+    for (key, descriptor) in (("covariates", "Z"), ("null_y", "Ynull"))
+        a = corpus_array(case, inputs, key, descriptor)
+        a === nothing || (named[Symbol(key)] = a)
+    end
     for (k, v) in kw
-        (k == "weights" || describes_data(fn, k)) && continue
+        (k in ("weights", "covariates", "null_y") || describes_data(fn, k)) && continue
+        gram && k in ("gram", "pre_standardized") && continue
         named[Symbol(k)] = v
     end
     return record(call_by_name(fn, named))

@@ -49,6 +49,8 @@ weights through the `weights` argument.
 - `pls3_fit` / `plssvd_fit` and `spls3_fit` accept the argument but refuse
   anything other than `None`: weights are not implemented for PLS3.
 
+With `covariates`, the covariates are removed by weighted least squares with the same weights, and each weight stays on its row in the permutation tests ([Covariates](covariates.md)).
+
 ## Caching the standardization
 
 `plskit.preprocess(X, y, weights=w)` standardizes `X` and `y` once, with
@@ -69,5 +71,6 @@ up to rounding. `pre_standardized` skips only the centering and scaling:
 
 ## Cross-references
 
+- [Covariates](covariates.md): weighted removal of covariates
 - [Effective sample size](../effective-sample-size.md): where the `n_eff` check runs and the errors it raises
 - Function signatures: [Python API](../../python/api.md)

@@ -155,25 +155,34 @@ fn reduce_leverage(samples_b: &[f64], point: f64, level: f64) -> CIScalar {
 
 /// The confirmatory CI's subsample size on `n` rows, or `InvalidArgument`
 /// when it cannot serve a `k`-component CI: `m ≥ n` leaves no rows outside
-/// the subsample, so the β rate `√(m/(n − m))` is undefined, and `m < k + 2`
-/// (or a `holdout_train_size(n) < k + 2`) is too small to fit `k` components
-/// and leave residual degrees of freedom.
-pub(crate) fn resolve_ci_m(n: usize, k: usize, m_rate: f64) -> PlsKitResult<usize> {
+/// the subsample, so the β rate `√(m/(n − m))` is undefined, and
+/// `m < k + 1 + rank` (or a `holdout_train_size(n) < k + 1 + rank`) is too
+/// small to fit `k` components and leave residual degrees of freedom.
+/// `rank` is that of `[1, Z]` with covariates, 1 without.
+pub(crate) fn resolve_ci_m(n: usize, k: usize, rank: usize, m_rate: f64) -> PlsKitResult<usize> {
     let m = resolve_m(n, m_rate);
     if m >= n {
         return Err(PlsKitError::InvalidArgument(format!(
             "resolved m = {m} (from n={n}, m_rate={m_rate}) leaves no rows outside the subsample; need m < n"
         )));
     }
-    if m < k + 2 {
+    let (d, cov) = (
+        rank + 1,
+        if rank > 1 {
+            format!(" and {} covariates", rank - 1)
+        } else {
+            String::new()
+        },
+    );
+    if m < k + d {
         return Err(PlsKitError::InvalidArgument(format!(
-            "resolved m = {m} (from n={n}, m_rate={m_rate}) is too small for k={k}; need m ≥ k+2"
+            "resolved m = {m} (from n={n}, m_rate={m_rate}) is too small for k={k}{cov}; need m ≥ k+{d}"
         )));
     }
     let m_h = holdout_train_size(n);
-    if m_h < k + 2 {
+    if m_h < k + d {
         return Err(PlsKitError::InvalidArgument(format!(
-            "the holdout_corr split trains on n/2 = {m_h} rows (n={n}), too few for k={k}; need n/2 ≥ k+2"
+            "the holdout_corr split trains on n/2 = {m_h} rows (n={n}), too few for k={k}{cov}; need n/2 ≥ k+{d}"
         )));
     }
     Ok(m)
@@ -238,6 +247,7 @@ mod tests_indices {
 
 use faer::{Col, ColRef, Mat, MatRef};
 
+use crate::covariates::CovariateBasis;
 use crate::error::{PlsKitError, PlsKitResult};
 use crate::fit::{FitOpts, KSpec, pls1_fit_impl};
 use crate::linalg::{col_row_subset, row_subset};
@@ -281,7 +291,11 @@ struct RowFit {
     beta: Col<f64>,
     x_mean: Col<f64>,
     x_scale: Col<f64>,
+    y_mean: f64,
     y_scale: f64,
+    /// With covariates: the basis of the rows' `[1, Z]` and the WLS
+    /// coefficients of the standardized X `(rank, d)` and y `(rank, 1)` on it.
+    cov: Option<(CovariateBasis, Mat<f64>, Mat<f64>)>,
 }
 
 /// Fit `k` components on the rows `idx` of `(x, y)` (repeats allowed) with
@@ -290,9 +304,15 @@ struct RowFit {
 /// `pre_standardized_x`. Weights are sliced to `idx` and re-validated, so an
 /// insufficient effective sample size surfaces as `InvalidWeights`.
 ///
+/// With covariates `z`, the standardized rows of X and y are replaced by
+/// their WLS residuals on the rows' own `[1, Z]` (weighted with the rows'
+/// normalized weights) before the fit, as the full-data fit does on all
+/// rows; too few residual degrees of freedom is `InsufficientResidualDf`.
+///
 /// A NIPALS short-circuit (`k_used < k`) is an error, so the caller's
 /// driver counts the resample as failed instead of reducing a truncated
 /// weight matrix against length-`k` references.
+#[allow(clippy::many_single_char_names)]
 fn fit_rows(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -300,6 +320,7 @@ fn fit_rows(
     k: usize,
     pre_standardized_x: bool,
     weights: Option<ColRef<'_, f64>>,
+    z: Option<MatRef<'_, f64>>,
 ) -> PlsKitResult<RowFit> {
     let d = x.ncols();
     let y_rows = col_row_subset(y, idx);
@@ -311,7 +332,7 @@ fn fit_rows(
         k,
     )?;
 
-    let (xs_sub, x_mean, x_scale, ys_sub, y_scale) = if pre_standardized_x {
+    let (mut xs_sub, x_mean, x_scale, mut ys_sub, y_mean, y_scale) = if pre_standardized_x {
         // Caller asserts already standardized: the row subsets are the
         // blocks. Mean/scale are no-ops (zeros / ones) for the holdout
         // standardization and for the β back-projection (β_b stays on the
@@ -322,20 +343,31 @@ fn fit_rows(
             Col::<f64>::zeros(d),
             Col::<f64>::from_fn(d, |_| 1.0),
             y_rows,
+            0.0_f64,
             1.0_f64,
         )
     } else {
-        let (xs, mu, sigma) = crate::linalg::standardize_rows(
-            x,
-            idx,
-            w_sub_norm.as_ref().map(faer::Col::as_ref),
-            None,
-        );
-        let (ys, _, ys_sigma) = crate::linalg::standardize1_weighted(
+        let (xs, mu, sigma) =
+            crate::linalg::standardize_rows(x, idx, w_sub_norm.as_ref().map(faer::Col::as_ref));
+        let (ys, ys_mean, ys_sigma) = crate::linalg::standardize1_weighted(
             y_rows.as_ref(),
             w_sub_norm.as_ref().map(faer::Col::as_ref),
         );
-        (xs, mu, sigma, ys, ys_sigma)
+        (xs, mu, sigma, ys, ys_mean, ys_sigma)
+    };
+    let cov = match z {
+        None => None,
+        Some(z) => {
+            let z_rows = row_subset(z, idx);
+            let basis =
+                CovariateBasis::new(z_rows.as_ref(), w_sub_norm.as_ref().map(faer::Col::as_ref))?;
+            basis.check_df(k)?;
+            let bx = basis.coef(xs_sub.as_ref());
+            let by = basis.coef(ys_sub.as_ref().as_mat());
+            basis.residualize_new(z_rows.as_ref(), xs_sub.as_mut(), bx.as_ref());
+            basis.residualize_new(z_rows.as_ref(), ys_sub.as_mut().as_mat_mut(), by.as_ref());
+            Some((basis, bx, by))
+        }
     };
 
     let fit = pls1_fit_impl(
@@ -343,6 +375,7 @@ fn fit_rows(
         ys_sub.as_ref(),
         KSpec::Fixed(k),
         w_sub_norm.as_ref().map(faer::Col::as_ref),
+        None,
         FitOpts {
             pre_standardized: true,
             // Auto: the fit picks its arm from its shape (`fit::resolve_par`),
@@ -356,7 +389,9 @@ fn fit_rows(
         beta: fit.beta,
         x_mean,
         x_scale,
+        y_mean,
         y_scale,
+        cov,
     })
 }
 
@@ -375,11 +410,13 @@ fn fit_rows(
 ///
 /// `holdout_corr` uses a half split, not the size-`m` subsample, because
 /// its target is the held-out correlation of a fit trained on that many
-/// rows: at `m = ⌊n/2⌋` it is the quantity the split tests estimate, and
+/// rows: at `m = ⌊n/2⌋` it is close to what the split tests estimate (each
+/// half scaled with its own moments), and
 /// the NB factor `(n − m)/m` is about 1 (at `m = n^0.7` it is 2.8 at
 /// `n = 100`, and the interval nearly always covers).
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
+#[allow(clippy::too_many_arguments)]
 fn run_one_confirmatory(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -387,6 +424,7 @@ fn run_one_confirmatory(
     m: usize,
     pre_standardized_x: bool,
     weights: Option<ColRef<'_, f64>>,
+    z: Option<MatRef<'_, f64>>,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<ConfirmatoryWorkerRow> {
     let n = x.nrows();
@@ -403,8 +441,8 @@ fn run_one_confirmatory(
         x_scale,
         y_scale,
         ..
-    } = fit_rows(x, y, &sample_idx, k, pre_standardized_x, weights)?;
-    let boot = fit_rows(x, y, &boot_idx, k, pre_standardized_x, weights)?;
+    } = fit_rows(x, y, &sample_idx, k, pre_standardized_x, weights, z)?;
+    let boot = fit_rows(x, y, &boot_idx, k, pre_standardized_x, weights, z)?;
 
     // 3. Per-variable leverage on the bootstrap fit's unaligned W. Leverage
     // is invariant under right-orthogonal rotation (leverage =
@@ -418,17 +456,22 @@ fn run_one_confirmatory(
     // β and leverage rows.
     // Pre-standardized: the holdout rows are the block. Otherwise they are
     // gathered and standardized with the training half's moments in one pass.
+    // With covariates, both are then the residuals on the holdout rows'
+    // `[1, Z]` from the training half's coefficients.
     #[allow(clippy::cast_precision_loss)]
-    let holdout_corr = match fit_rows(x, y, &half_idx, k, pre_standardized_x, weights) {
+    let holdout_corr = match fit_rows(x, y, &half_idx, k, pre_standardized_x, weights, z) {
         Err(_) => f64::NAN,
         Ok(RowFit {
             beta: beta_h,
             x_mean,
             x_scale: x_scale_h,
+            y_mean: y_mean_h,
+            y_scale: y_scale_h,
+            cov,
             ..
         }) => {
-            let ys_h_owned = col_row_subset(y, &holdout_idx);
-            let xs_h = if pre_standardized_x {
+            let mut ys_h_owned = col_row_subset(y, &holdout_idx);
+            let mut xs_h = if pre_standardized_x {
                 row_subset(x, &holdout_idx)
             } else {
                 crate::linalg::standardize_apply_rows(
@@ -439,6 +482,14 @@ fn run_one_confirmatory(
                     None,
                 )
             };
+            if let (Some(z), Some((basis, bx, by))) = (z, cov) {
+                let z_h = row_subset(z, &holdout_idx);
+                basis.residualize_new(z_h.as_ref(), xs_h.as_mut(), bx.as_ref());
+                for v in ys_h_owned.iter_mut() {
+                    *v = (*v - y_mean_h) / y_scale_h;
+                }
+                basis.residualize_new(z_h.as_ref(), ys_h_owned.as_mut().as_mat_mut(), by.as_ref());
+            }
 
             // Seq inside the replicate worker: outer Rayon owns the threadpool.
             let y_pred = crate::linalg::mat_vec(xs_h.as_ref(), beta_h.as_ref(), faer::Par::Seq);
@@ -517,6 +568,7 @@ mod tests_worker {
             resolve_m(n, 0.7),
             true,
             None,
+            None,
             &mut rng,
         );
         assert!(
@@ -537,19 +589,79 @@ mod tests_worker {
         let y = Col::<f64>::from_fn(n, |_| rng_data.random_range(-1.0..1.0));
 
         let (_, mut rng) = resolve_seed(Some(11)).unwrap();
-        let row =
-            run_one_confirmatory(x.as_ref(), y.as_ref(), k, 99, false, None, &mut rng).unwrap();
+        let row = run_one_confirmatory(x.as_ref(), y.as_ref(), k, 99, false, None, None, &mut rng)
+            .unwrap();
         assert!(row.holdout_corr.is_nan());
         assert!(row.beta.iter().chain(&row.leverage).all(|v| v.is_finite()));
+    }
+
+    /// With covariates, a replicate fit is the plain fit on its rows
+    /// standardized with their own (weighted) moments and then residualized
+    /// on the rows' own `[1, Z]` with their normalized weights.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn ci_with_covariates_adjusts_each_subsample() {
+        use crate::test_support::{assert_close_rel, synth, test_weights, unif};
+        let (n, d, k) = (60, 8, 2);
+        let (x, y) = synth(n, d, 3, 1.0, 71);
+        let x = Mat::<f64>::from_fn(n, d, |i, j| x[(i, j)] + 3.0);
+        let z = unif(n, 2, 72);
+        let idx: Vec<usize> = (0..n).filter(|i| i % 3 != 1).collect();
+        for w in [None, Some(test_weights(n))] {
+            let wr = w.as_ref().map(Col::as_ref);
+            let got =
+                fit_rows(x.as_ref(), y.as_ref(), &idx, k, false, wr, Some(z.as_ref())).unwrap();
+            let w_sub = wr.map(|w| col_row_subset(w, &idx));
+            let (w_sub, _) = crate::fit::validate_and_normalize_weights(
+                w_sub.as_ref().map(Col::as_ref),
+                idx.len(),
+                k,
+            )
+            .unwrap();
+            let wsr = w_sub.as_ref().map(Col::as_ref);
+            let basis = CovariateBasis::new(row_subset(z.as_ref(), &idx).as_ref(), wsr).unwrap();
+            let (mut xs, _, _) = crate::linalg::standardize_rows(x.as_ref(), &idx, wsr);
+            let (mut ys, _, _) = crate::linalg::standardize1_weighted(
+                col_row_subset(y.as_ref(), &idx).as_ref(),
+                wsr,
+            );
+            basis.residualize(xs.as_mut());
+            basis.residualize(ys.as_mut().as_mat_mut());
+            let want = pls1_fit_impl(
+                xs.as_ref(),
+                ys.as_ref(),
+                KSpec::Fixed(k),
+                wsr,
+                None,
+                FitOpts {
+                    pre_standardized: true,
+                    ..FitOpts::default()
+                },
+            )
+            .unwrap();
+            assert_close_rel(got.beta.as_mat(), want.beta.as_mat(), 1e-12, "beta");
+        }
     }
 
     #[test]
     fn a_half_split_too_small_for_k_is_invalid_argument() {
         // m = ⌈10^0.9⌉ = 8 passes m ≥ k + 2 = 6; the half split trains on 5 rows.
         assert_eq!(resolve_m(10, 0.9), 8);
-        let r = resolve_ci_m(10, 4, 0.9);
+        let r = resolve_ci_m(10, 4, 1, 0.9);
         assert!(
             matches!(&r, Err(PlsKitError::InvalidArgument(m)) if m.contains("n/2 = 5")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn a_subsample_too_small_for_the_covariates_is_invalid_argument() {
+        // m = ⌈100^0.7⌉ = 26 serves k = 1 alone, not with 24 covariates.
+        assert_eq!(resolve_m(100, 0.7), 26);
+        assert_eq!(resolve_ci_m(100, 1, 1, 0.7).unwrap(), 26);
+        let r = resolve_ci_m(100, 1, 25, 0.7);
+        assert!(
+            matches!(&r, Err(PlsKitError::InvalidArgument(m)) if m.contains("24 covariates")),
             "{r:?}"
         );
     }
@@ -1663,7 +1775,9 @@ enum WorkerOutcome {
 }
 
 /// Engine entry for the confirmatory CI branch. Caller has already done the
-/// full-data reference fit and validated arguments.
+/// full-data reference fit and validated arguments. With covariates `z`,
+/// `(n, p_z)`, every replicate fit redoes the adjustment on its own rows
+/// (see `fit_rows`).
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::many_single_char_names)]
 pub(crate) fn pls1_subsample_inference_confirmatory(
@@ -1674,11 +1788,13 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
     leverage_ref: &[f64],
     opts: SubsampleOpts,
     weights: Option<ColRef<'_, f64>>,
+    z: Option<MatRef<'_, f64>>,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<ConfirmatoryCI> {
     opts.validate()?;
     let n = x.nrows();
-    let m = resolve_ci_m(n, k, opts.m_rate)?;
+    // The caller checked m against the covariates' rank.
+    let m = resolve_ci_m(n, k, 1, opts.m_rate)?;
 
     let pre_std = opts.pre_standardized;
     // The replicates run in batches by the memory budget. One replicate
@@ -1693,7 +1809,7 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
         .saturating_add(crate::fit::pls1_fit_bytes(x.ncols(), k));
     let outcomes: Vec<WorkerOutcome> =
         crate::resample::map_units_seeded(rng, opts.n_boot, unit, |_, child| {
-            match run_one_confirmatory(x, y, k, m, pre_std, weights, child) {
+            match run_one_confirmatory(x, y, k, m, pre_std, weights, z, child) {
                 std::result::Result::Ok(row) => WorkerOutcome::Ok(row),
                 Err(PlsKitError::InvalidWeights {
                     reason: "insufficient_effective_n",
@@ -1824,6 +1940,7 @@ mod tests_engine {
             y.as_ref(),
             KSpec::Fixed(k),
             None,
+            None,
             FitOpts::default(),
         )
         .unwrap();
@@ -1844,6 +1961,7 @@ mod tests_engine {
             fit.beta.as_ref(),
             &leverage_ref,
             opts,
+            None,
             None,
             &mut rng,
         )
@@ -1927,6 +2045,7 @@ mod tests_engine {
                 y.as_ref(),
                 KSpec::Fixed(1),
                 None,
+                None,
                 FitOpts::default(),
             )
             .unwrap();
@@ -1973,6 +2092,7 @@ mod tests_engine {
             x.as_ref(),
             y.as_ref(),
             KSpec::Fixed(2),
+            None,
             None,
             FitOpts::default(),
         )
@@ -2035,6 +2155,7 @@ mod tests_engine {
                     c.y,
                     KSpec::Fixed(k),
                     wr,
+                    None,
                     FitOpts {
                         pre_standardized: c.pre,
                         ..FitOpts::default()
@@ -2057,6 +2178,7 @@ mod tests_engine {
                         max_skip_rate: 0.0,
                     },
                     wr,
+                    None,
                     &mut rng,
                 )
             },
@@ -2104,6 +2226,7 @@ mod tests_engine {
                 y.as_ref(),
                 KSpec::Fixed(k),
                 wr,
+                None,
                 FitOpts::default(),
             )
             .unwrap();
@@ -2127,6 +2250,7 @@ mod tests_engine {
                                 max_skip_rate: 1.0,
                             },
                             wr,
+                            None,
                             &mut rng,
                         )
                         .unwrap()

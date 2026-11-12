@@ -20,6 +20,7 @@ lists what looks different from Julia.
 
   Python's `pls3_transform(model, X_new)` is `pls3_transform(model; X_new=X_new)`
   in Julia.
+  One exception: `X` and `y` / `Y` of `pls1_confirmatory_test` and `pls3_confirmatory_test` default to `None` in Python (so `gram=` can replace `X`) but stay positional in Julia, as `pls1_confirmatory_test(X, y; ...)`; the `gram=` call passes `y` / `Y` by keyword: `pls1_confirmatory_test(; gram=g, y=y)`.
 - **`args`, `find_k_args`, `find_n_args`** take a `NamedTuple` or a
   `Dict` with `Symbol` or `String` keys, nested like Python's dicts:
   `find_k_args=(selector=:r2_max, args=(n_folds=5,))`.
@@ -39,6 +40,7 @@ lists what looks different from Julia.
 - **`seed`** takes an `Int` or a `UInt64`. `result.seed` is a `UInt64`,
   shown in hex (`0x076988841aab76b2`), and spans the full 64-bit range;
   `seed=result.seed` reproduces the run exactly.
+- `k` of `pls1_confirmatory_test` takes an `Int` or an `AbstractVector{Int}` for a set (`k=1:8`); `nothing`, the default, is the default set ([A set of `k`](../concepts/PLS1/inference.md#a-set-of-k)). The result's `k` is a `Vector{Int}`, `pvalues_by_k` and `statistics_by_k` are `Dict{Int,Float64}`, and `statistic` is `nothing` for a set of more than one `k`.
 - A whole float count (`k=2.0`) is accepted as `2`. Every argument is
   validated by `plskit-py` exactly as it is for a Python caller: a
   fractional `k` (`k=2.5`) raises `PlsKitError` with code
@@ -69,14 +71,12 @@ lists what looks different from Julia.
   | NumPy scalar (`np.float64`, `np.bool_`, ...) | its plain Julia value, by the rules above |
   | `dict[int, float]` (`cv_scores`, ...) | `Dict{Int,Float64}` (empty: `Dict{Int,Float64}()`) |
   | `RotationSpec.args` | `NamedTuple` |
-  | `list[int]` (`keep_grid`) | `Vector{Int}` (empty: `Int[]`) |
+  | `list[int]` (`keep_grid`, `k`) | `Vector{Int}` (empty: `Int[]`) |
   | `list[bool]` | `Vector{Bool}` |
   | `list[CIScalar]` | `Vector{PlsKitResult}` |
   | result dataclass | `PlsKitResult{T}` |
 - `pls1_predict` returns a plain `Vector{Float64}`.
-- Display is a compact summary: the type, then each field with its value
-  (scalars, strings) or a short description (arrays, dicts). Results have no
-  methods (`coef`, `predict`, ...) beyond display.
+- Display is a compact summary: the type, then each field with its value (scalars, strings) or a short description (arrays, dicts). Results have no methods (`coef`, `predict`, ...) beyond display, with one exception: Python's `result.subset(rows)` on a `GramMatrixResult` is `PLSKit.subset(g, rows)`, with 1-based `rows`; it is not exported, because DataFrames exports a `subset` of its own.
 
 ## Errors
 

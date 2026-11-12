@@ -275,6 +275,7 @@ fn all_equal_weights_report_n_eff_n_like_the_fits() {
             y.as_ref(),
             plskit::KSpec::Fixed(1),
             Some(w.as_ref()),
+            None,
             plskit::FitOpts::default(),
         )
         .unwrap();

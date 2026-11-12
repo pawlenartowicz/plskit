@@ -7,7 +7,9 @@
 //! fixture's manifest entry and the shape of its `X` input and asserts the
 //! route its selector returns, so a later rule change that silently moves a
 //! fixture onto another route fails here instead of turning the fixture
-//! into a test of something else. Test-only.
+//! into a test of something else. The `auto` fixtures are pinned by the
+//! method stored in their outputs, so a regeneration cannot quietly give a
+//! fixture named after one method another. Test-only.
 //!
 //! This is the crate's one module of route pins: a new route rule adds its
 //! pins here, next to the ones it may flip, never in a module of its own.
@@ -17,7 +19,10 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::perm_null::perm_null_route;
-use crate::signal_test::{ReplicateRoute, raw_perm_route, split_exact_refit_route};
+use crate::resample::split_sizes;
+use crate::signal_test::{
+    K1Route, ReplicateRoute, k1_route, raw_perm_route, split_exact_refit_route, test_moments_route,
+};
 
 fn testdata() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -39,8 +44,8 @@ fn case(name: &str) -> Value {
         .clone()
 }
 
-/// `(n, p)` of the fixture's `X` input.
-fn x_shape(case: &Value) -> (usize, usize) {
+/// The fixture's `X` input.
+fn x_input(case: &Value) -> faer::Mat<f64> {
     let path = testdata().join(case["inputs"].as_str().expect("inputs path"));
     let bytes = std::fs::read(&path).expect("inputs npz");
     let mut npz = ndarray_npy::NpzReader::new(std::io::Cursor::new(bytes)).expect("npz");
@@ -53,7 +58,30 @@ fn x_shape(case: &Value) -> (usize, usize) {
     let x = npz
         .by_name::<ndarray::OwnedRepr<f64>, ndarray::IxDyn>(&entry)
         .expect("X array");
-    (x.shape()[0], x.shape()[1])
+    faer::Mat::from_fn(x.shape()[0], x.shape()[1], |i, j| x[[i, j]])
+}
+
+/// `(n, p)` of the fixture's `X` input.
+fn x_shape(case: &Value) -> (usize, usize) {
+    let x = x_input(case);
+    (x.nrows(), x.ncols())
+}
+
+/// The `test_method` stored in fixture `name`'s outputs (UTF-8 bytes).
+fn stored_test_method(name: &str) -> String {
+    let path = testdata().join(case(name)["outputs"].as_str().expect("outputs path"));
+    let bytes = std::fs::read(&path).expect("outputs npz");
+    let mut npz = ndarray_npy::NpzReader::new(std::io::Cursor::new(bytes)).expect("npz");
+    let entry = npz
+        .names()
+        .expect("npz names")
+        .into_iter()
+        .find(|n| n.trim_end_matches(".npy") == "test_method")
+        .expect("test_method output");
+    let m = npz
+        .by_name::<ndarray::OwnedRepr<u8>, ndarray::Ix1>(&entry)
+        .expect("test_method array");
+    String::from_utf8(m.to_vec()).expect("UTF-8")
 }
 
 fn kw(v: &Value, key: &str) -> usize {
@@ -86,13 +114,60 @@ fn route_of(name: &str) -> ReplicateRoute {
             weighted,
         ),
         ("pls1_confirmatory_test", Some("split_exact")) => {
-            split_exact_refit_route(n, p, n_perm, kw(kwargs, "k"), keep, weighted)
+            let n_splits = kw(args, "n_splits");
+            split_exact_refit_route(
+                n,
+                p,
+                n_perm,
+                n_splits,
+                kw(kwargs, "k"),
+                keep,
+                weighted,
+                false,
+            )
         }
         // Every step of the sequence tests at k = 1 on the deflated residual.
         ("spls1_find_k_sequence", Some("split_exact")) => {
-            split_exact_refit_route(n, p, n_perm, 1, keep, weighted)
+            let n_splits = kw(args, "n_splits");
+            split_exact_refit_route(n, p, n_perm, n_splits, 1, keep, weighted, false)
         }
         other => panic!("{name}: no route selector for {other:?}"),
+    }
+}
+
+/// How the `split_exact` fixture `name` scores its test halves, from the
+/// same manifest entry and `X` shape as [`route_of`]: on the K = 1 no-refit
+/// route (`Special`) the `k1_route` arm and whether route A scores them from
+/// moments (`test_moments_route`); on the `GramP` refit route `None` and
+/// whether that loop does; on any other route `None` and false. The
+/// sequence steps test at k = 1; `n_perm + 1` outcome columns over
+/// `n_splits` splits.
+fn split_exact_arm_of(name: &str) -> (Option<K1Route>, bool) {
+    let c = case(name);
+    let (n, p) = x_shape(&c);
+    let kwargs = &c["kwargs"];
+    let args = &kwargs["args"];
+    let weighted = kwargs.get("weights").is_some();
+    let k = if c["function"] == "spls1_find_k_sequence" {
+        1
+    } else {
+        kw(kwargs, "k")
+    };
+    let (n_cols, n_splits) = (kw(args, "n_perm") + 1, kw(args, "n_splits"));
+    let (n_train, n_test) = split_sizes(n, k);
+    // At the default budget, so `PLSKIT_MEMORY_BUDGET` in the test environment cannot move the pin.
+    let moments = || {
+        crate::fit::with_budget(crate::fit::DEFAULT_MEMORY_BUDGET, || {
+            test_moments_route(n, n_test, p, n_cols, n_splits, weighted)
+        })
+    };
+    match route_of(name) {
+        ReplicateRoute::Special => {
+            let arm = k1_route(n, n_train, n_test, p, n_cols, n_splits, false);
+            (Some(arm), arm == K1Route::A && moments())
+        }
+        ReplicateRoute::GramP => (None, moments()),
+        _ => (None, false),
     }
 }
 
@@ -134,6 +209,40 @@ fn route_fixtures_take_their_routes() {
     ] {
         assert_eq!(route_of(name), route, "{name}");
     }
+    // The arms inside those routes that score the test halves: route G
+    // reads the all-row Gram matrix (wide), route A scores them from
+    // moments where it is cheaper and unweighted, and so does the tall
+    // Gram-p refit loop. No corpus shape takes route B, or the Gram-p
+    // moment arm at k >= 2.
+    for (name, arm) in [
+        (
+            "pls1_confirmatory_split_exact_wide_k1",
+            (Some(K1Route::G), false),
+        ),
+        ("pls1_confirmatory_split_exact_k1", (Some(K1Route::A), true)),
+        (
+            "pls1_confirmatory_weighted_split_exact",
+            (Some(K1Route::A), false),
+        ),
+        (
+            "spls1_find_k_sequence_split_exact_tall_keep10",
+            (None, true),
+        ),
+    ] {
+        assert_eq!(split_exact_arm_of(name), arm, "{name}");
+    }
+}
+
+#[test]
+fn auto_fixtures_resolve_to_their_named_method() {
+    for (name, method) in [
+        ("pls1_confirmatory_auto_split_exact", "split_exact"),
+        ("pls1_confirmatory_auto_split_nb", "split_nb"),
+        ("pls3_confirmatory_auto_split_exact", "split_exact"),
+        ("pls1_find_k_sequence_auto", "split_exact"),
+    ] {
+        assert_eq!(stored_test_method(name), method, "{name}");
+    }
 }
 
 // ── Route pins for tests/thread_count_parity.rs ──
@@ -153,9 +262,9 @@ fn thread_count_parity_shapes_take_their_routes() {
         "perm_null"
     );
     // thread_count_parity's split_exact_nspace_is_pool_size_invariant:
-    // 40 x 2000, n_perm = 57, k = 2.
+    // 40 x 2000, n_perm = 57, n_splits = 10, k = 2.
     assert_eq!(
-        split_exact_refit_route(40, 2000, 57, 2, None, false),
+        split_exact_refit_route(40, 2000, 57, 10, 2, None, false, false),
         Nspace,
         "split_exact"
     );
@@ -179,9 +288,9 @@ fn thread_count_parity_shapes_take_their_routes() {
         "raw_perm"
     );
     // thread_count_parity's split_exact keep row: 2000 x 200, n_perm 400,
-    // k 1, keep 10.
+    // n_splits 5, k 1, keep 10.
     assert_eq!(
-        split_exact_refit_route(2000, 200, 400, 1, Some(10), false),
+        split_exact_refit_route(2000, 200, 400, 5, 1, Some(10), false, false),
         GramP,
         "split_exact keep"
     );
@@ -199,10 +308,10 @@ fn thread_count_parity_shapes_take_their_routes() {
     // from that file, row counts from the routes (change together).
     //
     // The K = 1 Gram raw_perm row above: 5 folds of 8 rows, so
-    // `dual_route::pls1_cv_r2_columns` sizes its blocks for the 32 training
-    // rows.
+    // `dual_route::pls1_cv_r2_columns` builds its all-row Gram matrix
+    // (`HeldOutGram::from_x`) in blocks sized for all 40 rows.
     assert!(
-        20_000 > 2 * crate::linalg::stream_block_width(32),
+        20_000 > 2 * crate::linalg::stream_block_width(40),
         "raw_perm k=1 blocks"
     );
     // thread_count_parity's split_nb_gate 40 x 20000 row:
@@ -212,11 +321,10 @@ fn thread_count_parity_shapes_take_their_routes() {
         "split_nb_gate blocks"
     );
     // thread_count_parity's pls3 split_exact 60 x 20000 x 3 row, k = 1:
-    // `dual_route::pls3_split_zbars_columns` sizes its blocks for the larger
-    // half of a split.
-    let (n_train, n_test) = crate::resample::split_sizes(60, 1);
+    // the Gram route reads X through `HeldOutGram::from_x`, which streams
+    // it in blocks sized for all 60 rows.
     assert!(
-        20_000 > 2 * crate::linalg::stream_block_width(n_train.max(n_test)),
+        20_000 > 2 * crate::linalg::stream_block_width(60),
         "pls3 split_exact blocks"
     );
 }

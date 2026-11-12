@@ -36,13 +36,11 @@ model.k_used        # 2
 ŷ = pls1_predict(model, X)   # 200-element Vector{Float64}
 ```
 
-`k` can also be `"optimal"` or `"sequence"` (with `k_max`) to choose the
-component count from the data; see `pls1_find_k_optimal` and
-`pls1_find_k_sequence` in the [API reference](../python/api.md).
+Without `k`, `pls1_fit(X, y)` chooses the component count: the default `k="optimal"` runs `pls1_find_k_optimal` (cross-validation, `k_max` up to 9) and fits at its choice. Without a `seed` the folds are random, so the chosen `k` can differ between runs. `k="sequence"` chooses by a sequence of tests; see `pls1_find_k_optimal` and `pls1_find_k_sequence` in the [API reference](../python/api.md).
 
 ## 2. Test for signal
 
-`test_method` defaults to `"auto"`, which picks `split_exact` or
+`test_method` defaults to `"auto"`, which runs `split_exact` over a set of more than one `k` and, at one `k`, picks `split_exact` or
 `split_nb` from `X` (see [`test_method="auto"`](../concepts/PLS1/inference.md#test_methodauto)). `args` takes a `NamedTuple`
 (or a `Dict`). The counts are kept small so the example runs in seconds.
 
@@ -52,9 +50,12 @@ test = pls1_confirmatory_test(X, y; k=1, test_method="split_exact",
 
 test.pvalue        # permutation p-value
 test.statistic     # tanh of the mean Fisher-z held-out correlation
+test.k             # [1]: the tested set, always a Vector{Int}
 test.test_method   # "split_exact"
 test.seed          # 0x0000000000000001
 ```
+
+Without `k` the test runs over the default set `1:8`, cut by the design, and returns one p-value for signal at some `k` in the set; `test.statistic` is then `nothing` and `test.pvalues_by_k` holds each `k`'s own p ([A set of `k`](../concepts/PLS1/inference.md#a-set-of-k)).
 
 Pass `seed=test.seed` to reproduce a run whose seed was drawn for you.
 

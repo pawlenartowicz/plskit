@@ -26,6 +26,7 @@ fn cache_pattern_round_trip_parity() {
         y.as_ref(),
         KSpec::Fixed(3),
         Some(w.as_ref()),
+        None,
         FitOpts::default(),
     )
     .unwrap();
@@ -44,6 +45,7 @@ fn cache_pattern_round_trip_parity() {
         ys.as_ref(),
         KSpec::Fixed(3),
         Some(wn.as_ref()),
+        None,
         FitOpts {
             pre_standardized: true,
             ..FitOpts::default()
@@ -101,6 +103,7 @@ fn full_rank_weighted_fit_is_weighted_least_squares() {
             y.as_ref(),
             KSpec::Fixed(k),
             weights.map(Col::as_ref),
+            None,
             FitOpts::default(),
         )
         .unwrap();

@@ -101,7 +101,7 @@ fn synth(rng: &mut ChaCha8Rng, n: usize, d: usize, snr: f64) -> (Mat<f64>, Col<f
 ///   `leverage[j] = W_star[j,:] · (W_starᵀ W_star)⁻¹ · W_star[j,:]ᵀ`
 #[allow(clippy::similar_names, clippy::many_single_char_names)]
 fn oracle_leverage(x: faer::MatRef<f64>, y: faer::ColRef<f64>, k: usize) -> Vec<f64> {
-    let fit = pls1_fit(x, y, KSpec::Fixed(k), None, FitOpts::default())
+    let fit = pls1_fit(x, y, KSpec::Fixed(k), None, None, FitOpts::default())
         .expect("oracle pls1_fit must succeed");
 
     let mut wtw = faer::Mat::<f64>::zeros(k, k);
@@ -219,8 +219,10 @@ fn coverage_mc_two_sided_grid() {
                             ConfirmatoryTestInput::Raw {
                                 x: xo.as_ref(),
                                 y: yo.as_ref(),
-                                k,
+                                k: Some(&[k]),
                                 weights: None,
+                                covariates: None,
+                                null_y: None,
                             },
                             oracle_opts,
                         )
@@ -271,8 +273,10 @@ fn coverage_mc_two_sided_grid() {
                             ConfirmatoryTestInput::Raw {
                                 x: x.as_ref(),
                                 y: y.as_ref(),
-                                k,
+                                k: Some(&[k]),
                                 weights: None,
+                                covariates: None,
+                                null_y: None,
                             },
                             opts,
                         )

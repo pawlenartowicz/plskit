@@ -30,16 +30,20 @@ end
 
 @testset "arguments through the public API" begin
     X, y = pls1_data()
-    base = pls1_confirmatory_test(X, y; test_method="raw_perm", args=(n_perm=100,), seed=5)
+    base = pls1_confirmatory_test(X, y; k=1, test_method="raw_perm", args=(n_perm=100,), seed=5)
     # args as NamedTuple, Dict{String}, Dict{Symbol}; test_method as Symbol
     for args in ((n_perm=100,), Dict("n_perm" => 100), Dict(:n_perm => 100))
-        r = pls1_confirmatory_test(X, y; test_method=:raw_perm, args=args, seed=5)
+        r = pls1_confirmatory_test(X, y; k=1, test_method=:raw_perm, args=args, seed=5)
         @test r.pvalue == base.pvalue && r.statistic == base.statistic
     end
     # nested args inside find_k_args, Symbol values inside args
     opt = pls1_fit(X, y; k="optimal", k_max=3, seed=2,
                    find_k_args=(selector=:r2_max, args=(n_folds=5,)))
     @test opt.selection_result.selector == "r2_max"
+    # no k: k="optimal" up to k_max = min(9, p) = 8
+    dflt = pls1_fit(X, y; seed=2)
+    @test dflt.coef == pls1_fit(X, y; k="optimal", k_max=8, seed=2).coef
+    @test length(dflt.selection_result.cv_scores) == 8
     # adjoint, view, integer, Float32 and BitVector inputs
     fit = pls1_fit(X, y; k=2)
     @test pls1_fit(permutedims(X)', y; k=2).coef == fit.coef
@@ -58,11 +62,11 @@ end
     @test pls1_fit(Matrix{Bool}(Xb), Vector{Bool}(y .> 0); k=2).coef == fit01.coef
     @test pls1_predict(fit01, Xb) == pls1_predict(fit01, Float64.(Xb))
     Xbm = Array{Union{Missing,Bool}}(Xb); Xbm[2, 3] = missing
-    @test plskit_error(() -> pls1_fit(Xbm, y)).code === :non_finite_input
+    @test plskit_error(() -> pls1_fit(Xbm, y; k=1)).code === :non_finite_input
     # `missing` reaches the engine as NaN
     Xm = Array{Union{Missing,Float64}}(X); Xm[1, 1] = missing
-    @test plskit_error(() -> pls1_fit(Xm, y)).code === :non_finite_input
+    @test plskit_error(() -> pls1_fit(Xm, y; k=1)).code === :non_finite_input
     # same for a Matrix{Any} column mix
     Xa = Matrix{Any}(X); Xa[1, 1] = missing
-    @test plskit_error(() -> pls1_fit(Xa, y)).code === :non_finite_input
+    @test plskit_error(() -> pls1_fit(Xa, y; k=1)).code === :non_finite_input
 end

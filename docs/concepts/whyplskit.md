@@ -9,14 +9,10 @@ what it leaves out, and how it relates to other PLS packages.
   [PLS3 / PLSSVD](PLS3/index.md) for two blocks (PLSC in neuroimaging and
   psychology), and sparse variants of both ([sPLS1](PLS1/sparse.md),
   [sPLS3](PLS3/sparse.md)).
-- **A test of the model.** `pls1_confirmatory_test` asks whether there is
-  signal at a chosen `k`. The recommended method, `split_exact`, is a
-  split-half test calibrated by permutation
-  ([picking a method](PLS1/fit-and-predict.md#confirmatory-testing-picking-a-method)).
+- **A test of the model.** `pls1_confirmatory_test` asks whether there is signal at some `k` in a set fixed before the test sees `y`, by default `1..8` cut by the design, and returns one p-value ([A set of `k`](PLS1/inference.md#a-set-of-k)). The recommended method, `split_exact`, is a split-half test calibrated by permutation ([picking a method](PLS1/fit-and-predict.md#confirmatory-testing-picking-a-method)).
   `pls3_confirmatory_test` asks the same of the first latent variable of a
   two-block model ([PLS3 inference](PLS3/inference.md)).
-- **A choice of `k`** by cross-validation, BIC, or a sequence of tests
-  ([Find K](PLS1/find-k.md)).
+- **A choice of `k`** by cross-validation, BIC, or a sequence of tests ([Find K](PLS1/find-k.md)). `pls1_fit(X, y)` chooses `k` by cross-validation by default.
 - **Confidence intervals** on the held-out correlation, per-variable
   leverage and β, from `pls1_confirmatory_test(ci=True)`
   ([Confidence intervals](PLS1/ci.md)).

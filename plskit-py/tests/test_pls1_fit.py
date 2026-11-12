@@ -57,12 +57,37 @@ def test_fit_k_optimal_dispatches_to_find_k_optimal(find_k_args):
     assert m.intercept == m_fixed.intercept
 
 
-def test_fit_string_mode_requires_k_max():
-    X, y = _data()
+def test_default_k_is_optimal_with_k_max_9():
+    X, y = _data(n=80, d=30, k_signal=4)
+    a = plskit.pls1_fit(X, y, seed=3)
+    b = plskit.pls1_fit(X, y, k="optimal", k_max=9, seed=3)
+    assert a.k_used == b.k_used == plskit.pls1_find_k_optimal(X, y, 9, seed=3).k_star
+    assert a.selection_result.cv_scores == b.selection_result.cv_scores
+    np.testing.assert_array_equal(a.coef, b.coef)
+
+
+def test_default_k_max_is_p_on_narrow_x():
+    X, y = _data(n=80, d=4)
+    m = plskit.pls1_fit(X, y, seed=1)
+    assert sorted(m.selection_result.cv_scores) == [1, 2, 3, 4]
+
+
+def test_default_k_max_is_cut_by_n_eff_and_covariates():
+    # Kish n_eff about 5.1 and n - rank([1, Z]) = 5 at n = 60: both cut k_max to 4.
+    X, y = _data(n=60, d=30)
+    w = np.full(60, 1e-3)
+    w[:5] = 1.0
+    Z = np.random.default_rng(2).normal(size=(60, 54))
+    for kw in ({"weights": w}, {"covariates": Z}):
+        m = plskit.pls1_fit(X, y, seed=1, **kw)
+        assert sorted(m.selection_result.cv_scores) == [1, 2, 3, 4]
+
+
+def test_default_on_constant_y_raises_optimal_no_component():
+    X, _ = _data()
     with pytest.raises(plskit.PlsKitError) as ei:
-        plskit.pls1_fit(X, y, k="optimal")
-    assert ei.value.code == "invalid_argument"
-    assert "k_max" in str(ei.value)
+        plskit.pls1_fit(X, np.full(80, 3.0), seed=1)
+    assert ei.value.code == "optimal_no_component"
 
 
 def test_fit_unknown_string_mode_raises():

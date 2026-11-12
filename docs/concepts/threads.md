@@ -111,8 +111,7 @@ exceed the budget, since it cannot be computed in parts: with `0`, or when
 one unit's buffers take more than half the budget, the peak is about `X`
 plus one unit's buffers.
 
-Results do not depend on the budget: any value gives the same results, as
-any thread count does.
+Results agree across budgets to the last bits. On tall unweighted `X`, `split_exact` (in `pls1_confirmatory_test` and in the functions that run it) scores its held-out halves from moments, and sums its training halves from the cells of its split design, only when those buffers fit the budget; `split_exact` in `pls3_confirmatory_test` (and so `auto`) sums its training halves from the cells under the same rule. These arms agree with the ones they replace to rounding (about 1e-15 relative), not bit for bit, so the same call can differ in its last bits between two budgets.
 
 ### When to change it
 

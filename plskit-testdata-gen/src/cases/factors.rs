@@ -48,10 +48,11 @@ pub fn pls1_n50_d10_k2_n3(root: &Path) -> Result<Case> {
         y_faer.as_ref(),
         KSpec::Fixed(2),
         None,
+        None,
         FitOpts::default(),
     )?;
     let (xs, _, _) = standardize(x_faer.as_ref());
-    let f = factors(model.coef.as_ref(), x_faer.as_ref(), 3, false)?;
+    let f = factors(model.coef.as_ref(), x_faer.as_ref(), 3, false, None)?;
     let l = Mat::<f64>::from_fn(xs.nrows(), f.w.ncols(), |i, j| {
         (0..xs.ncols()).map(|t| xs[(i, t)] * f.w[(t, j)]).sum()
     });

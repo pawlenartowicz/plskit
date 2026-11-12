@@ -39,37 +39,36 @@ model.k_used         # 2
 y_hat = plskit.pls1_predict(model, X)   # shape (200,)
 ```
 
-`k` can also be `"optimal"` or `"sequence"` (with `k_max`) to choose the
-component count from the data; see `pls1_find_k_optimal` and
-`pls1_find_k_sequence` in the [API reference](api.md).
+Without `k`, `pls1_fit(X, y)` chooses the component count: the default `k="optimal"` runs `pls1_find_k_optimal` (cross-validation, `k_max` up to 9) and fits at its choice. Without a `seed` the folds are random, so the chosen `k` can differ between runs. `k="sequence"` chooses by a sequence of tests; see `pls1_find_k_optimal` and `pls1_find_k_sequence` in the [API reference](api.md).
 
 ## 2. Test for signal
 
-`pls1_confirmatory_test` asks whether there is any predictive signal at a
-pre-specified `k`. `test_method` defaults to `"auto"`, which picks `split_exact` or
+`pls1_confirmatory_test` asks whether there is any predictive signal at some `k` in a set fixed before the test sees `y`. Without `k` it tests the default set `1..8` (cut by the design; here all eight) and returns one p-value for the whole set ([A set of `k`](../concepts/PLS1/inference.md#a-set-of-k)). `test_method` defaults to `"auto"`, which runs `split_exact` over a set of more than one `k` and, at one `k`, picks `split_exact` or
 `split_nb` from `X` (see [`test_method="auto"`](../concepts/PLS1/inference.md#test_methodauto)); the example passes `"split_exact"` explicitly. The permutation and split
 counts here are kept small so the example runs in seconds; the defaults
-are `n_perm=1000`, `n_splits=50`.
+are `n_perm=1000`, `n_splits=32`.
 
 ```python
 test = plskit.pls1_confirmatory_test(
-    X, y, k=1,
+    X, y,
     test_method="split_exact",
     args={"n_perm": 199, "n_splits": 20},
     seed=1,
 )
 
-test.pvalue        # permutation p-value
-test.statistic     # tanh of the mean Fisher-z held-out correlation
-test.test_method   # "split_exact"
+test.pvalue           # one permutation p-value for the whole set
+test.k                # [1, 2, 3, 4, 5, 6, 7, 8]: the tested set
+test.pvalues_by_k     # each k's own p, not adjusted for the set
+test.statistics_by_k  # each k's tanh of the mean Fisher-z held-out correlation
+test.statistic        # None for a set; the statistic when k is one integer
+test.test_method      # "split_exact"
 ```
 
 A fixed `seed` makes the result reproducible, also across thread counts.
 Pass `ci=True` to add rotation-invariant subsample CIs on `test.ci`
 (see [results](results.md), `ConfirmatoryCI`).
 
-Choosing `k` with `pls1_find_k_*` and then testing at that `k` on the same
-data is not a confirmatory test; fix `k` in advance or test on fresh data.
+The test names no `k` to fit at. Make the claim with the test and fit the model with `pls1_fit(X, y)`, which chooses its own `k`; pass no `k` from one to the other. Choosing `k` with `pls1_find_k_*` and then testing at that `k` on the same data is not a confirmatory test; test the default set, fix `k` in advance, or test on fresh data.
 
 ## 3. Two blocks: PLS3
 

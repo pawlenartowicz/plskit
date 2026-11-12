@@ -5,19 +5,21 @@
 \title{Confirmatory test of a PLS3 signal}
 \usage{
 pls3_confirmatory_test(
-  X,
-  Y,
+  X = NULL,
+  Y = NULL,
   k = 1L,
   test_method = "auto",
   args = NULL,
   pre_standardized_X = FALSE,
   pre_standardized_Y = FALSE,
   seed = NULL,
-  verbose = FALSE
+  verbose = FALSE,
+  gram = NULL,
+  n_features = NULL
 )
 }
 \arguments{
-\item{X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, verbose}{See the canonical reference.}
+\item{X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, verbose, gram, n_features}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("confirmatory_test_result", "plskit_result")}.

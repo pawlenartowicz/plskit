@@ -10,11 +10,12 @@ rotate(
   method = "varimax",
   L = NULL,
   args = NULL,
-  pre_standardized = NULL
+  pre_standardized = NULL,
+  covariates = NULL
 )
 }
 \arguments{
-\item{model_or_W, X, method, L, args, pre_standardized}{See the canonical reference.}
+\item{model_or_W, X, method, L, args, pre_standardized, covariates}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("rotate_result", "plskit_result")}, or \code{c("pls3_result", "plskit_result")}, or \code{c("factors_result", "plskit_result")}, depending on the input.

@@ -51,6 +51,30 @@ impl<'a> Inputs<'a> {
         }
     }
 
+    /// `covariates`, an `(n, p_z)` matrix or a length-`n` vector read as one
+    /// column; `None` when absent.
+    pub(crate) fn opt_covariates(&mut self) -> Result<Option<MatF64<'a>>, BindError> {
+        let why = |w: String| named("covariates", &w);
+        match self.take("covariates") {
+            Value::Null => Ok(None),
+            v @ Value::Mat(_) => coerce::to_mat(v).map(Some).map_err(why),
+            v => {
+                let c = coerce::to_vec(v).map_err(why)?;
+                let n = c.len();
+                Ok(Some(match c {
+                    VecF64::Borrowed(s) => {
+                        MatF64::Borrowed(faer::MatRef::from_column_major_slice(s, n, 1))
+                    }
+                    VecF64::Owned(data) => MatF64::Owned {
+                        data,
+                        nrows: n,
+                        ncols: 1,
+                    },
+                }))
+            }
+        }
+    }
+
     pub(crate) fn vec(&mut self, name: &str) -> Result<VecF64<'a>, BindError> {
         coerce::to_vec(self.take(name)).map_err(|w| named(name, &w))
     }
@@ -70,6 +94,15 @@ impl<'a> Inputs<'a> {
         match self.take(name) {
             Value::Null => Ok(None),
             v => coerce::to_usize(&v).map(Some).map_err(|w| named(name, &w)),
+        }
+    }
+
+    pub(crate) fn opt_usize_set(&mut self, name: &str) -> Result<Option<Vec<usize>>, BindError> {
+        match self.take(name) {
+            Value::Null => Ok(None),
+            v => coerce::to_usize_set(&v)
+                .map(Some)
+                .map_err(|w| named(name, &w)),
         }
     }
 

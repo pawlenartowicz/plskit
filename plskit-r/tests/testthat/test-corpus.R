@@ -34,10 +34,18 @@ run_case <- function(case, inputs) {
   }
   has_weights <- identical(kw[["weights"]], "nonuniform")
   stopifnot(has_weights == !is.null(inputs[["weights"]]))
+  # `"covariates": "Z"` and `"null_y": "Ynull"` name the npz arrays
+  # `covariates` and `null_y`, cross-checked as the weights descriptor is.
+  has_covariates <- identical(kw[["covariates"]], "Z")
+  stopifnot(has_covariates == !is.null(inputs[["covariates"]]))
+  has_null_y <- identical(kw[["null_y"]], "Ynull")
+  stopifnot(has_null_y == !is.null(inputs[["null_y"]]))
   switch(fn,
     pls1_predict = {
-      fit <- pls1_fit(arr("X_train"), arr("y_train"), k = kw[["k"]])
-      fit$y_pred <- pls1_predict(fit, arr("X_new"))
+      z <- if (has_covariates) arr("covariates")
+      z_new <- if (has_covariates) arr("covariates_new")
+      fit <- pls1_fit(arr("X_train"), arr("y_train"), k = kw[["k"]], covariates = z)
+      fit$y_pred <- pls1_predict(fit, arr("X_new"), covariates = z_new)
       fit
     },
     rotate = {
@@ -59,12 +67,27 @@ run_case <- function(case, inputs) {
       pls1_perm_alpha(arr("gram"), arr("Y"), k = kw[["k"]], n_features = kw[["n_features"]])
     },
     {
-      args <- list(X = arr("X"))
+      # `"gram": true`: the call takes gram_matrix(X, pre_standardized) in place of X.
+      gram <- isTRUE(kw[["gram"]])
+      kw[["gram"]] <- NULL
+      args <- if (gram) {
+        list(gram = gram_matrix(arr("X"), pre_standardized = isTRUE(kw[["pre_standardized"]])))
+      } else {
+        list(X = arr("X"))
+      }
+      if (gram) kw[["pre_standardized"]] <- NULL
       if (!is.null(inputs[["y"]])) args[["y"]] <- arr("y")
       if (!is.null(inputs[["Y"]])) args[["Y"]] <- arr("Y")
       if (has_weights) args["weights"] <- list(arr("weights"))
+      if (has_covariates) args[["covariates"]] <- arr("covariates")
+      if (has_null_y) args[["null_y"]] <- arr("null_y")
       for (key in names(kw)) {
-        if (key != "weights" && !describes_data(fn, key)) args[key] <- list(kw[[key]])
+        if (!key %in% c("weights", "covariates", "null_y") && !describes_data(fn, key)) {
+          v <- kw[[key]]
+          # A JSON list (the tested set `k`) is an unnamed list here; `args` stays a named list.
+          if (is.list(v) && is.null(names(v))) v <- unlist(v)
+          args[key] <- list(v)
+        }
       }
       call_fn(fn, args)
     }

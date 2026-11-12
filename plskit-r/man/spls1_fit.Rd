@@ -4,10 +4,18 @@
 \alias{spls1_fit}
 \title{Fit a sparse PLS1 model}
 \usage{
-spls1_fit(X, y, k, keep, pre_standardized = FALSE, weights = NULL)
+spls1_fit(
+  X,
+  y,
+  k,
+  keep,
+  pre_standardized = FALSE,
+  weights = NULL,
+  covariates = NULL
+)
 }
 \arguments{
-\item{X, y, k, keep, pre_standardized, weights}{See the canonical reference.}
+\item{X, y, k, keep, pre_standardized, weights, covariates}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("pls1_result", "plskit_result")}.

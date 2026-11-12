@@ -29,18 +29,19 @@ preprocess <- function(
 #' documented once, in the canonical reference: section
 #' "2.1 Fit" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k,k_max,find_k_args,pre_standardized,seed,weights See the canonical reference.
+#' @param X,y,k,k_max,find_k_args,pre_standardized,seed,weights,covariates See the canonical reference.
 #' @return A list of class `c("pls1_result", "plskit_result")`.
 #' @export
 pls1_fit <- function(
   X,
   y,
-  k = 1L,
+  k = "optimal",
   k_max = NULL,
   find_k_args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 ) {
   .plskit_call("pls1_fit", list(
     X = X,
@@ -50,7 +51,8 @@ pls1_fit <- function(
     find_k_args = find_k_args,
     pre_standardized = pre_standardized,
     seed = seed,
-    weights = weights
+    weights = weights,
+    covariates = covariates
   ))
 }
 
@@ -60,16 +62,18 @@ pls1_fit <- function(
 #' documented once, in the canonical reference: section
 #' "2.2 Predict" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param model,X_new See the canonical reference.
+#' @param model,X_new,covariates See the canonical reference.
 #' @return A numeric vector.
 #' @export
 pls1_predict <- function(
   model,
-  X_new
+  X_new,
+  covariates = NULL
 ) {
   .plskit_call("pls1_predict", list(
     model = model,
-    X_new = X_new
+    X_new = X_new,
+    covariates = covariates
   ))
 }
 
@@ -79,7 +83,7 @@ pls1_predict <- function(
 #' documented once, in the canonical reference: section
 #' "2.3 K-selection" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k_max,selector,diagnostic,args,pre_standardized,seed,verbose,weights See the canonical reference.
+#' @param X,y,k_max,selector,diagnostic,args,pre_standardized,seed,verbose,weights,covariates See the canonical reference.
 #' @return A list of class `c("find_k_optimal_result", "plskit_result")`.
 #' @export
 pls1_find_k_optimal <- function(
@@ -92,7 +96,8 @@ pls1_find_k_optimal <- function(
   pre_standardized = FALSE,
   seed = NULL,
   verbose = FALSE,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 ) {
   .plskit_call("pls1_find_k_optimal", list(
     X = X,
@@ -104,7 +109,8 @@ pls1_find_k_optimal <- function(
     pre_standardized = pre_standardized,
     seed = seed,
     verbose = verbose,
-    weights = weights
+    weights = weights,
+    covariates = covariates
   ))
 }
 
@@ -114,7 +120,7 @@ pls1_find_k_optimal <- function(
 #' documented once, in the canonical reference: section
 #' "2.3 K-selection" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k_max,test_method,alpha,args,pre_standardized,seed,verbose,weights See the canonical reference.
+#' @param X,y,k_max,test_method,alpha,args,pre_standardized,seed,verbose,weights,covariates See the canonical reference.
 #' @return A list of class `c("find_k_sequence_result", "plskit_result")`.
 #' @export
 pls1_find_k_sequence <- function(
@@ -127,7 +133,8 @@ pls1_find_k_sequence <- function(
   pre_standardized = FALSE,
   seed = NULL,
   verbose = FALSE,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 ) {
   .plskit_call("pls1_find_k_sequence", list(
     X = X,
@@ -139,7 +146,8 @@ pls1_find_k_sequence <- function(
     pre_standardized = pre_standardized,
     seed = seed,
     verbose = verbose,
-    weights = weights
+    weights = weights,
+    covariates = covariates
   ))
 }
 
@@ -149,7 +157,7 @@ pls1_find_k_sequence <- function(
 #' documented once, in the canonical reference: section
 #' "2b.1 Sparse fit" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k,keep,pre_standardized,weights See the canonical reference.
+#' @param X,y,k,keep,pre_standardized,weights,covariates See the canonical reference.
 #' @return A list of class `c("pls1_result", "plskit_result")`.
 #' @export
 spls1_fit <- function(
@@ -158,7 +166,8 @@ spls1_fit <- function(
   k,
   keep,
   pre_standardized = FALSE,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 ) {
   .plskit_call("spls1_fit", list(
     X = X,
@@ -166,7 +175,8 @@ spls1_fit <- function(
     k = k,
     keep = keep,
     pre_standardized = pre_standardized,
-    weights = weights
+    weights = weights,
+    covariates = covariates
   ))
 }
 
@@ -176,7 +186,7 @@ spls1_fit <- function(
 #' documented once, in the canonical reference: section
 #' "2b.2 Keep-count tuning" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k,args,seed,verbose,weights See the canonical reference.
+#' @param X,y,k,args,seed,verbose,weights,covariates See the canonical reference.
 #' @return A list of class `c("find_keep_optimal_result", "plskit_result")`.
 #' @export
 spls1_find_keep_optimal <- function(
@@ -186,7 +196,8 @@ spls1_find_keep_optimal <- function(
   args = NULL,
   seed = NULL,
   verbose = FALSE,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 ) {
   .plskit_call("spls1_find_keep_optimal", list(
     X = X,
@@ -195,7 +206,8 @@ spls1_find_keep_optimal <- function(
     args = args,
     seed = seed,
     verbose = verbose,
-    weights = weights
+    weights = weights,
+    covariates = covariates
   ))
 }
 
@@ -205,7 +217,7 @@ spls1_find_keep_optimal <- function(
 #' documented once, in the canonical reference: section
 #' "2b.3 K-selection at fixed keep" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k_max,keep,selector,diagnostic,args,pre_standardized,seed,verbose,weights See the canonical reference.
+#' @param X,y,k_max,keep,selector,diagnostic,args,pre_standardized,seed,verbose,weights,covariates See the canonical reference.
 #' @return A list of class `c("find_k_optimal_result", "plskit_result")`.
 #' @export
 spls1_find_k_optimal <- function(
@@ -219,7 +231,8 @@ spls1_find_k_optimal <- function(
   pre_standardized = FALSE,
   seed = NULL,
   verbose = FALSE,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 ) {
   .plskit_call("spls1_find_k_optimal", list(
     X = X,
@@ -232,7 +245,8 @@ spls1_find_k_optimal <- function(
     pre_standardized = pre_standardized,
     seed = seed,
     verbose = verbose,
-    weights = weights
+    weights = weights,
+    covariates = covariates
   ))
 }
 
@@ -242,7 +256,7 @@ spls1_find_k_optimal <- function(
 #' documented once, in the canonical reference: section
 #' "2b.3 K-selection at fixed keep" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k_max,keep,test_method,alpha,args,pre_standardized,seed,verbose,weights See the canonical reference.
+#' @param X,y,k_max,keep,test_method,alpha,args,pre_standardized,seed,verbose,weights,covariates See the canonical reference.
 #' @return A list of class `c("find_k_sequence_result", "plskit_result")`.
 #' @export
 spls1_find_k_sequence <- function(
@@ -256,7 +270,8 @@ spls1_find_k_sequence <- function(
   pre_standardized = FALSE,
   seed = NULL,
   verbose = FALSE,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 ) {
   .plskit_call("spls1_find_k_sequence", list(
     X = X,
@@ -269,7 +284,8 @@ spls1_find_k_sequence <- function(
     pre_standardized = pre_standardized,
     seed = seed,
     verbose = verbose,
-    weights = weights
+    weights = weights,
+    covariates = covariates
   ))
 }
 
@@ -414,13 +430,13 @@ spls3_fit <- function(
 #' documented once, in the canonical reference: section
 #' "3.1 Confirmatory omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k,test_method,args,ci,n_boot,m_rate,level,max_failure_rate,pre_standardized,seed,verbose,weights,max_skip_rate See the canonical reference.
+#' @param X,y,k,test_method,args,ci,n_boot,m_rate,level,max_failure_rate,pre_standardized,seed,verbose,weights,max_skip_rate,covariates,null_y,gram,n_features See the canonical reference.
 #' @return A list of class `c("confirmatory_test_result", "plskit_result")`.
 #' @export
 pls1_confirmatory_test <- function(
-  X,
-  y,
-  k = 1L,
+  X = NULL,
+  y = NULL,
+  k = NULL,
   test_method = "auto",
   args = NULL,
   ci = FALSE,
@@ -432,7 +448,11 @@ pls1_confirmatory_test <- function(
   seed = NULL,
   verbose = FALSE,
   weights = NULL,
-  max_skip_rate = NULL
+  max_skip_rate = NULL,
+  covariates = NULL,
+  null_y = NULL,
+  gram = NULL,
+  n_features = NULL
 ) {
   .plskit_call("pls1_confirmatory_test", list(
     X = X,
@@ -449,7 +469,11 @@ pls1_confirmatory_test <- function(
     seed = seed,
     verbose = verbose,
     weights = weights,
-    max_skip_rate = max_skip_rate
+    max_skip_rate = max_skip_rate,
+    covariates = covariates,
+    null_y = null_y,
+    gram = gram,
+    n_features = n_features
   ))
 }
 
@@ -459,16 +483,18 @@ pls1_confirmatory_test <- function(
 #' documented once, in the canonical reference: section
 #' "3.2 Auto-gate query" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,weights See the canonical reference.
+#' @param X,weights,pre_standardized See the canonical reference.
 #' @return A list of class `c("split_nb_gate_result", "plskit_result")`.
 #' @export
 split_nb_gate <- function(
   X,
-  weights = NULL
+  weights = NULL,
+  pre_standardized = FALSE
 ) {
   .plskit_call("split_nb_gate", list(
     X = X,
-    weights = weights
+    weights = weights,
+    pre_standardized = pre_standardized
   ))
 }
 
@@ -478,7 +504,7 @@ split_nb_gate <- function(
 #' documented once, in the canonical reference: section
 #' "3.3 Permutation-null engine" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k,n_perm,return_perm_matrix,pre_standardized,seed,verbose,weights See the canonical reference.
+#' @param X,y,k,n_perm,return_perm_matrix,pre_standardized,seed,verbose,weights,covariates See the canonical reference.
 #' @return A list of class `c("perm_null_result", "plskit_result")`.
 #' @export
 pls1_perm_null <- function(
@@ -490,7 +516,8 @@ pls1_perm_null <- function(
   pre_standardized = FALSE,
   seed = NULL,
   verbose = FALSE,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 ) {
   .plskit_call("pls1_perm_null", list(
     X = X,
@@ -501,7 +528,8 @@ pls1_perm_null <- function(
     pre_standardized = pre_standardized,
     seed = seed,
     verbose = verbose,
-    weights = weights
+    weights = weights,
+    covariates = covariates
   ))
 }
 
@@ -511,19 +539,21 @@ pls1_perm_null <- function(
 #' documented once, in the canonical reference: section
 #' "3.4 Confirmatory PLS3 omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,Y,k,test_method,args,pre_standardized_X,pre_standardized_Y,seed,verbose See the canonical reference.
+#' @param X,Y,k,test_method,args,pre_standardized_X,pre_standardized_Y,seed,verbose,gram,n_features See the canonical reference.
 #' @return A list of class `c("confirmatory_test_result", "plskit_result")`.
 #' @export
 pls3_confirmatory_test <- function(
-  X,
-  Y,
+  X = NULL,
+  Y = NULL,
   k = 1L,
   test_method = "auto",
   args = NULL,
   pre_standardized_X = FALSE,
   pre_standardized_Y = FALSE,
   seed = NULL,
-  verbose = FALSE
+  verbose = FALSE,
+  gram = NULL,
+  n_features = NULL
 ) {
   .plskit_call("pls3_confirmatory_test", list(
     X = X,
@@ -534,7 +564,9 @@ pls3_confirmatory_test <- function(
     pre_standardized_X = pre_standardized_X,
     pre_standardized_Y = pre_standardized_Y,
     seed = seed,
-    verbose = verbose
+    verbose = verbose,
+    gram = gram,
+    n_features = n_features
   ))
 }
 
@@ -551,7 +583,7 @@ pls1_perm_alpha <- function(
   gram,
   Y,
   k = 1L,
-  n_features
+  n_features = NULL
 ) {
   .plskit_call("pls1_perm_alpha", list(
     gram = gram,
@@ -561,13 +593,32 @@ pls1_perm_alpha <- function(
   ))
 }
 
+#' The all-row Gram matrix the held-out tests compute
+#'
+#' R binding of `gram_matrix`. Arguments, defaults and result fields are
+#' documented once, in the canonical reference: section
+#' "3.6 The held-out Gram matrix" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
+#'
+#' @param X,pre_standardized See the canonical reference.
+#' @return A list of class `c("gram_matrix_result", "plskit_result")`.
+#' @export
+gram_matrix <- function(
+  X,
+  pre_standardized = FALSE
+) {
+  .plskit_call("gram_matrix", list(
+    X = X,
+    pre_standardized = pre_standardized
+  ))
+}
+
 #' Rotate a factors result, a PLS3 model or a weight matrix
 #'
 #' R binding of `rotate`. Arguments, defaults and result fields are
 #' documented once, in the canonical reference: section
 #' "4.1 Rotation" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param model_or_W,X,method,L,args,pre_standardized See the canonical reference.
+#' @param model_or_W,X,method,L,args,pre_standardized,covariates See the canonical reference.
 #' @return A list of class `c("rotate_result", "plskit_result")`, or `c("pls3_result", "plskit_result")`, or `c("factors_result", "plskit_result")`, depending on the input.
 #' @export
 rotate <- function(
@@ -576,7 +627,8 @@ rotate <- function(
   method = "varimax",
   L = NULL,
   args = NULL,
-  pre_standardized = NULL
+  pre_standardized = NULL,
+  covariates = NULL
 ) {
   .plskit_call("rotate", list(
     model_or_W = model_or_W,
@@ -584,7 +636,8 @@ rotate <- function(
     method = method,
     L = L,
     args = args,
-    pre_standardized = pre_standardized
+    pre_standardized = pre_standardized,
+    covariates = covariates
   ))
 }
 
@@ -594,20 +647,22 @@ rotate <- function(
 #' documented once, in the canonical reference: section
 #' "4.3 Factors" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param model_or_coef,X,n,pre_standardized See the canonical reference.
+#' @param model_or_coef,X,n,pre_standardized,covariates See the canonical reference.
 #' @return A list of class `c("factors_result", "plskit_result")`.
 #' @export
 factors <- function(
   model_or_coef,
   X,
   n,
-  pre_standardized = NULL
+  pre_standardized = NULL,
+  covariates = NULL
 ) {
   .plskit_call("factors", list(
     model_or_coef = model_or_coef,
     X = X,
     n = n,
-    pre_standardized = pre_standardized
+    pre_standardized = pre_standardized,
+    covariates = covariates
   ))
 }
 

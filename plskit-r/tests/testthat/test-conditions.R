@@ -3,7 +3,7 @@
 d <- make_xy()
 
 test_that("an engine error arrives with its code and class vector", {
-  e <- catch_plskit(pls1_fit(d$X, d$y[-1]))
+  e <- catch_plskit(pls1_fit(d$X, d$y[-1], k = 1L))
   expect_identical(e$code, "dimension_mismatch")
   expect_identical(class(e), c("plskit_error", "error", "condition"))
   # A 10 x 0 matrix crosses the seam; the engine is what rejects it.
@@ -20,7 +20,7 @@ test_that("invalid_weights carries its reason", {
   w <- rep(1, 60)
   w[3] <- -1
   reason <- tryCatch(
-    pls1_fit(d$X, d$y, weights = w),
+    pls1_fit(d$X, d$y, k = 1L, weights = w),
     plskit_invalid_weights = function(e) e$reason,
     plskit_error = function(e) "wrong class"
   )

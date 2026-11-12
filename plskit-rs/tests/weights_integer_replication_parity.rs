@@ -24,6 +24,7 @@ fn integer_weights_match_row_duplication() {
         y.as_ref(),
         KSpec::Fixed(2),
         Some(w.as_ref()),
+        None,
         FitOpts::default(),
     )
     .unwrap();
@@ -33,6 +34,7 @@ fn integer_weights_match_row_duplication() {
         x_dup.as_ref(),
         y_dup.as_ref(),
         KSpec::Fixed(2),
+        None,
         None,
         FitOpts::default(),
     )

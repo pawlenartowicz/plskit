@@ -89,6 +89,38 @@ pub(crate) fn thin_svd(
     })
 }
 
+/// The `R` factor of the Householder QR of `a` (`min(m, n) × n`, upper
+/// trapezoidal, `a'a = R'R` up to the QR's backward error), computed in
+/// place on `a` under `Par::Seq`, so its bits do not depend on the pool.
+pub(crate) fn qr_r_seq(mut a: Mat<f64>) -> Mat<f64> {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::linalg::qr::no_pivoting::factor::{
+        qr_in_place, qr_in_place_scratch, recommended_block_size,
+    };
+    let (m, n) = a.shape();
+    let size = m.min(n);
+    if size == 0 {
+        return Mat::<f64>::zeros(0, n);
+    }
+    let block = recommended_block_size::<f64>(m, n);
+    let mut q_coeff = Mat::<f64>::zeros(block, size);
+    let mut mem = MemBuffer::new(qr_in_place_scratch::<f64>(
+        m,
+        n,
+        block,
+        Par::Seq,
+        faer::Spec::default(),
+    ));
+    qr_in_place(
+        a.as_mut(),
+        q_coeff.as_mut(),
+        Par::Seq,
+        MemStack::new(&mut mem),
+        faer::Spec::default(),
+    );
+    Mat::<f64>::from_fn(size, n, |i, j| if i <= j { a[(i, j)] } else { 0.0 })
+}
+
 /// Eigendecomposition of the self-adjoint `a` with an explicit `par`:
 /// faer's `self_adjoint_eigen(Side::Lower)`, minus the global read.
 /// Returns `(λ, U)` with the eigenvalues ascending and `U`'s columns the
@@ -260,46 +292,85 @@ pub fn standardize_apply(
 /// with the same element expression, so only one block of at most eight
 /// gathered columns is held at a time and no bit changes. `w` is indexed
 /// by output row (length `idx.len()`) and is renormalized to mean one for
-/// the moments, as `standardize_weighted` does. `row_scale`, when given,
-/// multiplies output row `i` as `v * row_scale[i]` on the write: the √w
-/// row scaling of the split statistics, fused.
+/// the moments, as `standardize_weighted` does. The rows are not scaled:
+/// the held-out tests' √w row scaling is [`center_rows_fro`]'s.
 pub(crate) fn standardize_rows(
     x: MatRef<'_, f64>,
     idx: &[usize],
     w: Option<ColRef<'_, f64>>,
-    row_scale: Option<ColRef<'_, f64>>,
 ) -> (Mat<f64>, Col<f64>, Col<f64>) {
-    let (xs, mean, scale, _) = standardize_rows_fro(x, idx, w, row_scale);
+    let w_prime: Option<Col<f64>> = w.map(renormalize_mean_one);
+    let (xs, mean, scale, _) = standardize_columns(
+        x,
+        Some(idx),
+        w_prime.as_ref().map(owned_col_slice),
+        None,
+        true,
+    );
     (xs, mean, scale)
 }
 
-/// [`standardize_rows`] with a fourth value taken from the column moments
-/// ([`fro_from_terms`]): `‖result‖_F`, to rounding, when `row_scale[i]²`
-/// equals `w[i]` renormalized to mean one, or when `w` and `row_scale` are
-/// both `None`.
-pub(crate) fn standardize_rows_fro(
+/// The column scales the held-out tests divide a block by, once for all
+/// rows: those the canonical standardization gives it (weighted moments,
+/// mean-one `w`, when `w` is given), as `pls1_fit` scales X and the PLS3
+/// tests scale X and Y; or all ones when `pre_standardized`, where the
+/// block is used as given.
+pub(crate) fn held_out_scale(
+    x: MatRef<'_, f64>,
+    w: Option<ColRef<'_, f64>>,
+    pre_standardized: bool,
+) -> Col<f64> {
+    if pre_standardized {
+        return Col::<f64>::from_fn(x.ncols(), |_| 1.0);
+    }
+    fit_x_moments(x, w, crate::fit::par_fixed()).scale
+}
+
+/// Rows `idx` of `x` centred by their own means and divided by the given
+/// column `scale`: `(x[idx[i], j] - mean[j]) / scale[j]`, times
+/// `row_scale[i]` when given. The means are [`standardize_rows`]'s, bit for
+/// bit (`w` indexed by output row, renormalized to mean one); only the
+/// scale is not the part's own. Returns the matrix, the means and
+/// `‖result‖_F` from the column moments ([`fro_from_terms`]), to rounding
+/// when `row_scale[i]²` equals `w[i]` renormalized to mean one, or when `w`
+/// and `row_scale` are both `None`.
+///
+/// # Panics
+/// When `scale` does not have one entry per column of `x`.
+pub(crate) fn center_rows_fro(
     x: MatRef<'_, f64>,
     idx: &[usize],
     w: Option<ColRef<'_, f64>>,
     row_scale: Option<ColRef<'_, f64>>,
-) -> (Mat<f64>, Col<f64>, Col<f64>, f64) {
+    scale: ColRef<'_, f64>,
+) -> (Mat<f64>, Col<f64>, f64) {
+    assert_eq!(
+        scale.nrows(),
+        x.ncols(),
+        "center_rows_fro: scale has {} entries, x has {} columns",
+        scale.nrows(),
+        x.ncols()
+    );
     let w_prime: Option<Col<f64>> = w.map(renormalize_mean_one);
     let row_scale: Option<Vec<f64>> = row_scale.map(|r| (0..r.nrows()).map(|i| r[i]).collect());
-    standardize_columns(
+    let scale: Vec<f64> = (0..scale.nrows()).map(|j| scale[j]).collect();
+    let (xs, mean, _, terms) = standardize_columns_terms(
         x,
         Some(idx),
         w_prime.as_ref().map(owned_col_slice),
         row_scale.as_deref(),
+        Some(&scale),
         true,
-    )
+    );
+    (xs, mean, fro_from_terms(&terms))
 }
 
-/// Bytes one block of [`standardized_blocks`] may hold per half: small
-/// enough to stay in cache between the standardizing pass and the products
+/// Bytes one block of [`centered_blocks`] may hold per half: small
+/// enough to stay in cache between the centring pass and the products
 /// formed from the block.
 pub(crate) const STREAM_BLOCK_BYTES: usize = 2 << 20;
 
-/// Columns per block of [`standardized_blocks`] for halves of at most
+/// Columns per block of [`centered_blocks`] for halves of at most
 /// `n_rows` rows: [`STREAM_BLOCK_BYTES`] worth, rounded down to a multiple
 /// of [`STD_BLOCK`], at least one `STD_BLOCK`. A function of the row count
 /// alone, so the block boundaries, and with them the bits of every product
@@ -311,7 +382,7 @@ pub(crate) fn stream_block_width(n_rows: usize) -> usize {
     (cols / STD_BLOCK * STD_BLOCK).max(STD_BLOCK)
 }
 
-/// Bytes of the two blocks [`standardized_blocks`] holds at once for halves
+/// Bytes of the two blocks [`centered_blocks`] holds at once for halves
 /// of `n_a` and `n_b` rows at width `stream_block_width(max(n_a, n_b))`,
 /// the width every batched loop passes it (change together): two owned
 /// matrices, each padded as `resample::copy_bytes` counts. A block can
@@ -326,9 +397,9 @@ pub(crate) fn stream_blocks_bytes(n_a: usize, n_b: usize) -> usize {
     copy_bytes(n_a, w).saturating_add(copy_bytes(n_b, w))
 }
 
-/// `standardize_rows(x, tr, w_tr, sw_tr)` and
-/// `standardize_apply_rows(x, te, mean, scale, sw_te)`, `width` columns at
-/// a time: `f(j0, a, c)` receives the two standardized blocks of columns
+/// `center_rows_fro(x, tr, w_tr, sw_tr, scale)` and
+/// `standardize_apply_rows(x, te, mean_tr, scale, sw_te)`, `width` columns
+/// at a time: `f(j0, a, c)` receives the two blocks of columns
 /// `j0 .. j0 + a.ncols()`, in column order, and nothing the size of `x` is
 /// written. Each column's moments are one sum chain in row order whatever
 /// columns it is grouped with ([`scaled_moments_block`]), so every entry of
@@ -336,35 +407,45 @@ pub(crate) fn stream_blocks_bytes(n_a: usize, n_b: usize) -> usize {
 /// column-major for every layout of `x`. `te` may be empty.
 ///
 /// Returns `‖X̃_tr‖_F` from the column moments, the block values combined
-/// by [`fro_from_terms`]: valid under [`standardize_rows_fro`]'s condition
+/// by [`fro_from_terms`]: valid under [`center_rows_fro`]'s condition
 /// on `w_tr` and `sw_tr`.
 ///
 /// # Panics
-/// When `width` is zero.
+/// When `width` is zero, or `scale` does not have one entry per column of
+/// `x`.
 #[allow(
     clippy::too_many_arguments,
     clippy::similar_names,
     clippy::many_single_char_names
 )]
-pub(crate) fn standardized_blocks(
+pub(crate) fn centered_blocks(
     x: MatRef<'_, f64>,
     tr: &[usize],
     te: &[usize],
     w_tr: Option<ColRef<'_, f64>>,
     sw_tr: Option<ColRef<'_, f64>>,
     sw_te: Option<ColRef<'_, f64>>,
+    scale: ColRef<'_, f64>,
     width: usize,
     mut f: impl FnMut(usize, MatRef<'_, f64>, MatRef<'_, f64>),
 ) -> f64 {
-    assert!(width > 0, "standardized_blocks: width must be positive");
+    assert!(width > 0, "centered_blocks: width must be positive");
+    assert_eq!(
+        scale.nrows(),
+        x.ncols(),
+        "centered_blocks: scale has {} entries, x has {} columns",
+        scale.nrows(),
+        x.ncols()
+    );
     let p = x.ncols();
     let mut fro = Vec::with_capacity(p.div_ceil(width));
     let mut j0 = 0;
     while j0 < p {
         let w = width.min(p - j0);
         let xb = x.subcols(j0, w);
-        let (a, mean, scale, fro_b) = standardize_rows_fro(xb, tr, w_tr, sw_tr);
-        let c = standardize_apply_rows(xb, te, mean.as_ref(), scale.as_ref(), sw_te);
+        let sb = scale.subrows(j0, w);
+        let (a, mean, fro_b) = center_rows_fro(xb, tr, w_tr, sw_tr, sb);
+        let c = standardize_apply_rows(xb, te, mean.as_ref(), sb, sw_te);
         fro.push(fro_b);
         f(j0, a.as_ref(), c.as_ref());
         j0 += w;
@@ -373,7 +454,7 @@ pub(crate) fn standardized_blocks(
 }
 
 /// `standardize_apply(row_subset(x, idx), mean, scale)` in one pass, with
-/// the optional per-row factor of [`standardize_rows`].
+/// the optional per-row factor of [`center_rows_fro`].
 pub(crate) fn standardize_apply_rows(
     x: MatRef<'_, f64>,
     idx: &[usize],
@@ -389,6 +470,24 @@ pub(crate) fn standardize_apply_rows(
             standardized(x[(idx[i], j)], mean[j], scale[j]) * r[i]
         }),
     }
+}
+
+/// `X̃'v` for `X̃ = (x − 1·mean')/scale`, entry `j` the sum over the rows
+/// in index order of `standardized(x[i, j], mean[j], scale[j])·v(i)`: the
+/// entries [`standardize_apply_rows`] writes, so a part's sums and the
+/// all-row sum are formed on the same bits. Nothing the size of `x` is
+/// written.
+pub(crate) fn centered_xt_vec(
+    x: MatRef<'_, f64>,
+    mean: ColRef<'_, f64>,
+    scale: ColRef<'_, f64>,
+    v: impl Fn(usize) -> f64,
+) -> Col<f64> {
+    Col::<f64>::from_fn(x.ncols(), |j| {
+        (0..x.nrows())
+            .map(|i| standardized(x[(i, j)], mean[j], scale[j]) * v(i))
+            .sum()
+    })
 }
 
 /// `Σw` in index order: the sum [`normalize_weights`] checks for zero
@@ -550,15 +649,16 @@ fn standardize_columns(
     row_scale: Option<&[f64]>,
     write: bool,
 ) -> (Mat<f64>, Col<f64>, Col<f64>, f64) {
-    let (xs, mean, scale, terms) = standardize_columns_terms(x, rows, w, row_scale, write);
+    let (xs, mean, scale, terms) = standardize_columns_terms(x, rows, w, row_scale, None, write);
     (xs, mean, scale, fro_from_terms(&terms))
 }
 
 /// The body of [`standardize_weighted`] and [`standardize_rows`] once the
 /// weights are mean-one (`w`, one per output row; `None` for unit weights),
-/// and of [`fit_x_moments`] on one strip of columns of any layout but
-/// row-major. The input is `x` itself (`rows = None`) or its rows `idx` in
-/// that order (`rows = Some(idx)`, repeats allowed). Columns go through
+/// of [`fit_x_moments`] on one strip of columns of any layout but
+/// row-major, and of [`centered_part_moments`] on one strip of any layout.
+/// The input is `x` itself (`rows = None`) or its rows `idx` in that order
+/// (`rows = Some(idx)`, repeats allowed). Columns go through
 /// [`scaled_moments_block`] `STD_BLOCK` at a time (a shorter last block one
 /// column at a time), and each block is then appended to the output as
 /// `(v - mean) / scale`, times `row_scale[i]` when given, while it is still
@@ -571,12 +671,16 @@ fn standardize_columns(
 /// makes every layout of `x` give the same bits. The fourth value is the
 /// columns' [`fro_term`]s in column order; [`standardize_columns`] combines
 /// them. With `write` false only the moments are formed, and the matrix
-/// returned is `n_rows × 0`.
+/// returned is `n_rows × 0`. With `fixed_scale` (one entry per column),
+/// column `j` is divided by `fixed_scale[j]` in place of its own scale,
+/// which is also the scale returned and the one its `fro_term` uses; the
+/// moments still give the mean ([`center_rows_fro`]).
 fn standardize_columns_terms(
     x: MatRef<'_, f64>,
     rows: Option<&[usize]>,
     w: Option<&[f64]>,
     row_scale: Option<&[f64]>,
+    fixed_scale: Option<&[f64]>,
     write: bool,
 ) -> (Mat<f64>, Col<f64>, Col<f64>, Vec<f64>) {
     let n_rows = rows.map_or(x.nrows(), <[usize]>::len);
@@ -646,7 +750,8 @@ fn standardize_columns_terms(
         }
         let mut stats = [(0.0_f64, 1.0_f64); STD_BLOCK];
         for (b, moments) in block_moments.iter().enumerate() {
-            let (col_mean, col_scale) = mean_and_scale_from(moments, n_rows);
+            let (col_mean, own_scale) = mean_and_scale_from(moments, n_rows);
+            let col_scale = fixed_scale.map_or(own_scale, |s| s[j0 + b]);
             mean[j0 + b] = col_mean;
             scale[j0 + b] = col_scale;
             stats[b] = (col_mean, col_scale);
@@ -822,11 +927,7 @@ impl FitX {
 }
 
 /// The moments of `standardize_weighted(x, weights)`: its `mean` and `scale`,
-/// bit for bit, and `fro`, with nothing written. With `rows`, the moments are
-/// those of the listed rows in that order, the bits of [`standardize_rows`]'s,
-/// and `weights` is indexed by output row (length `rows.len()`); the strip
-/// widths count those rows. [`FitX::materialize`] writes `x`'s rows, so it
-/// takes only the moments of `rows = None`. `x` is read in strips of columns,
+/// bit for bit, and `fro`, with nothing written. `x` is read in strips of columns,
 /// and each strip's sweeps run while it is in cache. A column-major or strided
 /// `x` is read in strips of [`stream_block_width`]`(n)` columns, so `x` is read
 /// from memory once while a strip fits in [`STREAM_BLOCK_BYTES`], for `n` up to
@@ -846,14 +947,13 @@ impl FitX {
 /// `x`, within the crate's tolerance.
 pub(crate) fn fit_x_moments(
     x: MatRef<'_, f64>,
-    rows: Option<&[usize]>,
     weights: Option<ColRef<'_, f64>>,
     par: Par,
 ) -> FitX {
     let w_prime: Option<Col<f64>> = weights.map(renormalize_mean_one);
     let w = w_prime.as_ref().map(owned_col_slice);
     let row_major = x.try_as_col_major().is_none() && x.try_as_row_major().is_some();
-    let (n, d) = (rows.map_or(x.nrows(), <[usize]>::len), x.ncols());
+    let (n, d) = (x.nrows(), x.ncols());
     let width = if row_major {
         row_major_strip_width(n, d, par)
     } else {
@@ -862,9 +962,9 @@ pub(crate) fn fit_x_moments(
     let strip = |j0: usize| {
         let xb = x.subcols(j0, width.min(d - j0));
         if row_major {
-            row_major_moments(xb, rows, w)
+            row_major_moments(xb, w)
         } else {
-            let (_, mean, scale, terms) = standardize_columns_terms(xb, rows, w, None, false);
+            let (_, mean, scale, terms) = standardize_columns_terms(xb, None, w, None, None, false);
             (mean, scale, terms)
         }
     };
@@ -921,6 +1021,80 @@ pub(crate) fn fit_x_moments(
         scale,
         fro: fro_from_terms(&terms),
     }
+}
+
+/// The means of rows `idx` of `x` and `‖√w'·(X_idx − 1·mean')/scale‖_F`
+/// (`w` indexed by output row, renormalized to mean one), the second and
+/// third values of [`center_rows_fro`]`(x, idx, w, None, scale)` bit for
+/// bit, without writing a block. `x` is read in strips of
+/// [`stream_block_width`]`(idx.len())` columns through
+/// [`standardize_columns_terms`] (every layout, the row-major one
+/// included); under `Par::Rayon` the strips map in parallel. No bit
+/// depends on the strips or on `par`.
+///
+/// # Panics
+/// When `scale` does not have one entry per column of `x`.
+pub(crate) fn centered_part_moments(
+    x: MatRef<'_, f64>,
+    idx: &[usize],
+    w: Option<ColRef<'_, f64>>,
+    scale: ColRef<'_, f64>,
+    par: Par,
+) -> (Col<f64>, f64) {
+    assert_eq!(
+        scale.nrows(),
+        x.ncols(),
+        "centered_part_moments: scale has {} entries, x has {} columns",
+        scale.nrows(),
+        x.ncols()
+    );
+    let w_prime: Option<Col<f64>> = w.map(renormalize_mean_one);
+    let w = w_prime.as_ref().map(owned_col_slice);
+    let scale: Vec<f64> = (0..scale.nrows()).map(|j| scale[j]).collect();
+    let d = x.ncols();
+    let width = stream_block_width(idx.len());
+    let mut mean = Col::<f64>::zeros(d);
+    let mut terms = vec![0.0_f64; d];
+    {
+        let ms = mean
+            .try_as_col_major_mut()
+            .expect("an owned Col is contiguous")
+            .as_slice_mut();
+        let fill = |c: usize, mo: &mut [f64], to: &mut [f64]| {
+            let (j0, b) = (c * width, mo.len());
+            let (_, sm, _, st) = standardize_columns_terms(
+                x.subcols(j0, b),
+                Some(idx),
+                w,
+                None,
+                Some(&scale[j0..j0 + b]),
+                false,
+            );
+            for (o, j) in mo.iter_mut().zip(0..b) {
+                *o = sm[j];
+            }
+            to.copy_from_slice(&st);
+        };
+        match par {
+            Par::Seq => {
+                for (c, (mo, to)) in ms
+                    .chunks_mut(width)
+                    .zip(terms.chunks_mut(width))
+                    .enumerate()
+                {
+                    fill(c, mo, to);
+                }
+            }
+            Par::Rayon(_) => {
+                use rayon::prelude::*;
+                ms.par_chunks_mut(width)
+                    .zip(terms.par_chunks_mut(width))
+                    .enumerate()
+                    .for_each(|(c, (mo, to))| fill(c, mo, to));
+            }
+        }
+    }
+    (mean, fro_from_terms(&terms))
 }
 
 /// The narrowest [`stream_block_width`] at which [`fit_x_moments`] reads a
@@ -1005,15 +1179,11 @@ fn run_rows(rows: &[&[f64]], f: Option<&[f64]>, pass: &mut impl RowPass) {
     }
 }
 
-/// The contiguous rows of a row-major `x`, each `ncols` long: every row in
-/// order (`idx = None`), or the rows `idx` in that order.
-fn row_slices<'a>(x: MatRef<'a, f64>, idx: Option<&[usize]>) -> Vec<&'a [f64]> {
+/// The contiguous rows of a row-major `x`, each `ncols` long, in order.
+fn row_slices(x: MatRef<'_, f64>) -> Vec<&[f64]> {
     let xr = x.try_as_row_major().expect("the caller checked the layout");
     let d = x.ncols();
-    match idx {
-        None => (0..x.nrows()).map(|i| &xr.row(i).as_slice()[..d]).collect(),
-        Some(idx) => idx.iter().map(|&i| &xr.row(i).as_slice()[..d]).collect(),
-    }
+    (0..x.nrows()).map(|i| &xr.row(i).as_slice()[..d]).collect()
 }
 
 /// `max |x|` per column. `f64::max` ignores a NaN operand, as the fold in
@@ -1118,8 +1288,8 @@ impl RowPass for CenteredSq<'_> {
 }
 
 /// The row-major arm of [`fit_x_moments`] on one strip of columns (a row-major
-/// view, each row a contiguous segment) and its rows `idx` (`None`: every row
-/// in order; `w` is indexed by those rows): the columns' means, scales and
+/// view, each row a contiguous segment), every row in order: the columns'
+/// means, scales and
 /// [`fro_term`]s, in column order. The moments are those of
 /// [`scaled_moments_block`] (the same terms, in the same row order, from the
 /// same start, so the same bits), each column's sums advancing together over
@@ -1127,12 +1297,8 @@ impl RowPass for CenteredSq<'_> {
 /// width); change the two together. Three passes over the strip: `max |x|`, the
 /// mean sum and `Σu²` together, and `Σ(u − mean)²`, with `u = x·(1/s)`.
 #[allow(clippy::cast_precision_loss, clippy::many_single_char_names)]
-fn row_major_moments(
-    x: MatRef<'_, f64>,
-    idx: Option<&[usize]>,
-    w: Option<&[f64]>,
-) -> (Col<f64>, Col<f64>, Vec<f64>) {
-    let rows = row_slices(x, idx);
+fn row_major_moments(x: MatRef<'_, f64>, w: Option<&[f64]>) -> (Col<f64>, Col<f64>, Vec<f64>) {
+    let rows = row_slices(x);
     let (n, d) = (rows.len(), x.ncols());
     let zero = sum_start();
 
@@ -1245,7 +1411,7 @@ pub(crate) fn row_major_t_mul(
     if d < ROW_BLOCK_MIN_COLS || x.try_as_col_major().is_some() || x.try_as_row_major().is_none() {
         return None;
     }
-    let rows = row_slices(x, None);
+    let rows = row_slices(x);
     let t: Vec<f64> = (0..n).map(|i| t[i]).collect();
     let mut out = vec![0.0_f64; d];
     match par {
@@ -2478,122 +2644,79 @@ mod row_standardize_tests {
         ]
     }
 
-    /// Training and held-out blocks of `standardized_blocks`, concatenated.
-    #[allow(clippy::similar_names)]
-    fn collect_blocks(
-        x: MatRef<'_, f64>,
-        tr: &[usize],
-        te: &[usize],
-        w: Option<ColRef<'_, f64>>,
-        sw_tr: Option<ColRef<'_, f64>>,
-        sw_te: Option<ColRef<'_, f64>>,
-        width: usize,
-    ) -> (Mat<f64>, Mat<f64>, f64, Vec<usize>) {
-        let mut a_all = Mat::<f64>::zeros(tr.len(), x.ncols());
-        let mut c_all = Mat::<f64>::zeros(te.len(), x.ncols());
-        let mut starts = Vec::new();
-        let fro = standardized_blocks(x, tr, te, w, sw_tr, sw_te, width, |j0, a, c| {
-            starts.push(j0);
-            for j in 0..a.ncols() {
-                for i in 0..a.nrows() {
-                    a_all[(i, j0 + j)] = a[(i, j)];
-                }
-                for i in 0..c.nrows() {
-                    c_all[(i, j0 + j)] = c[(i, j)];
-                }
-            }
-        });
-        (a_all, c_all, fro, starts)
+    /// 12 × 5: columns at scales 1e-3, 1 and 1e3, the constant 7.0, and
+    /// one with an outlier (row 4).
+    fn held_out_x() -> Mat<f64> {
+        let u = unif(12, 5, 33);
+        Mat::<f64>::from_fn(12, 5, |i, j| match j {
+            0 => 1e-3 * u[(i, 0)],
+            2 => 1e3 * u[(i, 2)],
+            3 => 7.0,
+            4 if i == 4 => 50.0,
+            _ => u[(i, j)],
+        })
     }
 
     #[test]
-    #[allow(clippy::similar_names)]
-    fn standardized_blocks_concatenate_to_the_full_standardizers() {
-        // 24 × 37: wider than one STD_BLOCK and not a multiple of it.
-        let x = unif(24, 37, 5);
-        let lay = Layouts::new(x.as_ref());
-        let tr: Vec<usize> = (0..24).step_by(2).collect();
-        let te: Vec<usize> = (1..24).step_by(2).collect();
-        // Mean-one weights with `sw_tr² = w`: the condition under which the
-        // returned norm is the norm of the result.
-        let w = renormalize_mean_one(test_weights(tr.len()).as_ref());
-        let sw_tr = Col::<f64>::from_fn(tr.len(), |i| w[i].sqrt());
-        let sw_te = Col::<f64>::from_fn(te.len(), |i| 0.5 + (i % 3) as f64);
-        for (view, xv) in lay.all(&x) {
-            for weighted in [false, true] {
-                let (wr, sr, se) = if weighted {
-                    (Some(w.as_ref()), Some(sw_tr.as_ref()), Some(sw_te.as_ref()))
-                } else {
-                    (None, None, None)
-                };
-                let (full_a, mean, scale) = standardize_rows(xv, &tr, wr, sr);
-                let full_c = standardize_apply_rows(xv, &te, mean.as_ref(), scale.as_ref(), se);
-                for width in [1, 8, 16, 24, 37, 64] {
-                    let what = format!("{view} weighted={weighted} width={width}");
-                    let (a, c, fro, starts) = collect_blocks(xv, &tr, &te, wr, sr, se, width);
-                    assert_mat_bits_eq(a.as_ref(), full_a.as_ref(), &what);
-                    assert_mat_bits_eq(c.as_ref(), full_c.as_ref(), &what);
-                    let expect: Vec<usize> = (0..37).step_by(width).collect();
-                    assert_eq!(starts, expect, "{what}: block starts");
-                    approx::assert_relative_eq!(fro, full_a.norm_l2(), max_relative = 1e-13);
-                }
-            }
+    #[allow(clippy::float_cmp)]
+    fn held_out_scale_is_the_fit_scale_or_ones() {
+        let x = held_out_x();
+        for w in [None, Some(test_weights(12))] {
+            let w = w.as_ref().map(Col::as_ref);
+            let what = format!("weighted={}", w.is_some());
+            let s = held_out_scale(x.as_ref(), w, false);
+            let (_, _, s_ref) = standardize_weighted(x.as_ref(), w);
+            assert_bits_eq(&col_vals(s.as_ref()), &col_vals(s_ref.as_ref()), &what);
+            let ones = held_out_scale(x.as_ref(), w, true);
+            assert_eq!(col_vals(ones.as_ref()), vec![1.0; 5], "{what}");
         }
     }
 
     #[test]
-    fn standardized_blocks_take_an_empty_held_out_set() {
-        let x = data();
-        let rows: Vec<usize> = (0..24).collect();
-        let (full, _, _) = standardize_rows(x.as_ref(), &rows, None, None);
-        let (a, _, _, _) = collect_blocks(x.as_ref(), &rows, &[], None, None, None, 2);
-        assert_mat_bits_eq(a.as_ref(), full.as_ref(), "all rows, no held-out");
-        // The held-out block has no rows and the training block's columns.
-        standardized_blocks(x.as_ref(), &rows, &[], None, None, None, 2, |_, a, c| {
-            assert_eq!((c.nrows(), c.ncols()), (0, a.ncols()));
-        });
-    }
-
-    /// `fro_from_terms` is NaN when a term is NaN, also when every term is:
-    /// `f64::max` drops a NaN, so the largest-term fold alone would read an
-    /// all-NaN slice as the zero norm.
-    /// `standardized_blocks` combines its block norms with it, so one
-    /// all-NaN block makes the whole norm NaN next to a finite block.
-    #[test]
-    #[allow(clippy::float_cmp, clippy::cast_precision_loss)]
-    fn fro_from_terms_is_nan_when_a_term_is_nan() {
-        assert!(fro_from_terms(&[f64::NAN, f64::NAN]).is_nan());
-        assert!(fro_from_terms(&[f64::NAN, 2.0]).is_nan());
-        assert!(fro_from_terms(&[f64::INFINITY, f64::NAN]).is_nan());
-        assert_eq!(fro_from_terms(&[f64::INFINITY, 2.0]), f64::INFINITY);
-        assert_eq!(fro_from_terms(&[3.0, 4.0]), 5.0);
-        assert_eq!(fro_from_terms(&[]), 0.0);
-
-        // Width 2: block 0 (columns 0 and 1) is all NaN, block 1 finite.
-        let x = Mat::<f64>::from_fn(6, 4, |i, j| {
-            if j < 2 {
-                f64::NAN
-            } else {
-                (i * (j + 1)) as f64
+    #[allow(clippy::float_cmp)]
+    fn center_rows_divides_part_centred_rows_by_the_given_scale() {
+        let x = held_out_x();
+        let idx = [0, 2, 3, 5, 8, 11];
+        for w in [None, Some(test_weights(12))] {
+            let what = format!("weighted={}", w.is_some());
+            let scale = held_out_scale(x.as_ref(), w.as_ref().map(Col::as_ref), false);
+            // Part weights, and the row factor `√` of them renormalized to mean one.
+            let w_part = w.map(|w| Col::<f64>::from_fn(idx.len(), |i| w[idx[i]]));
+            let w_part = w_part.as_ref().map(Col::as_ref);
+            let sw = w_part.map(|w| sqrt_col(renormalize_mean_one(w).as_ref()));
+            let sw = sw.as_ref().map(Col::as_ref);
+            let (xc, mean, fro) = center_rows_fro(x.as_ref(), &idx, w_part, sw, scale.as_ref());
+            let (_, mean_ref, _) = standardize_rows(x.as_ref(), &idx, w_part);
+            assert_bits_eq(
+                &col_vals(mean.as_ref()),
+                &col_vals(mean_ref.as_ref()),
+                &what,
+            );
+            for j in 0..5 {
+                for i in 0..idx.len() {
+                    let r = sw.map_or(1.0, |s| s[i]);
+                    let expect = ((x[(idx[i], j)] - mean[j]) / scale[j]) * r;
+                    approx::assert_relative_eq!(xc[(i, j)], expect, max_relative = 1e-14);
+                }
             }
-        });
-        let rows: Vec<usize> = (0..6).collect();
-        let fro = standardized_blocks(x.as_ref(), &rows, &[], None, None, None, 2, |_, _, _| {});
-        assert!(fro.is_nan(), "fro = {fro}");
+            approx::assert_relative_eq!(fro, xc.norm_l2(), max_relative = 1e-12);
+            assert!(
+                (0..idx.len()).all(|i| xc[(i, 3)] == 0.0),
+                "{what}: constant column"
+            );
+        }
     }
 
-    /// `fit_x_moments` over a list of rows gives the bits of
-    /// `standardize_rows_fro`'s mean, scale and `fro` for those rows, on
-    /// every layout (the row-major arm through `row_major_moments`, the
-    /// others through `standardize_columns_terms`), with and without
+    /// `centered_part_moments` over a list of rows gives `center_rows_fro`'s
+    /// means and norm at the all-row scale, bit for bit, and its means are
+    /// `standardize_rows`' for those rows, on every layout, with and without
     /// weights, under `Par::Seq` and the fixed split, over the copy-free
-    /// families and a 40 × 13,200 X whose 27 listed rows read two strips
-    /// of `stream_block_width(27)` columns, the last one partial.
+    /// families and a 40 × 13,200 X whose 27 listed rows read two strips of
+    /// `stream_block_width(27)` columns, the last one partial.
     #[test]
-    fn fit_x_moments_over_rows_matches_standardize_rows() {
+    fn centered_part_moments_match_center_rows_fro() {
         use crate::test_support::{
             Agree, Family, assert_agree, assert_layout_agree, copy_free_families, signal_data,
-            test_weights,
         };
         let (xs, ys) = signal_data(40, 13_200, 106);
         let mut families = copy_free_families();
@@ -2620,25 +2743,154 @@ mod row_standardize_tests {
                     f.name
                 );
             }
+            let scale = held_out_scale(f.x.as_ref(), f.w.as_ref().map(Col::as_ref), false);
             let w_rows: Option<Col<f64>> =
                 f.w.as_ref()
                     .map(|w| Col::<f64>::from_fn(idx.len(), |i| w[idx[i]]));
             let wr = w_rows.as_ref().map(Col::as_ref);
-            let (_, mean, scale, fro) = standardize_rows_fro(f.x.as_ref(), &idx, wr, None);
-            let mut want: Vec<f64> = mean.iter().chain(scale.iter()).copied().collect();
+            let (_, mean, fro) = center_rows_fro(f.x.as_ref(), &idx, wr, None, scale.as_ref());
+            let (_, mean_rows, _) = standardize_rows(f.x.as_ref(), &idx, wr);
+            assert_bits_eq(
+                &col_vals(mean.as_ref()),
+                &col_vals(mean_rows.as_ref()),
+                f.name,
+            );
+            let mut want = col_vals(mean.as_ref());
             want.push(fro);
             for par in [Par::Seq, crate::fit::par_fixed()] {
                 let what = format!("{} {par:?}", f.name);
                 let got = assert_layout_agree(&f.x, &what, Agree::Bits, |xv| {
-                    let m = fit_x_moments(xv, Some(&idx), wr, par);
-                    let mut v: Vec<f64> = m.mean.iter().chain(m.scale.iter()).copied().collect();
-                    v.push(m.fro);
+                    let (m, fro) = centered_part_moments(xv, &idx, wr, scale.as_ref(), par);
+                    let mut v = col_vals(m.as_ref());
+                    v.push(fro);
                     Ok(v)
                 })
                 .unwrap();
                 assert_agree(&got, &want, Agree::Bits, &what);
             }
         }
+    }
+
+    /// Training and held-out blocks of `centered_blocks`, concatenated.
+    #[allow(clippy::similar_names, clippy::too_many_arguments)]
+    fn collect_centered_blocks(
+        x: MatRef<'_, f64>,
+        tr: &[usize],
+        te: &[usize],
+        w: Option<ColRef<'_, f64>>,
+        sw_tr: Option<ColRef<'_, f64>>,
+        sw_te: Option<ColRef<'_, f64>>,
+        scale: ColRef<'_, f64>,
+        width: usize,
+    ) -> (Mat<f64>, Mat<f64>, f64, Vec<usize>) {
+        let mut a_all = Mat::<f64>::zeros(tr.len(), x.ncols());
+        let mut c_all = Mat::<f64>::zeros(te.len(), x.ncols());
+        let mut starts = Vec::new();
+        let fro = centered_blocks(x, tr, te, w, sw_tr, sw_te, scale, width, |j0, a, c| {
+            starts.push(j0);
+            for j in 0..a.ncols() {
+                for i in 0..a.nrows() {
+                    a_all[(i, j0 + j)] = a[(i, j)];
+                }
+                for i in 0..c.nrows() {
+                    c_all[(i, j0 + j)] = c[(i, j)];
+                }
+            }
+        });
+        (a_all, c_all, fro, starts)
+    }
+
+    #[test]
+    #[allow(clippy::similar_names, clippy::cast_precision_loss)]
+    fn centered_blocks_match_full_calls_at_every_width() {
+        // 24 × 37: wider than one STD_BLOCK and not a multiple of it.
+        let x = unif(24, 37, 5);
+        let lay = Layouts::new(x.as_ref());
+        let tr: Vec<usize> = (0..24).step_by(2).collect();
+        let te: Vec<usize> = (1..24).step_by(2).collect();
+        let w = renormalize_mean_one(test_weights(tr.len()).as_ref());
+        let sw_tr = sqrt_col(w.as_ref());
+        let sw_te = Col::<f64>::from_fn(te.len(), |i| 0.5 + (i % 3) as f64);
+        let scale = Col::<f64>::from_fn(37, |j| 0.5 + j as f64 * 0.25);
+        for (view, xv) in lay.all(&x) {
+            for weighted in [false, true] {
+                let (wr, sr, se) = if weighted {
+                    (Some(w.as_ref()), Some(sw_tr.as_ref()), Some(sw_te.as_ref()))
+                } else {
+                    (None, None, None)
+                };
+                let (full_a, mean, full_fro) = center_rows_fro(xv, &tr, wr, sr, scale.as_ref());
+                let full_c = standardize_apply_rows(xv, &te, mean.as_ref(), scale.as_ref(), se);
+                for width in [1, 3, 8, 64] {
+                    let what = format!("{view} weighted={weighted} width={width}");
+                    let (a, c, fro, starts) =
+                        collect_centered_blocks(xv, &tr, &te, wr, sr, se, scale.as_ref(), width);
+                    assert_mat_bits_eq(a.as_ref(), full_a.as_ref(), &what);
+                    assert_mat_bits_eq(c.as_ref(), full_c.as_ref(), &what);
+                    let expect: Vec<usize> = (0..37).step_by(width).collect();
+                    assert_eq!(starts, expect, "{what}: block starts");
+                    // One term per block (width 1) or one block: the same
+                    // `fro_from_terms` sum. Otherwise block norms are combined.
+                    if width == 1 || width >= 37 {
+                        assert_eq!(fro.to_bits(), full_fro.to_bits(), "{what}: fro");
+                    } else {
+                        approx::assert_relative_eq!(fro, full_fro, max_relative = 1e-13);
+                    }
+                    approx::assert_relative_eq!(fro, full_a.norm_l2(), max_relative = 1e-13);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn centered_blocks_take_an_empty_held_out_set() {
+        let x = data();
+        let rows: Vec<usize> = (0..24).collect();
+        let scale = held_out_scale(x.as_ref(), None, false);
+        let (full, _, _) = center_rows_fro(x.as_ref(), &rows, None, None, scale.as_ref());
+        let (a, c, _, _) =
+            collect_centered_blocks(x.as_ref(), &rows, &[], None, None, None, scale.as_ref(), 2);
+        assert_mat_bits_eq(a.as_ref(), full.as_ref(), "all rows, no held-out");
+        assert_eq!((c.nrows(), c.ncols()), (0, x.ncols()));
+    }
+
+    /// `fro_from_terms` is NaN when a term is NaN, also when every term is:
+    /// `f64::max` drops a NaN, so the largest-term fold alone would read an
+    /// all-NaN slice as the zero norm.
+    /// `centered_blocks` combines its block norms with it, so one
+    /// all-NaN block makes the whole norm NaN next to a finite block.
+    #[test]
+    #[allow(clippy::float_cmp, clippy::cast_precision_loss)]
+    fn fro_from_terms_is_nan_when_a_term_is_nan() {
+        assert!(fro_from_terms(&[f64::NAN, f64::NAN]).is_nan());
+        assert!(fro_from_terms(&[f64::NAN, 2.0]).is_nan());
+        assert!(fro_from_terms(&[f64::INFINITY, f64::NAN]).is_nan());
+        assert_eq!(fro_from_terms(&[f64::INFINITY, 2.0]), f64::INFINITY);
+        assert_eq!(fro_from_terms(&[3.0, 4.0]), 5.0);
+        assert_eq!(fro_from_terms(&[]), 0.0);
+
+        // Width 2: block 0 (columns 0 and 1) is all NaN, block 1 finite.
+        let x = Mat::<f64>::from_fn(6, 4, |i, j| {
+            if j < 2 {
+                f64::NAN
+            } else {
+                (i * (j + 1)) as f64
+            }
+        });
+        let rows: Vec<usize> = (0..6).collect();
+        let ones = Col::<f64>::from_fn(4, |_| 1.0);
+        let fro = centered_blocks(
+            x.as_ref(),
+            &rows,
+            &[],
+            None,
+            None,
+            None,
+            ones.as_ref(),
+            2,
+            |_, _, _| {},
+        );
+        assert!(fro.is_nan(), "fro = {fro}");
     }
 
     #[test]
@@ -2656,12 +2908,12 @@ mod row_standardize_tests {
     }
 
     /// `stream_blocks_bytes` is the most the two blocks of
-    /// `standardized_blocks` allocate at the width the batched loops pass,
+    /// `centered_blocks` allocate at the width the batched loops pass,
     /// over a full block and a partial one: halves equal and unequal, not
     /// multiples of 8, and past 32,768 rows, where the width stays at
     /// `STD_BLOCK` columns.
     #[test]
-    fn stream_blocks_bytes_is_what_standardized_blocks_allocates() {
+    fn stream_blocks_bytes_is_what_centered_blocks_allocates() {
         let bytes = |m: MatRef<'_, f64>| m.col_stride().unsigned_abs() * m.ncols() * 8;
         for (n_a, n_b) in [(20, 20), (21, 19), (32, 8), (127, 127), (40_000, 1)] {
             let n = n_a + n_b;
@@ -2670,10 +2922,21 @@ mod row_standardize_tests {
             let x = Mat::<f64>::from_fn(n, p, |i, j| ((i * 7 + j * 3) % 11) as f64);
             let tr: Vec<usize> = (0..n_a).collect();
             let te: Vec<usize> = (n_a..n).collect();
+            let ones = Col::<f64>::from_fn(p, |_| 1.0);
             let mut most = 0;
-            standardized_blocks(x.as_ref(), &tr, &te, None, None, None, width, |_, a, c| {
-                most = most.max(bytes(a) + bytes(c));
-            });
+            centered_blocks(
+                x.as_ref(),
+                &tr,
+                &te,
+                None,
+                None,
+                None,
+                ones.as_ref(),
+                width,
+                |_, a, c| {
+                    most = most.max(bytes(a) + bytes(c));
+                },
+            );
             assert_eq!(stream_blocks_bytes(n_a, n_b), most, "{n_a} + {n_b} rows");
         }
     }
@@ -2686,35 +2949,26 @@ mod row_standardize_tests {
             for (label, idx) in index_sets() {
                 let m = idx.len();
                 let w = test_weights(m + 1).subrows(1, m).to_owned();
-                let rs = Col::<f64>::from_fn(m, |i| 0.5 + (i % 3) as f64);
                 for wref in [None, Some(w.as_ref())] {
-                    for rsref in [None, Some(rs.as_ref())] {
-                        let (a, am, as_) = standardize_rows(xv, &idx, wref, rsref);
-                        let (b0, bm, bs) =
-                            standardize_weighted(row_subset(xv, &idx).as_ref(), wref);
-                        let b = match rsref {
-                            None => b0,
-                            Some(r) => Mat::<f64>::from_fn(m, x.ncols(), |i, j| b0[(i, j)] * r[i]),
-                        };
-                        let what =
-                            format!("{view} {label} w={} rs={}", wref.is_some(), rsref.is_some());
-                        assert_eq!((a.nrows(), a.ncols()), (b.nrows(), b.ncols()), "xs shape");
-                        assert_bits_eq(&mat_vals(a.as_ref()), &mat_vals(b.as_ref()), &what);
-                        assert_bits_eq(&col_vals(am.as_ref()), &col_vals(bm.as_ref()), &what);
-                        assert_bits_eq(&col_vals(as_.as_ref()), &col_vals(bs.as_ref()), &what);
-                        let scale_c = as_[2].to_bits();
-                        assert_eq!(scale_c, 3.0_f64.to_bits(), "{what}: constant column");
-                    }
+                    let (a, am, as_) = standardize_rows(xv, &idx, wref);
+                    let (b, bm, bs) = standardize_weighted(row_subset(xv, &idx).as_ref(), wref);
+                    let what = format!("{view} {label} w={}", wref.is_some());
+                    assert_eq!((a.nrows(), a.ncols()), (b.nrows(), b.ncols()), "xs shape");
+                    assert_bits_eq(&mat_vals(a.as_ref()), &mat_vals(b.as_ref()), &what);
+                    assert_bits_eq(&col_vals(am.as_ref()), &col_vals(bm.as_ref()), &what);
+                    assert_bits_eq(&col_vals(as_.as_ref()), &col_vals(bs.as_ref()), &what);
+                    let scale_c = as_[2].to_bits();
+                    assert_eq!(scale_c, 3.0_f64.to_bits(), "{what}: constant column");
                 }
             }
         }
         // Column 3 is constant on the even rows only: the constant rule
         // (scale `max(1, |mean|)`) is decided on the gathered rows.
         let even: Vec<usize> = (0..24).step_by(2).collect();
-        let (_, _, s) = standardize_rows(x.as_ref(), &even, None, None);
+        let (_, _, s) = standardize_rows(x.as_ref(), &even, None);
         assert_eq!(s[3].to_bits(), 7.5_f64.to_bits());
         // On every row it varies, and its scale is its population sd.
-        let (_, _, s_all) = standardize_rows(x.as_ref(), &(0..24).collect::<Vec<_>>(), None, None);
+        let (_, _, s_all) = standardize_rows(x.as_ref(), &(0..24).collect::<Vec<_>>(), None);
         let c3: Vec<f64> = (0..24).map(|i| x[(i, 3)]).collect();
         let m3 = c3.iter().sum::<f64>() / 24.0;
         let sd3 = (c3.iter().map(|v| (v - m3).powi(2)).sum::<f64>() / 24.0).sqrt();
@@ -2796,7 +3050,7 @@ mod fast_standardize_tests {
         weights: Option<ColRef<'_, f64>>,
         row_scale: Option<ColRef<'_, f64>>,
     ) -> FitX {
-        let mut f = fit_x_moments(x, None, weights, Par::Seq);
+        let mut f = fit_x_moments(x, weights, Par::Seq);
         f.materialize(x, row_scale);
         f
     }
@@ -3064,7 +3318,7 @@ mod fast_standardize_tests {
                 for (view, xv) in lay.all(&x).into_iter().chain([("strided", strided)]) {
                     for par in [Par::Seq, crate::fit::par_fixed()] {
                         let what = format!("{n}x{p} {view} {label} {par:?}");
-                        let f = fit_x_moments(xv, None, wref, par);
+                        let f = fit_x_moments(xv, wref, par);
                         assert_moments_bits(&f, &mean, &scale, fro, &what);
                     }
                 }
@@ -3108,7 +3362,7 @@ mod fast_standardize_tests {
                             } else {
                                 assert_eq!(width, p, "{what}: not one strip");
                             }
-                            let f = fit_x_moments(xv, None, wref, par);
+                            let f = fit_x_moments(xv, wref, par);
                             assert_moments_bits(&f, &mean, &scale, fro, &what);
                         }
                     });
@@ -3364,7 +3618,7 @@ mod fast_standardize_tests {
             let lay = Layouts::new(x.as_ref());
             // No rows gathered: a `0 × p` result.
             for (view, xv) in lay.all(&x) {
-                let (e, _, _) = standardize_rows(xv, &[], None, None);
+                let (e, _, _) = standardize_rows(xv, &[], None);
                 assert_eq!((e.nrows(), e.ncols()), (0, p), "{n}x{p} {view}: no rows");
             }
             if n == 0 {
@@ -3373,28 +3627,21 @@ mod fast_standardize_tests {
             let idx: Vec<usize> = (0..n).rev().chain([0, n - 1, n / 2]).collect();
             let m = idx.len();
             let weights = test_weight_sets(m);
-            let rs = Col::<f64>::from_fn(m, |i| 0.5 + (i % 3) as f64);
             for (view, xv) in lay.all(&x) {
                 let sub = row_subset(xv, &idx);
                 let mut cases: Vec<(&str, Option<ColRef<'_, f64>>)> = vec![("unweighted", None)];
                 cases.extend(weights.iter().map(|(l, w)| (*l, Some(w.as_ref()))));
                 for (label, wref) in cases {
-                    for rsref in [None, Some(rs.as_ref())] {
-                        let what = format!("{n}x{p} {view} {label} rs={}", rsref.is_some());
-                        let (a, am, asc) = standardize_rows(xv, &idx, wref, rsref);
-                        let (b0, bm, bsc) = standardize_weighted_reference(sub.as_ref(), wref);
-                        let b = match rsref {
-                            None => b0,
-                            Some(r) => Mat::<f64>::from_fn(m, p, |i, j| b0[(i, j)] * r[i]),
-                        };
-                        assert_eq!(mat_bits(a.as_ref()), mat_bits(b.as_ref()), "{what}: xs");
-                        assert_eq!(col_bits(am.as_ref()), col_bits(bm.as_ref()), "{what}: mean");
-                        assert_eq!(
-                            col_bits(asc.as_ref()),
-                            col_bits(bsc.as_ref()),
-                            "{what}: scale"
-                        );
-                    }
+                    let what = format!("{n}x{p} {view} {label}");
+                    let (a, am, asc) = standardize_rows(xv, &idx, wref);
+                    let (b, bm, bsc) = standardize_weighted_reference(sub.as_ref(), wref);
+                    assert_eq!(mat_bits(a.as_ref()), mat_bits(b.as_ref()), "{what}: xs");
+                    assert_eq!(col_bits(am.as_ref()), col_bits(bm.as_ref()), "{what}: mean");
+                    assert_eq!(
+                        col_bits(asc.as_ref()),
+                        col_bits(bsc.as_ref()),
+                        "{what}: scale"
+                    );
                 }
             }
         }

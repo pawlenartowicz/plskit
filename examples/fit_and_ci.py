@@ -10,8 +10,8 @@ Demonstrates the recommended pipeline (`docs/python/api.md` §3.1):
 
   1. Generate synthetic data with a known PLS1 signal in the first two
      of D=8 columns (everything else is noise).
-  2. Fit PLS1 at K=1 (the recommended omnibus K; y depends on X through
-     a single direction here, so there is no reason to fix K higher).
+  2. Fit PLS1 at K=1, and test at K=1: y depends on X through a single
+     direction here.
   3. Run `pls1_confirmatory_test(k=1, test_method="split_exact", ci=True)` to
      get both the omnibus p-value AND the rotation-invariant CI bundle.
      `split_exact` is the recommended method: a split-half test
@@ -88,7 +88,8 @@ def main() -> None:
         print(f"  β[{j}] z={z:+7.2f}{flag}")
 
     # Per-coordinate β CIs: a regression-style diagnostic (PLS1 only).
-    # The calibrated readouts are `holdout_corr` and, at k=1, `beta_sign_z`;
+    # The inferential readouts are `holdout_corr` (beta, see
+    # docs/python/results.md) and, at k=1, `beta_sign_z`;
     # the CI below omits the SE corrections that `beta_sign_z` applies.
     # Centered-scaled CIs may be biased by PLS shrinkage on small m; see
     # `docs/python/results.md` caveats; the midpoint is *not* guaranteed to bracket

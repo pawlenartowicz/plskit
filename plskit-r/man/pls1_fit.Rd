@@ -7,16 +7,17 @@
 pls1_fit(
   X,
   y,
-  k = 1L,
+  k = "optimal",
   k_max = NULL,
   find_k_args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  weights = NULL
+  weights = NULL,
+  covariates = NULL
 )
 }
 \arguments{
-\item{X, y, k, k_max, find_k_args, pre_standardized, seed, weights}{See the canonical reference.}
+\item{X, y, k, k_max, find_k_args, pre_standardized, seed, weights, covariates}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("pls1_result", "plskit_result")}.

@@ -10,7 +10,7 @@ use crate::fit::{
     pls1_fit_impl, pls1_fit_implicit,
 };
 use crate::linalg::{
-    col_row_subset, normalize_weights, standardize_apply_rows, standardize_rows,
+    center_rows_fro, col_row_subset, normalize_weights, standardize_apply_rows,
     standardize1_weighted,
 };
 use crate::sequential::{IncrementalSequenceOpts, SequentialArgs, run_incremental_sequence};
@@ -57,7 +57,16 @@ pub struct FindKOptimalOpts {
     /// auto-gate flags. Default `false`, which reroutes the diagnostic to
     /// `split_exact`. Inert unless `diagnostic == Some(SplitNb)`.
     pub force: bool,
-    /// Caller asserts X and y are already standardized; skips centering/scaling.
+    /// Caller asserts X is already on its intended column scale. The
+    /// cross-validation folds of `r2_se` and `r2_max` then read X as given
+    /// and only centre each part; without the flag they read X divided once
+    /// by its column scales over all rows, and centre each part. Each fold
+    /// standardizes y either way, and the `bic` selector standardizes X
+    /// itself either way (with `covariates` it reads the adjusted X as the
+    /// fit does). For the `diagnostic` the flag governs the
+    /// `split_nb` gate and step 1; steps from 2 on test the deflated
+    /// residual on the scale step 1 used, as
+    /// [`FindKSequenceOpts::pre_standardized`] says.
     pub pre_standardized: bool,
     /// RNG seed; `None` draws from OS entropy.
     pub seed: Option<u64>,
@@ -72,7 +81,7 @@ impl Default for FindKOptimalOpts {
             n_folds: 5,
             diagnostic: None,
             n_perm: 1000,
-            n_splits: 50,
+            n_splits: 32,
             force: false,
             pre_standardized: false,
             seed: None,
@@ -109,12 +118,16 @@ pub struct FindKOptimalOutput {
     pub seed: u64,
     /// Kish's effective sample size. Equals `n_samples` for uniform/absent weights.
     pub n_eff: f64,
-    /// Stable rank of the standardized X, as the sequence-level auto-gate saw
-    /// it. `Some` whenever `diagnostic == Some(SplitNb)` — whether the gate
-    /// fired or not, and also under `force`. `None` otherwise, including when
-    /// no diagnostic was requested. NaN when the Gram matrix of the
-    /// standardized X is not finite; the gate then fires.
+    /// Stable rank of X as the sequence-level auto-gate read it (centred, and
+    /// divided by its all-row scale unless `pre_standardized`). `Some`
+    /// whenever `diagnostic == Some(SplitNb)`, whether the gate fired or
+    /// not, and also under `force`. `None` otherwise, including when
+    /// no diagnostic was requested. NaN when the Gram matrix of X as the gate
+    /// read it is not finite; the gate then fires.
     pub stable_rank: Option<f64>,
+    /// Rank of `[1, Z]` minus 1 (covariates kept after aliased columns are
+    /// dropped); `None` without covariates.
+    pub n_covariates: Option<usize>,
 }
 
 impl FindKOptimalOutput {
@@ -137,6 +150,47 @@ impl FindKOptimalOutput {
             Ok(self.k_star)
         }
     }
+}
+
+/// The largest `k_max` `pls1_fit` selects up to when `k` is a mode and
+/// `k_max` is not given, before the design cuts it.
+pub const PLS1_FIT_DEFAULT_K_MAX: usize = 9;
+
+/// `pls1_fit`'s `k_max` when `k` is a mode and `k_max` is not given:
+/// [`PLS1_FIT_DEFAULT_K_MAX`] cut to `p`, below the weights' Kish `n_eff`
+/// (`n_eff ≥ k + 1`) and the covariates' residual df
+/// (`n_pos − rank([1, Z]) ≥ k + 1`); at least 1. The selection's CV cap
+/// (`n − n_folds − 2`) applies after it, as for an explicit `k_max`.
+///
+/// # Errors
+/// `InvalidWeights` and `NonFiniteInput` for unusable weights, and
+/// `ShapeMismatch` and `NonFiniteInput` for unusable covariates, as the
+/// selection raises them.
+pub fn pls1_default_k_max(
+    x: MatRef<'_, f64>,
+    weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
+) -> PlsKitResult<usize> {
+    let n = x.nrows();
+    let (w_norm, n_eff) = crate::fit::validate_and_normalize_weights(weights, n, 0)?;
+    let residual_df = covariates
+        .map(|z| {
+            if z.nrows() != n {
+                return Err(PlsKitError::ShapeMismatch(format!(
+                    "covariates have {} rows, X has {n}",
+                    z.nrows()
+                )));
+            }
+            crate::covariates::CovariateBasis::new(z, w_norm.as_ref().map(Col::as_ref))
+        })
+        .transpose()?
+        .map(|b| b.residual_df());
+    Ok(crate::signal_test::k_limit(
+        PLS1_FIT_DEFAULT_K_MAX,
+        x.ncols(),
+        Some(n_eff),
+        residual_df,
+    ))
 }
 
 /// Optimal-K selection on full data. Optionally attaches a same-sample
@@ -164,6 +218,12 @@ impl FindKOptimalOutput {
 /// step: `pvalues` is empty and `diagnostic` names the method the
 /// `split_nb` auto-gate resolved to.
 ///
+/// # Covariates
+/// `covariates: (n_samples, p_z)` removes `[1, Z]` from X and y once, over
+/// all rows, after the usual standardization; `Z` columns that are constant
+/// or aliased are dropped. The selection then runs on the residuals.
+/// `n_covariates` on the output is the rank of `[1, Z]` minus 1.
+///
 /// # Errors
 /// - `InvalidArgument` for `k_max == 0`
 /// - `KExceedsMax` for `k_max > n_features`
@@ -171,14 +231,21 @@ impl FindKOptimalOutput {
 /// - `InvalidArgument` if `diagnostic == Some(Score)` or `Some(Auto)`
 /// - `NonFiniteInput` when X, y, or weights contain NaN/inf
 /// - `InvalidWeights` for negative, all-zero, or insufficient-`n_eff` weights
+/// - `ShapeMismatch` when `covariates` does not have `n_samples` rows
+/// - `NonFiniteInput` when `covariates` holds NaN/inf
+/// - `InsufficientResidualDf` when `n_samples − rank([1, Z]) < k_max + 1`
+/// - `InvalidArgument` with covariates for a `diagnostic` of `split_nb`, `score` or `e`
 pub fn pls1_find_k_optimal(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
     k_max: usize,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: FindKOptimalOpts,
 ) -> PlsKitResult<FindKOptimalOutput> {
-    crate::fit::with_thread_limit(|| find_k_optimal_impl(x, y, k_max, None, weights, opts))
+    crate::fit::with_thread_limit(|| {
+        find_k_optimal_impl(x, y, k_max, None, weights, covariates, opts)
+    })
 }
 
 /// Sparse counterpart of [`pls1_find_k_optimal`] (`docs/python/api.md`
@@ -196,14 +263,15 @@ pub fn pls1_find_k_optimal(
 /// `docs/concepts/PLS1/sparse.md` for the BIC bias.
 ///
 /// # Errors
-/// Everything `pls1_find_k_optimal` returns, plus `InvalidArgument` for
-/// `keep == 0` or `keep > n_features`.
+/// Everything `pls1_find_k_optimal` returns (`covariates` as there), plus
+/// `InvalidArgument` for `keep == 0` or `keep > n_features`.
 pub fn spls1_find_k_optimal(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
     k_max: usize,
     keep: usize,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: FindKOptimalOpts,
 ) -> PlsKitResult<FindKOptimalOutput> {
     crate::fit::with_thread_limit(|| {
@@ -215,6 +283,7 @@ pub fn spls1_find_k_optimal(
             k_max,
             (keep < x.ncols()).then_some(keep),
             weights,
+            covariates,
             opts,
         )
     })
@@ -229,8 +298,14 @@ fn find_k_optimal_impl(
     k_max: usize,
     keep: Option<usize>,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: FindKOptimalOpts,
 ) -> PlsKitResult<FindKOptimalOutput> {
+    if covariates.is_some() {
+        if let Some(method) = opts.diagnostic {
+            crate::signal_test::check_covariate_method(method, "split_exact and raw_perm")?;
+        }
+    }
     let n = x.nrows();
     if y.nrows() != n {
         return Err(PlsKitError::DimensionMismatch {
@@ -279,6 +354,14 @@ fn find_k_optimal_impl(
     let (w_norm, n_eff_val) = crate::fit::validate_weights_for_k(weights, n, k_max)?;
 
     let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
+    let wref = w_norm.as_ref().map(Col::as_ref);
+    let adj = adjust_for_find_k(x, y, covariates, wref, opts.pre_standardized, k_max)?;
+    let (x, y, pre_standardized) = match &adj {
+        Some(a) => (a.x.as_ref(), a.y.as_ref(), true),
+        None => (x, y, opts.pre_standardized),
+    };
+    let basis = adj.as_ref().map(|a| &a.basis);
+    let scale = crate::linalg::held_out_scale(x, wref, pre_standardized);
 
     // Selector dispatch. A `y` with no extractable first component gives
     // `k_star = 0` with empty score maps on every selector: the CV selectors
@@ -298,7 +381,8 @@ fn find_k_optimal_impl(
                 k_max,
                 opts.n_folds,
                 true,
-                w_norm.as_ref().map(Col::as_ref),
+                wref,
+                scale.as_ref(),
                 keep,
                 &mut rng,
             )?;
@@ -311,7 +395,8 @@ fn find_k_optimal_impl(
                 k_max,
                 opts.n_folds,
                 false,
-                w_norm.as_ref().map(Col::as_ref),
+                wref,
+                scale.as_ref(),
                 keep,
                 &mut rng,
             )?;
@@ -325,6 +410,7 @@ fn find_k_optimal_impl(
                 w_norm.as_ref().map(Col::as_ref),
                 n_eff_val,
                 keep,
+                adj.is_some(),
             )?;
             (k, None, None, Some(scores), "bic")
         }
@@ -339,9 +425,10 @@ fn find_k_optimal_impl(
         if matches!(method, ConfirmatoryMethod::SplitNb) {
             let gate = crate::signal_test::resolve_split_nb(
                 x,
-                w_norm.as_ref().map(Col::as_ref),
+                wref,
                 n_eff_val,
                 opts.force,
+                scale.as_ref(),
             );
             (
                 Some(Col::zeros(0)),
@@ -383,7 +470,7 @@ fn find_k_optimal_impl(
                 args: seq_args,
                 alpha: 0.05,
                 stop_early_override: true, // collect ALL p-values up to K*
-                pre_standardized: opts.pre_standardized,
+                pre_standardized,
                 seed: Some({
                     use rand::Rng;
                     rng.next_u64()
@@ -391,6 +478,7 @@ fn find_k_optimal_impl(
                 verbose: opts.verbose,
                 keep,
             },
+            basis,
         )?;
         // Echo what RAN, not what was asked for: the hoisted `split_nb`
         // auto-gate can reroute the whole sequence to `split_exact`.
@@ -410,6 +498,7 @@ fn find_k_optimal_impl(
         seed: seed_used,
         n_eff: n_eff_val,
         stable_rank,
+        n_covariates: basis.map(crate::covariates::CovariateBasis::n_covariates),
     })
 }
 
@@ -422,7 +511,9 @@ pub struct FindKSequenceOpts {
     /// a flagged design runs `split_exact` instead, and
     /// `FindKSequenceOutput.test_method` says so. `Auto` (the default)
     /// resolves once on the full X to `split_exact` or `split_nb` (see
-    /// [`ConfirmatoryMethod::Auto`]), and every step runs that method.
+    /// [`ConfirmatoryMethod::Auto`]), and every step runs that method. With
+    /// covariates `Auto` resolves to `split_exact`, and `split_nb`, `score`
+    /// and `e` are refused.
     pub test_method: ConfirmatoryMethod,
     /// Significance threshold for sequential rejection.
     pub alpha: f64,
@@ -436,7 +527,10 @@ pub struct FindKSequenceOpts {
     /// `split_exact`. `true` with `test_method = Auto` is an
     /// `InvalidArgument`; inert for every other `test_method`.
     pub force: bool,
-    /// Caller asserts X and y are already standardized; skips centering/scaling.
+    /// Skip the one standardization of X and y over all rows: the
+    /// `split_nb` gate and the step-1 test read X as given, each held-out
+    /// part only centred. Steps from 2 on test the deflated residual on the
+    /// scale step 1 used, each part only centred.
     pub pre_standardized: bool,
     /// RNG seed; `None` draws from OS entropy.
     pub seed: Option<u64>,
@@ -450,7 +544,7 @@ impl Default for FindKSequenceOpts {
             test_method: ConfirmatoryMethod::Auto,
             alpha: 0.05,
             n_perm: 1000,
-            n_splits: 50,
+            n_splits: 32,
             force: false,
             pre_standardized: false,
             seed: None,
@@ -475,13 +569,18 @@ pub struct FindKSequenceOutput {
     pub seed: u64,
     /// Kish's effective sample size. Equals `n_samples` for uniform/absent weights.
     pub n_eff: f64,
-    /// Stable rank of the standardized X, as the sequence-level auto-gate saw
-    /// it. `Some` on an explicit `split_nb` request, and on an `"auto"`
-    /// request that reached the stable-rank check (p > 4, `n_eff` ≥ 250,
-    /// and p ≤ 100·n without `keep`); `None` otherwise. On a `split_nb` request it is set
+    /// Stable rank of X as the sequence-level auto-gate read it (centred, and
+    /// divided by its all-row scale unless `pre_standardized`). `Some` on an
+    /// explicit `split_nb` request, and on an `"auto"`
+    /// request that reached the stable-rank check (p > 4, `n_eff` above
+    /// 1000 without `keep`, at least 250 with it, and p ≤ 100·n without
+    /// `keep`); `None` otherwise. On a `split_nb` request it is set
     /// whether the gate fired or not, and also under `force`. NaN when the
-    /// Gram matrix of the standardized X is not finite; the gate then fires.
+    /// Gram matrix of X as the gate read it is not finite; the gate then fires.
     pub stable_rank: Option<f64>,
+    /// Rank of `[1, Z]` minus 1 (covariates kept after aliased columns are
+    /// dropped); `None` without covariates.
+    pub n_covariates: Option<usize>,
 }
 
 impl FindKSequenceOutput {
@@ -510,6 +609,16 @@ impl FindKSequenceOutput {
 /// `y` from which no first component can be extracted (constant, or
 /// orthogonal to `X` up to rounding), matching [`pls1_find_k_optimal`].
 ///
+/// # Covariates
+/// `covariates: (n_samples, p_z)` removes `[1, Z]` from X and y once, over
+/// all rows, after the usual standardization; `Z` columns that are constant
+/// or aliased are dropped. The selection then runs on the residuals.
+/// `n_covariates` on the output is the rank of `[1, Z]` minus 1.
+///
+/// `test_method` `auto` resolves to `split_exact` when `covariates` are given, and
+/// every step's permutation null is residualized on `[1, Z]` (Freedman–Lane,
+/// approximately exact).
+///
 /// # Errors
 /// - `InvalidArgument` for `k_max == 0`
 /// - `KExceedsMax` for `k_max > n_features`
@@ -519,14 +628,21 @@ impl FindKSequenceOutput {
 ///   `force = true`
 /// - `NonFiniteInput` when X, y, or weights contain NaN/inf
 /// - `InvalidWeights` for negative, all-zero, or insufficient-`n_eff` weights
+/// - `ShapeMismatch` when `covariates` does not have `n_samples` rows
+/// - `NonFiniteInput` when `covariates` holds NaN/inf
+/// - `InsufficientResidualDf` when `n_samples − rank([1, Z]) < k_max + 1`
+/// - `InvalidArgument` with covariates for a `test_method` of `split_nb`, `score` or `e`
 pub fn pls1_find_k_sequence(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
     k_max: usize,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: FindKSequenceOpts,
 ) -> PlsKitResult<FindKSequenceOutput> {
-    crate::fit::with_thread_limit(|| find_k_sequence_impl(x, y, k_max, None, weights, opts))
+    crate::fit::with_thread_limit(|| {
+        find_k_sequence_impl(x, y, k_max, None, weights, covariates, opts)
+    })
 }
 
 /// Sparse counterpart of [`pls1_find_k_sequence`] (`docs/python/api.md`
@@ -538,14 +654,15 @@ pub fn pls1_find_k_sequence(
 /// function bit-exactly.
 ///
 /// # Errors
-/// Everything `pls1_find_k_sequence` returns, plus `InvalidArgument` for
-/// `keep == 0` or `keep > n_features`.
+/// Everything `pls1_find_k_sequence` returns (`covariates` as there), plus
+/// `InvalidArgument` for `keep == 0` or `keep > n_features`.
 pub fn spls1_find_k_sequence(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
     k_max: usize,
     keep: usize,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: FindKSequenceOpts,
 ) -> PlsKitResult<FindKSequenceOutput> {
     crate::fit::with_thread_limit(|| {
@@ -560,6 +677,7 @@ pub fn spls1_find_k_sequence(
             k_max,
             (keep < x.ncols()).then_some(keep),
             weights,
+            covariates,
             opts,
         )
     })
@@ -573,8 +691,15 @@ fn find_k_sequence_impl(
     k_max: usize,
     keep: Option<usize>,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: FindKSequenceOpts,
 ) -> PlsKitResult<FindKSequenceOutput> {
+    if covariates.is_some() {
+        crate::signal_test::check_covariate_method(
+            opts.test_method,
+            "split_exact, raw_perm and auto",
+        )?;
+    }
     let n = x.nrows();
     if y.nrows() != n {
         return Err(PlsKitError::DimensionMismatch {
@@ -630,21 +755,29 @@ fn find_k_sequence_impl(
             ));
         }
     }
+    let wref = w_norm.as_ref().map(Col::as_ref);
+    let adj = adjust_for_find_k(x, y, covariates, wref, opts.pre_standardized, k_max)?;
+    let (x, y, pre_standardized) = match &adj {
+        Some(a) => (a.x.as_ref(), a.y.as_ref(), true),
+        None => (x, y, opts.pre_standardized),
+    };
+    let basis = adj.as_ref().map(|a| &a.basis);
     let r = run_incremental_sequence(
         x,
         y,
         k_max,
-        w_norm.as_ref().map(Col::as_ref),
+        wref,
         n_eff_val,
         IncrementalSequenceOpts {
             args: seq_args,
             alpha: opts.alpha,
             stop_early_override: false,
-            pre_standardized: opts.pre_standardized,
+            pre_standardized,
             seed: opts.seed,
             verbose: opts.verbose,
             keep,
         },
+        basis,
     )?;
     let k_star = r.last_significant_k.unwrap_or(0);
     Ok(FindKSequenceOutput {
@@ -657,7 +790,33 @@ fn find_k_sequence_impl(
         seed: r.seed,
         n_eff: n_eff_val,
         stable_rank: r.stable_rank,
+        n_covariates: basis.map(crate::covariates::CovariateBasis::n_covariates),
     })
+}
+
+/// With `covariates`: X and y standardized as the fit does, then replaced by
+/// their residuals on `[1, Z]` (the caller then reads them as
+/// `pre_standardized`). `None` without covariates.
+///
+/// # Errors
+/// `NonFiniteInput`, `ShapeMismatch` and `InsufficientResidualDf` as
+/// `pls1_confirmatory_test` raises them.
+fn adjust_for_find_k(
+    x: MatRef<'_, f64>,
+    y: ColRef<'_, f64>,
+    covariates: Option<MatRef<'_, f64>>,
+    w_norm: Option<ColRef<'_, f64>>,
+    pre_standardized: bool,
+    k: usize,
+) -> PlsKitResult<Option<crate::covariates::Adjusted>> {
+    let Some(z) = covariates else {
+        return Ok(None);
+    };
+    crate::fit::check_finite_mat(x)?;
+    crate::fit::check_finite_col(y)?;
+    let adj = crate::covariates::adjust(x, y, z, w_norm, pre_standardized)?;
+    adj.basis.check_df(k)?;
+    Ok(Some(adj))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -665,8 +824,8 @@ fn find_k_sequence_impl(
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// One fold of `cv_select`, shared by `select_cv` and
-/// `spls1_find_keep_optimal`: the training rows' standardization moments
-/// (weighted) and the inputs of a fit on X in place
+/// `spls1_find_keep_optimal`: the training rows' (weighted) means, the
+/// column scales of all rows, and the inputs of a fit on X in place
 /// ([`FoldData::fit_predict`]), the standardized `y` of both sides (the
 /// validation side with the training moments), and, in `cv_select`'s
 /// second pass, the standardized blocks. Per-fold weights are re-normalized to
@@ -677,8 +836,9 @@ fn find_k_sequence_impl(
 struct FoldData {
     train_idx: Vec<usize>,
     val_idx: Vec<usize>,
-    /// The training rows' column means and scales, the bits of
-    /// `standardize_rows`'s, and `‖√w'·Xs_tr‖_F` from the same moments.
+    /// The training rows' column means, the bits of `center_rows_fro`'s;
+    /// the column scales the fold divides X by (its column scales over all
+    /// rows, or ones under `pre_standardized`), the same in every fold; and `‖√w'·Xs_tr‖_F` at those means and scales.
     mean: Col<f64>,
     scale: Col<f64>,
     fro: f64,
@@ -711,6 +871,7 @@ fn prep_fold(
     folds: &[Vec<usize>],
     fi: usize,
     val_idx: &[usize],
+    scale: ColRef<'_, f64>,
 ) -> PlsKitResult<FoldData> {
     let train_idx: Vec<usize> = folds
         .iter()
@@ -737,13 +898,14 @@ fn prep_fold(
         .and_then(|w| normalize_weights(w.as_ref()));
 
     let n_tr = train_idx.len();
-    let fx = crate::linalg::fit_x_moments(
+    let (mean, fro) = crate::linalg::centered_part_moments(
         x,
-        Some(&train_idx),
+        &train_idx,
         train_wref,
+        scale,
         crate::fit::resolve_par(ParChoice::Auto, n_tr, x.ncols(), 1),
     );
-    let mean_ratio = fx.max_mean_ratio();
+    let mean_ratio = (0..mean.nrows()).fold(0.0_f64, |m, j| m.max(mean[j].abs() / scale[j]));
     let (ys_tr, ym, ys) = standardize1_weighted(y_tr.as_ref(), train_wref);
     let ys_val = Col::<f64>::from_fn(nv, |i| (y_val[i] - ym) / ys);
 
@@ -764,9 +926,9 @@ fn prep_fold(
     Ok(FoldData {
         train_idx,
         val_idx: val_idx.to_vec(),
-        mean: fx.mean,
-        scale: fx.scale,
-        fro: fx.fro,
+        mean,
+        scale: scale.to_owned(),
+        fro,
         mean_ratio,
         row_factor,
         ys_n,
@@ -907,8 +1069,8 @@ impl FoldData {
     }
 
     /// [`FoldData::fit_predict`] on the standardized blocks: the training
-    /// rows standardized with weighted moments, the validation rows with
-    /// the training rows' moments, written on the first call and kept for
+    /// and validation rows centred by the training rows' weighted means and
+    /// divided by [`FoldData::scale`], written on the first call and kept for
     /// the fold's later fits; then `pls1_fit_impl` on the training block
     /// (`pre_standardized`, rows scaled by `√w''`) and the predictions
     /// `xs_val·c`. The same bits on every layout of X.
@@ -924,9 +1086,9 @@ impl FoldData {
     {
         let train_wref = self.train_w.as_ref().map(Col::as_ref);
         let (xs_tr, xs_val) = self.blocks.get_or_insert_with(|| {
-            let (xs_tr, mean, scale) = standardize_rows(x, &self.train_idx, train_wref, None);
-            let xs_val =
-                standardize_apply_rows(x, &self.val_idx, mean.as_ref(), scale.as_ref(), None);
+            let scale = self.scale.as_ref();
+            let (xs_tr, mean, _) = center_rows_fro(x, &self.train_idx, train_wref, None, scale);
+            let xs_val = standardize_apply_rows(x, &self.val_idx, mean.as_ref(), scale, None);
             (xs_tr, xs_val)
         });
         let m = pls1_fit_impl(
@@ -934,6 +1096,7 @@ impl FoldData {
             self.ys_tr.as_ref(),
             KSpec::Fixed(k),
             train_wref,
+            None,
             FitOpts {
                 pre_standardized: true,
                 // check_n_eff: false — per-fold slice may have low n_eff; let the math degrade
@@ -1018,8 +1181,11 @@ fn reject_cv_leave_one_out(n: usize, requested: usize, effective: usize) -> PlsK
 /// counts `1..=max_comp`) and `spls1_find_keep_optimal` (candidates are the
 /// keep grid): shuffle, split into `n_folds` folds, run `fold_work` on each
 /// fold ([`prep_fold`]; its fits read X in place, [`FoldData::fit_predict`]),
-/// and pick through [`aggregate_and_pick`]. `fold_work(fd, cells)` returns
-/// the validation R² of each candidate index in `cells`, in that order,
+/// and pick through [`aggregate_and_pick`]. Every fold reads X divided by
+/// the same column `scale` (the caller's `held_out_scale`, formed once) and
+/// centres each part by the training rows' own means.
+/// `fold_work(fd, cells)` returns the validation R² of each candidate
+/// index in `cells`, in that order,
 /// `None` where its fit is left to the fold's standardized blocks; `fit_k`
 /// is the component count of its fits.
 ///
@@ -1052,6 +1218,7 @@ fn cv_select<F>(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
     weights: Option<ColRef<'_, f64>>,
+    scale: ColRef<'_, f64>,
     check_keep: Option<usize>,
     n_folds: usize,
     candidates: &[usize],
@@ -1072,7 +1239,7 @@ where
     indices.shuffle(rng);
     let folds = crate::linalg::fold_split(&indices, n_folds);
     let run = |fi: usize, cells: &[usize], on_blocks: bool| {
-        let mut fd = prep_fold(x, y, weights, &folds, fi, folds[fi].as_slice())?;
+        let mut fd = prep_fold(x, y, weights, &folds, fi, folds[fi].as_slice(), scale)?;
         fd.on_blocks = on_blocks;
         fold_work(&mut fd, cells)
     };
@@ -1188,6 +1355,10 @@ fn aggregate_and_pick(
     (pick, cv_scores, cv_scores_se)
 }
 
+/// The `r2_se` / `r2_max` selectors: [`cv_select`] over the component
+/// counts `1..=max_comp`, one fit per fold giving every count. The folds
+/// read X divided by `scale` (its column scales over all rows, or ones
+/// under `pre_standardized`) and only centre each part.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
@@ -1200,6 +1371,7 @@ fn select_cv(
     n_folds: usize,
     use_1se: bool,
     weights: Option<ColRef<'_, f64>>,
+    scale: ColRef<'_, f64>,
     keep: Option<usize>,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<(usize, BTreeMap<usize, f64>, Option<BTreeMap<usize, f64>>)> {
@@ -1233,6 +1405,7 @@ fn select_cv(
         x,
         y,
         weights,
+        scale,
         keep,
         n_folds,
         &candidates,
@@ -1249,9 +1422,11 @@ fn select_cv(
 }
 
 /// The BIC selector: one fit to `k_max` on X in its own layout, which forms
-/// the weighted standardization moments itself (whatever `pre_standardized`
-/// says, as [`first_component_exhausted`] does) and writes a standardized
-/// copy only where it falls back to one; then
+/// the weighted standardization moments itself (whatever the caller's
+/// `pre_standardized` says, as [`first_component_exhausted`] does) and
+/// writes a standardized copy only where it falls back to one, or reads
+/// `(x, y)` as given under `pre_standardized` (the covariate-adjusted data,
+/// on the scale the fit reads it); then
 /// `BIC(k) = n_eff · ln(SSR_k / n_eff) + k · ln(n_eff)` for each
 /// `k ≤ k_used`. `SSR_k` is the squared norm of the outcome the fit worked
 /// on less its first `k` score columns times their y-loadings: the weighted
@@ -1266,14 +1441,16 @@ fn select_bic(
     weights: Option<ColRef<'_, f64>>,
     n_eff: f64,
     keep: Option<usize>,
+    pre_standardized: bool,
 ) -> PlsKitResult<(usize, BTreeMap<usize, f64>)> {
     let m = pls1_fit_impl(
         x,
         y,
         KSpec::Fixed(k_max),
         weights,
+        None,
         FitOpts {
-            pre_standardized: false,
+            pre_standardized,
             // check_n_eff: false: the BIC sweep below iterates 1..=k_used and
             // is truncation-tolerant by design (rank-deficient X just shortens
             // the sweep); n_eff was already validated at the top-level entry.
@@ -1292,7 +1469,11 @@ fn select_bic(
     // weights the fit normalized and standardized `y` with (`None` when
     // there are none or all are equal), so `ys` has the bits of the fit's
     // standardized `y`.
-    let (ys, _, _) = standardize1_weighted(y, m.weights.as_ref().map(Col::as_ref));
+    let ys = if pre_standardized {
+        y.to_owned()
+    } else {
+        standardize1_weighted(y, m.weights.as_ref().map(Col::as_ref)).0
+    };
     let mut e: Col<f64> = match m.weights.as_ref() {
         Some(w) => crate::fit::scale_col(ys.as_ref(), crate::linalg::sqrt_col(w.as_ref()).as_ref()),
         None => ys.clone(),
@@ -1337,6 +1518,7 @@ fn first_component_exhausted(
         y,
         KSpec::Fixed(1),
         weights,
+        None,
         FitOpts {
             pre_standardized: false,
             // check_n_eff: false: the truncation is the answer sought here,
@@ -1407,6 +1589,9 @@ pub struct FindKeepOptimalOutput {
     pub seed: u64,
     /// Kish's effective sample size. Equals `n_samples` for uniform/absent weights.
     pub n_eff: f64,
+    /// Rank of `[1, Z]` minus 1 (covariates kept after aliased columns are
+    /// dropped); `None` without covariates.
+    pub n_covariates: Option<usize>,
 }
 
 /// Keep-count tuning at fixed `k` (`docs/python/api.md` §2b.2): sweep a
@@ -1421,6 +1606,12 @@ pub struct FindKeepOptimalOutput {
 /// fit-time hard threshold (not post-hoc truncatable like `k`), so each
 /// grid point is an independent fit, `n_folds × |grid|` fits.
 ///
+/// # Covariates
+/// `covariates: (n_samples, p_z)` removes `[1, Z]` from X and y once, over
+/// all rows, after the usual standardization; `Z` columns that are constant
+/// or aliased are dropped. The sweep then runs on the residuals.
+/// `n_covariates` on the output is the rank of `[1, Z]` minus 1.
+///
 /// # No extractable component
 /// When the full-data fit cannot extract a first component at any keep
 /// (`y` constant, or orthogonal to the columns of `X` up to rounding), it
@@ -1433,6 +1624,9 @@ pub struct FindKeepOptimalOutput {
 /// - `InvalidArgument` for `k == 0`
 /// - `KExceedsMax` for `k > n_features`
 /// - `NonFiniteInput` / `InvalidWeights` as per `pls1_fit`
+/// - `ShapeMismatch` when `covariates` does not have `n_samples` rows
+/// - `NonFiniteInput` when `covariates` holds NaN/inf
+/// - `InsufficientResidualDf` when `n_samples − rank([1, Z]) < k + 1`
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::many_single_char_names)]
 pub fn spls1_find_keep_optimal(
@@ -1440,12 +1634,16 @@ pub fn spls1_find_keep_optimal(
     y: ColRef<'_, f64>,
     k: usize,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
     opts: FindKeepOptimalOpts,
 ) -> PlsKitResult<FindKeepOptimalOutput> {
-    crate::fit::with_thread_limit(|| find_keep_optimal_impl(x, y, k, weights, opts))
+    crate::fit::with_thread_limit(|| {
+        find_keep_optimal_impl(x, y, k, weights, covariates, false, opts)
+    })
 }
 
-/// Body of [`spls1_find_keep_optimal`], on the caller's pool.
+/// Body of [`spls1_find_keep_optimal`], on the caller's pool. The public
+/// entry reads X as raw (`pre_standardized = false`).
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::many_single_char_names)]
 pub(crate) fn find_keep_optimal_impl(
@@ -1453,6 +1651,8 @@ pub(crate) fn find_keep_optimal_impl(
     y: ColRef<'_, f64>,
     k: usize,
     weights: Option<ColRef<'_, f64>>,
+    covariates: Option<MatRef<'_, f64>>,
+    pre_standardized: bool,
     opts: FindKeepOptimalOpts,
 ) -> PlsKitResult<FindKeepOptimalOutput> {
     let n = x.nrows();
@@ -1482,6 +1682,11 @@ pub(crate) fn find_keep_optimal_impl(
     let n_folds = cv_n_folds(n, opts.n_folds);
     reject_cv_leave_one_out(n, opts.n_folds, n_folds)?;
     let wref = w_norm.as_ref().map(Col::as_ref);
+    let adj = adjust_for_find_k(x, y, covariates, wref, pre_standardized, k)?;
+    let (x, y, pre_standardized) = match &adj {
+        Some(a) => (a.x.as_ref(), a.y.as_ref(), true),
+        None => (x, y, pre_standardized),
+    };
 
     let fold_work = |fd: &mut FoldData, cells: &[usize]| -> PlsKitResult<Vec<Option<f64>>> {
         let ss_tot = fd.ss_tot();
@@ -1498,8 +1703,19 @@ pub(crate) fn find_keep_optimal_impl(
     // shrinks the first weight vector (`‖select(X'y)‖ ≤ ‖X'y‖`), so a `y` the
     // dense fit cannot extract a component from gives none at any keep, and
     // one it can gives a component at the dense endpoint of the grid.
+    let scale = crate::linalg::held_out_scale(x, wref, pre_standardized);
     let (keep_star, cv_scores, cv_scores_se) = cv_select(
-        x, y, wref, None, n_folds, &grid, k, true, &mut rng, fold_work,
+        x,
+        y,
+        wref,
+        scale.as_ref(),
+        None,
+        n_folds,
+        &grid,
+        k,
+        true,
+        &mut rng,
+        fold_work,
     )?;
     // Nothing was swept when there is no first component (`keep_star = 0`).
     let grid = if keep_star == 0 { Vec::new() } else { grid };
@@ -1512,6 +1728,7 @@ pub(crate) fn find_keep_optimal_impl(
         keep_grid: grid,
         seed: seed_used,
         n_eff: n_eff_val,
+        n_covariates: adj.as_ref().map(|a| a.basis.n_covariates()),
     })
 }
 
@@ -1523,6 +1740,23 @@ mod tests {
     use crate::test_support::synth;
     use faer::Mat;
     use rand::SeedableRng;
+
+    /// `pls1_fit`'s default `k_max`: 9, cut to p, below the Kish `n_eff`
+    /// (about 5.1 here) and below the residual df (60 − rank([1, Z]) = 5).
+    #[test]
+    fn default_k_max_is_cut_by_p_n_eff_and_residual_df() {
+        let (x, _) = synth(60, 30, 2, 2.0, 1);
+        let k = |x: MatRef<'_, f64>, w: Option<&Col<f64>>, z: Option<&Mat<f64>>| {
+            pls1_default_k_max(x, w.map(Col::as_ref), z.map(Mat::as_ref)).unwrap()
+        };
+        assert_eq!(k(x.as_ref(), None, None), 9);
+        assert_eq!(k(x.subcols(0, 4), None, None), 4);
+        assert_eq!(k(x.subrows(0, 6), None, None), 5);
+        let w = Col::<f64>::from_fn(60, |i| if i < 5 { 1.0 } else { 1e-3 });
+        assert_eq!(k(x.as_ref(), Some(&w), None), 4);
+        let z = crate::test_support::unif(60, 54, 2);
+        assert_eq!(k(x.as_ref(), None, Some(&z)), 4);
+    }
 
     /// The two inputs whose full-data fit truncates at the first component:
     /// a constant `y`, and a `y` residualized on `[1, X]` (orthogonal to the
@@ -1560,6 +1794,7 @@ mod tests {
                 y.as_ref(),
                 KSpec::Fixed(2),
                 None,
+                None,
                 FitOpts::default(),
             )
             .unwrap();
@@ -1570,9 +1805,10 @@ mod tests {
                     seed: Some(3),
                     ..Default::default()
                 };
-                let dense = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, None, opts).unwrap();
+                let dense =
+                    pls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, None, None, opts).unwrap();
                 let sparse =
-                    spls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, 4, None, opts).unwrap();
+                    spls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, 4, None, None, opts).unwrap();
                 for (path, r) in [("pls1", &dense), ("spls1", &sparse)] {
                     let tag = format!("{name} {path} {selector:?}");
                     assert_eq!(r.k_star, 0, "{tag}");
@@ -1611,6 +1847,7 @@ mod tests {
                 y.as_ref(),
                 3,
                 None,
+                None,
                 FindKOptimalOpts {
                     seed: Some(3),
                     ..Default::default()
@@ -1626,6 +1863,7 @@ mod tests {
                 x.as_ref(),
                 y.as_ref(),
                 3,
+                None,
                 None,
                 FindKSequenceOpts {
                     test_method: ConfirmatoryMethod::E,
@@ -1649,6 +1887,7 @@ mod tests {
             y.as_ref(),
             4,
             None,
+            None,
             FindKOptimalOpts {
                 seed: Some(7),
                 ..Default::default()
@@ -1661,6 +1900,7 @@ mod tests {
             x.as_ref(),
             y.as_ref(),
             3,
+            None,
             None,
             FindKSequenceOpts {
                 test_method: ConfirmatoryMethod::E,
@@ -1688,6 +1928,7 @@ mod tests {
                     y.as_ref(),
                     k,
                     None,
+                    None,
                     FindKeepOptimalOpts {
                         seed: Some(3),
                         ..Default::default()
@@ -1712,7 +1953,7 @@ mod tests {
     fn optimal_diagnostic_at_k_star_zero_is_empty() {
         // n = 20 trips the split_nb gate's effective-sample floor.
         let (x, ys) = degenerate_ys(20, 5, 9);
-        let gate = crate::signal_test::split_nb_gate(x.as_ref(), None).unwrap();
+        let gate = crate::signal_test::split_nb_gate(x.as_ref(), None, false).unwrap();
         assert!(gate.fires);
         for (name, y) in &ys {
             for (method, force, expect, has_rank) in [
@@ -1726,6 +1967,7 @@ mod tests {
                         x.as_ref(),
                         y.as_ref(),
                         2,
+                        None,
                         None,
                         FindKOptimalOpts {
                             selector,
@@ -1778,6 +2020,7 @@ mod tests {
                         y.as_ref(),
                         2,
                         None,
+                        None,
                         FindKOptimalOpts {
                             selector,
                             diagnostic: Some(ConfirmatoryMethod::RawPerm),
@@ -1818,6 +2061,7 @@ mod tests {
                 y.as_ref(),
                 1,
                 None,
+                None,
                 FindKOptimalOpts {
                     selector,
                     ..Default::default()
@@ -1832,6 +2076,7 @@ mod tests {
             x.as_ref(),
             y.as_ref(),
             1,
+            None,
             None,
             FindKeepOptimalOpts::default(),
         );
@@ -1854,11 +2099,11 @@ mod tests {
         // Without the weights n = 26 clears the floor, so the size half of
         // the rule is what decides below.
         assert!(
-            !crate::signal_test::split_nb_gate(x.as_ref(), None)
+            !crate::signal_test::split_nb_gate(x.as_ref(), None, false)
                 .unwrap()
                 .fires
         );
-        let gate = crate::signal_test::split_nb_gate(x.as_ref(), Some(w.as_ref())).unwrap();
+        let gate = crate::signal_test::split_nb_gate(x.as_ref(), Some(w.as_ref()), false).unwrap();
         assert!(gate.n_eff < 25.0, "n_eff = {}", gate.n_eff);
         assert!(gate.fires);
 
@@ -1866,8 +2111,10 @@ mod tests {
             crate::signal_test::ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
                 y: y.as_ref(),
-                k: 1,
+                k: Some(&[1]),
                 weights: Some(w.as_ref()),
+                covariates: None,
+                null_y: None,
             },
             crate::signal_test::ConfirmatoryTestOpts {
                 args: crate::signal_test::ConfirmatoryArgs::SplitNb {
@@ -1890,6 +2137,7 @@ mod tests {
             y.as_ref(),
             2,
             Some(w.as_ref()),
+            None,
             FindKSequenceOpts {
                 test_method: ConfirmatoryMethod::SplitNb,
                 n_perm: 20,
@@ -1911,6 +2159,7 @@ mod tests {
             y.as_ref(),
             2,
             Some(w.as_ref()),
+            None,
             FindKOptimalOpts {
                 selector: Selector::Bic,
                 diagnostic: Some(ConfirmatoryMethod::SplitNb),
@@ -1950,9 +2199,10 @@ mod tests {
                     seed: Some(3),
                     ..Default::default()
                 };
-                let dense = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, None, opts).unwrap();
+                let dense =
+                    pls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, None, None, opts).unwrap();
                 let sparse =
-                    spls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, 4, None, opts).unwrap();
+                    spls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, 4, None, None, opts).unwrap();
                 for (path, r) in [("pls1", &dense), ("spls1", &sparse)] {
                     let tag = format!("{name} {path} {method:?}");
                     assert_eq!(r.k_star, 0, "{tag}");
@@ -1982,16 +2232,19 @@ mod tests {
             seed: Some(7),
             ..Default::default()
         };
-        let rerouted = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, None, opts(false)).unwrap();
+        let rerouted =
+            pls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, None, None, opts(false)).unwrap();
         assert_eq!(rerouted.diagnostic.as_deref(), Some("split_exact"));
         assert!(rerouted.stable_rank.is_some());
-        let forced = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, None, opts(true)).unwrap();
+        let forced =
+            pls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, None, None, opts(true)).unwrap();
         assert_eq!(forced.diagnostic.as_deref(), Some("split_nb"));
         for diagnostic in [Some(ConfirmatoryMethod::RawPerm), None] {
             let r = pls1_find_k_optimal(
                 x.as_ref(),
                 y.as_ref(),
                 2,
+                None,
                 None,
                 FindKOptimalOpts {
                     diagnostic,
@@ -2016,6 +2269,7 @@ mod tests {
             x.as_ref(),
             y.as_ref(),
             4,
+            None,
             None,
             FindKSequenceOpts {
                 test_method: ConfirmatoryMethod::SplitNb,
@@ -2046,9 +2300,11 @@ mod tests {
             seed: Some(7),
             ..Default::default()
         };
-        let rerouted = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, opts(false)).unwrap();
+        let rerouted =
+            pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, None, opts(false)).unwrap();
         assert_eq!(rerouted.test_method, "split_exact");
-        let forced = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, opts(true)).unwrap();
+        let forced =
+            pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, None, opts(true)).unwrap();
         assert_eq!(forced.test_method, "split_nb");
         // Both carry what the gate saw — that is what makes the reroute
         // explainable to the caller, and `force` doesn't suppress it.
@@ -2056,10 +2312,252 @@ mod tests {
         assert!(rerouted.stable_rank.is_some());
     }
 
+    #[allow(clippy::many_single_char_names)]
+    fn cov_data(n: usize, d: usize, seed: u64) -> (Mat<f64>, Col<f64>, Mat<f64>) {
+        let z = crate::test_support::unif(n, 2, seed + 100);
+        let (x0, y0) = synth(n, d, 2, 2.0, seed);
+        // X and y depend on Z, so the adjustment changes the answer.
+        let x = Mat::<f64>::from_fn(n, d, |i, j| x0[(i, j)] + 2.0 * z[(i, j % 2)]);
+        let y = Col::<f64>::from_fn(n, |i| y0[i] + 3.0 * z[(i, 0)]);
+        (x, y, z)
+    }
+
+    fn assert_map_close(a: &BTreeMap<usize, f64>, b: &BTreeMap<usize, f64>, what: &str) {
+        assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>());
+        for (k, v) in a {
+            assert!(
+                (v - b[k]).abs() <= 1e-12 * v.abs().max(1.0),
+                "{what} k={k}: {v:e} vs {:e}",
+                b[k]
+            );
+        }
+    }
+
+    #[test]
+    fn find_k_optimal_with_covariates_equals_adjusted_call() {
+        let (x, y, z) = cov_data(80, 6, 11);
+        let w = crate::test_support::test_weights(80);
+        for weights in [None, Some(w.as_ref())] {
+            let w_norm = weights.and_then(crate::linalg::normalize_weights);
+            let adj = crate::covariates::adjust(
+                x.as_ref(),
+                y.as_ref(),
+                z.as_ref(),
+                w_norm.as_ref().map(Col::as_ref),
+                false,
+            )
+            .unwrap();
+            for selector in [Selector::R2Se, Selector::R2Max] {
+                let opts = FindKOptimalOpts {
+                    selector,
+                    seed: Some(3),
+                    ..Default::default()
+                };
+                let got =
+                    pls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, weights, Some(z.as_ref()), opts)
+                        .unwrap();
+                let want = pls1_find_k_optimal(
+                    adj.x.as_ref(),
+                    adj.y.as_ref(),
+                    4,
+                    weights,
+                    None,
+                    FindKOptimalOpts {
+                        pre_standardized: true,
+                        ..opts
+                    },
+                )
+                .unwrap();
+                assert_eq!(got.k_star, want.k_star, "{selector:?}");
+                assert_eq!(got.n_covariates, Some(2));
+                assert_eq!(want.n_covariates, None);
+                for (a, b) in [
+                    (&got.cv_scores, &want.cv_scores),
+                    (&got.bic_scores, &want.bic_scores),
+                ] {
+                    assert_eq!(a.is_some(), b.is_some());
+                    if let (Some(a), Some(b)) = (a, b) {
+                        assert_map_close(a, b, &format!("{selector:?}"));
+                    }
+                }
+            }
+            // `bic` reads the adjusted X on the fit's scale, not restandardized.
+            let got = pls1_find_k_optimal(
+                x.as_ref(),
+                y.as_ref(),
+                4,
+                weights,
+                Some(z.as_ref()),
+                FindKOptimalOpts {
+                    selector: Selector::Bic,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let (_, n_eff) = crate::fit::validate_weights_for_k(weights, 80, 4).unwrap();
+            let (k_star, want) = select_bic(
+                adj.x.as_ref(),
+                adj.y.as_ref(),
+                4,
+                w_norm.as_ref().map(Col::as_ref),
+                n_eff,
+                None,
+                true,
+            )
+            .unwrap();
+            assert_eq!(got.k_star, k_star);
+            assert_map_close(got.bic_scores.as_ref().unwrap(), &want, "bic");
+            let kopts = FindKeepOptimalOpts {
+                seed: Some(3),
+                ..Default::default()
+            };
+            let got = spls1_find_keep_optimal(
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                weights,
+                Some(z.as_ref()),
+                kopts,
+            )
+            .unwrap();
+            let want = find_keep_optimal_impl(
+                adj.x.as_ref(),
+                adj.y.as_ref(),
+                2,
+                weights,
+                None,
+                true,
+                kopts,
+            )
+            .unwrap();
+            assert_eq!(got.keep_star, want.keep_star);
+            assert_eq!(got.n_covariates, Some(2));
+            assert_map_close(&got.cv_scores, &want.cv_scores, "keep");
+        }
+    }
+
+    fn assert_refused_for_covariates<T: std::fmt::Debug>(
+        r: PlsKitResult<T>,
+        method: ConfirmatoryMethod,
+    ) {
+        match r {
+            Err(PlsKitError::InvalidArgument(m)) => {
+                assert!(m.contains("covariates"), "{method:?}: {m}");
+            }
+            other => panic!("{method:?}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn find_k_with_covariates_refuses_nb_score_e() {
+        let (x, y, z) = cov_data(60, 5, 5);
+        for method in [
+            ConfirmatoryMethod::SplitNb,
+            ConfirmatoryMethod::Score,
+            ConfirmatoryMethod::E,
+        ] {
+            let e = pls1_find_k_optimal(
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                None,
+                Some(z.as_ref()),
+                FindKOptimalOpts {
+                    diagnostic: Some(method),
+                    ..Default::default()
+                },
+            );
+            assert_refused_for_covariates(e, method);
+            let e = pls1_find_k_sequence(
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                None,
+                Some(z.as_ref()),
+                FindKSequenceOpts {
+                    test_method: method,
+                    ..Default::default()
+                },
+            );
+            assert_refused_for_covariates(e, method);
+        }
+    }
+
+    /// y is Z plus noise and X carries Z, with no X-y link beyond Z. At
+    /// n = 1100 without covariates `auto` takes `split_nb`. With covariates
+    /// every step is `split_exact` with a Freedman-Lane null and p is
+    /// interior.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn sequence_with_covariates_runs_split_exact_with_freedman_lane_steps() {
+        use crate::signal_test::{ConfirmatoryArgs, ConfirmatoryTestInput, pls1_confirmatory_test};
+        let (n, d) = (1100, 8);
+        let z = crate::test_support::unif(n, 2, 1);
+        let x0 = crate::test_support::unif(n, d, 2);
+        let x = Mat::<f64>::from_fn(n, d, |i, j| x0[(i, j)] + 0.5 * z[(i, j % 2)]);
+        let e = crate::test_support::unif_col(n, 3);
+        let y = Col::<f64>::from_fn(n, |i| 3.0 * z[(i, 0)] + e[i]);
+        let (n_perm, n_splits) = (199, 4);
+        let opts = FindKSequenceOpts {
+            alpha: 1.0,
+            n_perm,
+            n_splits,
+            seed: Some(5),
+            ..Default::default()
+        };
+        let seq =
+            pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, Some(z.as_ref()), opts).unwrap();
+        let plain = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, None, opts).unwrap();
+        assert_eq!(seq.test_method, "split_exact");
+        assert_eq!(plain.test_method, "split_nb");
+        assert_eq!(seq.n_covariates, Some(2));
+        // Step 1's seed: one draw is discarded, the next is the test seed.
+        let (_, mut rng) = crate::rng::resolve_seed(Some(5)).unwrap();
+        let step_seed = {
+            use rand::Rng;
+            let _ = rng.next_u64();
+            rng.next_u64()
+        };
+        let direct = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: Some(&[1]),
+                weights: None,
+                covariates: Some(z.as_ref()),
+                null_y: None,
+            },
+            crate::signal_test::ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::SplitExact { n_perm, n_splits },
+                pre_standardized: false,
+                seed: Some(step_seed),
+                verbose: false,
+                ci: None,
+                max_skip_rate: 0.01,
+                keep: None,
+            },
+        )
+        .unwrap();
+        let floor = 1.0 / (n_perm as f64 + 1.0);
+        assert!(direct.pvalue > floor, "p at the floor: {}", direct.pvalue);
+        assert!(
+            (seq.pvalues[0] - direct.pvalue).abs() <= 1e-12,
+            "{} vs {}",
+            seq.pvalues[0],
+            direct.pvalue
+        );
+        assert!(
+            (seq.pvalues[0] - plain.pvalues[0]).abs() > 1e-6,
+            "covariates changed nothing: {}",
+            seq.pvalues[0]
+        );
+        assert!(seq.pvalues[1].is_finite(), "step 2 did not run");
+    }
+
     /// The sequence resolves `Auto` once on the full X, so at one seed it
     /// returns what an explicit sequence of the resolved method returns,
     /// field by field except `stable_rank`: n = 60 resolves to
-    /// `split_exact`, n = 300 with ten iid columns to `split_nb`.
+    /// `split_exact`, n = 1200 with ten iid columns to `split_nb`.
     #[test]
     fn sequence_auto_matches_the_resolved_method_at_the_same_seed() {
         let opts = |test_method| FindKSequenceOpts {
@@ -2075,9 +2573,14 @@ mod tests {
                 ConfirmatoryMethod::SplitExact,
                 false,
             ),
-            (synth(300, 10, 1, 1.0, 3), ConfirmatoryMethod::SplitNb, true),
+            (
+                synth(1200, 10, 1, 1.0, 3),
+                ConfirmatoryMethod::SplitNb,
+                true,
+            ),
         ] {
-            let run = |m| pls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, None, opts(m)).unwrap();
+            let run =
+                |m| pls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, None, None, opts(m)).unwrap();
             let mut got = run(ConfirmatoryMethod::Auto);
             let mut want = run(explicit);
             assert_eq!(got.test_method, explicit.as_str());
@@ -2088,12 +2591,32 @@ mod tests {
         }
     }
 
+    /// Between `n_eff` 250 and 1000, `Auto` keeps `split_exact` on the
+    /// no-refit route (dense, k = 1 at every step) and takes `split_nb` on
+    /// the refit route (a sparse `keep`): 600 rows of iid columns clear the
+    /// gate.
+    #[test]
+    fn find_k_sequence_auto_runs_split_exact_below_the_no_refit_floor() {
+        let (x, y) = synth(600, 10, 1, 1.0, 3);
+        let opts = FindKSequenceOpts {
+            test_method: ConfirmatoryMethod::Auto,
+            n_perm: 19,
+            n_splits: 4,
+            seed: Some(5),
+            ..Default::default()
+        };
+        let dense = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, None, None, opts).unwrap();
+        assert_eq!(dense.test_method, "split_exact");
+        let sparse = spls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, 5, None, None, opts).unwrap();
+        assert_eq!(sparse.test_method, "split_nb");
+    }
+
     /// Under `Auto` the sequence checks `split_exact`'s count floors and
     /// refuses `force` before it resolves, so all three hold on a design that
     /// resolves to `split_nb`.
     #[test]
     fn sequence_auto_rejects_bad_counts_and_force() {
-        let (x, y) = synth(300, 10, 1, 1.0, 3);
+        let (x, y) = synth(1200, 10, 1, 1.0, 3);
         let base = FindKSequenceOpts {
             test_method: ConfirmatoryMethod::Auto,
             n_perm: 19,
@@ -2102,7 +2625,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            pls1_find_k_sequence(x.as_ref(), y.as_ref(), 1, None, base)
+            pls1_find_k_sequence(x.as_ref(), y.as_ref(), 1, None, None, base)
                 .unwrap()
                 .test_method,
             "split_nb"
@@ -2124,7 +2647,7 @@ mod tests {
                 },
             ),
         ] {
-            let r = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 1, None, opts);
+            let r = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 1, None, None, opts);
             assert!(
                 matches!(r, Err(PlsKitError::InvalidArgument(_))),
                 "{tag}: {r:?}"
@@ -2144,6 +2667,7 @@ mod tests {
                 y.as_ref(),
                 3,
                 None,
+                None,
                 FindKOptimalOpts {
                     diagnostic: Some(diagnostic),
                     ..Default::default()
@@ -2155,6 +2679,7 @@ mod tests {
             x.as_ref(),
             y.as_ref(),
             3,
+            None,
             None,
             FindKSequenceOpts {
                 test_method: ConfirmatoryMethod::Score,
@@ -2199,8 +2724,9 @@ mod tests {
                 seed: Some(7),
                 ..Default::default()
             };
-            let dense = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, None, opts).unwrap();
-            let sparse = spls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, 5, None, opts).unwrap();
+            let dense = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, None, None, opts).unwrap();
+            let sparse =
+                spls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, 5, None, None, opts).unwrap();
             assert_eq!(dense.k_star, sparse.k_star, "{diagnostic:?}");
             assert_eq!(dense.seed, sparse.seed, "{diagnostic:?}");
             let (dm, sm) = (dense.cv_scores.unwrap(), sparse.cv_scores.unwrap());
@@ -2239,7 +2765,7 @@ mod tests {
             seed: Some(13),
             ..Default::default()
         };
-        let r = spls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, 2, None, opts).unwrap();
+        let r = spls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, 2, None, None, opts).unwrap();
         let bic = r.bic_scores.as_ref().expect("bic selector reports scores");
         let keys: Vec<usize> = bic.keys().copied().collect();
         assert!(
@@ -2252,7 +2778,7 @@ mod tests {
             .map(|(k, _)| *k)
             .unwrap();
         assert_eq!(r.k_star, argmin);
-        let dense = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, None, opts).unwrap();
+        let dense = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 4, None, None, opts).unwrap();
         let dense_bic = dense.bic_scores.unwrap();
         assert!(
             bic.iter()
@@ -2273,6 +2799,7 @@ mod tests {
             3,
             keep,
             None,
+            None,
             FindKOptimalOpts::default(),
         );
         assert!(
@@ -2284,6 +2811,7 @@ mod tests {
             y.as_ref(),
             3,
             keep,
+            None,
             None,
             FindKSequenceOpts::default(),
         );
@@ -2309,8 +2837,9 @@ mod tests {
                 seed: Some(7),
                 ..Default::default()
             };
-            let dense = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, None, opts).unwrap();
-            let sparse = spls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, 5, None, opts).unwrap();
+            let dense = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, None, None, opts).unwrap();
+            let sparse =
+                spls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, 5, None, None, opts).unwrap();
             assert_eq!(dense.k_star, sparse.k_star, "{test_method:?}");
             assert_eq!(dense.seed, sparse.seed, "{test_method:?}");
             assert_eq!(dense.test_method, sparse.test_method, "{test_method:?}");
@@ -2349,6 +2878,7 @@ mod tests {
             x.as_ref(),
             y.as_ref(),
             1,
+            None,
             None,
             FindKeepOptimalOpts {
                 seed: Some(7),
@@ -2392,6 +2922,7 @@ mod tests {
             x.as_ref(),
             y.as_ref(),
             6,
+            None,
             None,
             FindKeepOptimalOpts::default(),
         );
@@ -2458,10 +2989,13 @@ mod tests {
                     let what = format!("{selector:?} {} pre={pre} {diagnostic:?}", f.name);
                     assert_layout_agree(&x, &what, Agree::Corpus(1e-10), |xv| {
                         let mut v = Vec::new();
-                        push_optimal(&mut v, &pls1_find_k_optimal(xv, y.as_ref(), 3, w, opts)?);
                         push_optimal(
                             &mut v,
-                            &spls1_find_k_optimal(xv, y.as_ref(), 3, 3, w, opts)?,
+                            &pls1_find_k_optimal(xv, y.as_ref(), 3, w, None, opts)?,
+                        );
+                        push_optimal(
+                            &mut v,
+                            &spls1_find_k_optimal(xv, y.as_ref(), 3, 3, w, None, opts)?,
                         );
                         Ok(v)
                     })
@@ -2474,6 +3008,7 @@ mod tests {
                         y.as_ref(),
                         2,
                         w,
+                        None,
                         FindKeepOptimalOpts {
                             seed: Some(7),
                             ..Default::default()
@@ -2505,6 +3040,7 @@ mod tests {
                         4,
                         None,
                         weights,
+                        None,
                         FindKOptimalOpts {
                             selector: Selector::R2Se,
                             seed: Some(7),
@@ -2538,6 +3074,7 @@ mod tests {
                         x.as_ref(),
                         y.as_ref(),
                         None,
+                        crate::linalg::held_out_scale(x.as_ref(), None, false).as_ref(),
                         None,
                         5,
                         &[1],
@@ -2590,6 +3127,7 @@ mod tests {
                         x.as_ref(),
                         y.as_ref(),
                         weights,
+                        crate::linalg::held_out_scale(x.as_ref(), weights, false).as_ref(),
                         None,
                         4,
                         &[1],
@@ -2637,7 +3175,7 @@ mod tests {
             for keep in [None, Some(3)] {
                 let what = format!("{} keep={keep:?}", f.name);
                 let (k_star, scores) =
-                    select_bic(f.x.as_ref(), f.y.as_ref(), 4, wr, n_eff, keep).unwrap();
+                    select_bic(f.x.as_ref(), f.y.as_ref(), 4, wr, n_eff, keep, false).unwrap();
                 let (xs, _, _) = standardize_weighted(f.x.as_ref(), wr);
                 let (ys, _, _) = standardize1_weighted(f.y.as_ref(), wr);
                 let m = pls1_fit_impl(
@@ -2645,6 +3183,7 @@ mod tests {
                     ys.as_ref(),
                     KSpec::Fixed(4),
                     wr,
+                    None,
                     FitOpts {
                         pre_standardized: true,
                         check_n_eff: false,
@@ -2707,12 +3246,12 @@ mod tests {
                 seed: Some(7),
                 ..Default::default()
             };
-            let r = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, None, opts);
+            let r = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, None, None, opts);
             assert!(
                 matches!(r, Err(PlsKitError::NonFiniteInput)),
                 "pls1 40x{p}: {r:?}"
             );
-            let r = spls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, 3, None, opts);
+            let r = spls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, 3, None, None, opts);
             assert!(
                 matches!(r, Err(PlsKitError::NonFiniteInput)),
                 "spls1 40x{p}: {r:?}"
@@ -2721,6 +3260,7 @@ mod tests {
                 x.as_ref(),
                 y.as_ref(),
                 2,
+                None,
                 None,
                 FindKeepOptimalOpts {
                     seed: Some(7),
@@ -2753,6 +3293,7 @@ mod tests {
             let (w_norm, _) =
                 crate::fit::validate_and_normalize_weights(w.map(Col::as_ref), n, 1).unwrap();
             let wr = w_norm.as_ref().map(Col::as_ref);
+            let scale = crate::linalg::held_out_scale(x, wr, false);
             let (_, mut rng) = crate::rng::resolve_seed(Some(7)).unwrap();
             let mut idx: Vec<usize> = (0..n).collect();
             idx.shuffle(&mut rng);
@@ -2762,7 +3303,9 @@ mod tests {
             for fi in 0..folds.len() {
                 for &(k, keep) in &sweeps {
                     let what = format!("{name} fold {fi} k={k} keep={keep:?}");
-                    let mut fd = prep_fold(x, y.as_ref(), wr, &folds, fi, &folds[fi]).unwrap();
+                    let mut fd =
+                        prep_fold(x, y.as_ref(), wr, &folds, fi, &folds[fi], scale.as_ref())
+                            .unwrap();
                     let Some(got) = fd.fit_predict(x, k, keep, sweep_coefs).unwrap() else {
                         assert!(
                             keep.is_some(),
@@ -2828,7 +3371,9 @@ mod tests {
                 crate::fit::validate_and_normalize_weights(w.map(Col::as_ref), n, 1).unwrap();
             let wr = w_norm.as_ref().map(Col::as_ref);
             let folds = crate::linalg::fold_split(&(0..n).collect::<Vec<_>>(), 5);
-            let mut fd = prep_fold(x, y.as_ref(), wr, &folds, 0, &folds[0]).unwrap();
+            let scale = crate::linalg::held_out_scale(x, wr, false);
+            let mut fd =
+                prep_fold(x, y.as_ref(), wr, &folds, 0, &folds[0], scale.as_ref()).unwrap();
             if name == "offset" {
                 assert!(
                     fd.mean_ratio > IMPLICIT_MAX_MEAN_RATIO,
@@ -2844,6 +3389,91 @@ mod tests {
             let got = fd.fit_predict(x, k, None, sweep_coefs).unwrap().unwrap();
             if name == "rank_two" {
                 assert!(got.len() < k, "{name}: k_used {}", got.len());
+            }
+        }
+    }
+
+    /// `prep_fold` forms the training rows' means and norm without writing
+    /// a block: its means are `center_rows_fro`'s, bit for bit, at the
+    /// scale it is given.
+    #[test]
+    fn prep_fold_writes_no_block() {
+        let (x, y) = crate::test_support::signal_data(48, 7, 101);
+        let w = crate::test_support::test_weights(48);
+        let folds = crate::linalg::fold_split(&(0..48).collect::<Vec<_>>(), 5);
+        for wr in [None, Some(w.as_ref())] {
+            let scale = crate::linalg::held_out_scale(x.as_ref(), wr, false);
+            let fd = prep_fold(
+                x.as_ref(),
+                y.as_ref(),
+                wr,
+                &folds,
+                1,
+                &folds[1],
+                scale.as_ref(),
+            )
+            .unwrap();
+            assert!(fd.blocks.is_none());
+            let (_, mean, _) = crate::linalg::center_rows_fro(
+                x.as_ref(),
+                &fd.train_idx,
+                fd.train_w.as_ref().map(Col::as_ref),
+                None,
+                scale.as_ref(),
+            );
+            crate::test_support::assert_bits_eq(
+                &crate::test_support::col_vals(fd.mean.as_ref()),
+                &crate::test_support::col_vals(mean.as_ref()),
+                &format!("weighted={}", wr.is_some()),
+            );
+        }
+    }
+
+    /// A fold's standardized blocks are X's rows centred by the training
+    /// rows' (weighted) means and divided by the column scale over all
+    /// rows: `(x[i, j] - mean_j) / scale_j`, formed by hand, within 1e-14,
+    /// on columns of unequal spread, weighted and not.
+    #[test]
+    #[allow(clippy::cast_precision_loss, clippy::many_single_char_names)]
+    fn cv_folds_centre_with_part_means_and_all_row_scale() {
+        let (n, p) = (48_usize, 7_usize);
+        let (x0, y) = crate::test_support::signal_data(n, p, 101);
+        let x = Mat::<f64>::from_fn(n, p, |i, j| x0[(i, j)] * (j + 1) as f64 + j as f64);
+        let w = crate::test_support::test_weights(n);
+        let folds = crate::linalg::fold_split(&(0..n).collect::<Vec<_>>(), 5);
+        for wr in [None, Some(w.as_ref())] {
+            let scale = crate::linalg::held_out_scale(x.as_ref(), wr, false);
+            let mut fd = prep_fold(
+                x.as_ref(),
+                y.as_ref(),
+                wr,
+                &folds,
+                2,
+                &folds[2],
+                scale.as_ref(),
+            )
+            .unwrap();
+            fd.on_blocks = true;
+            fd.fit_predict(x.as_ref(), 2, None, sweep_coefs).unwrap();
+            let (xs_tr, xs_val) = fd.blocks.as_ref().unwrap();
+            let tw = |i: usize| wr.map_or(1.0, |w| w[fd.train_idx[i]]);
+            let sw: f64 = (0..fd.train_idx.len()).map(tw).sum();
+            for j in 0..p {
+                let mean = (0..fd.train_idx.len())
+                    .map(|i| tw(i) * x[(fd.train_idx[i], j)])
+                    .sum::<f64>()
+                    / sw;
+                for (rows, block) in [(&fd.train_idx, xs_tr), (&fd.val_idx, xs_val)] {
+                    for (i, &r) in rows.iter().enumerate() {
+                        let want = (x[(r, j)] - mean) / scale[j];
+                        assert!(
+                            (block[(i, j)] - want).abs() <= 1e-14 * want.abs().max(1.0),
+                            "weighted={} row {r} column {j}: {:e} vs {want:e}",
+                            wr.is_some(),
+                            block[(i, j)]
+                        );
+                    }
+                }
             }
         }
     }

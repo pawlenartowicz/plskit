@@ -20,7 +20,7 @@ fn plskit_num_threads_caps_the_pool_without_changing_results() {
         // threshold, so the call reaches a parallel faer split as well as the
         // replicate loop.
         let (x, y) = synth(2000, 600, 1.0, 9);
-        let out = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, perm_opts(), Some(15))
+        let out = pls1_perm_null(x.as_ref(), y.as_ref(), 2, None, None, perm_opts(), Some(15))
             .map(|o| format!("{o:?}"));
         match (arg.as_str(), out) {
             ("ok", Ok(s)) => emit_result(&s),

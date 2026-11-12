@@ -5,32 +5,33 @@ export preprocess, pls1_fit, pls1_predict, pls1_find_k_optimal, pls1_find_k_sequ
        spls1_fit, spls1_find_keep_optimal, spls1_find_k_optimal, spls1_find_k_sequence,
        pls3_fit, plssvd_fit, pls3_transform, plssvd_transform, spls3_fit,
        pls1_confirmatory_test, split_nb_gate, pls1_perm_null, pls3_confirmatory_test,
-       pls1_perm_alpha, rotate, factors, pca_basis, profiles_find_n, profiles,
+       pls1_perm_alpha, gram_matrix, rotate, factors, pca_basis, profiles_find_n, profiles,
        profiles_search
 
 export PreprocessResult, PLS1Result, PLS3Result, PLS3Scores, FindKOptimalResult,
        FindKSequenceResult, FindKeepOptimalResult, ConfirmatoryTestResult, SplitNbGateResult,
-       PermNullResult, PermAlphaResult, CIScalar, ConfirmatoryCI, RotateResult,
-       FactorsResult, PCABasisResult, ProfilesFindNResult, ProfilesResult,
+       PermNullResult, PermAlphaResult, GramMatrixResult, CIScalar, ConfirmatoryCI,
+       RotateResult, FactorsResult, PCABasisResult, ProfilesFindNResult, ProfilesResult,
        ProfilesSearchResult, RotationSpec
 
 # Field order of every result type, as in docs/python/results.md.
 const _RESULT_FIELDS = Dict{Symbol,Vector{Symbol}}(
     :PreprocessResult => [:X_std, :X_mean, :X_scale, :Y_std, :Y_mean, :Y_scale, :weights_normalized, :n_eff],
-    :PLS1Result => [:T, :P, :W, :Q, :coef, :beta, :intercept, :k_used, :pre_standardized, :weights, :n_eff, :selection_result, :keep],
+    :PLS1Result => [:T, :P, :W, :Q, :coef, :beta, :intercept, :k_used, :pre_standardized, :weights, :n_eff, :selection_result, :keep, :covariate_coef, :n_covariates],
     :PLS3Result => [:U, :V, :singular_values, :x_scores, :y_scores, :X_mean, :X_scale, :Y_mean, :Y_scale, :k_used, :pre_standardized_X, :pre_standardized_Y, :keep_X, :keep_Y, :converged, :n_iter, :rotation_spec],
     :PLS3Scores => [:x_scores, :y_scores],
-    :FindKOptimalResult => [:k_star, :selector, :cv_scores, :cv_scores_se, :bic_scores, :pvalues, :diagnostic, :seed, :n_eff, :stable_rank],
-    :FindKSequenceResult => [:k_star, :pvalues, :test_method, :alpha, :seed, :n_eff, :stable_rank],
-    :FindKeepOptimalResult => [:keep_star, :k, :cv_scores, :cv_scores_se, :keep_grid, :seed, :n_eff],
-    :ConfirmatoryTestResult => [:pvalue, :statistic, :test_method, :k, :n_perm, :n_splits, :seed, :n_eff, :rho_hat, :stable_rank, :ci],
+    :FindKOptimalResult => [:k_star, :selector, :cv_scores, :cv_scores_se, :bic_scores, :pvalues, :diagnostic, :seed, :n_eff, :stable_rank, :n_covariates],
+    :FindKSequenceResult => [:k_star, :pvalues, :test_method, :alpha, :seed, :n_eff, :stable_rank, :n_covariates],
+    :FindKeepOptimalResult => [:keep_star, :k, :cv_scores, :cv_scores_se, :keep_grid, :seed, :n_eff, :n_covariates],
+    :ConfirmatoryTestResult => [:pvalue, :statistic, :test_method, :k, :pvalues_by_k, :statistics_by_k, :n_perm, :n_splits, :seed, :n_eff, :rho_hat, :stable_rank, :ci, :n_covariates],
     :SplitNbGateResult => [:fires, :stable_rank, :n_eff],
-    :PermNullResult => [:n_perm, :k, :seed, :beta_ref, :beta_perm_mean, :beta_perm_sd, :beta_perm_z, :beta_perm_matrix, :n_eff],
-    :PermAlphaResult => [:alpha, :k_used, :resolved, :k, :n_features],
+    :PermNullResult => [:n_perm, :k, :seed, :beta_ref, :beta_perm_mean, :beta_perm_sd, :beta_perm_z, :beta_perm_matrix, :n_eff, :n_covariates],
+    :PermAlphaResult => [:alpha, :k_used, :k, :n_features],
+    :GramMatrixResult => [:gram, :n_features, :pre_standardized],
     :CIScalar => [:point, :lower, :upper, :sd],
     :ConfirmatoryCI => [:n_boot, :m, :m_rate, :level, :beta_sign_z, :beta_sign_z_signed, :leverage_ci_lower, :leverage_ci_upper, :leverage_se, :beta_ci_lower, :beta_ci_upper, :beta_se, :holdout_corr, :n_boot_finite, :n_boot_finite_holdout_corr],
     :RotateResult => [:W_rot, :spec],
-    :FactorsResult => [:F, :W, :size, :coef, :pre_standardized, :rotation_spec],
+    :FactorsResult => [:F, :W, :size, :coef, :pre_standardized, :rotation_spec, :covariate_adjusted],
     :PCABasisResult => [:V, :s],
     :ProfilesFindNResult => [:n_star, :n_grid, :r2_mean, :r2_se, :K_star, :n_failed_folds, :seed],
     :ProfilesResult => [:model, :factors, :scores],
@@ -51,7 +52,7 @@ const PreprocessResult = PlsKitResult{:PreprocessResult}
     PLS1Result
 
 `PlsKitResult{:PLS1Result}`, the Julia form of Python's `plskit.PLS1Result`.
-Fields: `T`, `P`, `W`, `Q`, `coef`, `beta`, `intercept`, `k_used`, `pre_standardized`, `weights`, `n_eff`, `selection_result`, `keep`.
+Fields: `T`, `P`, `W`, `Q`, `coef`, `beta`, `intercept`, `k_used`, `pre_standardized`, `weights`, `n_eff`, `selection_result`, `keep`, `covariate_coef`, `n_covariates`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const PLS1Result = PlsKitResult{:PLS1Result}
@@ -78,7 +79,7 @@ const PLS3Scores = PlsKitResult{:PLS3Scores}
     FindKOptimalResult
 
 `PlsKitResult{:FindKOptimalResult}`, the Julia form of Python's `plskit.FindKOptimalResult`.
-Fields: `k_star`, `selector`, `cv_scores`, `cv_scores_se`, `bic_scores`, `pvalues`, `diagnostic`, `seed`, `n_eff`, `stable_rank`.
+Fields: `k_star`, `selector`, `cv_scores`, `cv_scores_se`, `bic_scores`, `pvalues`, `diagnostic`, `seed`, `n_eff`, `stable_rank`, `n_covariates`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const FindKOptimalResult = PlsKitResult{:FindKOptimalResult}
@@ -87,7 +88,7 @@ const FindKOptimalResult = PlsKitResult{:FindKOptimalResult}
     FindKSequenceResult
 
 `PlsKitResult{:FindKSequenceResult}`, the Julia form of Python's `plskit.FindKSequenceResult`.
-Fields: `k_star`, `pvalues`, `test_method`, `alpha`, `seed`, `n_eff`, `stable_rank`.
+Fields: `k_star`, `pvalues`, `test_method`, `alpha`, `seed`, `n_eff`, `stable_rank`, `n_covariates`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const FindKSequenceResult = PlsKitResult{:FindKSequenceResult}
@@ -96,7 +97,7 @@ const FindKSequenceResult = PlsKitResult{:FindKSequenceResult}
     FindKeepOptimalResult
 
 `PlsKitResult{:FindKeepOptimalResult}`, the Julia form of Python's `plskit.FindKeepOptimalResult`.
-Fields: `keep_star`, `k`, `cv_scores`, `cv_scores_se`, `keep_grid`, `seed`, `n_eff`.
+Fields: `keep_star`, `k`, `cv_scores`, `cv_scores_se`, `keep_grid`, `seed`, `n_eff`, `n_covariates`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const FindKeepOptimalResult = PlsKitResult{:FindKeepOptimalResult}
@@ -105,7 +106,7 @@ const FindKeepOptimalResult = PlsKitResult{:FindKeepOptimalResult}
     ConfirmatoryTestResult
 
 `PlsKitResult{:ConfirmatoryTestResult}`, the Julia form of Python's `plskit.ConfirmatoryTestResult`.
-Fields: `pvalue`, `statistic`, `test_method`, `k`, `n_perm`, `n_splits`, `seed`, `n_eff`, `rho_hat`, `stable_rank`, `ci`.
+Fields: `pvalue`, `statistic`, `test_method`, `k`, `pvalues_by_k`, `statistics_by_k`, `n_perm`, `n_splits`, `seed`, `n_eff`, `rho_hat`, `stable_rank`, `ci`, `n_covariates`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const ConfirmatoryTestResult = PlsKitResult{:ConfirmatoryTestResult}
@@ -123,7 +124,7 @@ const SplitNbGateResult = PlsKitResult{:SplitNbGateResult}
     PermNullResult
 
 `PlsKitResult{:PermNullResult}`, the Julia form of Python's `plskit.PermNullResult`.
-Fields: `n_perm`, `k`, `seed`, `beta_ref`, `beta_perm_mean`, `beta_perm_sd`, `beta_perm_z`, `beta_perm_matrix`, `n_eff`.
+Fields: `n_perm`, `k`, `seed`, `beta_ref`, `beta_perm_mean`, `beta_perm_sd`, `beta_perm_z`, `beta_perm_matrix`, `n_eff`, `n_covariates`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const PermNullResult = PlsKitResult{:PermNullResult}
@@ -132,10 +133,19 @@ const PermNullResult = PlsKitResult{:PermNullResult}
     PermAlphaResult
 
 `PlsKitResult{:PermAlphaResult}`, the Julia form of Python's `plskit.PermAlphaResult`.
-Fields: `alpha`, `k_used`, `resolved`, `k`, `n_features`.
+Fields: `alpha`, `k_used`, `k`, `n_features`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const PermAlphaResult = PlsKitResult{:PermAlphaResult}
+
+"""
+    GramMatrixResult
+
+`PlsKitResult{:GramMatrixResult}`, the Julia form of Python's `plskit.GramMatrixResult`.
+Fields: `gram`, `n_features`, `pre_standardized`.
+Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
+"""
+const GramMatrixResult = PlsKitResult{:GramMatrixResult}
 
 """
     CIScalar
@@ -168,7 +178,7 @@ const RotateResult = PlsKitResult{:RotateResult}
     FactorsResult
 
 `PlsKitResult{:FactorsResult}`, the Julia form of Python's `plskit.FactorsResult`.
-Fields: `F`, `W`, `size`, `coef`, `pre_standardized`, `rotation_spec`.
+Fields: `F`, `W`, `size`, `coef`, `pre_standardized`, `rotation_spec`, `covariate_adjusted`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const FactorsResult = PlsKitResult{:FactorsResult}
@@ -230,91 +240,91 @@ function preprocess(; X=nothing, Y=nothing, weights=nothing)
 end
 
 """
-    pls1_fit(X, y; k=1, k_max=nothing, find_k_args=nothing, pre_standardized=false, seed=nothing, weights=nothing) -> PLS1Result
+    pls1_fit(X, y; k="optimal", k_max=nothing, find_k_args=nothing, pre_standardized=false, seed=nothing, weights=nothing, covariates=nothing) -> PLS1Result
 
 Call Python's `plskit.pls1_fit` with the same arguments and defaults.
 Reference: [`pls1_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function pls1_fit(X, y; k=1, k_max=nothing, find_k_args=nothing, pre_standardized=false, seed=nothing, weights=nothing)
-    _call(:pls1_fit; X, y, k, k_max, find_k_args, pre_standardized, seed, weights)
+function pls1_fit(X, y; k="optimal", k_max=nothing, find_k_args=nothing, pre_standardized=false, seed=nothing, weights=nothing, covariates=nothing)
+    _call(:pls1_fit; X, y, k, k_max, find_k_args, pre_standardized, seed, weights, covariates)
 end
 
 """
-    pls1_predict(model, X_new) -> Vector{Float64}
+    pls1_predict(model, X_new; covariates=nothing) -> Vector{Float64}
 
 Call Python's `plskit.pls1_predict` with the same arguments and defaults.
 Reference: [`pls1_predict` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function pls1_predict(model, X_new)
-    _call(:pls1_predict; model, X_new)
+function pls1_predict(model, X_new; covariates=nothing)
+    _call(:pls1_predict; model, X_new, covariates)
 end
 
 """
-    pls1_find_k_optimal(X, y, k_max; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKOptimalResult
+    pls1_find_k_optimal(X, y, k_max; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, covariates=nothing) -> FindKOptimalResult
 
 Call Python's `plskit.pls1_find_k_optimal` with the same arguments and defaults.
 Reference: [`pls1_find_k_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function pls1_find_k_optimal(X, y, k_max; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
-    _call(:pls1_find_k_optimal; X, y, k_max, selector, diagnostic, args, pre_standardized, seed, verbose, weights)
+function pls1_find_k_optimal(X, y, k_max; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, covariates=nothing)
+    _call(:pls1_find_k_optimal; X, y, k_max, selector, diagnostic, args, pre_standardized, seed, verbose, weights, covariates)
 end
 
 """
-    pls1_find_k_sequence(X, y, k_max; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKSequenceResult
+    pls1_find_k_sequence(X, y, k_max; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, covariates=nothing) -> FindKSequenceResult
 
 Call Python's `plskit.pls1_find_k_sequence` with the same arguments and defaults.
 Reference: [`pls1_find_k_sequence` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function pls1_find_k_sequence(X, y, k_max; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
-    _call(:pls1_find_k_sequence; X, y, k_max, test_method, alpha, args, pre_standardized, seed, verbose, weights)
+function pls1_find_k_sequence(X, y, k_max; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, covariates=nothing)
+    _call(:pls1_find_k_sequence; X, y, k_max, test_method, alpha, args, pre_standardized, seed, verbose, weights, covariates)
 end
 
 """
-    spls1_fit(X, y, k, keep; pre_standardized=false, weights=nothing) -> PLS1Result
+    spls1_fit(X, y, k, keep; pre_standardized=false, weights=nothing, covariates=nothing) -> PLS1Result
 
 Call Python's `plskit.spls1_fit` with the same arguments and defaults.
 Reference: [`spls1_fit` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function spls1_fit(X, y, k, keep; pre_standardized=false, weights=nothing)
-    _call(:spls1_fit; X, y, k, keep, pre_standardized, weights)
+function spls1_fit(X, y, k, keep; pre_standardized=false, weights=nothing, covariates=nothing)
+    _call(:spls1_fit; X, y, k, keep, pre_standardized, weights, covariates)
 end
 
 """
-    spls1_find_keep_optimal(X, y, k; args=nothing, seed=nothing, verbose=false, weights=nothing) -> FindKeepOptimalResult
+    spls1_find_keep_optimal(X, y, k; args=nothing, seed=nothing, verbose=false, weights=nothing, covariates=nothing) -> FindKeepOptimalResult
 
 Call Python's `plskit.spls1_find_keep_optimal` with the same arguments and defaults.
 Reference: [`spls1_find_keep_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function spls1_find_keep_optimal(X, y, k; args=nothing, seed=nothing, verbose=false, weights=nothing)
-    _call(:spls1_find_keep_optimal; X, y, k, args, seed, verbose, weights)
+function spls1_find_keep_optimal(X, y, k; args=nothing, seed=nothing, verbose=false, weights=nothing, covariates=nothing)
+    _call(:spls1_find_keep_optimal; X, y, k, args, seed, verbose, weights, covariates)
 end
 
 """
-    spls1_find_k_optimal(X, y, k_max, keep; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKOptimalResult
+    spls1_find_k_optimal(X, y, k_max, keep; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, covariates=nothing) -> FindKOptimalResult
 
 Call Python's `plskit.spls1_find_k_optimal` with the same arguments and defaults.
 Reference: [`spls1_find_k_optimal` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function spls1_find_k_optimal(X, y, k_max, keep; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
-    _call(:spls1_find_k_optimal; X, y, k_max, keep, selector, diagnostic, args, pre_standardized, seed, verbose, weights)
+function spls1_find_k_optimal(X, y, k_max, keep; selector="r2_se", diagnostic=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, covariates=nothing)
+    _call(:spls1_find_k_optimal; X, y, k_max, keep, selector, diagnostic, args, pre_standardized, seed, verbose, weights, covariates)
 end
 
 """
-    spls1_find_k_sequence(X, y, k_max, keep; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> FindKSequenceResult
+    spls1_find_k_sequence(X, y, k_max, keep; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, covariates=nothing) -> FindKSequenceResult
 
 Call Python's `plskit.spls1_find_k_sequence` with the same arguments and defaults.
 Reference: [`spls1_find_k_sequence` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function spls1_find_k_sequence(X, y, k_max, keep; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
-    _call(:spls1_find_k_sequence; X, y, k_max, keep, test_method, alpha, args, pre_standardized, seed, verbose, weights)
+function spls1_find_k_sequence(X, y, k_max, keep; test_method="auto", alpha=nothing, args=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, covariates=nothing)
+    _call(:spls1_find_k_sequence; X, y, k_max, keep, test_method, alpha, args, pre_standardized, seed, verbose, weights, covariates)
 end
 
 """
@@ -373,80 +383,91 @@ function spls3_fit(X, Y, k, keep_X, keep_Y; pre_standardized_X=false, pre_standa
 end
 
 """
-    pls1_confirmatory_test(X, y; k=1, test_method="auto", args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing) -> ConfirmatoryTestResult
+    pls1_confirmatory_test(; X=nothing, y=nothing, k=nothing, test_method="auto", args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing, covariates=nothing, null_y=nothing, gram=nothing, n_features=nothing) -> ConfirmatoryTestResult
 
 Call Python's `plskit.pls1_confirmatory_test` with the same arguments and defaults.
 Reference: [`pls1_confirmatory_test` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function pls1_confirmatory_test(X, y; k=1, test_method="auto", args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing)
-    _call(:pls1_confirmatory_test; X, y, k, test_method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, verbose, weights, max_skip_rate)
+function pls1_confirmatory_test(; X=nothing, y=nothing, k=nothing, test_method="auto", args=nothing, ci=false, n_boot=nothing, m_rate=nothing, level=nothing, max_failure_rate=nothing, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, max_skip_rate=nothing, covariates=nothing, null_y=nothing, gram=nothing, n_features=nothing)
+    _call(:pls1_confirmatory_test; X, y, k, test_method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, verbose, weights, max_skip_rate, covariates, null_y, gram, n_features)
 end
 
 """
-    split_nb_gate(X; weights=nothing) -> SplitNbGateResult
+    split_nb_gate(X; weights=nothing, pre_standardized=false) -> SplitNbGateResult
 
 Call Python's `plskit.split_nb_gate` with the same arguments and defaults.
 Reference: [`split_nb_gate` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function split_nb_gate(X; weights=nothing)
-    _call(:split_nb_gate; X, weights)
+function split_nb_gate(X; weights=nothing, pre_standardized=false)
+    _call(:split_nb_gate; X, weights, pre_standardized)
 end
 
 """
-    pls1_perm_null(X, y, k; n_perm=nothing, return_perm_matrix=false, pre_standardized=false, seed=nothing, verbose=false, weights=nothing) -> PermNullResult
+    pls1_perm_null(X, y, k; n_perm=nothing, return_perm_matrix=false, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, covariates=nothing) -> PermNullResult
 
 Call Python's `plskit.pls1_perm_null` with the same arguments and defaults.
 Reference: [`pls1_perm_null` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function pls1_perm_null(X, y, k; n_perm=nothing, return_perm_matrix=false, pre_standardized=false, seed=nothing, verbose=false, weights=nothing)
-    _call(:pls1_perm_null; X, y, k, n_perm, return_perm_matrix, pre_standardized, seed, verbose, weights)
+function pls1_perm_null(X, y, k; n_perm=nothing, return_perm_matrix=false, pre_standardized=false, seed=nothing, verbose=false, weights=nothing, covariates=nothing)
+    _call(:pls1_perm_null; X, y, k, n_perm, return_perm_matrix, pre_standardized, seed, verbose, weights, covariates)
 end
 
 """
-    pls3_confirmatory_test(X, Y; k=1, test_method="auto", args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, verbose=false) -> ConfirmatoryTestResult
+    pls3_confirmatory_test(; X=nothing, Y=nothing, k=1, test_method="auto", args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, verbose=false, gram=nothing, n_features=nothing) -> ConfirmatoryTestResult
 
 Call Python's `plskit.pls3_confirmatory_test` with the same arguments and defaults.
 Reference: [`pls3_confirmatory_test` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function pls3_confirmatory_test(X, Y; k=1, test_method="auto", args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, verbose=false)
-    _call(:pls3_confirmatory_test; X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, verbose)
+function pls3_confirmatory_test(; X=nothing, Y=nothing, k=1, test_method="auto", args=nothing, pre_standardized_X=false, pre_standardized_Y=false, seed=nothing, verbose=false, gram=nothing, n_features=nothing)
+    _call(:pls3_confirmatory_test; X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, verbose, gram, n_features)
 end
 
 """
-    pls1_perm_alpha(gram, Y; k=1, n_features) -> PermAlphaResult
+    pls1_perm_alpha(gram, Y; k=1, n_features=nothing) -> PermAlphaResult
 
 Call Python's `plskit.pls1_perm_alpha` with the same arguments and defaults.
 Reference: [`pls1_perm_alpha` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function pls1_perm_alpha(gram, Y; k=1, n_features)
+function pls1_perm_alpha(gram, Y; k=1, n_features=nothing)
     _call(:pls1_perm_alpha; gram, Y, k, n_features)
 end
 
 """
-    rotate(model_or_W; X=nothing, method="varimax", L=nothing, args=nothing, pre_standardized=nothing) -> RotateResult or PLS3Result or FactorsResult
+    gram_matrix(X; pre_standardized=false) -> GramMatrixResult
+
+Call Python's `plskit.gram_matrix` with the same arguments and defaults.
+Reference: [`gram_matrix` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
+result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
+"""
+function gram_matrix(X; pre_standardized=false)
+    _call(:gram_matrix; X, pre_standardized)
+end
+
+"""
+    rotate(model_or_W; X=nothing, method="varimax", L=nothing, args=nothing, pre_standardized=nothing, covariates=nothing) -> RotateResult or PLS3Result or FactorsResult
 
 Call Python's `plskit.rotate` with the same arguments and defaults.
 Reference: [`rotate` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function rotate(model_or_W; X=nothing, method="varimax", L=nothing, args=nothing, pre_standardized=nothing)
-    _call(:rotate; model_or_W, X, method, L, args, pre_standardized)
+function rotate(model_or_W; X=nothing, method="varimax", L=nothing, args=nothing, pre_standardized=nothing, covariates=nothing)
+    _call(:rotate; model_or_W, X, method, L, args, pre_standardized, covariates)
 end
 
 """
-    factors(model_or_coef, X, n; pre_standardized=nothing) -> FactorsResult
+    factors(model_or_coef, X, n; pre_standardized=nothing, covariates=nothing) -> FactorsResult
 
 Call Python's `plskit.factors` with the same arguments and defaults.
 Reference: [`factors` in the Python API](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md);
 result fields: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
-function factors(model_or_coef, X, n; pre_standardized=nothing)
-    _call(:factors; model_or_coef, X, n, pre_standardized)
+function factors(model_or_coef, X, n; pre_standardized=nothing, covariates=nothing)
+    _call(:factors; model_or_coef, X, n, pre_standardized, covariates)
 end
 
 """

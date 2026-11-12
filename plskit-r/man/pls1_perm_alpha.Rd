@@ -4,7 +4,7 @@
 \alias{pls1_perm_alpha}
 \title{Dual coefficients of PLS1 fits from a Gram matrix}
 \usage{
-pls1_perm_alpha(gram, Y, k = 1L, n_features)
+pls1_perm_alpha(gram, Y, k = 1L, n_features = NULL)
 }
 \arguments{
 \item{gram, Y, k, n_features}{See the canonical reference.}

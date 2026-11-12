@@ -65,9 +65,8 @@ truncated fit by design (the comment at each call site says why):
 
 - `signal_test.rs`: the `e`-value train-half refit in `run_e`. The
   `raw_perm` CV folds (`cv_fold_contribution`) and the per-half fits of the
-  split tests (`split_column_r`: the `split_exact` refit route, `split_nb`
-  at `k ≥ 2` or with `keep` set, and the fallback of `nr_split_r`, the
-  no-refit body of both tests at `k = 1` without `keep`) do not call
+  split tests (`split_column_r`: the `split_exact` refit route, and
+  `split_nb` at `k ≥ 2` or with `keep` set) do not call
   `pls1_fit`: they run its kernel tail, `fit::pls1_fit_prepared_fro`, which
   has no check and takes no weights (the weights are already in the
   row-scaled data).
@@ -82,16 +81,15 @@ truncated fit by design (the comment at each call site says why):
 The dual (Gram) routes in `dual_route.rs` (`pls1_cv_r2_columns`,
 `pls3_split_zbars_columns`, and the n-space PLS1 kernel
 `pls1_nspace_kernel`, whose unit bodies `nspace_perm_row`,
-`fold_column_nspace` and `split_column_r_nspace` serve `pls1_perm_null`,
+`fold_column_nspace` and `split_columns_r_nspace` serve `pls1_perm_null`,
 raw_perm at `k ≥ 2` and the split_exact refit route at `k ≥ 2`) do not
 call `pls1_fit` and run no check, matching the primal sites they replace.
-Their primal fallbacks run with the check off, as those sites do.
 
-The p-space Gram backend in `gram_p.rs` (`GramPBlock::fit_replicate`,
-behind `pls1_perm_null`, raw_perm and the split_exact refit route on tall
-data, where `n` is well above `p`) does not call `pls1_fit` and runs no
-check either. A replicate it cannot certify falls back to the primal unit
-of its site, which runs with the check off, as those sites do.
+The p-space Gram backend in `gram_p.rs` (`GramPBlock::fit`, behind
+`pls1_perm_null`, raw_perm and the split_exact refit route on tall data,
+where `n` is well above `p`) does not call `pls1_fit` and runs no check
+either, matching the primal units of its sites, which run with the check
+off. It decides every replicate itself; nothing is refitted on X.
 
 ## Internal call sites that keep the check on
 

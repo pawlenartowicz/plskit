@@ -80,6 +80,8 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
                 "record:FindKOptimalResult|FindKSequenceResult",
             ),
             opt("keep", "i64"),
+            opt("covariate_coef", "vec"),
+            opt("n_covariates", "i64"),
         ],
     },
     ResultTypeSpec {
@@ -124,6 +126,7 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             req("seed", "u64"),
             req("n_eff", "f64"),
             opt("stable_rank", "f64"),
+            opt("n_covariates", "i64"),
         ],
     },
     ResultTypeSpec {
@@ -137,6 +140,7 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             req("seed", "u64"),
             req("n_eff", "f64"),
             opt("stable_rank", "f64"),
+            opt("n_covariates", "i64"),
         ],
     },
     ResultTypeSpec {
@@ -150,6 +154,7 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             req("keep_grid", "intvec"),
             req("seed", "u64"),
             req("n_eff", "f64"),
+            opt("n_covariates", "i64"),
         ],
     },
     ResultTypeSpec {
@@ -157,9 +162,11 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
         r_class: "confirmatory_test_result",
         fields: &[
             req("pvalue", "f64"),
-            req("statistic", "f64"),
+            opt("statistic", "f64"),
             req("test_method", "str"),
-            req("k", "i64"),
+            req("k", "intvec"),
+            req("pvalues_by_k", "intmap"),
+            req("statistics_by_k", "intmap"),
             opt("n_perm", "i64"),
             opt("n_splits", "i64"),
             req("seed", "u64"),
@@ -167,6 +174,7 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             opt("rho_hat", "f64"),
             opt("stable_rank", "f64"),
             opt("ci", "record:ConfirmatoryCI"),
+            opt("n_covariates", "i64"),
         ],
     },
     ResultTypeSpec {
@@ -191,6 +199,7 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             req("beta_perm_z", "vec"),
             opt("beta_perm_matrix", "mat"),
             req("n_eff", "f64"),
+            opt("n_covariates", "i64"),
         ],
     },
     ResultTypeSpec {
@@ -199,9 +208,17 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
         fields: &[
             req("alpha", "mat"),
             req("k_used", "intvec"),
-            req("resolved", "boolvec"),
             req("k", "i64"),
             req("n_features", "i64"),
+        ],
+    },
+    ResultTypeSpec {
+        name: "GramMatrixResult",
+        r_class: "gram_matrix_result",
+        fields: &[
+            req("gram", "mat"),
+            req("n_features", "i64"),
+            req("pre_standardized", "bool"),
         ],
     },
     ResultTypeSpec {
@@ -250,6 +267,7 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             req("coef", "vec"),
             req("pre_standardized", "bool"),
             opt("rotation_spec", "record:RotationSpec"),
+            req("covariate_adjusted", "bool"),
         ],
     },
     ResultTypeSpec {

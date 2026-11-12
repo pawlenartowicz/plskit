@@ -54,6 +54,7 @@ const COVERED_FUNCTIONS: &[&str] = &[
     "preprocess",
     "pls1_perm_null",
     "pls1_perm_alpha",
+    "gram_matrix",
     "spls1_fit",
     "spls1_find_keep_optimal",
     "spls1_find_k_optimal",
@@ -170,6 +171,34 @@ impl Inputs {
             case["name"]
         );
         has_array.then(|| self.col("weights"))
+    }
+
+    /// The matrix input `npz`, cross-checked against the manifest descriptor
+    /// `key` (`"covariates": "Z"`, `"null_y": "Ynull"`) as [`Self::weights`]
+    /// is: either both are present or neither is.
+    fn described_mat(
+        &self,
+        case: &Value,
+        key: &str,
+        descriptor: &str,
+        npz: &str,
+    ) -> Option<faer::Mat<f64>> {
+        let has_descriptor = case["kwargs"].get(key).and_then(Value::as_str) == Some(descriptor);
+        let has_array = self.0.contains_key(npz);
+        assert_eq!(
+            has_descriptor, has_array,
+            "{}: manifest {key} descriptor and NPZ {npz} array disagree",
+            case["name"]
+        );
+        has_array.then(|| self.mat(npz))
+    }
+
+    fn covariates(&self, case: &Value) -> Option<faer::Mat<f64>> {
+        self.described_mat(case, "covariates", "Z", "covariates")
+    }
+
+    fn null_y(&self, case: &Value) -> Option<faer::Mat<f64>> {
+        self.described_mat(case, "null_y", "Ynull", "null_y")
     }
 }
 
@@ -507,6 +536,16 @@ fn kw_usize(kw: &Value, key: &str) -> usize {
     .unwrap()
 }
 
+/// The tested set: a list `k`, one integer `k` as a one-element set, or
+/// `None` (the default set) when the kwargs name no `k`.
+fn kw_k_set(kw: &Value) -> Option<Vec<usize>> {
+    let to_usize = |v: &Value| usize::try_from(v.as_u64().expect("integer k")).unwrap();
+    kw.get("k").map(|v| match v.as_array() {
+        Some(ks) => ks.iter().map(to_usize).collect(),
+        None => vec![to_usize(v)],
+    })
+}
+
 fn kw_opt_usize(kw: &Value, key: &str) -> Option<usize> {
     kw.get(key)
         .map(|v| usize::try_from(v.as_u64().expect("integer kwarg")).unwrap())
@@ -616,6 +655,12 @@ fn check_pls1_model(fx: &Fixture, m: &plskit::Pls1Model) {
     fx.col("beta", &m.beta);
     fx.scalar("intercept", m.intercept);
     fx.int("k_used", m.k_used);
+    fx.optional("covariate_coef", m.covariate_coef.as_ref(), |fx, c| {
+        fx.col("covariate_coef", c);
+    });
+    fx.optional("n_covariates", m.n_covariates, |fx, v| {
+        fx.int("n_covariates", v);
+    });
 }
 
 /// The fields every `pls1_find_k_optimal` / `spls1_find_k_optimal` fixture records.
@@ -639,6 +684,9 @@ fn check_find_k_sequence(fx: &Fixture, r: &plskit::FindKSequenceOutput) {
     fx.string("test_method", &r.test_method);
     fx.scalar("alpha", r.alpha);
     fx.int("seed", r.seed);
+    fx.optional("n_covariates", r.n_covariates, |fx, v| {
+        fx.int("n_covariates", v);
+    });
 }
 
 /// A `CIScalar` stored as four 0-D fields `{prefix}_{point,lower,upper,sd}`.
@@ -662,15 +710,25 @@ fn check_svd_outputs(fx: &Fixture, m: &plskit::Pls3Model) {
 /// wrapper and the generator: `pls1_find_k_sequence` at the core defaults
 /// with the manifest seed, then a fixed fit at its `k_star`.
 #[test]
+#[allow(clippy::many_single_char_names)] // x, y, z, k, m are the math names
 fn pls1_fit_cases_match_corpus() {
     // `seed` feeds the K selection of `k = "sequence"`; with an integer `k`
     // both this arm and the Python one pass it and the fit ignores it.
-    let kwargs = Kwargs::top(&["k", "k_max", "pre_standardized", "seed", "weights"]);
+    let kwargs = Kwargs::top(&[
+        "covariates",
+        "k",
+        "k_max",
+        "pre_standardized",
+        "seed",
+        "weights",
+    ]);
     for_each_case("pls1_fit", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let (x, y) = (inputs.mat("X"), inputs.col("y"));
         let weights = inputs.weights(case);
         let wref = weights.as_ref().map(faer::Col::as_ref);
+        let z = inputs.covariates(case);
+        let zref = z.as_ref().map(faer::Mat::as_ref);
         let k = match &kw["k"] {
             Value::String(mode) if mode == "sequence" => {
                 let seq = plskit::pls1_find_k_sequence(
@@ -678,6 +736,7 @@ fn pls1_fit_cases_match_corpus() {
                     y.as_ref(),
                     kw_usize(kw, "k_max"),
                     wref,
+                    zref,
                     find_k_sequence_opts(kw),
                 )
                 .expect("find_k_sequence");
@@ -696,6 +755,7 @@ fn pls1_fit_cases_match_corpus() {
             y.as_ref(),
             KSpec::Fixed(k),
             wref,
+            zref,
             FitOpts {
                 pre_standardized: kw_bool(kw, "pre_standardized"),
                 ..FitOpts::default()
@@ -728,6 +788,7 @@ fn pls1_find_k_optimal_cases_match_corpus() {
             inputs.col("y").as_ref(),
             kw_usize(kw, "k_max"),
             weights.as_ref().map(faer::Col::as_ref),
+            None,
             find_k_optimal_opts(kw),
         )
         .expect("find_k_optimal");
@@ -741,6 +802,7 @@ fn pls1_find_k_sequence_cases_match_corpus() {
         top: &[
             "alpha",
             "args",
+            "covariates",
             "k_max",
             "pre_standardized",
             "seed",
@@ -752,11 +814,13 @@ fn pls1_find_k_sequence_cases_match_corpus() {
     for_each_case("pls1_find_k_sequence", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let weights = inputs.weights(case);
+        let z = inputs.covariates(case);
         let r = plskit::pls1_find_k_sequence(
             inputs.mat("X").as_ref(),
             inputs.col("y").as_ref(),
             kw_usize(kw, "k_max"),
             weights.as_ref().map(faer::Col::as_ref),
+            z.as_ref().map(faer::Mat::as_ref),
             find_k_sequence_opts(kw),
         )
         .expect("find_k_sequence");
@@ -768,16 +832,20 @@ fn pls1_find_k_sequence_cases_match_corpus() {
 /// unweighted, the wide `raw_perm` case that takes the Gram route, and the
 /// `split_nb` case carrying the subsampling CI bundle.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn pls1_confirmatory_test_cases_match_corpus() {
     let kwargs = Kwargs {
         top: &[
             "args",
             "ci",
+            "covariates",
+            "gram",
             "k",
             "level",
             "m_rate",
             "max_failure_rate",
             "n_boot",
+            "null_y",
             "pre_standardized",
             "seed",
             "test_method",
@@ -789,6 +857,8 @@ fn pls1_confirmatory_test_cases_match_corpus() {
         let kw = &case["kwargs"];
         let (x, y) = (inputs.mat("X"), inputs.col("y"));
         let weights = inputs.weights(case);
+        let z = inputs.covariates(case);
+        let null_y = inputs.null_y(case);
         let method = method_from_str(kw["test_method"].as_str().expect("test_method"));
         let ci = kw_bool(kw, "ci").then(|| {
             let d = CIOpts::default();
@@ -799,33 +869,55 @@ fn pls1_confirmatory_test_cases_match_corpus() {
                 max_failure_rate: kw_opt_f64(kw, "max_failure_rate").unwrap_or(d.max_failure_rate),
             }
         });
-        let r = plskit::pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: x.as_ref(),
-                y: y.as_ref(),
-                k: kw_usize(kw, "k"),
-                weights: weights.as_ref().map(faer::Col::as_ref),
-            },
-            ConfirmatoryTestOpts {
-                args: confirmatory_args(method, &kw["args"]),
-                pre_standardized: kw_bool(kw, "pre_standardized"),
-                seed: kw_seed(kw),
-                ci,
-                ..ConfirmatoryTestOpts::default()
-            },
-        )
+        let opts = ConfirmatoryTestOpts {
+            args: confirmatory_args(method, &kw["args"]),
+            pre_standardized: kw_bool(kw, "pre_standardized"),
+            seed: kw_seed(kw),
+            ci,
+            ..ConfirmatoryTestOpts::default()
+        };
+        let ks = kw_k_set(kw);
+        // `"gram": true`: the call takes `gram_matrix(X, pre_standardized)`.
+        let r = if kw_bool(kw, "gram") {
+            let g = plskit::gram_matrix(x.as_ref(), opts.pre_standardized).expect("gram_matrix");
+            plskit::pls1_confirmatory_test(
+                ConfirmatoryTestInput::Gram {
+                    gram: &g,
+                    y: y.as_ref(),
+                    k: ks.as_deref(),
+                    covariates: z.as_ref().map(faer::Mat::as_ref),
+                    null_y: null_y.as_ref().map(faer::Mat::as_ref),
+                },
+                ConfirmatoryTestOpts {
+                    pre_standardized: false,
+                    ..opts
+                },
+            )
+        } else {
+            plskit::pls1_confirmatory_test(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k: ks.as_deref(),
+                    weights: weights.as_ref().map(faer::Col::as_ref),
+                    covariates: z.as_ref().map(faer::Mat::as_ref),
+                    null_y: null_y.as_ref().map(faer::Mat::as_ref),
+                },
+                opts,
+            )
+        }
         .expect("pls1_confirmatory_test");
 
-        fx.scalar("pvalue", r.pvalue);
-        fx.scalar("statistic", r.statistic);
-        fx.string("test_method", &r.test_method);
-        fx.int("k", r.k);
+        check_k_set(fx, &r);
         fx.optional("n_perm", r.n_perm, |fx, v| fx.int("n_perm", v));
         fx.optional("n_splits", r.n_splits, |fx, v| fx.int("n_splits", v));
         fx.optional("stable_rank", r.stable_rank, |fx, v| {
             fx.scalar("stable_rank", v);
         });
         fx.int("seed", r.seed);
+        fx.optional("n_covariates", r.n_covariates, |fx, v| {
+            fx.int("n_covariates", v);
+        });
 
         assert_eq!(r.ci.is_some(), ci.is_some(), "{}: ci presence", fx.name);
         if let Some(c) = &r.ci {
@@ -851,17 +943,34 @@ fn pls1_confirmatory_test_cases_match_corpus() {
 #[test]
 fn pls1_predict_cases_match_corpus() {
     // The generated data: training / new-data shapes and seeds.
-    let kwargs = Kwargs::top(&["d", "k", "n_new", "n_train", "seed_new", "seed_train"]);
+    let kwargs = Kwargs::top(&[
+        "covariates",
+        "d",
+        "k",
+        "n_new",
+        "n_train",
+        "seed_new",
+        "seed_train",
+    ]);
     for_each_case("pls1_predict", kwargs, |case, inputs, fx| {
+        // `covariates` are the training rows', `covariates_new` the new rows'.
+        let z = inputs.covariates(case);
+        let z_new = z.as_ref().map(|_| inputs.mat("covariates_new"));
         let m = plskit::pls1_fit(
             inputs.mat("X_train").as_ref(),
             inputs.col("y_train").as_ref(),
             KSpec::Fixed(kw_usize(&case["kwargs"], "k")),
             None,
+            z.as_ref().map(faer::Mat::as_ref),
             FitOpts::default(),
         )
         .expect("fit");
-        let y_pred = plskit::pls1_predict(&m, inputs.mat("X_new").as_ref()).expect("predict");
+        let y_pred = plskit::pls1_predict(
+            &m,
+            inputs.mat("X_new").as_ref(),
+            z_new.as_ref().map(faer::Mat::as_ref),
+        )
+        .expect("predict");
         fx.col("y_pred", &y_pred);
         check_pls1_model(fx, &m);
     });
@@ -879,6 +988,7 @@ fn rotate_cases_match_corpus() {
             inputs.mat("X").as_ref(),
             inputs.col("y").as_ref(),
             KSpec::Fixed(kw_usize(kw, "k")),
+            None,
             None,
             FitOpts::default(),
         )
@@ -911,11 +1021,12 @@ fn factors_cases_match_corpus() {
             inputs.col("y").as_ref(),
             KSpec::Fixed(kw_usize(kw, "k")),
             None,
+            None,
             FitOpts::default(),
         )
         .expect("fit");
         let (xs, _, _) = plskit::linalg::standardize(x.as_ref());
-        let f = plskit::factors(m.coef.as_ref(), x.as_ref(), n, false).expect("factors");
+        let f = plskit::factors(m.coef.as_ref(), x.as_ref(), n, false, None).expect("factors");
         let l = faer::Mat::<f64>::from_fn(xs.nrows(), f.w.ncols(), |i, j| {
             (0..xs.ncols()).map(|t| xs[(i, t)] * f.w[(t, j)]).sum()
         });
@@ -1000,6 +1111,7 @@ fn profiles_find_n_cases_match_corpus() {
 #[test]
 fn pls1_perm_null_cases_match_corpus() {
     let kwargs = Kwargs::top(&[
+        "covariates",
         "d",
         "k",
         "n",
@@ -1012,11 +1124,13 @@ fn pls1_perm_null_cases_match_corpus() {
     for_each_case("pls1_perm_null", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let weights = inputs.weights(case);
+        let z = inputs.covariates(case);
         let r = plskit::pls1_perm_null(
             inputs.mat("X").as_ref(),
             inputs.col("y").as_ref(),
             kw_usize(kw, "k"),
             weights.as_ref().map(faer::Col::as_ref),
+            z.as_ref().map(faer::Mat::as_ref),
             PermNullOpts {
                 n_perm: kw_usize(kw, "n_perm"),
                 return_perm_matrix: kw_bool(kw, "return_perm_matrix"),
@@ -1034,6 +1148,9 @@ fn pls1_perm_null_cases_match_corpus() {
         fx.int("k", r.k);
         fx.int("seed", r.seed);
         fx.scalar("n_eff", r.n_eff);
+        fx.optional("n_covariates", r.n_covariates, |fx, v| {
+            fx.int("n_covariates", v);
+        });
         // Row-major `(n_perm, d)` in the core, stored 2-D.
         let d = r.beta_ref.len();
         fx.optional(
@@ -1068,11 +1185,24 @@ fn pls1_perm_alpha_cases_match_corpus() {
             .map(|&v| i64::try_from(v).unwrap())
             .collect();
         fx.ints("k_used", &k_used);
-        // `resolved` is written as 0/1: the npz writer has no bool dtype.
-        let resolved: Vec<i64> = r.resolved.iter().map(|&b| i64::from(b)).collect();
-        fx.ints("resolved", &resolved);
         fx.int("k", r.k);
         fx.int("n_features", r.n_features);
+    });
+}
+
+#[test]
+fn gram_matrix_cases_match_corpus() {
+    let kwargs = Kwargs::top(&["pre_standardized"]);
+    for_each_case("gram_matrix", kwargs, |case, inputs, fx| {
+        let r = plskit::gram_matrix(
+            inputs.mat("X").as_ref(),
+            kw_bool(&case["kwargs"], "pre_standardized"),
+        )
+        .expect("gram_matrix");
+        fx.mat("gram", &r.gram);
+        fx.int("n_features", r.n_features);
+        // `pre_standardized` is written as 0/1: the npz writer has no bool dtype.
+        fx.int("pre_standardized", i64::from(r.pre_standardized));
     });
 }
 
@@ -1091,6 +1221,7 @@ fn spls1_fit_cases_match_corpus() {
             KSpec::Fixed(kw_usize(kw, "k")),
             kw_usize(kw, "keep"),
             weights.as_ref().map(faer::Col::as_ref),
+            None,
             FitOpts::default(),
         )
         .expect("spls1_fit");
@@ -1110,6 +1241,7 @@ fn spls1_find_keep_optimal_cases_match_corpus() {
             inputs.col("y").as_ref(),
             kw_usize(kw, "k"),
             weights.as_ref().map(faer::Col::as_ref),
+            None,
             FindKeepOptimalOpts {
                 seed: kw_seed(kw),
                 ..FindKeepOptimalOpts::default()
@@ -1154,6 +1286,7 @@ fn spls1_find_k_optimal_cases_match_corpus() {
             kw_usize(kw, "k_max"),
             kw_usize(kw, "keep"),
             weights.as_ref().map(faer::Col::as_ref),
+            None,
             find_k_optimal_opts(kw),
         )
         .expect("spls1_find_k_optimal");
@@ -1185,6 +1318,7 @@ fn spls1_find_k_sequence_cases_match_corpus() {
             kw_usize(kw, "k_max"),
             kw_usize(kw, "keep"),
             weights.as_ref().map(faer::Col::as_ref),
+            None,
             find_k_sequence_opts(kw),
         )
         .expect("spls1_find_k_sequence");
@@ -1248,30 +1382,43 @@ fn pls3_transform_cases_match_corpus() {
     });
 }
 
+/// The fields every confirmatory result shares: `pvalue`, `statistic` (one
+/// k only), `test_method`, the tested set `k` and the per-k maps.
+fn check_k_set(fx: &Fixture, r: &plskit::ConfirmatoryTestOutput) {
+    fx.scalar("pvalue", r.pvalue);
+    fx.optional("statistic", r.statistic, |fx, v| fx.scalar("statistic", v));
+    fx.string("test_method", &r.test_method);
+    let ks: Vec<i64> = r.k.iter().map(|&k| i64::try_from(k).unwrap()).collect();
+    fx.ints("k", &ks);
+    fx.score_map("pvalues_by_k", &r.pvalues_by_k);
+    fx.score_map("statistics_by_k", &r.statistics_by_k);
+}
+
 #[test]
 fn pls3_confirmatory_test_cases_match_corpus() {
     let kwargs = Kwargs {
-        top: &["args", "k", "seed", "test_method"],
+        top: &["args", "gram", "k", "seed", "test_method"],
         args: &["force", "n_folds", "n_perm", "n_splits"],
     };
     for_each_case("pls3_confirmatory_test", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
         let method = method_from_str(kw["test_method"].as_str().expect("test_method"));
-        let r = plskit::pls3_confirmatory_test(
-            inputs.mat("X").as_ref(),
-            inputs.mat("Y").as_ref(),
-            kw_usize(kw, "k"),
-            Pls3ConfirmatoryTestOpts {
-                args: confirmatory_args(method, &kw["args"]),
-                seed: kw_seed(kw),
-                ..Pls3ConfirmatoryTestOpts::default()
-            },
-        )
+        let (x, y) = (inputs.mat("X"), inputs.mat("Y"));
+        let opts = Pls3ConfirmatoryTestOpts {
+            args: confirmatory_args(method, &kw["args"]),
+            seed: kw_seed(kw),
+            ..Pls3ConfirmatoryTestOpts::default()
+        };
+        let k = kw_usize(kw, "k");
+        // `"gram": true`: the call takes `gram_matrix(X)`.
+        let r = if kw_bool(kw, "gram") {
+            let g = plskit::gram_matrix(x.as_ref(), false).expect("gram_matrix");
+            plskit::pls3_confirmatory_test_gram(&g, y.as_ref(), k, opts)
+        } else {
+            plskit::pls3_confirmatory_test(x.as_ref(), y.as_ref(), k, opts)
+        }
         .expect("pls3_confirmatory_test");
-        fx.scalar("pvalue", r.pvalue);
-        fx.scalar("statistic", r.statistic);
-        fx.string("test_method", &r.test_method);
-        fx.int("k", r.k);
+        check_k_set(fx, &r);
         fx.optional("n_perm", r.n_perm, |fx, v| fx.int("n_perm", v));
         fx.optional("n_splits", r.n_splits, |fx, v| fx.int("n_splits", v));
         fx.optional("stable_rank", r.stable_rank, |fx, v| {

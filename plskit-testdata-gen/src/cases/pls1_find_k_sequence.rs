@@ -7,7 +7,7 @@ use anyhow::Result;
 use plskit::{ConfirmatoryMethod, FindKSequenceOpts, pls1_find_k_sequence};
 
 use crate::cases::{
-    faer_col_to_array, ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data,
+    Xyw, array_descriptors, faer_col_to_array, scalar_f64, scalar_i64, synth_covariates, synth_data,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
@@ -38,7 +38,23 @@ struct SequenceCase {
 /// case-specific outputs file, then returns the manifest `Case`.
 #[allow(clippy::many_single_char_names)]
 fn run_sequence_case(root: &Path, c: &SequenceCase) -> Result<Case> {
-    let rel_inputs = format!("inputs/{INPUTS_NAME}.npz");
+    let (x, y) = synth_data(SYNTH_N, SYNTH_D, SYNTH_K_SIGNAL, SYNTH_SNR, SYNTH_SEED);
+    run_sequence_on(
+        root,
+        c,
+        INPUTS_NAME,
+        &Xyw {
+            x,
+            y,
+            ..Default::default()
+        },
+    )
+}
+
+/// [`run_sequence_case`] on `data`, written to `inputs/{inputs_name}.npz`
+/// (with `covariates` when `data` has them, which the call takes).
+fn run_sequence_on(root: &Path, c: &SequenceCase, inputs_name: &str, data: &Xyw) -> Result<Case> {
+    let rel_inputs = format!("inputs/{inputs_name}.npz");
     let rel_outputs = format!("outputs/{FUNCTION}/{}.npz", c.name);
     let abs_inputs = root.join(&rel_inputs);
     let abs_outputs = root.join(&rel_outputs);
@@ -50,19 +66,18 @@ fn run_sequence_case(root: &Path, c: &SequenceCase) -> Result<Case> {
         std::fs::create_dir_all(p)?;
     }
 
-    let (x, y) = synth_data(SYNTH_N, SYNTH_D, SYNTH_K_SIGNAL, SYNTH_SNR, SYNTH_SEED);
+    // Write the inputs (idempotent — same bytes every call).
+    data.write(&abs_inputs)?;
 
-    // Write shared inputs (idempotent — same bytes every call).
-    {
-        let mut w = NpzWriter::create(&abs_inputs)?;
-        w.add_f64("X", &x.clone().into_dyn())?;
-        w.add_f64("y", &y.clone().into_dyn())?;
-        w.finish()?;
-    }
-
-    let x_faer = ndarray_to_faer_mat(&x);
-    let y_faer = ndarray_to_faer_col(&y);
-    let r = pls1_find_k_sequence(x_faer.as_ref(), y_faer.as_ref(), K_MAX, None, c.opts)?;
+    let z_faer = data.z_faer();
+    let r = pls1_find_k_sequence(
+        data.x_faer().as_ref(),
+        data.y_faer().as_ref(),
+        K_MAX,
+        None,
+        z_faer.as_ref().map(faer::Mat::as_ref),
+        c.opts,
+    )?;
 
     {
         let mut w = NpzWriter::create(&abs_outputs)?;
@@ -71,15 +86,20 @@ fn run_sequence_case(root: &Path, c: &SequenceCase) -> Result<Case> {
         w.add_string("test_method", &r.test_method)?;
         w.add_f64("alpha", &scalar_f64(r.alpha))?;
         w.add_i64("seed", &scalar_i64(i64::try_from(r.seed)?))?;
+        if let Some(nc) = r.n_covariates {
+            w.add_i64("n_covariates", &scalar_i64(i64::try_from(nc)?))?;
+        }
         w.finish()?;
     }
 
+    let mut kwargs = c.kwargs.clone();
+    array_descriptors(&mut kwargs, data);
     Ok(Case {
         name: c.name.to_string(),
         function: FUNCTION.into(),
         inputs: rel_inputs,
         outputs: rel_outputs,
-        kwargs: c.kwargs.clone(),
+        kwargs,
         hashes: Hashes {
             inputs_sha256: sha256_of_file(&abs_inputs)?,
             outputs_sha256: sha256_of_file(&abs_outputs)?,
@@ -210,6 +230,43 @@ pub fn auto(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 100, "n_splits": 20},
                 "seed": 42
             }),
+        },
+    )
+}
+
+/// Case: `pls1_find_k_sequence` with `test_method=split_exact`, `n_perm=100`,
+/// `n_splits=20`, `seed=42`, on the shared design with three covariates, the
+/// third an alias of the first.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_find_k_sequence` fails.
+pub fn covariates(root: &Path) -> Result<Case> {
+    let (x, y) = synth_data(SYNTH_N, SYNTH_D, SYNTH_K_SIGNAL, SYNTH_SNR, SYNTH_SEED);
+    let z = Some(synth_covariates(&x, 7));
+    run_sequence_on(
+        root,
+        &SequenceCase {
+            name: "pls1_find_k_sequence_covariates",
+            opts: FindKSequenceOpts {
+                test_method: ConfirmatoryMethod::SplitExact,
+                n_perm: 100,
+                n_splits: 20,
+                seed: Some(42),
+                ..FindKSequenceOpts::default()
+            },
+            kwargs: serde_json::json!({
+                "k_max": 4,
+                "test_method": "split_exact",
+                "args": {"n_perm": 100, "n_splits": 20},
+                "seed": 42
+            }),
+        },
+        "pls1_find_k_sequence_covariates_inputs",
+        &Xyw {
+            x,
+            y,
+            z,
+            ..Default::default()
         },
     )
 }
