@@ -301,17 +301,17 @@ pub fn standardize_apply(
 /// rows: those the canonical standardization gives it (weighted moments,
 /// mean-one `w`, when `w` is given), as `pls1_fit` scales X and the PLS3
 /// tests scale X and Y; or, when `pre_standardized`, where the block is
-/// used as given, all ones, except that a block whose largest entry is
-/// outside `[2^-256, 2^256]` gets one common power of two near it
-/// ([`pre_standardized_scale`]). Every held-out result is unchanged by a
-/// common positive factor on the block.
+/// used as given, all ones, except that a block whose largest entry (on a
+/// row of positive weight) is outside `[2^-256, 2^256]` gets one common
+/// power of two near it ([`pre_standardized_scale`]). Every held-out
+/// result is unchanged by a common positive factor on the block.
 pub(crate) fn held_out_scale(
     x: MatRef<'_, f64>,
     w: Option<ColRef<'_, f64>>,
     pre_standardized: bool,
 ) -> Col<f64> {
     if pre_standardized {
-        let c = pre_standardized_scale(x).unwrap_or(1.0);
+        let c = pre_standardized_scale(x, w).unwrap_or(1.0);
         return Col::<f64>::from_fn(x.ncols(), |_| c);
     }
     fit_x_moments(x, w, crate::fit::par_fixed()).scale
@@ -322,33 +322,61 @@ pub(crate) fn held_out_scale(
 /// outside `[2^-256, 2^256]`, else `None`. Products of such entries leave
 /// the `f64` range (the Gram matrix overflows from about 1e154), and a
 /// power of two moves no bit of an entry, so a fit or test on the divided
-/// block is the one on the block, up to that factor.
-pub(crate) fn pre_standardized_scale(x: MatRef<'_, f64>) -> Option<f64> {
-    let m = x.norm_max();
+/// block is the one on the block, up to that factor. With weights `w`
+/// (any non-negative weights), the entries are read times [`row_keep`],
+/// so a row of weight 0, which no weighted result reads, does not pick
+/// the power of two.
+pub(crate) fn pre_standardized_scale(
+    x: MatRef<'_, f64>,
+    w: Option<ColRef<'_, f64>>,
+) -> Option<f64> {
+    let m = match w {
+        None => x.norm_max(),
+        Some(w) => {
+            let mut m = 0.0_f64;
+            for j in 0..x.ncols() {
+                for i in 0..x.nrows() {
+                    m = m.max((x[(i, j)] * row_keep(w[i])).abs());
+                }
+            }
+            m
+        }
+    };
     (!(2f64.powi(-256)..=2f64.powi(256)).contains(&m)).then(|| pow2_scale(m).0)
 }
 
-/// `x` divided by its [`pre_standardized_scale`] `c`, as a column-major
-/// copy, with `c`; `None` when `x` is used as given.
-pub(crate) fn pre_standardized_div(x: MatRef<'_, f64>) -> Option<(Mat<f64>, f64)> {
-    pre_standardized_scale(x).map(|c| {
+/// `x` divided by its [`pre_standardized_scale`] `c` under `w`, as a
+/// column-major copy, with `c`; `None` when `x` is used as given. A row of
+/// weight 0 is written as 0, as the moment kernels read it: divided by a
+/// `c` the other rows picked, a far one could overflow.
+pub(crate) fn pre_standardized_div(
+    x: MatRef<'_, f64>,
+    w: Option<ColRef<'_, f64>>,
+) -> Option<(Mat<f64>, f64)> {
+    pre_standardized_scale(x, w).map(|c| {
         let inv = 1.0 / c;
-        (
-            Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| x[(i, j)] * inv),
-            c,
-        )
+        let m = match w {
+            None => Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| x[(i, j)] * inv),
+            Some(w) => Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| {
+                x[(i, j)] * row_keep(w[i]) * inv
+            }),
+        };
+        (m, c)
     })
 }
 
 /// A block used as given, as the paths that read it in place take it:
 /// [`pre_standardized_div`]'s copy and `c`, or [`col_major_or_copy`] and 1.
-pub(crate) fn pre_standardized_input(x: MatRef<'_, f64>) -> (Option<Mat<f64>>, f64) {
-    pre_standardized_div(x).map_or_else(|| (col_major_or_copy(x), 1.0), |(m, c)| (Some(m), c))
+pub(crate) fn pre_standardized_input(
+    x: MatRef<'_, f64>,
+    w: Option<ColRef<'_, f64>>,
+) -> (Option<Mat<f64>>, f64) {
+    pre_standardized_div(x, w).map_or_else(|| (col_major_or_copy(x), 1.0), |(m, c)| (Some(m), c))
 }
 
 /// Rows `idx` of `x` centred by their own means and divided by the given
 /// column `scale`: `(x[idx[i], j] - mean[j]) / scale[j]`, times
-/// `row_scale[i]` when given. The means are those of
+/// `row_scale[i]` when given ([`times_row_factor`]). The means are those of
 /// `standardize_weighted(row_subset(x, idx), w)`, bit for bit (`w` indexed
 /// by output row, renormalized to mean one); only the
 /// scale is not the part's own. Returns the matrix, the means and
@@ -488,7 +516,7 @@ pub(crate) fn standardize_apply_rows(
             standardized(x[(idx[i], j)], mean[j], scale[j])
         }),
         Some(r) => Mat::<f64>::from_fn(idx.len(), x.ncols(), |i, j| {
-            standardized(x[(idx[i], j)], mean[j], scale[j]) * r[i]
+            times_row_factor(standardized(x[(idx[i], j)], mean[j], scale[j]), r[i])
         }),
     };
     for j in 0..x.ncols() {
@@ -497,7 +525,7 @@ pub(crate) fn standardize_apply_rows(
             mean[j],
             scale[j],
             |i| x[(idx[i], j)],
-            |i, v| out[(i, j)] = row_scale.map_or(v, |r| v * r[i]),
+            |i, v| out[(i, j)] = row_scale.map_or(v, |r| times_row_factor(v, r[i])),
         );
     }
     out
@@ -806,7 +834,10 @@ fn standardize_columns_terms(
             }),
             Some(factor) => xs.resize_with(n_rows, j0 + width, |i, j| {
                 let (col_mean, col_scale) = stats[j - j0];
-                standardized(cols[j - j0][i], col_mean, col_scale) * factor[i]
+                times_row_factor(
+                    standardized(cols[j - j0][i], col_mean, col_scale),
+                    factor[i],
+                )
             }),
         }
         for (b, &(col_mean, col_scale)) in stats[..width].iter().enumerate() {
@@ -815,7 +846,7 @@ fn standardize_columns_terms(
                 col_mean,
                 col_scale,
                 |i| cols[b][i],
-                |i, v| xs[(i, j0 + b)] = row_scale.map_or(v, |f| v * f[i]),
+                |i, v| xs[(i, j0 + b)] = row_scale.map_or(v, |f| times_row_factor(v, f[i])),
             );
         }
     }
@@ -829,6 +860,15 @@ fn standardize_columns_terms(
 #[inline]
 fn standardized(v: f64, mean: f64, scale: f64) -> f64 {
     (v - mean) / scale
+}
+
+/// `z·f`, a standardized entry `z` times its row's factor `f` (`√w`), as
+/// every row-scaled writer forms it. A row of factor 0 is written as 0,
+/// as `HeldOutGram::with_row_weights` writes it: a finite entry far out on
+/// a column of small scale can give `z = inf`, and `inf·0` would be NaN.
+#[inline]
+fn times_row_factor(z: f64, f: f64) -> f64 {
+    if f == 0.0 { 0.0 } else { z * f }
 }
 
 /// Whether `v − mean` can round past `f64::MAX` for a finite `v`: only
@@ -984,7 +1024,7 @@ impl FitX {
                     Some(f) => {
                         let fi = f[i];
                         for (((o, &v), &m), &s) in terms {
-                            *o = standardized(v, m, s) * fi;
+                            *o = times_row_factor(standardized(v, m, s), fi);
                         }
                     }
                 }
@@ -995,7 +1035,9 @@ impl FitX {
                     mean[j],
                     scale[j],
                     |i| xr[(i, j)],
-                    |i, v| storage[(j, i)] = factor.as_ref().map_or(v, |f| v * f[i]),
+                    |i, v| {
+                        storage[(j, i)] = factor.as_ref().map_or(v, |f| times_row_factor(v, f[i]));
+                    },
                 );
             }
             storage
@@ -1007,7 +1049,7 @@ impl FitX {
                 None => xs.resize_with(n, d, |i, j| standardized(x[(i, j)], mean[j], scale[j])),
                 Some(f) => {
                     xs.resize_with(n, d, |i, j| {
-                        standardized(x[(i, j)], mean[j], scale[j]) * f[i]
+                        times_row_factor(standardized(x[(i, j)], mean[j], scale[j]), f[i])
                     });
                 }
             }
@@ -1017,7 +1059,7 @@ impl FitX {
                     mean[j],
                     scale[j],
                     |i| x[(i, j)],
-                    |i, v| xs[(i, j)] = factor.as_ref().map_or(v, |f| v * f[i]),
+                    |i, v| xs[(i, j)] = factor.as_ref().map_or(v, |f| times_row_factor(v, f[i])),
                 );
             }
             xs
@@ -1286,22 +1328,38 @@ fn row_slices(x: MatRef<'_, f64>) -> Vec<&[f64]> {
     (0..x.nrows()).map(|i| &xr.row(i).as_slice()[..d]).collect()
 }
 
-/// `max |x|` per column. `f64::max` ignores a NaN operand, as the fold in
+/// `max |x|` per column, each row's entries times [`row_keep`] of its
+/// weight when weighted. `f64::max` ignores a NaN operand, as the fold in
 /// `scaled_moments` does; the order of a max does not matter.
 struct MaxAbs<'a> {
     max_abs: &'a mut [f64],
 }
 
+#[allow(clippy::many_single_char_names)]
 impl RowPass for MaxAbs<'_> {
-    fn rows<const K: usize>(&mut self, rows: [&[f64]; K], _f: Option<[f64; K]>) {
+    fn rows<const K: usize>(&mut self, rows: [&[f64]; K], f: Option<[f64; K]>) {
         let d = self.max_abs.len();
         let rows = rows.map(|r| &r[..d]);
-        for (j, m) in self.max_abs.iter_mut().enumerate() {
-            let mut v = *m;
-            for r in &rows {
-                v = v.max(r[j].abs());
+        match f {
+            None => {
+                for (j, m) in self.max_abs.iter_mut().enumerate() {
+                    let mut v = *m;
+                    for r in &rows {
+                        v = v.max(r[j].abs());
+                    }
+                    *m = v;
+                }
             }
-            *m = v;
+            Some(w) => {
+                let k = w.map(row_keep);
+                for (j, m) in self.max_abs.iter_mut().enumerate() {
+                    let mut v = *m;
+                    for (r, &ki) in rows.iter().zip(&k) {
+                        v = v.max((r[j] * ki).abs());
+                    }
+                    *m = v;
+                }
+            }
         }
     }
 }
@@ -1334,10 +1392,11 @@ impl RowPass for SumSq<'_> {
                 }
             }
             Some(w) => {
+                let k = w.map(row_keep);
                 for j in 0..d {
                     let (mut s, mut q, iv) = (sum[j], sq[j], inv[j]);
-                    for (r, &wi) in rows.iter().zip(&w) {
-                        let u = r[j] * iv;
+                    for ((r, &wi), &ki) in rows.iter().zip(&w).zip(&k) {
+                        let u = r[j] * ki * iv;
                         s += wi * u;
                         q += wi * (u * u);
                     }
@@ -1357,6 +1416,7 @@ struct CenteredSq<'a> {
     mean: &'a [f64],
 }
 
+#[allow(clippy::many_single_char_names)]
 impl RowPass for CenteredSq<'_> {
     fn rows<const K: usize>(&mut self, rows: [&[f64]; K], f: Option<[f64; K]>) {
         let d = self.ss.len();
@@ -1374,10 +1434,11 @@ impl RowPass for CenteredSq<'_> {
                 }
             }
             Some(w) => {
+                let k = w.map(row_keep);
                 for j in 0..d {
                     let (mut acc, iv, m) = (ss[j], inv[j], mean[j]);
-                    for (r, &wi) in rows.iter().zip(&w) {
-                        let dv = r[j] * iv - m;
+                    for ((r, &wi), &ki) in rows.iter().zip(&w).zip(&k) {
+                        let dv = r[j] * ki * iv - m;
                         acc += wi * (dv * dv);
                     }
                     ss[j] = acc;
@@ -1405,7 +1466,7 @@ fn row_major_moments(x: MatRef<'_, f64>, w: Option<&[f64]>) -> (Col<f64>, Col<f6
     let mut max_abs = vec![0.0_f64; d];
     run_rows(
         &rows,
-        None,
+        w,
         &mut MaxAbs {
             max_abs: &mut max_abs,
         },
@@ -1655,6 +1716,19 @@ impl ScaledMoments {
     }
 }
 
+/// The factor the moment kernels read row `i`'s entries with, from its
+/// mean-one weight: 0 for a row of weight 0, 1 otherwise. Such a row adds
+/// nothing to the weighted sums, and read as `x·0` it does not set their
+/// power-of-two scale either: a far one (an entry near 1e200 among entries
+/// near 1) would push the other rows' squares below the normal range, or
+/// its own past it, where its term `0·inf` is NaN. `x·0` is 0 for a finite
+/// entry at any magnitude and NaN for a non-finite one, so the sums still
+/// carry a non-finite entry. A factor of 1 leaves every bit as it was.
+#[inline]
+fn row_keep(wi: f64) -> f64 {
+    if wi == 0.0 { 0.0 } else { 1.0 }
+}
+
 /// Moments of `v(0)..v(n−1)` formed on `v/s`, `s` the power of two
 /// [`pow2_scale`] picks for the largest `|vᵢ|`, under mean-one weights `w`
 /// (`None` for unit weights). The one kernel behind the standardizers
@@ -1679,13 +1753,15 @@ impl ScaledMoments {
 /// power-of-two factor).
 ///
 /// Every sum runs in index order. A weighted term is `wᵢ·(d·d)`, not
-/// `(wᵢ·d)·d`; the two round differently.
+/// `(wᵢ·d)·d`; the two round differently. Weighted, every entry is read
+/// times [`row_keep`]`(wᵢ)`, so a row of weight 0 does not set `s`.
 #[allow(clippy::cast_precision_loss, clippy::many_single_char_names)]
 pub(crate) fn scaled_moments(
     n: usize,
     v: impl Fn(usize) -> f64,
     w: Option<ColRef<'_, f64>>,
 ) -> ScaledMoments {
+    let v = |i: usize| w.map_or_else(|| v(i), |w| v(i) * row_keep(w[i]));
     let max_abs = (0..n).map(|i| v(i).abs()).fold(0.0_f64, f64::max);
     let (s, inv) = pow2_scale(max_abs);
     let u = |i: usize| v(i) * inv;
@@ -1726,7 +1802,8 @@ const STD_BLOCK: usize = 8;
 /// then the mean sum and `Σu²` together, then `Σ(u − mean)²`, with
 /// `u = x·(1/s)`. `w` holds the mean-one weights (one per row), `None`
 /// for unit weights; a weighted term is `wᵢ·u` / `wᵢ·(u·u)` /
-/// `wᵢ·(d·d)` as in [`scaled_moments`]. [`row_major_moments`] repeats
+/// `wᵢ·(d·d)` as in [`scaled_moments`], and every pass reads `x` times
+/// [`row_keep`]`(wᵢ)`. [`row_major_moments`] repeats
 /// these loops over the rows of a row-major matrix for the same bits:
 /// change the two together.
 // Row `i` addresses all `B` columns, so the loops index rather than iterate.
@@ -1741,9 +1818,21 @@ fn scaled_moments_block<const B: usize>(
     let w = w.map(|w| &w[..n]);
 
     let mut max_abs = [0.0_f64; B];
-    for i in 0..n {
-        for b in 0..B {
-            max_abs[b] = max_abs[b].max(cols[b][i].abs());
+    match w {
+        None => {
+            for i in 0..n {
+                for b in 0..B {
+                    max_abs[b] = max_abs[b].max(cols[b][i].abs());
+                }
+            }
+        }
+        Some(w) => {
+            for (i, &wi) in w.iter().enumerate() {
+                let k = row_keep(wi);
+                for b in 0..B {
+                    max_abs[b] = max_abs[b].max((cols[b][i] * k).abs());
+                }
+            }
         }
     }
     let scales: [(f64, f64); B] = core::array::from_fn(|b| pow2_scale(max_abs[b]));
@@ -1773,16 +1862,18 @@ fn scaled_moments_block<const B: usize>(
         }
         Some(w) => {
             for (i, &wi) in w.iter().enumerate() {
+                let k = row_keep(wi);
                 for b in 0..B {
-                    let u = cols[b][i] * inv[b];
+                    let u = cols[b][i] * k * inv[b];
                     sum[b] += wi * u;
                     sq[b] += wi * (u * u);
                 }
             }
             mean = core::array::from_fn(|b| sum[b] / n_f);
             for (i, &wi) in w.iter().enumerate() {
+                let k = row_keep(wi);
                 for b in 0..B {
-                    let d = cols[b][i] * inv[b] - mean[b];
+                    let d = cols[b][i] * k * inv[b] - mean[b];
                     ss[b] += wi * (d * d);
                 }
             }
@@ -3099,6 +3190,136 @@ mod row_standardize_tests {
             &mat_vals(x.as_ref()),
             "reversed_cols copy values",
         );
+    }
+
+    /// 12 × 3 under [`test_weights`] (row 10 has weight 0), row 10 set to `row10`.
+    fn with_row10(row10: [f64; 3]) -> Mat<f64> {
+        let u = unif(12, 3, 41);
+        Mat::<f64>::from_fn(12, 3, |i, j| if i == 10 { row10[j] } else { u[(i, j)] })
+    }
+
+    /// A row of weight 0 enters no weighted moment however far it lies, in
+    /// every moment kernel and layout; a non-finite entry there still makes
+    /// its column's mean non-finite, which is how the fit detects it.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn a_far_zero_weight_row_leaves_the_weighted_moments_unchanged() {
+        let w = test_weights(12);
+        assert_eq!(w[10], 0.0);
+        let wn = normalize_weights(w.as_ref()).unwrap();
+        let near = with_row10([0.5; 3]);
+        for row10 in [[1e200, -1e300, 0.5], [f64::NAN, f64::INFINITY, 0.5]] {
+            let far = with_row10(row10);
+            let finite = row10[0].is_finite();
+            let (ln, lf) = (Layouts::new(near.as_ref()), Layouts::new(far.as_ref()));
+            for ((name, a), (_, b)) in ln.all(&near).into_iter().zip(lf.all(&far)) {
+                let fa = fit_x_moments(a, Some(w.as_ref()), Par::Seq);
+                let fb = fit_x_moments(b, Some(w.as_ref()), Par::Seq);
+                if finite {
+                    assert_bits_eq(
+                        &col_vals(fb.mean.as_ref()),
+                        &col_vals(fa.mean.as_ref()),
+                        name,
+                    );
+                    assert_bits_eq(
+                        &col_vals(fb.scale.as_ref()),
+                        &col_vals(fa.scale.as_ref()),
+                        name,
+                    );
+                    assert_eq!(fb.fro.to_bits(), fa.fro.to_bits(), "{name}");
+                } else {
+                    assert!(!fb.mean[0].is_finite() && !fb.mean[1].is_finite(), "{name}");
+                }
+            }
+            for j in 0..3 {
+                let a = mean_and_scale(12, |i| near[(i, j)], Some(wn.as_ref()));
+                let b = mean_and_scale(12, |i| far[(i, j)], Some(wn.as_ref()));
+                if finite || j == 2 {
+                    assert_eq!(
+                        (b.0.to_bits(), b.1.to_bits()),
+                        (a.0.to_bits(), a.1.to_bits()),
+                        "col {j}"
+                    );
+                } else {
+                    assert!(!b.0.is_finite(), "col {j}");
+                }
+            }
+        }
+    }
+
+    /// Used as given, a block's power of two comes from its rows of positive
+    /// weight: a zero-weight row at 1e300 among rows near 1e-200 does not
+    /// pick it, and is 0 in the divided copy, where dividing it would
+    /// overflow.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn pre_standardized_scale_ignores_zero_weight_rows() {
+        let w = test_weights(12);
+        let u = unif(12, 3, 45);
+        let x = |far: f64| {
+            Mat::<f64>::from_fn(12, 3, |i, j| if i == 10 { far } else { 1e-200 * u[(i, j)] })
+        };
+        let (near, far) = (x(1e-200), x(1e300));
+        let wr = Some(w.as_ref());
+        assert_bits_eq(
+            &col_vals(held_out_scale(far.as_ref(), wr, true).as_ref()),
+            &col_vals(held_out_scale(near.as_ref(), wr, true).as_ref()),
+            "held_out_scale",
+        );
+        let (a, ca) = pre_standardized_input(near.as_ref(), wr);
+        let (b, cb) = pre_standardized_input(far.as_ref(), wr);
+        assert_eq!(cb.to_bits(), ca.to_bits());
+        assert!(cb < 1.0);
+        let b = b.expect("divided copy");
+        assert_mat_bits_eq(
+            b.as_ref(),
+            a.expect("divided copy").as_ref(),
+            "divided copy",
+        );
+        assert!((0..3).all(|j| b[(10, j)] == 0.0));
+    }
+
+    /// Every row-scaled writer writes a zero-weight row as 0, also where its
+    /// standardized entry overflows: 1e300 on a column of scale near 3e-11.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn row_scaled_writers_write_a_zero_weight_row_as_zero() {
+        let wn = normalize_weights(test_weights(12).as_ref()).unwrap();
+        let sw = sqrt_col(wn.as_ref());
+        let x = with_row10([1e300, 0.5, 0.5]);
+        let x = Mat::<f64>::from_fn(12, 3, |i, j| {
+            if j == 0 && i != 10 {
+                1e-10 * x[(i, 0)]
+            } else {
+                x[(i, j)]
+            }
+        });
+        let rows: Vec<usize> = (0..12).collect();
+        let scale = held_out_scale(x.as_ref(), Some(wn.as_ref()), false);
+        let (a, mean, _) = center_rows_fro(
+            x.as_ref(),
+            &rows,
+            Some(wn.as_ref()),
+            Some(sw.as_ref()),
+            scale.as_ref(),
+        );
+        let c = standardize_apply_rows(
+            x.as_ref(),
+            &rows,
+            mean.as_ref(),
+            scale.as_ref(),
+            Some(sw.as_ref()),
+        );
+        let mut f = fit_x_moments(x.as_ref(), Some(wn.as_ref()), Par::Seq);
+        f.materialize(x.as_ref(), Some(sw.as_ref()));
+        for (name, m) in [
+            ("center_rows_fro", a.as_ref()),
+            ("standardize_apply_rows", c.as_ref()),
+            ("materialize", f.xs()),
+        ] {
+            assert!(crate::fit::check_finite_mat(m).is_ok(), "{name}");
+            assert!((0..3).all(|j| m[(10, j)] == 0.0), "{name}");
+        }
     }
 }
 

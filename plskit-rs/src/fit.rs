@@ -82,7 +82,8 @@ pub struct FitOpts {
     /// genuinely zero-mean / unit-variance (or at least scale-comparable
     /// to that). The default `pre_standardized=false` path absorbs raw
     /// scale automatically and is unaffected by this contract. An X whose
-    /// largest entry is outside `[2^-256, 2^256]`, whose products leave the
+    /// largest entry (with weights, on a row of positive weight) is outside
+    /// `[2^-256, 2^256]`, whose products leave the
     /// `f64` range, is fitted divided by a power of two near that entry and
     /// the fit is mapped back to X's scale, as if fitted in exact arithmetic.
     ///
@@ -781,8 +782,9 @@ pub(crate) fn pls1_fit_impl(
     // non-finite, and the pre-standardized sum of squares is non-finite for a
     // non-finite entry or an overflowing square. A non-finite verdict is
     // confirmed by the exact scan, so a finite X is never rejected.
-    // A pre-standardized X whose largest entry is outside `[2^-256, 2^256]`
-    // is divided by a power of two `c` near it, as the held-out tests divide
+    // A pre-standardized X whose largest entry (on a row of positive weight)
+    // is outside `[2^-256, 2^256]` is divided by a power of two `c` near it,
+    // as the held-out tests divide
     // it (`linalg::pre_standardized_scale`), and the fit is mapped back to
     // X's scale below. The sum of squares spares the common case that scan:
     // inside the band tested here, every entry of the kernel's input is
@@ -800,7 +802,7 @@ pub(crate) fn pls1_fit_impl(
             if !ss.is_finite() {
                 check_finite_mat(x)?;
             }
-            x_div = crate::linalg::pre_standardized_div(x).map(|(xd, c)| match &sqw {
+            x_div = crate::linalg::pre_standardized_div(x, wref).map(|(xd, c)| match &sqw {
                 Some(s) => (scale_rows(xd.as_ref(), s.as_ref()), c),
                 None => (xd, c),
             });
@@ -978,11 +980,7 @@ fn pls1_fit_covariates(
         .map(crate::linalg::sqrt_col)
         .filter(|s| rows_scale_in_band(adj.x.as_ref(), s.as_ref()));
     if let Some(s) = &sqw {
-        for j in 0..adj.x.ncols() {
-            for i in 0..adj.x.nrows() {
-                adj.x[(i, j)] *= s[i];
-            }
-        }
+        scale_rows_in_place(&mut adj.x, s.as_ref());
         for i in 0..adj.y.nrows() {
             adj.y[i] *= s[i];
         }
@@ -1191,18 +1189,30 @@ pub(crate) fn scale_rows(x: MatRef<'_, f64>, sqw: ColRef<'_, f64>) -> Mat<f64> {
     Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| sqw[i] * x[(i, j)])
 }
 
+/// [`scale_rows`] written over `x`, the same bits without the copy.
+pub(crate) fn scale_rows_in_place(x: &mut Mat<f64>, sqw: ColRef<'_, f64>) {
+    for j in 0..x.ncols() {
+        for i in 0..x.nrows() {
+            x[(i, j)] *= sqw[i];
+        }
+    }
+}
+
 /// Whether the unweighted pre-standardized fit of `scale_rows(x, sqw)` and
 /// `scale_col(y, sqw)` takes the kernel input of the weighted one of
 /// `(x, y)` with `√w' = sqw`: when neither `x` nor the scaled rows have their
 /// largest entry outside `[2^-256, 2^256]`, neither fit divides by a power
 /// of two (`linalg::pre_standardized_scale`; the weighted fit reads it off
-/// `x`, the other off the scaled rows). `|sqw·x|` is `sqw·|x|` to the bit.
+/// the rows of `x` of positive weight, the other off the scaled rows).
+/// `|sqw·x|` is `sqw·|x|` to the bit.
 pub(crate) fn rows_scale_in_band(x: MatRef<'_, f64>, sqw: ColRef<'_, f64>) -> bool {
     let (mut m, mut ms) = (0.0_f64, 0.0_f64);
     for j in 0..x.ncols() {
         for i in 0..x.nrows() {
             let a = x[(i, j)].abs();
-            m = m.max(a);
+            if sqw[i] != 0.0 {
+                m = m.max(a);
+            }
             ms = ms.max(sqw[i] * a);
         }
     }
@@ -2976,6 +2986,48 @@ mod boundary_tests {
                 &what,
             );
         }
+    }
+
+    /// Weighted, a row of weight 0 does not pick that power of two: the fit
+    /// of X·2^-600 is the same with the zero-weight rows at X·2^600, which
+    /// divided the other rows below the `f64` range.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn weighted_pre_standardized_fit_ignores_far_zero_weight_rows() {
+        let (x, y) = signal_data(40, 6, 3);
+        let (ys, _, _) = standardize1(y.as_ref());
+        let w = crate::test_support::test_weights(40);
+        assert_eq!(w[10], 0.0);
+        let opts = FitOpts {
+            pre_standardized: true,
+            ..FitOpts::default()
+        };
+        let fit = |far: f64| {
+            let xs = Mat::<f64>::from_fn(40, 6, |i, j| {
+                x[(i, j)] * if w[i] == 0.0 { far } else { 2f64.powi(-600) }
+            });
+            pls1_fit(
+                xs.as_ref(),
+                ys.as_ref(),
+                KSpec::Fixed(2),
+                Some(w.as_ref()),
+                None,
+                opts,
+            )
+            .unwrap()
+        };
+        let (want, got) = (fit(2f64.powi(-600)), fit(2f64.powi(600)));
+        assert_eq!(got.k_used, 2);
+        assert_bits_eq(
+            &col_vals(got.beta.as_ref()),
+            &col_vals(want.beta.as_ref()),
+            "beta",
+        );
+        assert_bits_eq(
+            &col_vals(got.q_loadings.as_ref()),
+            &col_vals(want.q_loadings.as_ref()),
+            "q",
+        );
     }
 
     /// Each fault gets its documented code (and, for `InvalidWeights`, its

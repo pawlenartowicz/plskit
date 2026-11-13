@@ -405,7 +405,7 @@ fn sequence_inputs(
     use crate::linalg::{standardize, standardize_weighted, standardize1, standardize1_weighted};
     if pre_standardized {
         (
-            crate::linalg::pre_standardized_input(x).0,
+            crate::linalg::pre_standardized_input(x, weights).0,
             Col::<f64>::from_fn(y.nrows(), |i| y[i]),
         )
     } else if weights.is_some() {

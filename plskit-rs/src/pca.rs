@@ -51,7 +51,7 @@ pub fn pca_basis(x: MatRef<'_, f64>, pre_standardized: bool) -> PlsKitResult<Pca
     // power of two `c`, and its singular values multiplied back.
     let mut c = 1.0;
     let svd = if pre_standardized {
-        match crate::linalg::pre_standardized_div(x) {
+        match crate::linalg::pre_standardized_div(x, None) {
             Some((xd, cd)) => {
                 c = cd;
                 thin_svd(xd.as_ref(), Par::Seq)

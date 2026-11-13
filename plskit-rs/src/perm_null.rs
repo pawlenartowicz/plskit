@@ -151,7 +151,7 @@ pub(crate) fn perm_null_impl(
 ) -> PlsKitResult<PermNullOutput> {
     use crate::fit::{
         FitOpts, KSpec, fit_row_scale, pls1_fit_impl, rows_scale_in_band, scale_col, scale_rows,
-        validate_weights_for_k,
+        scale_rows_in_place, validate_weights_for_k,
     };
     use crate::linalg::{standardize, standardize_weighted, standardize1, standardize1_weighted};
     use faer::{Col, Mat};
@@ -224,7 +224,9 @@ pub(crate) fn perm_null_impl(
     // then `c` times its value on X, and is divided back at the end.
     let div = opts
         .pre_standardized
-        .then(|| crate::linalg::pre_standardized_div(xs_owned.as_ref().map_or(x, Mat::as_ref)))
+        .then(|| {
+            crate::linalg::pre_standardized_div(xs_owned.as_ref().map_or(x, Mat::as_ref), wref)
+        })
         .flatten();
     let c = div.as_ref().map(|d| d.1);
     let xs_owned = div.map_or(xs_owned, |d| Some(d.0));
@@ -270,11 +272,7 @@ pub(crate) fn perm_null_impl(
     };
     let xs_fit_owned: Option<Mat<f64>> = match (sqw.as_ref(), xs_owned) {
         (Some(s), Some(mut m)) => {
-            for j in 0..m.ncols() {
-                for i in 0..m.nrows() {
-                    m[(i, j)] *= s[i];
-                }
-            }
+            scale_rows_in_place(&mut m, s.as_ref());
             Some(m)
         }
         // No copy of ours: `xs` is `x` itself.

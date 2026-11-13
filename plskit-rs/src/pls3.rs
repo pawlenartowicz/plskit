@@ -612,7 +612,7 @@ fn prepare(
     // (`linalg::pre_standardized_input`); `into_model` maps back.
     let (mut x_div, mut y_div) = (1.0, 1.0);
     let (xs_owned, x_mean, x_scale, x_implicit, x_fro) = if opts.pre_standardized_x {
-        let (xs, c) = crate::linalg::pre_standardized_input(x);
+        let (xs, c) = crate::linalg::pre_standardized_input(x, None);
         x_div = c;
         (
             xs,
@@ -637,7 +637,7 @@ fn prepare(
         )
     };
     let (ys_owned, y_mean, y_scale) = if opts.pre_standardized_y {
-        let (ys, c) = crate::linalg::pre_standardized_input(y);
+        let (ys, c) = crate::linalg::pre_standardized_input(y, None);
         y_div = c;
         (
             ys,

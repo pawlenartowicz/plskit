@@ -565,7 +565,7 @@ pub fn profiles_find_n(
     let k_raw = if opts.pre_standardized {
         // Far from unit scale, divided by a power of two (no eigenvalue
         // ratio moves).
-        let xd = crate::linalg::pre_standardized_div(x);
+        let xd = crate::linalg::pre_standardized_div(x, None);
         parallel_k(xd.as_ref().map_or(x, |(m, _)| m.as_ref()), &perm_seeds)?
     } else {
         parallel_k(standardize(x).0.as_ref(), &perm_seeds)?

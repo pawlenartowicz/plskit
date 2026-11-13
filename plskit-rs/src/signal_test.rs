@@ -5876,7 +5876,7 @@ fn run_score(
     // that leaves the p-value as it is and divides the statistic by `c²`,
     // multiplied back below.
     let (x_copy, c) = if opts.pre_standardized {
-        crate::linalg::pre_standardized_input(x)
+        crate::linalg::pre_standardized_input(x, w_norm)
     } else {
         (None, 1.0)
     };

@@ -355,7 +355,41 @@ fn find_k_optimal_impl(
 
     let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
     let wref = w_norm.as_ref().map(Col::as_ref);
-    let adj = adjust_for_find_k(x, y, covariates, wref, opts.pre_standardized, k_max)?;
+    let mut adj = adjust_for_find_k(x, y, covariates, wref, opts.pre_standardized, k_max)?;
+    // Weighted `bic` on the adjusted data fits its rows scaled in place by
+    // the √w factor the weighted fit would apply to a copy, as
+    // `pls1_fit_covariates` does: the same kernel input, and no n×p copy
+    // beside `adj.x`. After selection only the diagnostic (with its `scale`)
+    // uses `adj`, unscaled, so `adj` is rebuilt when one runs.
+    let bic_in_place = match (adj.as_mut(), wref, opts.selector) {
+        (Some(adjusted), Some(wn), Selector::Bic) => {
+            let sqw = crate::fit::fit_row_scale(wn);
+            if crate::fit::rows_scale_in_band(adjusted.x.as_ref(), sqw.as_ref()) {
+                crate::fit::scale_rows_in_place(&mut adjusted.x, sqw.as_ref());
+                for i in 0..adjusted.y.nrows() {
+                    adjusted.y[i] *= sqw[i];
+                }
+                let selected = select_bic(
+                    adjusted.x.as_ref(),
+                    adjusted.y.as_ref(),
+                    k_max,
+                    None,
+                    n_eff_val,
+                    keep,
+                    true,
+                )?;
+                if opts.diagnostic.is_some() {
+                    // Free the scaled copy before the rebuild allocates its own.
+                    drop(adj.take());
+                    adj = adjust_for_find_k(x, y, covariates, wref, opts.pre_standardized, k_max)?;
+                }
+                Some(selected)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
     let (x, y, pre_standardized) = match &adj {
         Some(a) => (a.x.as_ref(), a.y.as_ref(), true),
         None => (x, y, opts.pre_standardized),
@@ -403,15 +437,18 @@ fn find_k_optimal_impl(
             (k, Some(scores), None, None, "r2_max")
         }
         Selector::Bic => {
-            let (k, scores) = select_bic(
-                x,
-                y,
-                k_max,
-                w_norm.as_ref().map(Col::as_ref),
-                n_eff_val,
-                keep,
-                adj.is_some(),
-            )?;
+            let (k, scores) = match bic_in_place {
+                Some(selected) => selected,
+                None => select_bic(
+                    x,
+                    y,
+                    k_max,
+                    w_norm.as_ref().map(Col::as_ref),
+                    n_eff_val,
+                    keep,
+                    adj.is_some(),
+                )?,
+            };
             (k, None, None, Some(scores), "bic")
         }
     };
@@ -2434,6 +2471,65 @@ mod tests {
             assert_eq!(got.n_covariates, Some(2));
             assert_map_close(&got.cv_scores, &want.cv_scores, "keep");
         }
+    }
+
+    /// Weighted `bic` with covariates fits the adjusted rows scaled in place;
+    /// the diagnostic after it runs on the unscaled adjusted data. The signal
+    /// is weak, so the p-values are interior and a scaled input would show.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn weighted_bic_diagnostic_reads_the_unscaled_adjusted_data() {
+        let n = 80;
+        let z = crate::test_support::unif(n, 2, 111);
+        let (x0, y0) = synth(n, 6, 1, 0.15, 12);
+        let x = Mat::<f64>::from_fn(n, 6, |i, j| x0[(i, j)] + 2.0 * z[(i, j % 2)]);
+        let y = Col::<f64>::from_fn(n, |i| y0[i] + 3.0 * z[(i, 0)]);
+        let w = crate::test_support::test_weights(n);
+        let (w_norm, n_eff) = crate::fit::validate_weights_for_k(Some(w.as_ref()), n, 4).unwrap();
+        let wref = w_norm.as_ref().map(Col::as_ref);
+        let adj =
+            crate::covariates::adjust(x.as_ref(), y.as_ref(), z.as_ref(), wref, false).unwrap();
+        let got = pls1_find_k_optimal(
+            x.as_ref(),
+            y.as_ref(),
+            4,
+            Some(w.as_ref()),
+            Some(z.as_ref()),
+            FindKOptimalOpts {
+                selector: Selector::Bic,
+                diagnostic: Some(ConfirmatoryMethod::RawPerm),
+                n_perm: 199,
+                seed: Some(5),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let seq_seed = {
+            use rand::Rng;
+            crate::rng::resolve_seed(Some(5)).unwrap().1.next_u64()
+        };
+        let want = run_incremental_sequence(
+            adj.x.as_ref(),
+            adj.y.as_ref(),
+            got.k_star,
+            wref,
+            n_eff,
+            IncrementalSequenceOpts {
+                args: SequentialArgs::RawPerm { n_perm: 199 },
+                alpha: 0.05,
+                stop_early_override: true,
+                pre_standardized: true,
+                seed: Some(seq_seed),
+                verbose: false,
+                keep: None,
+            },
+            Some(&adj.basis),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::test_support::col_vals(got.pvalues.unwrap().as_ref()),
+            crate::test_support::col_vals(want.pvalues.as_ref()),
+        );
     }
 
     fn assert_refused_for_covariates<T: std::fmt::Debug>(
