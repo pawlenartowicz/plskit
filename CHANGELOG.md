@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented here.
 
-## [0.9.0] - 2026-11-11
+## [0.9.0] - 2026-11-13
 
 - Added: `covariates` on `pls1_fit`, `spls1_fit`, `pls1_predict`, `pls1_confirmatory_test`, `pls1_perm_null`, the PLS1 and sPLS1 k-selection functions, `factors` and `rotate`. X is standardized, then X and y are replaced by their (weighted) least-squares residuals on `[1, Z]`; the permutation tests of `split_exact` and `raw_perm` use Freedman–Lane null columns (approximately exact, not exact), and `"auto"` runs `split_exact`. `split_nb`, `score` and `e` refuse covariates; `profiles` and `profiles_search` refuse a model fitted with them. Aliased columns of Z are dropped, as `lm` does. Results gain `n_covariates`, `PLS1Result` gains `covariate_coef` and `FactorsResult` gains `covariate_adjusted`; a prediction is `intercept + X_new·beta + Z_new·covariate_coef`. The new error code `insufficient_residual_df` covers too few rows after the covariates are removed.
 - Added: `null_y` on `pls1_confirmatory_test`: your own null outcomes (`n × B`) for `split_exact`, which replace its permutations. It refuses `covariates` and an explicit `n_perm`.
