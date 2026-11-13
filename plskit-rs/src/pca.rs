@@ -47,8 +47,17 @@ pub fn pca_basis(x: MatRef<'_, f64>, pre_standardized: bool) -> PlsKitResult<Pca
             "X contains non-finite values".into(),
         ));
     }
+    // An `x` used as given that is far from unit scale is divided by a
+    // power of two `c`, and its singular values multiplied back.
+    let mut c = 1.0;
     let svd = if pre_standardized {
-        thin_svd(x, Par::Seq)
+        match crate::linalg::pre_standardized_div(x) {
+            Some((xd, cd)) => {
+                c = cd;
+                thin_svd(xd.as_ref(), Par::Seq)
+            }
+            None => thin_svd(x, Par::Seq),
+        }
     } else {
         // A constant column standardizes to rounding noise, not to zeros, so
         // an all-constant X would give a basis of noise.
@@ -75,7 +84,7 @@ pub fn pca_basis(x: MatRef<'_, f64>, pre_standardized: bool) -> PlsKitResult<Pca
     }
     Ok(PcaBasisOutput {
         v: svd.v.as_ref().subcols(0, k).to_owned(),
-        s: Col::<f64>::from_fn(k, |i| svd.s[i]),
+        s: Col::<f64>::from_fn(k, |i| svd.s[i] * c),
     })
 }
 

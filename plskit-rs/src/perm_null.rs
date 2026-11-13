@@ -135,7 +135,11 @@ pub fn pls1_perm_null(
 }
 
 /// Body of [`pls1_perm_null`], on the caller's pool.
-#[allow(clippy::needless_pass_by_value, clippy::many_single_char_names)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::many_single_char_names,
+    clippy::too_many_lines
+)]
 pub(crate) fn perm_null_impl(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -146,7 +150,8 @@ pub(crate) fn perm_null_impl(
     seed: Option<u64>,
 ) -> PlsKitResult<PermNullOutput> {
     use crate::fit::{
-        FitOpts, KSpec, fit_row_scale, pls1_fit_impl, scale_rows, validate_weights_for_k,
+        FitOpts, KSpec, fit_row_scale, pls1_fit_impl, rows_scale_in_band, scale_col, scale_rows,
+        validate_weights_for_k,
     };
     use crate::linalg::{standardize, standardize_weighted, standardize1, standardize1_weighted};
     use faer::{Col, Mat};
@@ -214,42 +219,74 @@ pub(crate) fn perm_null_impl(
         let (ys, _, _) = standardize1(y);
         (Some(xs), ys)
     };
+    // Under `pre_standardized`, an X far from unit scale is divided by a
+    // power of two `c` (`linalg::pre_standardized_div`): every β below is
+    // then `c` times its value on X, and is divided back at the end.
+    let div = opts
+        .pre_standardized
+        .then(|| crate::linalg::pre_standardized_div(xs_owned.as_ref().map_or(x, Mat::as_ref)))
+        .flatten();
+    let c = div.as_ref().map(|d| d.1);
+    let xs_owned = div.map_or(xs_owned, |d| Some(d.0));
     let xs: MatRef<'_, f64> = xs_owned.as_ref().map_or(x, Mat::as_ref);
     let ys = ys_owned.as_ref();
 
-    // Reference fit on full standardized data.
-    let fit_ref = pls1_fit_impl(
-        xs,
-        ys,
-        KSpec::Fixed(k),
-        wref,
-        None,
-        FitOpts {
-            pre_standardized: true,
-            // check_n_eff: false — n_eff was already validated at the top-level
-            // entry; truncation here just yields β at k_used (fit at what exists).
-            check_n_eff: false,
-            ..FitOpts::default()
-        },
-    )?;
-    let beta_ref: Vec<f64> = (0..d).map(|j| fit_ref.beta[j]).collect();
+    // Reference fit on full standardized data. Weighted, it reads the
+    // scaled copy built below for the loop, unweighted, with y scaled
+    // alike: the weighted fit's kernel input without a second copy.
+    // Outside the band `fit::rows_scale_in_band` checks, it is the weighted
+    // fit on `xs`, before the copy.
+    let fit_on = |xf: MatRef<'_, f64>, yf: ColRef<'_, f64>, w: Option<ColRef<'_, f64>>| {
+        pls1_fit_impl(
+            xf,
+            yf,
+            KSpec::Fixed(k),
+            w,
+            None,
+            FitOpts {
+                pre_standardized: true,
+                // check_n_eff: false — n_eff was already validated at the top-level
+                // entry; truncation here just yields β at k_used (fit at what exists).
+                check_n_eff: false,
+                ..FitOpts::default()
+            },
+        )
+    };
 
     // Weights stay tied to rows under every permutation, so the √w row
     // scaling `pls1_fit` applies to X̃ is the same matrix in every replicate:
     // build it once. The factor is `pls1_fit`'s own (it renormalizes the
     // weights it is handed), so it is √(normalize_weights(w')), not √w'.
-    // Once the scaled copy exists nothing reads the standardized one, so it
-    // is freed here: a single n×d buffer lives through the permutation loop.
+    // A standardized copy that is ours is scaled in place, so a single n×d
+    // buffer lives through the permutation loop.
     let sqw: Option<Col<f64>> = wref.map(fit_row_scale);
-    let xs_fit_owned: Option<Mat<f64>> = match sqw.as_ref() {
-        Some(s) => {
-            let scaled = scale_rows(xs, s.as_ref());
-            drop(xs_owned);
-            Some(scaled)
+    let ys_scaled: Option<Col<f64>> = sqw
+        .as_ref()
+        .filter(|s| rows_scale_in_band(xs, s.as_ref()))
+        .map(|s| scale_col(ys, s.as_ref()));
+    let fit_ref = match ys_scaled {
+        None => Some(fit_on(xs, ys, wref)?),
+        Some(_) => None,
+    };
+    let xs_fit_owned: Option<Mat<f64>> = match (sqw.as_ref(), xs_owned) {
+        (Some(s), Some(mut m)) => {
+            for j in 0..m.ncols() {
+                for i in 0..m.nrows() {
+                    m[(i, j)] *= s[i];
+                }
+            }
+            Some(m)
         }
-        None => xs_owned,
+        // No copy of ours: `xs` is `x` itself.
+        (Some(s), None) => Some(scale_rows(x, s.as_ref())),
+        (None, owned) => owned,
     };
     let xs_fit: MatRef<'_, f64> = xs_fit_owned.as_ref().map_or(x, Mat::as_ref);
+    let fit_ref = match fit_ref {
+        Some(f) => f,
+        None => fit_on(xs_fit, ys_scaled.as_ref().map_or(ys, Col::as_ref), None)?,
+    };
+    let beta_ref: Vec<f64> = (0..d).map(|j| fit_ref.beta[j]).collect();
 
     let (seed_used, mut rng) = crate::rng::resolve_seed(seed)?;
 
@@ -273,6 +310,14 @@ pub(crate) fn perm_null_impl(
     out.n_covariates = basis
         .as_ref()
         .map(crate::covariates::CovariateBasis::n_covariates);
+    if let Some(c) = c {
+        let o = &mut out;
+        let betas = o.beta_ref.iter_mut().chain(&mut o.beta_perm_mean);
+        let betas = betas.chain(&mut o.beta_perm_sd);
+        for v in betas.chain(o.beta_perm_matrix.iter_mut().flatten()) {
+            *v /= c;
+        }
+    }
     Ok(out)
 }
 

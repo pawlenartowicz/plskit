@@ -93,7 +93,7 @@ rows raises `code="invalid_argument"` (an empty column has no mean).
 **options:** `k_max` (default `None`; with `k` a string, `None` means `min(9, p)`, lowered until the weights' Kish effective sample size and the covariates' residual degrees of freedom both stay at least `k_max + 1`, never below 1; an explicit `k_max` is not lowered by the effective sample size or the residual degrees of freedom; must be `None` when `k` is an int); `find_k_args`
 (dict of method-specific kwargs forwarded to `pls1_find_k_optimal` /
 `pls1_find_k_sequence`; allowed keys are the public params of the
-target function except `seed` / `pre_standardized` / `weights`,
+target function except `seed` / `pre_standardized` / `weights` / `covariates`,
 which live on `pls1_fit` itself, and `verbose`, which the selection
 run does not take;
 unknown keys raise `PlsKitError(code="invalid_args")`);
@@ -392,7 +392,7 @@ directions; reporting both side-by-side is the canonical pattern.
   β), on an n-out-of-n bootstrap resample (for leverage) and on a
   random half of the rows (for `holdout_corr`, scored on the other
   half). Refused (`invalid_argument`) when `m` or `⌊n/2⌋` is below `k + 2`, or below `k + 1 + rank([1, Z])` with covariates.
-  `ci` is beta, not to be trusted yet: it scales each half with its own moments, while the held-out tests scale once over all rows, so it does not estimate exactly what they report.
+  `ci` is beta, not to be trusted yet. It scales X and y once over all rows, as the held-out tests do (not under `pre_standardized`). Its `holdout_corr` half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do. The β and leverage resamples are centred with their own means too, except under `pre_standardized`, where they use X and y as given, as the reference fit does.
 - `n_boot` (int, default `None`: the engine default, `1000`; must be
   `≥ 100`); `m_rate` (float, default `None`: the engine default, `0.7`;
   `0.5 < m_rate < 0.95`); `level` (float, default `None`: the engine
@@ -406,7 +406,7 @@ directions; reporting both side-by-side is the canonical pattern.
 - `pre_standardized`; `weights`; `seed`; `verbose`.
 - `covariates` (`(n, p_Z)` matrix or length-`n` vector; see [Covariates](../concepts/PLS1/covariates.md)): `split_exact` and `raw_perm` take it, with Freedman–Lane null columns (approximately exact, not exact). `"auto"` runs `split_exact`. `split_nb`, `score` and `e` raise `invalid_argument`. With `gram`, the call adjusts the Gram matrix itself and Z has one row per row of `gram`. The result records `n_covariates`.
 - `null_y` (`(n, B)` matrix): your own null outcomes, on the scale of `y`, for `split_exact` only (the default `"auto"` is refused: pass `test_method="split_exact"`). The statistic of each column, on the same splits as `y`, makes the null distribution, and `p = (#{null ≥ observed} + 1) / (B + 1)` at one `k`; over a set the reported p is the min-p p over the set (per-k p in `pvalues_by_k`). An `n_perm` in `args` raises `invalid_args`; `covariates` and any other method raise `invalid_argument`. It works with `gram`.
-- `gram` (keyword-only, in place of `X`; passing both raises `invalid_argument`): a `GramMatrixResult` from `gram_matrix` (§3.6), or an `(n, n)` array `X̃ @ X̃.T` with `n_features` (required with an array, refused with the result, which records it). Every method runs from it: the call centres it over its rows, so `result.subset(rows)` is accepted, and checks its entries (a non-negative diagonal, symmetry and the Cauchy-Schwarz bound; `invalid_input` otherwise). On `gram_matrix(X, pre_standardized=flag)` the result equals the call on `X` with `pre_standardized=flag` at the same seed, to rounding; `"score"` reads the centred matrix, so it equals the call on `X` centred over all rows. `pre_standardized` is read from the result (`True` with it raises `invalid_argument`) and says how `X̃` was scaled with an array. `weights`, `ci=True` and `k` above 10 raise `invalid_argument` with `gram`.
+- `gram` (keyword-only, in place of `X`; passing both raises `invalid_argument`): a `GramMatrixResult` from `gram_matrix` (§3.6), or an `(n, n)` array `X̃ @ X̃.T` with `n_features` (required with an array, refused with the result, which records it). Every method runs from it: the call centres it over its rows, so `result.subset(rows)` is accepted, and checks its entries (a non-negative diagonal, symmetry and the Cauchy-Schwarz bound; `invalid_input` otherwise). On `gram_matrix(X, pre_standardized=flag)` the result equals the call on `X` with `pre_standardized=flag` at the same seed, to rounding (except as §3.6 says for a pre-standardized `X` beyond `2**±256`); `"score"` reads the centred matrix, so it equals the call on `X` centred over all rows. `pre_standardized` is read from the result (`True` with it raises `invalid_argument`) and says how `X̃` was scaled with an array. `weights`, `ci=True` and `k` above 10 raise `invalid_argument` with `gram`.
 
 **args by method:**
 
@@ -670,7 +670,9 @@ rows = 1:2:size(X, 1)
 half = pls1_confirmatory_test(; gram=PLSKit.subset(g, rows), y=y[rows])
 ```
 
-Fewer than 2 rows of `X` raise `invalid_argument`; NaN or infinity in `X` raises `non_finite_input`; `X` with no columns, and an `X` whose Gram matrix overflows (entries of about 1e154 or more under `pre_standardized`), raise `invalid_input`. `subset` raises `invalid_argument` when `rows` is not a 1-D sequence of integer row indices of `gram`, or holds fewer than 2 entries. There is no `weights`.
+Fewer than 2 rows of `X` raise `invalid_argument`; NaN or infinity in `X` raises `non_finite_input`; `X` with no columns raises `invalid_input`. `subset` raises `invalid_argument` when `rows` is not a 1-D sequence of integer row indices of `gram`, or holds fewer than 2 entries. There is no `weights`.
+
+Under `pre_standardized`, an `X` whose largest entry is outside `2**-256 .. 2**256` gives the Gram matrix of `X` divided by a power of two `c` near that entry, and the result does not keep `c`: p-values computed from it are those of `X`, but the `"score"` statistic of `pls1_confirmatory_test` and the `alpha` of `pls1_perm_alpha` are those of `X / c`.
 
 ---
 

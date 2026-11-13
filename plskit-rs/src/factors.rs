@@ -30,9 +30,9 @@ use crate::covariates::CovariateBasis;
 use crate::error::{PlsKitError, PlsKitResult};
 use crate::fit::{FitOpts, KSpec, ParChoice, pls1_fit_impl};
 use crate::linalg::{
-    col_row_subset, constant_to_rounding, empirical_quantile, fold_split, lu_solve_in_place,
-    mat_mul, mat_vec, pow2_scale, row_subset, scaled_moments, self_adjoint_eigen, standardize,
-    standardize_apply,
+    center_rows_fro, col_row_subset, constant_to_rounding, empirical_quantile, fold_split,
+    held_out_scale, lu_solve_in_place, mat_mul, mat_vec, pow2_scale, scaled_moments,
+    self_adjoint_eigen, standardize, standardize_apply_rows, standardize1,
 };
 use crate::pca::pca_basis;
 use crate::resample::{permutation_from_seed, permute_indices};
@@ -435,9 +435,9 @@ pub struct ProfilesFindNOpts {
     pub n_repeats: usize,
     /// Column shuffles in the parallel analysis, at least 1.
     pub n_perm: usize,
-    /// `x` is already standardized. Decides only whether the parallel
-    /// analysis on the full data standardizes first; each fold's training
-    /// rows are always standardized with their own means and scales.
+    /// `x` is already standardized: the parallel analysis does not
+    /// standardize it, and the folds only centre it (see
+    /// [`profiles_find_n`]).
     pub pre_standardized: bool,
     /// Seed. `None` draws one from OS entropy; the value used is returned.
     pub seed: Option<u64>,
@@ -485,8 +485,10 @@ pub struct ProfilesFindNOutput {
 ///    rank. `K*` counts the leading ranks whose observed eigenvalue is
 ///    strictly above the 95th percentile (R type 7) of the null at the same
 ///    rank, at least 1, and at most the smallest training-fold rank.
-/// 2. `n_repeats` repeats of `n_folds` folds. In each fold the training
-///    rows are standardized, the leading `K*` right singular vectors `V`
+/// 2. `n_repeats` repeats of `n_folds` folds. X is scaled once over all
+///    rows by its column standard deviations (used as given under
+///    `pre_standardized`), and each fold centres its training and held-out
+///    rows by the training rows' means. The leading `K*` right singular vectors `V`
 ///    are rotated by varimax (Kaiser, 1958) to `Q`, and the axes are ordered
 ///    by `|Q' coef|`, largest first (stable), where `coef` is the
 ///    `pls1_fit` coefficient on the training rows at `k`.
@@ -561,10 +563,18 @@ pub fn profiles_find_n(
     let rep_seeds = child_seeds(&mut rng, opts.n_repeats);
 
     let k_raw = if opts.pre_standardized {
-        parallel_k(x, &perm_seeds)?
+        // Far from unit scale, divided by a power of two (no eigenvalue
+        // ratio moves).
+        let xd = crate::linalg::pre_standardized_div(x);
+        parallel_k(xd.as_ref().map_or(x, |(m, _)| m.as_ref()), &perm_seeds)?
     } else {
         parallel_k(standardize(x).0.as_ref(), &perm_seeds)?
     };
+    // The folds are read as the held-out tests read X: scaled once over all
+    // rows (or used as given under the flag) and centred by the training
+    // rows' means. A training-only scale blows up a held-out row wherever a
+    // column barely varies on the training rows.
+    let scale = held_out_scale(x, None, opts.pre_standardized);
 
     // Pass 1: the fold's leading right singular vectors. Folds are kept for
     // pass 2 so that K* can be capped by the smallest rank before any
@@ -584,7 +594,7 @@ pub fn profiles_find_n(
                 n_failed_folds += 1;
                 continue;
             }
-            let (xs_tr, _, _) = standardize(row_subset(x, &tr).as_ref());
+            let (xs_tr, _, _) = center_rows_fro(x, &tr, None, None, scale.as_ref());
             let basis = pca_basis(xs_tr.as_ref(), true)?;
             let rank = basis.v.ncols();
             kept.push(KeptFold {
@@ -610,16 +620,17 @@ pub fn profiles_find_n(
     // Pass 2: rotate, order, score.
     let mut rows: Vec<Vec<f64>> = Vec::with_capacity(kept.len());
     for fold in &kept {
-        let x_tr = row_subset(x, &fold.tr);
         let y_tr = col_row_subset(y, &fold.tr);
-        let (xs_tr, mean, scale) = standardize(x_tr.as_ref());
+        let (xs_tr, mean, _) = center_rows_fro(x, &fold.tr, None, None, scale.as_ref());
+        // Fitted as standardized: `coef` only orders the axes below.
         let fit = pls1_fit_impl(
-            x_tr.as_ref(),
-            y_tr.as_ref(),
+            xs_tr.as_ref(),
+            standardize1(y_tr.as_ref()).0.as_ref(),
             KSpec::Fixed(k),
             None,
             None,
             FitOpts {
+                pre_standardized: true,
                 check_n_eff: false,
                 par: ParChoice::Seq,
                 ..Default::default()
@@ -635,11 +646,7 @@ pub fn profiles_find_n(
         order.sort_by(|&p, &q| a[q].abs().total_cmp(&a[p].abs()));
         let axes = Mat::<f64>::from_fn(d, j_max, |i, j| rot.w_rot[(i, order[j])]);
         let z_tr = mat_mul(xs_tr.as_ref(), axes.as_ref(), Par::Seq);
-        let xs_te = standardize_apply(
-            row_subset(x, &fold.te).as_ref(),
-            mean.as_ref(),
-            scale.as_ref(),
-        );
+        let xs_te = standardize_apply_rows(x, &fold.te, mean.as_ref(), scale.as_ref(), None);
         let z_te = mat_mul(xs_te.as_ref(), axes.as_ref(), Par::Seq);
         let r2 = heldout_r2(
             z_tr.as_ref(),
@@ -1478,22 +1485,49 @@ mod tests {
         let (x, y) = traits(300, 2, 0.5, 4);
         let out = profiles_find_n(x.as_ref(), y.as_ref(), 1, 9, opts(5)).unwrap();
         let mean = [
-            0.201_421_225_481_178_83,
-            0.450_848_690_320_225_84,
-            0.452_152_166_016_964_5,
-            0.447_034_765_180_479_5,
-            0.442_415_635_240_151_7,
+            0.201_311_543_918_413_83,
+            0.450_660_859_082_905_3,
+            0.451_964_187_606_523_35,
+            0.446_874_877_667_746_6,
+            0.442_301_997_882_282_75,
         ];
         let se = [
-            0.025_719_111_159_345_522,
-            0.018_493_690_229_511_556,
-            0.018_476_751_957_864_513,
-            0.017_742_420_984_952_607,
-            0.014_851_552_999_753_449,
+            0.025_640_143_650_888_17,
+            0.018_376_587_648_754_446,
+            0.018_365_138_088_259_837,
+            0.017_613_410_191_815_806,
+            0.014_742_064_890_373_854,
         ];
         assert_eq!(out.r2_mean.len(), mean.len());
         for (a, b) in out.r2_mean.iter().zip(mean).chain(out.r2_se.iter().zip(se)) {
             assert!((a - b).abs() < 1e-10, "{a} vs {b}");
+        }
+    }
+
+    /// A column that barely varies except on one row (1e-44 noise, as
+    /// float32 subnormals read into f64, and 0.5 on row 0) leaves the
+    /// held-out R² near that of X without it. Scaled by its training rows
+    /// alone, a fold that holds row 0 out scored it at about 1e43, and the
+    /// mean R² was near -1e80.
+    #[test]
+    fn a_column_flat_on_the_training_rows_does_not_blow_up_held_out_rows() {
+        let (x, y) = traits(300, 2, 0.5, 4);
+        let noise = unif_col(300, 9);
+        let d = x.ncols();
+        let xt = Mat::<f64>::from_fn(300, d + 1, |i, j| match (i, j) {
+            (_, j) if j < d => x[(i, j)],
+            (0, _) => 0.5,
+            _ => 1e-44 * (1.5 + noise[i]),
+        });
+        let plain = profiles_find_n(x.as_ref(), y.as_ref(), 1, 9, opts(5)).unwrap();
+        let flat = profiles_find_n(xt.as_ref(), y.as_ref(), 1, 9, opts(5)).unwrap();
+        for (a, b) in flat.r2_mean.iter().zip(&plain.r2_mean) {
+            assert!(
+                (a - b).abs() < 0.05,
+                "{:?} vs {:?}",
+                flat.r2_mean,
+                plain.r2_mean
+            );
         }
     }
 

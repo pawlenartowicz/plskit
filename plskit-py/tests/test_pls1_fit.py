@@ -400,12 +400,18 @@ def test_array_of_the_wrong_dimension_is_invalid_argument(call, message):
          "got a vector"),
         (lambda X, y: plskit.pls1_fit(X, y, k=np.array(["a"])),
          "invalid_argument", "k has unsupported array dtype <U1"),
+        (lambda X, y: plskit.pls1_confirmatory_test(
+            X, y, k=np.array([True]), test_method="split_exact", seed=1),
+         "invalid_argument",
+         "k must be a non-negative whole number or a list of them, got a logical vector"),
     ],
 )
 def test_array_where_no_array_fits_is_refused_by_what_the_parameter_takes(call, code, message):
-    """An integer or bool array passed where the parameter takes no array is
-    refused as a float64 one is: by what the parameter takes, not by its
-    dtype. An array of no real dtype is refused by its dtype alone."""
+    """An integer or 2-D bool array passed where the parameter takes no
+    array is refused as a float64 one is: by what the parameter takes, not by
+    its dtype. A 1-D bool array is refused as R's logical vector is, never
+    read as 1/0 integers. An array of no real dtype is refused by its dtype
+    alone."""
     X, y = _data()
     with pytest.raises(plskit.PlsKitError) as ei:
         call(X, y)

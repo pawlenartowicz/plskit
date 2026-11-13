@@ -177,7 +177,7 @@ field semantics are identical to the Python counterpart; see
 | `n_eff` | `f64` | always; Kish effective sample size, equals `n_samples` for uniform/absent weights |
 | `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
 | `rho_hat` | `Option<f64>` | `Some` for `split_nb` only, and only when unweighted (no weights, or all-equal weights) with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
-| `stable_rank` | `Option<f64>` | stable rank of `X` as the `split_nb` auto-gate read it (standardized once over all rows, or only centred under `pre_standardized`); `Some` on an explicit `split_nb` request (fired or not, including under `force`), and on a PLS1 `"auto"` request with one `k` that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise, and on every `pls3_confirmatory_test` `"auto"` request |
+| `stable_rank` | `Option<f64>` | stable rank of `X` as the `split_nb` auto-gate read it (standardized once over all rows, or only centred under `pre_standardized`, with rows scaled by √w under weights); `Some` on an explicit `split_nb` request (fired or not, including under `force`), and on a PLS1 `"auto"` request with one `k` that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise, and on every `pls3_confirmatory_test` `"auto"` request |
 | `ci` | `Option<ConfirmatoryCI>` | `Some` when called with `ci=true`; carries the rotation-invariant subsample CIs |
 
 ## `SplitNbGateOutput`, what `split_nb_gate` returns
@@ -185,7 +185,7 @@ field semantics are identical to the Python counterpart; see
 | Field | Rust type | Notes |
 |---|---|---|
 | `fires` | `bool` | `true` → an explicit `split_nb` request on this `X` reroutes to `split_exact` |
-| `stable_rank` | `f64` | stable rank of `X` as the tests read it: standardized, or only centred under `pre_standardized`. NaN when the Gram matrix of that `X` is not finite. The gate then fires. |
+| `stable_rank` | `f64` | stable rank of `X` as the tests read it: standardized, or only centred under `pre_standardized`, with rows scaled by √w under weights. NaN when the Gram matrix of that `X` is not finite. The gate then fires. |
 | `n_eff` | `f64` | Kish effective sample size; equals `n_samples` for uniform/absent weights |
 
 Every field is always populated. This is the same rule the test
@@ -222,7 +222,7 @@ At `k = 1` a row is `c_ref·X̃ᵀỹ_p`, the permuted fit with its scalar `c` h
 
 | Field | Rust type | Notes |
 |---|---|---|
-| `gram` | `Mat<f64>` | `(n, n)`; `X̃X̃'`, with `X̃` = `X` centred over all rows and divided by its column standard deviations (population), or only centred under `pre_standardized` |
+| `gram` | `Mat<f64>` | `(n, n)`; `X̃X̃'`, with `X̃` = `X` centred over all rows and divided by its column standard deviations (population), or only centred under `pre_standardized` (first divided by one power of two near its largest entry when that entry is outside `2^-256 .. 2^256`) |
 | `n_features` | `usize` | the column count of `X`, constant columns included |
 | `pre_standardized` | `bool` | as passed |
 
@@ -243,7 +243,7 @@ A CI for a scalar, plus its SD. Its one use is `ConfirmatoryCI::holdout_corr`, w
 
 Rotation-invariant readouts only.
 
-`ConfirmatoryCI` is beta, not to be trusted yet: `holdout_corr` scales each half with its own moments, while the held-out tests scale once over all rows, so it does not estimate exactly what they report.
+`ConfirmatoryCI` is beta, not to be trusted yet. It scales X and y once over all rows, as the held-out tests do (not under `pre_standardized`). Its `holdout_corr` half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do. The β and leverage resamples are centred with their own means too, except under `pre_standardized`, where they use X and y as given, as the reference fit does.
 
 | Field | Rust type | Shape |
 |---|---|---|

@@ -788,9 +788,13 @@ def pls1_confirmatory_test(
     ci : bool, default False
         If True, run an independent resampling pass after the test and fill
         ``result.ci`` (a ``ConfirmatoryCI``). ``ci`` is beta, not to be
-        trusted yet: it scales each half with its own moments, while the
-        held-out tests scale once over all rows, so it does not estimate
-        exactly what they report.
+        trusted yet. It scales X and y once over all rows, as the held-out
+        tests do (not under ``pre_standardized``). Its ``holdout_corr`` half
+        split centres the training half with its own means and the held-out
+        half with the training means, as the held-out tests do. The β and
+        leverage resamples are centred with their own means too, except
+        under ``pre_standardized``, where they use X and y as given, as the
+        reference fit does.
     n_boot : int | None, default None
         Number of subsampling resamples for the ``ci`` branch. ``None`` uses
         the engine default, 1000. Inert when ``ci=False``.
@@ -812,8 +816,9 @@ def pls1_confirmatory_test(
         if ``skipped / total > max_skip_rate``.
     pre_standardized : bool, default False
         If True, X and y are assumed already zero-mean, unit-variance:
-        ``'score'``, the reference fit and the ``ci`` branch use them exactly
-        as given, with no centring or scaling. In ``'split_exact'``,
+        ``'score'``, the reference fit and the β and leverage resamples of
+        the ``ci`` branch use them exactly as given, with no centring or
+        scaling; its ``holdout_corr`` half split is only centred, as below. In ``'split_exact'``,
         ``'split_nb'`` (and its gate), ``'e'`` and ``'raw_perm'`` the flag
         skips the one standardization of X over all rows. Without it, X is
         divided once by its column standard deviations over all ``n`` rows
@@ -1315,7 +1320,10 @@ def profiles_find_n(
         not used and is counted in ``n_failed_folds``. Fewer than two usable
         folds raises ``invalid_input``.
     pre_standardized : bool
-        Whether the parallel analysis skips standardizing `X`.
+        If True, `X` is used as given: the parallel analysis does not
+        standardize it, and the folds only centre it. Otherwise the folds
+        read `X` divided once by its column standard deviations over all
+        rows, each fold centred by its training rows' means.
     seed : int | None
         Recorded on the result.
     """
@@ -1515,11 +1523,12 @@ def gram_matrix(X: np.ndarray, *, pre_standardized: bool = False) -> GramMatrixR
     ----------
     X : np.ndarray, shape (n, d)
         At least 2 rows and 1 column; NaN or infinity raises
-        ``PlsKitError(code="non_finite_input")``. No columns, or a Gram
-        matrix that overflows (entries of about 1e154 or more under
-        ``pre_standardized``), raises ``PlsKitError(code="invalid_input")``.
+        ``PlsKitError(code="non_finite_input")``. No columns raises
+        ``PlsKitError(code="invalid_input")``.
     pre_standardized : bool, default False
-        If True, `X` is read as given and only centred.
+        If True, `X` is read as given and only centred. An `X` whose
+        largest entry is outside ``2**-256 .. 2**256`` is first divided by
+        one power of two near that entry, as the held-out tests divide it.
 
     Returns
     -------

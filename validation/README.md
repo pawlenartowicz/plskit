@@ -12,10 +12,7 @@ and `run.sh` times the same routines.
 | `pls1_weighted` | `pls1_fit`, `spls1_fit` at the dense endpoint, both with `weights` | ikpls `sample_weight` | predictions on new rows |
 | `pls3` | `pls3_fit`, `spls3_fit` at the dense endpoint | scikit-learn `PLSSVD` | `U`, `V`, `x_scores`, `y_scores`, up to sign |
 
-- **Sparse fits** have no outside reference: no other package keeps a fixed
-  count of variables per component. They appear only at the dense endpoint
-  (`keep` = every variable), where they must equal the dense fit. That row
-  says nothing about the selection itself.
+- **Sparse fits** have no outside reference for the selection. R `mixOmics::spls` also keeps a fixed count of X variables per component (`keepX`), but it soft-thresholds the weight vector: each kept weight shrinks by the largest dropped one, where `spls1_fit` keeps the kept weights as they are. Both keep the same variables on the first component; from there the weights, scores and later selections differ, so the two agree only at `keep` = 1 and at the dense endpoint. Sparse fits appear here only at the dense endpoint (`keep` = every variable), where they must equal the dense fit. That row says nothing about the selection itself.
 - **PLS3 singular values** are not compared: `PLSSVD` does not expose them.
 - **PLS3 scores**: scikit-learn standardizes with the `n − 1` standard
   deviation and plskit with the `n` one, so its scores are multiplied by

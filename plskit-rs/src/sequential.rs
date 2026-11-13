@@ -388,7 +388,9 @@ fn p_for_confirmatory_at_k(
 /// X and y as step 1 tests them and every later step deflates them, formed
 /// once per run: used as given under `pre_standardized` (X copied when
 /// `linalg::col_major_or_copy` says it must be: a view that is not
-/// column-major, or one with a negative column stride); otherwise
+/// column-major, or one with a negative column stride; divided by a power
+/// of two when far from unit scale, which moves no p-value,
+/// `linalg::pre_standardized_input`); otherwise
 /// standardized once over all rows, with weighted moments when weights are
 /// present and with the plain `standardize` / `standardize1` when they are
 /// not. The first value is `None` when X is read as given. Each step's test
@@ -403,7 +405,7 @@ fn sequence_inputs(
     use crate::linalg::{standardize, standardize_weighted, standardize1, standardize1_weighted};
     if pre_standardized {
         (
-            crate::linalg::col_major_or_copy(x),
+            crate::linalg::pre_standardized_input(x).0,
             Col::<f64>::from_fn(y.nrows(), |i| y[i]),
         )
     } else if weights.is_some() {

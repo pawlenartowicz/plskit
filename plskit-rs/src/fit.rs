@@ -81,7 +81,10 @@ pub struct FitOpts {
     /// passing `pre_standardized=true` must ensure the inputs are
     /// genuinely zero-mean / unit-variance (or at least scale-comparable
     /// to that). The default `pre_standardized=false` path absorbs raw
-    /// scale automatically and is unaffected by this contract.
+    /// scale automatically and is unaffected by this contract. An X whose
+    /// largest entry is outside `[2^-256, 2^256]`, whose products leave the
+    /// `f64` range, is fitted divided by a power of two near that entry and
+    /// the fit is mapped back to X's scale, as if fitted in exact arithmetic.
     ///
     /// As a guard, when `pre_standardized=true` and `check_n_eff=true`
     /// (the default for top-level public entry points), `pls1_fit`
@@ -726,7 +729,7 @@ pub(crate) fn pls1_fit_impl(
     let wref: Option<ColRef<'_, f64>> = w_norm.as_ref().map(Col::as_ref);
 
     if let Some(z) = covariates {
-        return pls1_fit_covariates(x, y, z, k, weights, wref, opts);
+        return pls1_fit_covariates(x, y, z, k, weights, wref, n_eff_val, opts);
     }
 
     // √w' row factor. Row-scaling is the Cholesky factor of diag(w'),
@@ -778,13 +781,33 @@ pub(crate) fn pls1_fit_impl(
     // non-finite, and the pre-standardized sum of squares is non-finite for a
     // non-finite entry or an overflowing square. A non-finite verdict is
     // confirmed by the exact scan, so a finite X is never rejected.
+    // A pre-standardized X whose largest entry is outside `[2^-256, 2^256]`
+    // is divided by a power of two `c` near it, as the held-out tests divide
+    // it (`linalg::pre_standardized_scale`), and the fit is mapped back to
+    // X's scale below. The sum of squares spares the common case that scan:
+    // inside the band tested here, every entry of the kernel's input is
+    // within `2^±250`.
+    let mut x_div: Option<(Mat<f64>, f64)> = None;
     let x_fro = if let Some(f) = &fx {
         if !f.mean.iter().chain(f.scale.iter()).all(|v| v.is_finite()) {
             check_finite_mat(x)?;
         }
         f.fro
     } else {
-        let ss = crate::linalg::sum_of_squares(x_for_nipals, fit_par);
+        let mut ss = crate::linalg::sum_of_squares(x_for_nipals, fit_par);
+        let nd = (n_samples * n_features) as f64;
+        if !(nd * 2f64.powi(-500)..=2f64.powi(500)).contains(&ss) {
+            if !ss.is_finite() {
+                check_finite_mat(x)?;
+            }
+            x_div = crate::linalg::pre_standardized_div(x).map(|(xd, c)| match &sqw {
+                Some(s) => (scale_rows(xd.as_ref(), s.as_ref()), c),
+                None => (xd, c),
+            });
+            if let Some((xd, _)) = &x_div {
+                ss = crate::linalg::sum_of_squares(xd.as_ref(), fit_par);
+            }
+        }
         if ss.is_finite() {
             ss.sqrt()
         } else {
@@ -836,7 +859,7 @@ pub(crate) fn pls1_fit_impl(
     // input, the answer `signal_test::prepare_cv_fold` gives the same X. A
     // finite fit pays for no scan.
     let implicit_fit = implicit_fit.filter(|f| f.coef.is_all_finite());
-    let fit = match (implicit_fit, fx.as_mut()) {
+    let mut fit = match (implicit_fit, fx.as_mut()) {
         (Some(fit), _) => fit,
         (None, Some(f)) => {
             f.materialize(x, sqw.as_ref().map(Col::as_ref));
@@ -854,20 +877,28 @@ pub(crate) fn pls1_fit_impl(
             fit
         }
         (None, None) => {
-            let fit = pls1_fit_prepared_fro(
-                x_for_nipals,
-                y_for_nipals,
-                k_requested,
-                opts.keep,
-                opts.par,
-                x_fro,
-            )?;
+            let xk = x_div.as_ref().map_or(x_for_nipals, |(xd, _)| xd.as_ref());
+            let fit =
+                pls1_fit_prepared_fro(xk, y_for_nipals, k_requested, opts.keep, opts.par, x_fro)?;
             if !fit.coef.is_all_finite() {
-                check_finite_mat(x_for_nipals)?;
+                check_finite_mat(xk)?;
             }
             fit
         }
     };
+    // The fit of X/c has the scores T/c, the same weights and loadings,
+    // and the y-loadings and coefficients times c.
+    if let Some((_, c)) = x_div {
+        for j in 0..fit.t_scores.ncols() {
+            for i in 0..fit.t_scores.nrows() {
+                fit.t_scores[(i, j)] *= c;
+            }
+            fit.q_loadings[j] /= c;
+        }
+        for j in 0..n_features {
+            fit.coef[j] /= c;
+        }
+    }
     let k_used = fit.k_used;
     if opts.pre_standardized && opts.check_n_eff && k_used < k_requested {
         return Err(PlsKitError::InvalidInput(format!(
@@ -926,7 +957,7 @@ pub(crate) fn pls1_fit_impl(
 /// `ŷ = [1, Z]·γ_y + (X − 1·μ_X' − [1, Z]·Γ_X)·β` multiplies out to
 /// `intercept + X·β + Z·covariate_coef` with `intercept = d₀ − μ_X'·β` and
 /// `covariate_coef = d₁..` (`μ_X = 0` under `pre_standardized`).
-#[allow(clippy::many_single_char_names)]
+#[allow(clippy::many_single_char_names, clippy::too_many_arguments)]
 fn pls1_fit_covariates(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -934,19 +965,35 @@ fn pls1_fit_covariates(
     k: KSpec,
     weights: Option<ColRef<'_, f64>>,
     wref: Option<ColRef<'_, f64>>,
+    n_eff: f64,
     opts: FitOpts,
 ) -> PlsKitResult<Pls1Model> {
     let KSpec::Fixed(k_requested) = k;
     check_finite_mat(x)?;
-    let adj = crate::covariates::adjust(x, y, z, wref, opts.pre_standardized)?;
+    let mut adj = crate::covariates::adjust(x, y, z, wref, opts.pre_standardized)?;
     adj.basis.check_df(k_requested)?;
+    // Weighted, the adjusted rows are scaled by √w' in place and fitted
+    // unweighted: the weighted fit's kernel input without its n×p copy.
+    let sqw = wref
+        .map(crate::linalg::sqrt_col)
+        .filter(|s| rows_scale_in_band(adj.x.as_ref(), s.as_ref()));
+    if let Some(s) = &sqw {
+        for j in 0..adj.x.ncols() {
+            for i in 0..adj.x.nrows() {
+                adj.x[(i, j)] *= s[i];
+            }
+        }
+        for i in 0..adj.y.nrows() {
+            adj.y[i] *= s[i];
+        }
+    }
     // The truncation guard of a pre-standardized fit applies only when the
     // caller passed `pre_standardized`; the n_eff check has run above.
     let mut m = pls1_fit_impl(
         adj.x.as_ref(),
         adj.y.as_ref(),
         k,
-        weights,
+        if sqw.is_some() { None } else { weights },
         None,
         FitOpts {
             pre_standardized: true,
@@ -954,6 +1001,10 @@ fn pls1_fit_covariates(
             ..opts
         },
     )?;
+    if sqw.is_some() {
+        m.weights = wref.map(|w| w.to_owned());
+        m.n_eff = n_eff;
+    }
     if !opts.pre_standardized {
         m.beta = Col::<f64>::from_fn(m.coef.nrows(), |j| m.coef[j] * adj.y_scale / adj.x_scale[j]);
     }
@@ -1138,6 +1189,25 @@ pub(crate) fn fit_row_scale(w: ColRef<'_, f64>) -> Col<f64> {
 /// `sqw[i] * x[(i, j)]`, the operand order of `pls1_fit`'s row scaling.
 pub(crate) fn scale_rows(x: MatRef<'_, f64>, sqw: ColRef<'_, f64>) -> Mat<f64> {
     Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| sqw[i] * x[(i, j)])
+}
+
+/// Whether the unweighted pre-standardized fit of `scale_rows(x, sqw)` and
+/// `scale_col(y, sqw)` takes the kernel input of the weighted one of
+/// `(x, y)` with `√w' = sqw`: when neither `x` nor the scaled rows have their
+/// largest entry outside `[2^-256, 2^256]`, neither fit divides by a power
+/// of two (`linalg::pre_standardized_scale`; the weighted fit reads it off
+/// `x`, the other off the scaled rows). `|sqw·x|` is `sqw·|x|` to the bit.
+pub(crate) fn rows_scale_in_band(x: MatRef<'_, f64>, sqw: ColRef<'_, f64>) -> bool {
+    let (mut m, mut ms) = (0.0_f64, 0.0_f64);
+    for j in 0..x.ncols() {
+        for i in 0..x.nrows() {
+            let a = x[(i, j)].abs();
+            m = m.max(a);
+            ms = ms.max(sqw[i] * a);
+        }
+    }
+    let band = 2f64.powi(-256)..=2f64.powi(256);
+    band.contains(&m) && band.contains(&ms)
 }
 
 /// `sqw[i] * y[i]`.
@@ -2858,22 +2928,53 @@ mod boundary_tests {
         }
     }
 
-    /// A pre-standardized X of finite entries whose squares overflow is not
-    /// reported as non-finite: the sum-of-squares screen falls back to the
-    /// exact scan and `norm_l2`.
+    /// A pre-standardized X far from unit scale (`2^±600`: its products
+    /// overflow or underflow, and its weight norms fall under the absolute
+    /// floor) is fitted divided by a power of two and mapped back: the fit of
+    /// `X·s` is the fit of X with `coef`, `beta` and `q` divided by `s` and
+    /// the scores times `s`, to the bit.
     #[test]
-    fn pre_standardized_huge_finite_x_is_not_non_finite() {
+    fn pre_standardized_fit_far_from_unit_scale_is_the_rescaled_fit() {
         let (x, y) = signal_data(40, 6, 3);
-        let big = Mat::<f64>::from_fn(40, 6, |i, j| x[(i, j)] * 1e200);
         let (ys, _, _) = standardize1(y.as_ref());
-        for check_n_eff in [true, false] {
-            let opts = FitOpts {
-                pre_standardized: true,
-                check_n_eff,
-                ..FitOpts::default()
+        let opts = FitOpts {
+            pre_standardized: true,
+            ..FitOpts::default()
+        };
+        let want = pls1_fit(x.as_ref(), ys.as_ref(), KSpec::Fixed(2), None, None, opts).unwrap();
+        for s in [2f64.powi(600), 2f64.powi(-600)] {
+            let xs = Mat::<f64>::from_fn(40, 6, |i, j| x[(i, j)] * s);
+            let got =
+                pls1_fit(xs.as_ref(), ys.as_ref(), KSpec::Fixed(2), None, None, opts).unwrap();
+            let what = format!("s = {s:e}");
+            let back = |c: &Col<f64>| {
+                col_vals(c.as_ref())
+                    .iter()
+                    .map(|v| v * s)
+                    .collect::<Vec<_>>()
             };
-            let r = pls1_fit(big.as_ref(), ys.as_ref(), KSpec::Fixed(1), None, None, opts);
-            assert!(!matches!(r, Err(PlsKitError::NonFiniteInput)), "{r:?}");
+            assert_bits_eq(&back(&got.coef), &col_vals(want.coef.as_ref()), &what);
+            assert_bits_eq(&back(&got.beta), &col_vals(want.beta.as_ref()), &what);
+            assert_bits_eq(
+                &back(&got.q_loadings),
+                &col_vals(want.q_loadings.as_ref()),
+                &what,
+            );
+            let t: Vec<f64> = mat_vals(got.t_scores.as_ref())
+                .iter()
+                .map(|v| v / s)
+                .collect();
+            assert_bits_eq(&t, &mat_vals(want.t_scores.as_ref()), &what);
+            assert_bits_eq(
+                &mat_vals(got.p_loadings.as_ref()),
+                &mat_vals(want.p_loadings.as_ref()),
+                &what,
+            );
+            assert_bits_eq(
+                &mat_vals(got.w_star.as_ref()),
+                &mat_vals(want.w_star.as_ref()),
+                &what,
+            );
         }
     }
 
@@ -3573,7 +3674,9 @@ mod boundary_tests {
 mod covariate_tests {
     use super::*;
     use crate::covariates::adjust;
-    use crate::test_support::{assert_close_rel, signal_data, test_weights, unif, unif_col};
+    use crate::test_support::{
+        assert_close_rel, assert_mat_bits_eq, signal_data, test_weights, unif, unif_col,
+    };
 
     /// `(x, y, z)`: X offset from zero, y driven by X and by the first
     /// covariate, Z with two iid columns.
@@ -3621,9 +3724,14 @@ mod covariate_tests {
                 false,
             )
             .unwrap();
+            // The weighted fit scales the adjusted rows in place: the same bits.
             let o = fit(adj.x.as_ref(), adj.y.as_ref(), w.as_ref(), None, true).unwrap();
-            assert_close_rel(m.coef.as_mat(), o.coef.as_mat(), 1e-12, "coef");
-            assert_close_rel(m.t_scores.as_ref(), o.t_scores.as_ref(), 1e-12, "t_scores");
+            assert_mat_bits_eq(m.coef.as_mat(), o.coef.as_mat(), "coef");
+            assert_mat_bits_eq(m.t_scores.as_ref(), o.t_scores.as_ref(), "t_scores");
+            assert_mat_bits_eq(m.w_star.as_ref(), o.w_star.as_ref(), "w_star");
+            assert_mat_bits_eq(m.q_loadings.as_mat(), o.q_loadings.as_mat(), "q_loadings");
+            assert_eq!(m.weights, o.weights);
+            assert_eq!(m.n_eff.to_bits(), o.n_eff.to_bits());
             assert_eq!(m.n_covariates, Some(2));
             assert_eq!(m.covariate_coef.as_ref().map(Col::nrows), Some(2));
             assert!(!m.pre_standardized);

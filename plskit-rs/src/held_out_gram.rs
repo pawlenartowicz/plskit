@@ -11,7 +11,7 @@
 //! keeps that cancellation from losing digits on an uncentred X.
 
 use faer::linalg::matmul::triangular::{BlockStructure, matmul};
-use faer::{Accum, Col, ColRef, Mat, MatRef};
+use faer::{Accum, ColRef, Mat, MatRef};
 
 use crate::error::{PlsKitError, PlsKitResult};
 
@@ -37,14 +37,6 @@ impl HeldOutGram {
     /// `fit::par_fixed()`, which is mirrored once at the end: `n²p/2`
     /// multiply-adds, and the bits do not depend on the pool size.
     ///
-    /// `x − mean` can overflow only where an entry of `x` exceeds `MAX/2` in
-    /// magnitude. A block with an entry above `MAX/4` is centred from its
-    /// quarter, with a quarter of its scale. Quartering is exact unless the
-    /// same block holds entries or scales below about 8.9e-308 (four times
-    /// `f64::MIN_POSITIVE`), so its entries of `X̃` are the ones the plain
-    /// centring would give without the overflow, and every other block
-    /// keeps its bits.
-    ///
     /// # Panics
     /// When `scale` does not have one entry per column of `x`.
     #[allow(clippy::many_single_char_names)]
@@ -68,15 +60,13 @@ impl HeldOutGram {
         let mut j0 = 0;
         while j0 < p {
             let w = width.min(p - j0);
-            let (xb, sb) = (x.subcols(j0, w), scale.subrows(j0, w));
-            let big = (0..w).any(|j| (0..n).any(|i| xb[(i, j)].abs() > f64::MAX / 4.0));
-            let (a, _, _) = if big {
-                let xq = Mat::<f64>::from_fn(n, w, |i, j| 0.25 * xb[(i, j)]);
-                let sq = Col::<f64>::from_fn(w, |j| 0.25 * sb[j]);
-                crate::linalg::center_rows_fro(xq.as_ref(), &all, w_norm, None, sq.as_ref())
-            } else {
-                crate::linalg::center_rows_fro(xb, &all, w_norm, None, sb)
-            };
+            let (a, _, _) = crate::linalg::center_rows_fro(
+                x.subcols(j0, w),
+                &all,
+                w_norm,
+                None,
+                scale.subrows(j0, w),
+            );
             matmul(
                 g.as_mut(),
                 BlockStructure::TriangularLower,
@@ -95,12 +85,19 @@ impl HeldOutGram {
     }
 
     /// `D·G·D` with `D = diag(√w_norm)`: the Gram matrix of `X̃` with the √w
-    /// row scaling of `pls1_fit`.
+    /// row scaling of `pls1_fit`. A row or column of weight 0 is written as
+    /// 0, so an overflowed entry of a zero-weight row gives no `inf·0 = NaN`.
     pub(crate) fn with_row_weights(&self, w_norm: ColRef<'_, f64>) -> Self {
         let sw = crate::linalg::sqrt_col(w_norm);
         let n = self.g.nrows();
         Self {
-            g: Mat::<f64>::from_fn(n, n, |i, j| self.g[(i, j)] * sw[i] * sw[j]),
+            g: Mat::<f64>::from_fn(n, n, |i, j| {
+                if sw[i] == 0.0 || sw[j] == 0.0 {
+                    0.0
+                } else {
+                    self.g[(i, j)] * sw[i] * sw[j]
+                }
+            }),
             n_features: self.n_features,
         }
     }
@@ -208,7 +205,9 @@ impl HeldOutGram {
 pub struct GramMatrixOutput {
     /// `X̃X̃'`, shape `(n, n)`, exactly symmetric. `X̃` is `X` centred over
     /// all rows and divided by its column standard deviations (population),
-    /// or only centred when `pre_standardized`.
+    /// or only centred when `pre_standardized` (and then, when X's largest
+    /// entry is outside `[2^-256, 2^256]`, divided by a power of two `c`
+    /// that is not stored, so `gram` is the Gram matrix of `X/c`).
     pub gram: Mat<f64>,
     /// The column count `p` of `X`, constant columns included.
     pub n_features: usize,
@@ -248,15 +247,17 @@ impl GramMatrixOutput {
 
 /// The all-row Gram matrix `X̃X̃'` the held-out tests compute from `X`, bit
 /// for bit: `X` centred over all rows and divided by its column standard
-/// deviations (population), or only centred when `pre_standardized`.
-/// Computing it once lets a caller reuse it across calls on the same `X`.
+/// deviations (population), or only centred when `pre_standardized`
+/// (and divided by one power of two `c` near its largest entry when that
+/// entry is outside `[2^-256, 2^256]`, see `linalg::held_out_scale`; `c` is
+/// not returned, so `pls1_perm_alpha_gram`'s `alpha` and the `score`
+/// statistic from this matrix are those of `X/c`, while p-values are not
+/// affected). Computing it once lets a caller reuse it across calls on the same `X`.
 ///
 /// # Errors
 /// [`PlsKitError::InvalidArgument`] when `x` has fewer than 2 rows;
-/// [`PlsKitError::InvalidInput`] when `x` has no columns, or when the Gram
-/// matrix overflows (under `pre_standardized`, entries of `x` of about
-/// 1e154 or more); [`PlsKitError::NonFiniteInput`] when `x` holds NaN or
-/// infinity.
+/// [`PlsKitError::InvalidInput`] when `x` has no columns;
+/// [`PlsKitError::NonFiniteInput`] when `x` holds NaN or infinity.
 pub fn gram_matrix(x: MatRef<'_, f64>, pre_standardized: bool) -> PlsKitResult<GramMatrixOutput> {
     if x.nrows() < 2 {
         return Err(PlsKitError::InvalidArgument(format!(
@@ -273,14 +274,6 @@ pub fn gram_matrix(x: MatRef<'_, f64>, pre_standardized: bool) -> PlsKitResult<G
     crate::fit::with_thread_limit(|| {
         let scale = crate::linalg::held_out_scale(x, None, pre_standardized);
         let g = HeldOutGram::from_x(x, None, scale.as_ref());
-        // The held-out tests drop a non-finite G for another route, so a
-        // caller must not get one to pass back to them.
-        if !g.g.is_all_finite() {
-            return Err(PlsKitError::InvalidInput(
-                "the Gram matrix of X overflows (an entry of X~X~' is not finite); rescale X"
-                    .into(),
-            ));
-        }
         Ok(GramMatrixOutput {
             gram: g.g,
             n_features: g.n_features,
@@ -563,20 +556,22 @@ mod tests {
         assert!(matches!(err, PlsKitError::InvalidInput(_)), "p = 0: {err}");
     }
 
-    /// Finite X whose products overflow under the flag is refused; the
-    /// same X standardized stays finite and passes.
+    /// Under the flag, X far from unit scale (`1e200·X`, `1e-200·X`)
+    /// gives the Gram matrix of `X·2^-e`, with `2^e` near its largest entry:
+    /// finite, and in bits that of the same X scaled to its largest entry
+    /// in `[1, 2)`.
     #[test]
-    fn gram_matrix_refuses_a_gram_that_overflows() {
+    fn gram_matrix_divides_a_far_block_by_a_power_of_two() {
         let x = raw_x(6, 10, 20);
-        let big = Mat::<f64>::from_fn(6, 10, |i, j| x[(i, j)] * 1e200);
-        let err = gram_matrix(big.as_ref(), true).expect_err("overflow");
-        assert!(matches!(err, PlsKitError::InvalidInput(_)), "{err}");
-        assert!(
-            gram_matrix(big.as_ref(), false)
-                .unwrap()
-                .gram
-                .is_all_finite()
-        );
+        for f in [1e200, 1e-200] {
+            let far = Mat::<f64>::from_fn(6, 10, |i, j| x[(i, j)] * f);
+            let s = crate::linalg::pow2_scale(far.norm_max()).0;
+            let unit = Mat::<f64>::from_fn(6, 10, |i, j| far[(i, j)] / s);
+            let got = gram_matrix(far.as_ref(), true).unwrap().gram;
+            let want = gram_matrix(unit.as_ref(), true).unwrap().gram;
+            assert!(got.is_all_finite(), "{f}");
+            assert_mat_bits_eq(got.as_ref(), want.as_ref(), "far block");
+        }
     }
 
     /// `subset(rows)` is `gram[rows, rows]` in the order given, repeats

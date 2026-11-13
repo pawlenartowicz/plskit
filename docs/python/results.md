@@ -176,7 +176,7 @@ input gives `k_star = 0` from `spls1_find_k_optimal`.
 | `seed` | `int` | always |
 | `n_eff` | `float` | always; Kish effective sample size, equals `n` for uniform/absent weights |
 | `rho_hat` | `float \| None` | `split_nb` only, and only when unweighted (no weights, or all-equal weights) with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
-| `stable_rank` | `float \| None` | stable rank of `X` as the `split_nb` auto-gate read it (standardized once over all rows, or only centred under `pre_standardized`); set on an explicit `"split_nb"` request (fired or not, including under `force`), and on a PLS1 `"auto"` request with one `k` that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise, and on every `pls3_confirmatory_test` `"auto"` request |
+| `stable_rank` | `float \| None` | stable rank of `X` as the `split_nb` auto-gate read it (standardized once over all rows, or only centred under `pre_standardized`, with rows scaled by √w under weights); set on an explicit `"split_nb"` request (fired or not, including under `force`), and on a PLS1 `"auto"` request with one `k` that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise, and on every `pls3_confirmatory_test` `"auto"` request |
 | `ci` | `ConfirmatoryCI \| None` | not None when called with `ci=True`; carries the rotation-invariant resampling CIs (subsampling for β, half splits for `holdout_corr`, bootstrap for leverage) |
 | `n_covariates` | `int \| None` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
 
@@ -192,7 +192,7 @@ dropped from the public surface; only the headline result and
 | Field | Python type | Notes |
 |---|---|---|
 | `fires` | `bool` | `True` → an explicit `"split_nb"` request on this `X` reroutes to `"split_exact"` |
-| `stable_rank` | `float` | stable rank of `X` as the tests read it: standardized, or only centred under `pre_standardized`. NaN when the Gram matrix of that `X` is not finite. The gate then fires. |
+| `stable_rank` | `float` | stable rank of `X` as the tests read it: standardized, or only centred under `pre_standardized`, with rows scaled by √w under weights. NaN when the Gram matrix of that `X` is not finite. The gate then fires. |
 | `n_eff` | `float` | Kish effective sample size; equals `n` for uniform/absent weights |
 
 Every field is always populated. This is the same rule the test
@@ -255,7 +255,7 @@ conservative.
 
 | Field | Python type | Notes |
 |---|---|---|
-| `gram` | `np.ndarray` | shape `(n, n)`; `X̃ @ X̃.T`, with `X̃` = `X` centred over all rows and divided by its column standard deviations (population), or only centred under `pre_standardized` |
+| `gram` | `np.ndarray` | shape `(n, n)`; `X̃ @ X̃.T`, with `X̃` = `X` centred over all rows and divided by its column standard deviations (population), or only centred under `pre_standardized` (first divided by one power of two near its largest entry when that entry is outside `2^-256 .. 2^256`) |
 | `n_features` | `int` | the column count of `X`, constant columns included |
 | `pre_standardized` | `bool` | as passed |
 
@@ -277,7 +277,7 @@ A CI for a scalar, plus its SD. Its one use is `ConfirmatoryCI.holdout_corr`.
 Rotation-invariant readouts only. Per-axis CIs are intentionally absent
 (see [api](api.md) §3.1).
 
-`ConfirmatoryCI` is beta, not to be trusted yet: `holdout_corr` scales each half with its own moments, while the held-out tests scale once over all rows, so it does not estimate exactly what they report.
+`ConfirmatoryCI` is beta, not to be trusted yet. It scales X and y once over all rows, as the held-out tests do (not under `pre_standardized`). Its `holdout_corr` half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do. The β and leverage resamples are centred with their own means too, except under `pre_standardized`, where they use X and y as given, as the reference fit does.
 
 | Field | Python type | Shape | Description |
 |---|---|---|---|
@@ -297,7 +297,7 @@ Rotation-invariant readouts only. Per-axis CIs are intentionally absent
 | `n_boot_finite` | `int` | scalar | resamples whose worker fit succeeded (≤ `n_boot`) |
 | `n_boot_finite_holdout_corr` | `int` | scalar | subset whose holdout_corr is finite (≤ `n_boot_finite`); resamples with `|r_b| ≥ 1` (degenerate) are also excluded from the Fisher pool |
 
-Each replicate's `holdout_corr` comes from its own half split: a fit on `m_h = ⌊n/2⌋` random rows, correlated with `y` on the other `n − m_h`. The target is ρ(`m_h`), the expected held-out correlation of a model trained on `⌊n/2⌋` rows. The `split_exact` and `split_nb` statistics estimate the same kind of quantity, but each half here is scaled with its own moments, so the two are not exactly the same (see the beta note above). It is not the predictive correlation of the full-data fit, which is trained on `n` rows and is usually higher. The CI is built on the variance-stabilized Fisher z-scale (`ζ = atanh(r)`), with the NB inflation factor `(1/B + (n−m_h)/m_h)` (about 1) applied to z-scale variance, then back-transformed via `tanh`. Bounds are guaranteed to lie strictly in `(−1, 1)` and are **asymmetric** on the r-scale. `point` is the mean over splits on the r-scale (plug-in estimate of ρ(`m_h`)); `sd` is on the z-scale, so `point ± Φ⁻¹(1−α/2) · sd` does **not** reconstruct the CI — read the bounds directly. To recover the z-scale interval: `ci_z = (atanh(point) − Φ⁻¹(1−α/2)·sd, atanh(point) + Φ⁻¹(1−α/2)·sd)`; the reported bounds equal `tanh(ci_z)`.
+Each replicate's `holdout_corr` comes from its own half split: a fit on `m_h = ⌊n/2⌋` random rows, correlated with `y` on the other `n − m_h`. The target is ρ(`m_h`), the expected held-out correlation of a model trained on `⌊n/2⌋` rows. The `split_exact` and `split_nb` statistics estimate the same kind of quantity, and read X the same way: scaled once over all rows, each half centred with the training means. It is not the predictive correlation of the full-data fit, which is trained on `n` rows and is usually higher. The CI is built on the variance-stabilized Fisher z-scale (`ζ = atanh(r)`), with the NB inflation factor `(1/B + (n−m_h)/m_h)` (about 1) applied to z-scale variance, then back-transformed via `tanh`. Bounds are guaranteed to lie strictly in `(−1, 1)` and are **asymmetric** on the r-scale. `point` is the mean over splits on the r-scale (plug-in estimate of ρ(`m_h`)); `sd` is on the z-scale, so `point ± Φ⁻¹(1−α/2) · sd` does **not** reconstruct the CI — read the bounds directly. To recover the z-scale interval: `ci_z = (atanh(point) − Φ⁻¹(1−α/2)·sd, atanh(point) + Φ⁻¹(1−α/2)·sd)`; the reported bounds equal `tanh(ci_z)`.
 
 ### Per-variable readouts: leverage CIs and the subsampling z for β
 

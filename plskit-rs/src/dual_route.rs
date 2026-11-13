@@ -415,10 +415,9 @@ pub(crate) fn pls1_cv_r2_columns(
 /// the structure of the rest: the route can then lose precision on
 /// ordinary columns, not only at the floor, by up to O(1).
 ///
-/// A split whose `G` or `M` is not finite (a re-centring that overflows),
-/// a column whose `C` is not finite or whose eigendecomposition fails, and a
-/// column whose held-out Y block is not finite give `0`, the value the
-/// primal route gives a non-finite block.
+/// A split whose `G` or `M` is not finite (a re-centring of a caller's
+/// `gram` that overflows), and a column whose `C` is not finite or whose
+/// eigendecomposition fails, give `0`.
 ///
 /// # No `K = 1` restriction in principle
 /// PLS3 has no deflation, so the same reduction would serve any
@@ -596,12 +595,6 @@ pub(crate) fn pls3_split_columns_r(
         let y_c = cols.block(col);
         let (ys_tr, ys_te) =
             crate::pls3_signal_test::centered_halves(y_c.as_ref(), tr, te, y_scale);
-        // A non-finite held-out Y block gives the primal's value, 0
-        // (`pls3_signal_test::pls3_split_columns_r_primal`; change
-        // together).
-        if crate::fit::check_finite_mat(ys_te.as_ref()).is_err() {
-            return 0.0;
-        }
 
         // C = Ỹ_tr' G Ỹ_tr  (q × q), formed as Ỹ'(GỸ) so the
         // n_tr × n_tr Gram is applied, never squared. Seq inside the

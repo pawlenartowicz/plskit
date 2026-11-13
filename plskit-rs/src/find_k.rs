@@ -3228,49 +3228,62 @@ mod tests {
         }
     }
 
-    /// A finite X whose standardization overflows (rows 0 and 1 of column 0
-    /// at `f64::MAX`, row 2 at `-f64::MAX`) fails every selection by
-    /// cross-validation with `NonFiniteInput`, on 40 × 6 and 40 × 200: a
-    /// fold whose fit on X in place gives a non-finite coefficient or
-    /// prediction refits on its standardized blocks, which hold the
-    /// overflow.
+    /// A finite X whose plain standardization overflows (rows 0 and 1 of
+    /// column 0 at `f64::MAX`, row 2 at `-f64::MAX`) gives every selection
+    /// by cross-validation the scores of X/8, on 40 × 6 and 40 × 200.
     #[test]
-    fn cv_selection_rejects_x_that_overflows_in_standardization() {
+    fn cv_selection_reads_x_near_max_as_x_over_8() {
+        let close = |a: &BTreeMap<usize, f64>, b: &BTreeMap<usize, f64>, what: &str| {
+            assert_eq!(a.len(), b.len(), "{what}");
+            for ((ka, va), (kb, vb)) in a.iter().zip(b) {
+                assert_eq!(ka, kb, "{what}");
+                assert!(
+                    (va - vb).abs() <= 1e-12 * vb.abs().max(1.0),
+                    "{what} {ka}: {va} vs {vb}"
+                );
+            }
+        };
         for p in [6_usize, 200] {
             let (mut x, y) = crate::test_support::signal_data(40, p, 105);
             x[(0, 0)] = f64::MAX;
             x[(1, 0)] = f64::MAX;
             x[(2, 0)] = -f64::MAX;
+            let x8 = Mat::<f64>::from_fn(40, p, |i, j| x[(i, j)] / 8.0);
             let opts = FindKOptimalOpts {
                 selector: Selector::R2Se,
                 seed: Some(7),
                 ..Default::default()
             };
-            let r = pls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, None, None, opts);
-            assert!(
-                matches!(r, Err(PlsKitError::NonFiniteInput)),
-                "pls1 40x{p}: {r:?}"
-            );
-            let r = spls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, 3, None, None, opts);
-            assert!(
-                matches!(r, Err(PlsKitError::NonFiniteInput)),
-                "spls1 40x{p}: {r:?}"
-            );
-            let r = spls1_find_keep_optimal(
-                x.as_ref(),
-                y.as_ref(),
-                2,
-                None,
-                None,
-                FindKeepOptimalOpts {
-                    seed: Some(7),
-                    ..Default::default()
-                },
-            );
-            assert!(
-                matches!(r, Err(PlsKitError::NonFiniteInput)),
-                "keep 40x{p}: {r:?}"
-            );
+            let cv = |x: &Mat<f64>| {
+                pls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, None, None, opts)
+                    .expect("a result")
+                    .cv_scores
+                    .expect("r2_se scores")
+            };
+            close(&cv(&x), &cv(&x8), &format!("pls1 40x{p}"));
+            let cv = |x: &Mat<f64>| {
+                spls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, 3, None, None, opts)
+                    .expect("a result")
+                    .cv_scores
+                    .expect("r2_se scores")
+            };
+            close(&cv(&x), &cv(&x8), &format!("spls1 40x{p}"));
+            let keep = |x: &Mat<f64>| {
+                spls1_find_keep_optimal(
+                    x.as_ref(),
+                    y.as_ref(),
+                    2,
+                    None,
+                    None,
+                    FindKeepOptimalOpts {
+                        seed: Some(7),
+                        ..Default::default()
+                    },
+                )
+                .expect("a result")
+                .cv_scores
+            };
+            close(&keep(&x), &keep(&x8), &format!("keep 40x{p}"));
         }
     }
 

@@ -91,13 +91,18 @@ fn reduce_centered_scaled(samples_b: &[f64], point: f64, scale: f64, level: f64)
     let upper = point - scale * q_lo;
 
     // Two-pass stable variance: compute mean first, then sum squared deviations.
-    let mean: f64 = deltas.iter().sum::<f64>() / b_finite as f64;
+    // Formed on the deltas divided by a power of two near the largest
+    // (`linalg::pow2_scale`), so the squares stay finite and normal for a β
+    // at any magnitude (β of X·2^±600 under `pre_standardized` is about
+    // 2^∓600); the division is exact, so no bit changes elsewhere.
+    let (s, inv) = crate::linalg::pow2_scale(deltas.iter().fold(0.0_f64, |m, d| m.max(d.abs())));
+    let mean: f64 = deltas.iter().map(|d| d * inv).sum::<f64>() / b_finite as f64;
     let var: f64 = if b_finite > 1 {
-        deltas.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / (b_finite - 1) as f64
+        deltas.iter().map(|d| (d * inv - mean).powi(2)).sum::<f64>() / (b_finite - 1) as f64
     } else {
         0.0
     };
-    let sd = scale * var.sqrt();
+    let sd = scale * (s * var.sqrt());
 
     CIScalar {
         point,
@@ -250,7 +255,7 @@ use faer::{Col, ColRef, Mat, MatRef};
 use crate::covariates::CovariateBasis;
 use crate::error::{PlsKitError, PlsKitResult};
 use crate::fit::{FitOpts, KSpec, pls1_fit_impl};
-use crate::linalg::{col_row_subset, row_subset};
+use crate::linalg::{center_rows_fro, col_row_subset, row_subset, standardize_apply_rows};
 
 /// Per-resample outputs for the confirmatory CI branch. Per-variable arrays
 /// only.
@@ -284,77 +289,71 @@ pub(crate) fn bootstrap_indices(n: usize, rng: &mut crate::rng::Rng) -> Vec<usiz
     (0..n).map(|_| rng.random_range(0..n)).collect()
 }
 
-/// A fit on a row selection of `(x, y)`, with the column and target scales
-/// it was standardized with (unit / zero under `pre_standardized`).
+/// A fit on a row selection of `(x, y)`, with the rows' (weighted) means
+/// of X and y it was centred with.
 struct RowFit {
     w: Mat<f64>,
     beta: Col<f64>,
     x_mean: Col<f64>,
-    x_scale: Col<f64>,
     y_mean: f64,
-    y_scale: f64,
     /// With covariates: the basis of the rows' `[1, Z]` and the WLS
-    /// coefficients of the standardized X `(rank, d)` and y `(rank, 1)` on it.
+    /// coefficients of the scaled X `(rank, d)` and y `(rank, 1)` on it.
     cov: Option<(CovariateBasis, Mat<f64>, Mat<f64>)>,
 }
 
-/// Fit `k` components on the rows `idx` of `(x, y)` (repeats allowed) with
-/// the same standardization regime as the full-data fit: the rows are
-/// re-standardized with their own (weighted) moments unless
-/// `pre_standardized_x`. Weights are sliced to `idx` and re-validated, so an
+/// Fit `k` components on the rows `idx` of `(x, y)` (repeats allowed), read
+/// as the held-out tests read X: centred with the rows' own (weighted)
+/// means (when `centre`; else as given, with zero means) and divided by the
+/// all-row scales `x_scale` and `y_scale` (one entry), the caller's
+/// `linalg::held_out_scale` of X and of y. A
+/// row-subset scale would blow up the other rows wherever a column barely
+/// varies on these. Weights are sliced to `idx` and re-validated, so an
 /// insufficient effective sample size surfaces as `InvalidWeights`.
 ///
-/// With covariates `z`, the standardized rows of X and y are replaced by
+/// With covariates `z`, the scaled rows of X and y are replaced by
 /// their WLS residuals on the rows' own `[1, Z]` (weighted with the rows'
 /// normalized weights) before the fit, as the full-data fit does on all
-/// rows; too few residual degrees of freedom is `InsufficientResidualDf`.
+/// rows, a column `[1, Z]` explains set to 0; too few residual degrees of
+/// freedom is `InsufficientResidualDf`.
 ///
 /// A NIPALS short-circuit (`k_used < k`) is an error, so the caller's
 /// driver counts the resample as failed instead of reducing a truncated
 /// weight matrix against length-`k` references.
-#[allow(clippy::many_single_char_names)]
+#[allow(clippy::many_single_char_names, clippy::too_many_arguments)]
 fn fit_rows(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
     idx: &[usize],
     k: usize,
-    pre_standardized_x: bool,
+    x_scale: ColRef<'_, f64>,
+    y_scale: ColRef<'_, f64>,
     weights: Option<ColRef<'_, f64>>,
     z: Option<MatRef<'_, f64>>,
+    centre: bool,
 ) -> PlsKitResult<RowFit> {
-    let d = x.ncols();
-    let y_rows = col_row_subset(y, idx);
-
     let w_sub: Option<faer::Col<f64>> = weights.map(|w| crate::linalg::col_row_subset(w, idx));
     let (w_sub_norm, _) = crate::fit::validate_and_normalize_weights(
         w_sub.as_ref().map(faer::Col::as_ref),
         idx.len(),
         k,
     )?;
+    let wsr = w_sub_norm.as_ref().map(faer::Col::as_ref);
 
-    let (mut xs_sub, x_mean, x_scale, mut ys_sub, y_mean, y_scale) = if pre_standardized_x {
-        // Caller asserts already standardized: the row subsets are the
-        // blocks. Mean/scale are no-ops (zeros / ones) for the holdout
-        // standardization and for the β back-projection (β_b stays on the
-        // standardized scale, matching β_ref which the caller's full-data fit
-        // also leaves on that scale).
-        (
-            row_subset(x, idx),
-            Col::<f64>::zeros(d),
-            Col::<f64>::from_fn(d, |_| 1.0),
-            y_rows,
-            0.0_f64,
-            1.0_f64,
-        )
-    } else {
-        let (xs, mu, sigma) =
-            crate::linalg::standardize_rows(x, idx, w_sub_norm.as_ref().map(faer::Col::as_ref));
-        let (ys, ys_mean, ys_sigma) = crate::linalg::standardize1_weighted(
-            y_rows.as_ref(),
-            w_sub_norm.as_ref().map(faer::Col::as_ref),
-        );
-        (xs, mu, sigma, ys, ys_mean, ys_sigma)
+    let rows = |a: MatRef<'_, f64>, scale: ColRef<'_, f64>| {
+        if centre {
+            let (s, mean, _) = center_rows_fro(a, idx, wsr, None, scale);
+            (s, mean)
+        } else {
+            let mean = Col::<f64>::zeros(a.ncols());
+            (
+                standardize_apply_rows(a, idx, mean.as_ref(), scale, None),
+                mean,
+            )
+        }
     };
+    let (mut xs_sub, x_mean) = rows(x, x_scale);
+    let (ys_sub, y_mean) = rows(y.as_mat(), y_scale);
+    let (mut ys_sub, y_mean) = (ys_sub.col(0).to_owned(), y_mean[0]);
     let cov = match z {
         None => None,
         Some(z) => {
@@ -362,10 +361,13 @@ fn fit_rows(
             let basis =
                 CovariateBasis::new(z_rows.as_ref(), w_sub_norm.as_ref().map(faer::Col::as_ref))?;
             basis.check_df(k)?;
+            // The coefficients serve the held-out rows; the rows they came
+            // from take `residualize`, whose aliasing rule zeroes a column
+            // `[1, Z]` explains, as the full-data fit does.
             let bx = basis.coef(xs_sub.as_ref());
             let by = basis.coef(ys_sub.as_ref().as_mat());
-            basis.residualize_new(z_rows.as_ref(), xs_sub.as_mut(), bx.as_ref());
-            basis.residualize_new(z_rows.as_ref(), ys_sub.as_mut().as_mat_mut(), by.as_ref());
+            basis.residualize(xs_sub.as_mut());
+            basis.residualize(ys_sub.as_mut().as_mat_mut());
             Some((basis, bx, by))
         }
     };
@@ -388,9 +390,7 @@ fn fit_rows(
         w: fit.w_star,
         beta: fit.beta,
         x_mean,
-        x_scale,
         y_mean,
-        y_scale,
         cov,
     })
 }
@@ -400,7 +400,10 @@ fn fit_rows(
 /// for leverage, and a half split (`holdout_train_size(n)` training rows,
 /// the rest held out) for `holdout_corr`. All three index sets come from
 /// the same child `rng` in that order, so the β and leverage draws do not
-/// depend on the half split. `pre_standardized_x` matches the user's flag.
+/// depend on the half split. Every fit reads X and y on the all-row scales
+/// `x_scale` and `y_scale` (`fit_rows`). Under `pre_standardized` the β and
+/// leverage fits take the rows as given, as the full-data reference fit
+/// does, and the half split still centres, as the split tests do.
 ///
 /// Leverage uses the bootstrap because its bias depends on the sample size
 /// (at small `n/D` a fit spreads leverage from signal onto noise
@@ -410,9 +413,9 @@ fn fit_rows(
 ///
 /// `holdout_corr` uses a half split, not the size-`m` subsample, because
 /// its target is the held-out correlation of a fit trained on that many
-/// rows: at `m = ⌊n/2⌋` it is close to what the split tests estimate (each
-/// half scaled with its own moments), and
-/// the NB factor `(n − m)/m` is about 1 (at `m = n^0.7` it is 2.8 at
+/// rows: at `m = ⌊n/2⌋` it is close to what the split tests estimate (X
+/// scaled once over all rows, each half centred with the training means),
+/// and the NB factor `(n − m)/m` is about 1 (at `m = n^0.7` it is 2.8 at
 /// `n = 100`, and the interval nearly always covers).
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
@@ -422,9 +425,11 @@ fn run_one_confirmatory(
     y: ColRef<'_, f64>,
     k: usize,
     m: usize,
-    pre_standardized_x: bool,
+    x_scale: ColRef<'_, f64>,
+    y_scale: ColRef<'_, f64>,
     weights: Option<ColRef<'_, f64>>,
     z: Option<MatRef<'_, f64>>,
+    pre_standardized: bool,
     rng: &mut crate::rng::Rng,
 ) -> PlsKitResult<ConfirmatoryWorkerRow> {
     let n = x.nrows();
@@ -436,13 +441,9 @@ fn run_one_confirmatory(
     let (half_idx, holdout_idx) = subsample_indices(n, holdout_train_size(n), rng);
 
     // 2. Subsample fit (β) and bootstrap fit (leverage).
-    let RowFit {
-        beta: beta_b,
-        x_scale,
-        y_scale,
-        ..
-    } = fit_rows(x, y, &sample_idx, k, pre_standardized_x, weights, z)?;
-    let boot = fit_rows(x, y, &boot_idx, k, pre_standardized_x, weights, z)?;
+    let centre = !pre_standardized;
+    let beta_b = fit_rows(x, y, &sample_idx, k, x_scale, y_scale, weights, z, centre)?.beta;
+    let boot = fit_rows(x, y, &boot_idx, k, x_scale, y_scale, weights, z, centre)?;
 
     // 3. Per-variable leverage on the bootstrap fit's unaligned W. Leverage
     // is invariant under right-orthogonal rotation (leverage =
@@ -454,40 +455,29 @@ fn run_one_confirmatory(
     // 4. Holdout predictive correlation of the half-split fit. A failed
     // half-split fit costs the replicate its holdout_corr only (NaN), not its
     // β and leverage rows.
-    // Pre-standardized: the holdout rows are the block. Otherwise they are
-    // gathered and standardized with the training half's moments in one pass.
-    // With covariates, both are then the residuals on the holdout rows'
-    // `[1, Z]` from the training half's coefficients.
+    // The holdout rows are gathered, centred with the training half's means
+    // and divided by the all-row scale in one pass, y too (the r floors
+    // below are absolute). With covariates, both
+    // are then the residuals on the holdout rows' `[1, Z]` from the training
+    // half's coefficients.
     #[allow(clippy::cast_precision_loss)]
-    let holdout_corr = match fit_rows(x, y, &half_idx, k, pre_standardized_x, weights, z) {
+    let holdout_corr = match fit_rows(x, y, &half_idx, k, x_scale, y_scale, weights, z, true) {
         Err(_) => f64::NAN,
         Ok(RowFit {
             beta: beta_h,
             x_mean,
-            x_scale: x_scale_h,
             y_mean: y_mean_h,
-            y_scale: y_scale_h,
             cov,
             ..
         }) => {
             let mut ys_h_owned = col_row_subset(y, &holdout_idx);
-            let mut xs_h = if pre_standardized_x {
-                row_subset(x, &holdout_idx)
-            } else {
-                crate::linalg::standardize_apply_rows(
-                    x,
-                    &holdout_idx,
-                    x_mean.as_ref(),
-                    x_scale_h.as_ref(),
-                    None,
-                )
-            };
+            let mut xs_h = standardize_apply_rows(x, &holdout_idx, x_mean.as_ref(), x_scale, None);
+            for v in ys_h_owned.iter_mut() {
+                *v = (*v - y_mean_h) / y_scale[0];
+            }
             if let (Some(z), Some((basis, bx, by))) = (z, cov) {
                 let z_h = row_subset(z, &holdout_idx);
                 basis.residualize_new(z_h.as_ref(), xs_h.as_mut(), bx.as_ref());
-                for v in ys_h_owned.iter_mut() {
-                    *v = (*v - y_mean_h) / y_scale_h;
-                }
                 basis.residualize_new(z_h.as_ref(), ys_h_owned.as_mut().as_mat_mut(), by.as_ref());
             }
 
@@ -521,11 +511,14 @@ fn run_one_confirmatory(
     };
 
     // 5. Back-project β_b to the same scale as β_ref so deltas are meaningful.
-    // Mirrors `pls1_fit`'s full-data back-projection in `pls1_fit`:
+    // Mirrors `pls1_fit`'s full-data back-projection, with the same all-row
+    // scales:
     //   β_raw[j] = β_std[j] * y_scale / x_scale[j]
-    // For pre_standardized_x, both scales are 1.0 → no-op (β_b stays standardized,
-    // matching β_ref which the caller's full-data fit also leaves on that scale).
-    let beta_vec: Vec<f64> = (0..d).map(|j| beta_b[j] * y_scale / x_scale[j]).collect();
+    // Under pre_standardized the scales are 1 (a power of two for a block
+    // outside [2^-256, 2^256]), so β_b is on X as given, as β_ref is.
+    let beta_vec: Vec<f64> = (0..d)
+        .map(|j| beta_b[j] * y_scale[0] / x_scale[j])
+        .collect();
 
     Ok(ConfirmatoryWorkerRow {
         leverage,
@@ -537,6 +530,7 @@ fn run_one_confirmatory(
 #[cfg(test)]
 mod tests_worker {
     use super::*;
+    use crate::linalg::held_out_scale;
     use crate::rng::resolve_seed;
     use faer::{Col, Mat};
     use rand::RngExt;
@@ -566,9 +560,11 @@ mod tests_worker {
             y_tiny.as_ref(),
             k,
             resolve_m(n, 0.7),
+            held_out_scale(x.as_ref(), None, true).as_ref(),
+            held_out_scale(y_tiny.as_mat(), None, true).as_ref(),
+            None,
+            None,
             true,
-            None,
-            None,
             &mut rng,
         );
         assert!(
@@ -589,15 +585,31 @@ mod tests_worker {
         let y = Col::<f64>::from_fn(n, |_| rng_data.random_range(-1.0..1.0));
 
         let (_, mut rng) = resolve_seed(Some(11)).unwrap();
-        let row = run_one_confirmatory(x.as_ref(), y.as_ref(), k, 99, false, None, None, &mut rng)
-            .unwrap();
+        let (xs, ys) = (
+            held_out_scale(x.as_ref(), None, false),
+            held_out_scale(y.as_mat(), None, false),
+        );
+        let row = run_one_confirmatory(
+            x.as_ref(),
+            y.as_ref(),
+            k,
+            99,
+            xs.as_ref(),
+            ys.as_ref(),
+            None,
+            None,
+            false,
+            &mut rng,
+        )
+        .unwrap();
         assert!(row.holdout_corr.is_nan());
         assert!(row.beta.iter().chain(&row.leverage).all(|v| v.is_finite()));
     }
 
     /// With covariates, a replicate fit is the plain fit on its rows
-    /// standardized with their own (weighted) moments and then residualized
-    /// on the rows' own `[1, Z]` with their normalized weights.
+    /// centred with their own (weighted) means, divided by the all-row
+    /// scales, and then residualized on the rows' own `[1, Z]` with their
+    /// normalized weights.
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn ci_with_covariates_adjusts_each_subsample() {
@@ -609,8 +621,23 @@ mod tests_worker {
         let idx: Vec<usize> = (0..n).filter(|i| i % 3 != 1).collect();
         for w in [None, Some(test_weights(n))] {
             let wr = w.as_ref().map(Col::as_ref);
-            let got =
-                fit_rows(x.as_ref(), y.as_ref(), &idx, k, false, wr, Some(z.as_ref())).unwrap();
+            let (xsc, ysc) = (
+                held_out_scale(x.as_ref(), wr, false),
+                held_out_scale(y.as_mat(), wr, false),
+            );
+            let (xsc, ysc) = (xsc.as_ref(), ysc.as_ref());
+            let got = fit_rows(
+                x.as_ref(),
+                y.as_ref(),
+                &idx,
+                k,
+                xsc,
+                ysc,
+                wr,
+                Some(z.as_ref()),
+                true,
+            )
+            .unwrap();
             let w_sub = wr.map(|w| col_row_subset(w, &idx));
             let (w_sub, _) = crate::fit::validate_and_normalize_weights(
                 w_sub.as_ref().map(Col::as_ref),
@@ -620,16 +647,13 @@ mod tests_worker {
             .unwrap();
             let wsr = w_sub.as_ref().map(Col::as_ref);
             let basis = CovariateBasis::new(row_subset(z.as_ref(), &idx).as_ref(), wsr).unwrap();
-            let (mut xs, _, _) = crate::linalg::standardize_rows(x.as_ref(), &idx, wsr);
-            let (mut ys, _, _) = crate::linalg::standardize1_weighted(
-                col_row_subset(y.as_ref(), &idx).as_ref(),
-                wsr,
-            );
+            let (mut xs, _, _) = center_rows_fro(x.as_ref(), &idx, wsr, None, xsc);
+            let (mut ys, _, _) = center_rows_fro(y.as_mat(), &idx, wsr, None, ysc);
             basis.residualize(xs.as_mut());
-            basis.residualize(ys.as_mut().as_mat_mut());
+            basis.residualize(ys.as_mut());
             let want = pls1_fit_impl(
                 xs.as_ref(),
-                ys.as_ref(),
+                ys.col(0),
                 KSpec::Fixed(k),
                 wsr,
                 None,
@@ -641,6 +665,97 @@ mod tests_worker {
             .unwrap();
             assert_close_rel(got.beta.as_mat(), want.beta.as_mat(), 1e-12, "beta");
         }
+    }
+
+    /// A y that `[1, Z]` explains gives no component on a subsample, as on
+    /// all rows: its residual is set to 0, not fitted as rounding noise, and
+    /// the replicate fails (`truncated`).
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn a_y_the_covariates_explain_fits_no_component_on_a_subsample() {
+        use crate::test_support::{synth, unif};
+        let n = 60;
+        let (x, _) = synth(n, 8, 3, 1.0, 71);
+        let z = unif(n, 2, 72);
+        let y = Col::<f64>::from_fn(n, |i| 1.0 + 2.0 * z[(i, 0)] - z[(i, 1)]);
+        let idx: Vec<usize> = (0..n).filter(|i| i % 3 != 1).collect();
+        let r = fit_rows(
+            x.as_ref(),
+            y.as_ref(),
+            &idx,
+            1,
+            held_out_scale(x.as_ref(), None, false).as_ref(),
+            held_out_scale(y.as_mat(), None, false).as_ref(),
+            None,
+            Some(z.as_ref()),
+            true,
+        )
+        .map(|f| f.beta);
+        assert!(
+            matches!(&r, Err(PlsKitError::InvalidInput(m)) if m.contains("truncated")),
+            "{r:?}"
+        );
+    }
+
+    /// Under `pre_standardized` the β and leverage fits of a replicate take
+    /// X and y as given, as the full-data reference fit does: on X + 7 they
+    /// are the as-given fits of the drawn rows. The half split centres, so
+    /// `holdout_corr` is the one on X.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn pre_standardized_replicate_fits_beta_and_leverage_as_given() {
+        use crate::test_support::{assert_close_rel, synth, test_weights};
+        let (n, d, k, m) = (60, 8, 2, 40);
+        let (x, y) = synth(n, d, 3, 1.0, 71);
+        let x7 = Mat::<f64>::from_fn(n, d, |i, j| x[(i, j)] + 7.0);
+        let w = test_weights(n);
+        let run = |x: &Mat<f64>| {
+            let (_, mut rng) = resolve_seed(Some(11)).unwrap();
+            run_one_confirmatory(
+                x.as_ref(),
+                y.as_ref(),
+                k,
+                m,
+                held_out_scale(x.as_ref(), None, true).as_ref(),
+                held_out_scale(y.as_mat(), None, true).as_ref(),
+                Some(w.as_ref()),
+                None,
+                true,
+                &mut rng,
+            )
+            .unwrap()
+        };
+        let (plain, shifted) = (run(&x), run(&x7));
+        let (hp, hs) = (plain.holdout_corr, shifted.holdout_corr);
+        assert!(
+            (hp - hs).abs() <= 1e-12,
+            "holdout_corr {hp} on X, {hs} on X + 7"
+        );
+
+        let (_, mut rng) = resolve_seed(Some(11)).unwrap();
+        let (sample_idx, _) = subsample_indices(n, m, &mut rng);
+        let boot_idx = bootstrap_indices(n, &mut rng);
+        let fit = |idx: &[usize]| {
+            pls1_fit_impl(
+                row_subset(x7.as_ref(), idx).as_ref(),
+                col_row_subset(y.as_ref(), idx).as_ref(),
+                KSpec::Fixed(k),
+                Some(col_row_subset(w.as_ref(), idx).as_ref()),
+                None,
+                FitOpts {
+                    pre_standardized: true,
+                    ..FitOpts::default()
+                },
+            )
+            .unwrap()
+        };
+        let beta = fit(&sample_idx).beta;
+        let lev = crate::linalg::leverage_diag(fit(&boot_idx).w_star.as_ref());
+        let col = |v: &[f64]| Col::<f64>::from_fn(v.len(), |i| v[i]);
+        let got_beta = col(&shifted.beta);
+        assert_close_rel(got_beta.as_mat(), beta.as_mat(), 1e-12, "beta");
+        let (got_lev, want_lev) = (col(&shifted.leverage), col(&lev));
+        assert_close_rel(got_lev.as_mat(), want_lev.as_mat(), 1e-12, "leverage");
     }
 
     #[test]
@@ -1775,9 +1890,14 @@ enum WorkerOutcome {
 }
 
 /// Engine entry for the confirmatory CI branch. Caller has already done the
-/// full-data reference fit and validated arguments. With covariates `z`,
-/// `(n, p_z)`, every replicate fit redoes the adjustment on its own rows
-/// (see `fit_rows`).
+/// full-data reference fit and validated arguments. X and y are scaled once
+/// over all rows, as the held-out tests scale X (`linalg::held_out_scale`:
+/// the full-data fit's weighted moments, or as given under
+/// `pre_standardized`), and every replicate centres its own rows (see
+/// `fit_rows`), apart from the β and leverage fits under `pre_standardized`,
+/// which take X and y as given, as the reference fit does. With covariates
+/// `z`, `(n, p_z)`, every replicate fit redoes the adjustment on its own
+/// rows.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::many_single_char_names)]
 pub(crate) fn pls1_subsample_inference_confirmatory(
@@ -1797,6 +1917,8 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
     let m = resolve_ci_m(n, k, 1, opts.m_rate)?;
 
     let pre_std = opts.pre_standardized;
+    let x_scale = crate::linalg::held_out_scale(x, weights, pre_std);
+    let y_scale = crate::linalg::held_out_scale(y.as_mat(), weights, pre_std);
     // The replicates run in batches by the memory budget. One replicate
     // holds at most two n-row copies of X at once: the bootstrap fit's
     // standardized rows and, when weighted, their √w-scaled copy (the
@@ -1809,7 +1931,8 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
         .saturating_add(crate::fit::pls1_fit_bytes(x.ncols(), k));
     let outcomes: Vec<WorkerOutcome> =
         crate::resample::map_units_seeded(rng, opts.n_boot, unit, |_, child| {
-            match run_one_confirmatory(x, y, k, m, pre_std, weights, z, child) {
+            let (xs, ys) = (x_scale.as_ref(), y_scale.as_ref());
+            match run_one_confirmatory(x, y, k, m, xs, ys, weights, z, pre_std, child) {
                 std::result::Result::Ok(row) => WorkerOutcome::Ok(row),
                 Err(PlsKitError::InvalidWeights {
                     reason: "insufficient_effective_n",
@@ -1966,6 +2089,29 @@ mod tests_engine {
             &mut rng,
         )
         .unwrap()
+    }
+
+    /// A column that barely varies (1e-44 noise, one row at 0.5) is read on
+    /// the all-row scale, as the held-out tests read it, so a half split
+    /// that holds out the 0.5 row does not blow that row up by about 1e43:
+    /// `holdout_corr` stays where it is without the column.
+    #[test]
+    fn a_near_flat_column_does_not_move_holdout_corr() {
+        let (x, y) = synth(100, 20, 2, 1.0, 61);
+        let u = crate::test_support::unif_col(100, 62);
+        let x_flat = Mat::<f64>::from_fn(100, 21, |i, j| match (i, j) {
+            (_, 0..20) => x[(i, j)],
+            (0, _) => 0.5,
+            _ => 1e-44 * u[i],
+        });
+        let plain = run_engine(&x, &y, 1, 100, 63).holdout_corr;
+        let flat = run_engine(&x_flat, &y, 1, 100, 63).holdout_corr;
+        assert!(
+            (plain.point - flat.point).abs() < 0.01,
+            "holdout_corr {} without the column, {} with it",
+            plain.point,
+            flat.point
+        );
     }
 
     /// `holdout_corr` is built on half splits, so its target, the held-out
@@ -2132,6 +2278,85 @@ mod tests_engine {
             n_inside >= 7,
             "β_ref inside its CI on {n_inside} of 8: {lo:?} {beta_ref:?} {hi:?}"
         );
+    }
+
+    /// Under `pre_standardized`, X·2^±600 gives every CI readout of X:
+    /// β's bounds and SE times 2^±600, the rest unchanged.
+    #[test]
+    #[allow(clippy::many_single_char_names)] // n, d, k, x, y, s are the math names
+    fn ci_under_pre_standardized_reads_x_at_any_magnitude() {
+        let (n, d, k) = (60, 8, 1);
+        let (x, y) = synth(n, d, 2, 2.0, 17);
+        let run = |s: f64| {
+            let xs = Mat::<f64>::from_fn(n, d, |i, j| x[(i, j)] * s);
+            let opts = FitOpts {
+                pre_standardized: true,
+                ..FitOpts::default()
+            };
+            let fit = pls1_fit(xs.as_ref(), y.as_ref(), KSpec::Fixed(k), None, None, opts).unwrap();
+            let lev = crate::linalg::leverage_diag(fit.w_star.as_ref());
+            let (_, mut rng) = resolve_seed(Some(19)).unwrap();
+            let ci = pls1_subsample_inference_confirmatory(
+                xs.as_ref(),
+                y.as_ref(),
+                k,
+                fit.beta.as_ref(),
+                &lev,
+                SubsampleOpts {
+                    n_boot: 100,
+                    m_rate: 0.7,
+                    level: 0.95,
+                    pre_standardized: true,
+                    max_failure_rate: 0.0,
+                    max_skip_rate: 0.0,
+                },
+                None,
+                None,
+                &mut rng,
+            )
+            .unwrap();
+            let mut v: Vec<f64> = [&ci.beta_ci_lower, &ci.beta_ci_upper, &ci.beta_se]
+                .iter()
+                .flat_map(|a| a.iter().map(|b| b * s))
+                .collect();
+            for a in [
+                &ci.beta_sign_z_signed,
+                &ci.leverage_ci_lower,
+                &ci.leverage_ci_upper,
+                &ci.leverage_se,
+            ] {
+                v.extend_from_slice(a);
+            }
+            let h = &ci.holdout_corr;
+            v.extend([h.point, h.lower, h.upper, h.sd]);
+            v
+        };
+        let want = run(1.0);
+        for s in [2f64.powi(600), 2f64.powi(-600)] {
+            for (i, (g, w)) in run(s).iter().zip(&want).enumerate() {
+                assert!(
+                    (g - w).abs() <= 1e-12 * w.abs().max(1.0),
+                    "s = {s:e} [{i}]: {g} vs {w}"
+                );
+            }
+        }
+    }
+
+    /// The held-out y is read on the all-row scale, so a y in small units
+    /// (y·1e-17) gives the `holdout_corr` of y; raw, its Pearson sums fall
+    /// under the 1e-30 floors and every replicate fails.
+    #[test]
+    fn holdout_corr_reads_y_at_any_unit() {
+        let (x, y) = synth(200, 20, 2, 1.0, 61);
+        let run = |s: f64| {
+            let ys = Col::<f64>::from_fn(200, |i| y[i] * s);
+            let h = run_engine(&x, &ys, 1, 100, 5).holdout_corr;
+            [h.point, h.lower, h.upper, h.sd]
+        };
+        let want = run(1.0);
+        for (g, w) in run(1e-17).iter().zip(&want) {
+            assert!((g - w).abs() <= 1e-12 * w.abs(), "{g} vs {w}");
+        }
     }
 
     /// The replicates read X only through row gathers into owned

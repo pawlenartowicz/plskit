@@ -159,13 +159,15 @@ impl Default for Pls3ConfirmatoryTestOpts {
 /// `B' = n_perm + 1`, `q = n_targets` and `p = n_features`,
 ///
 /// ```text
-/// G + J·B'·(q·n_tr² + n_te·n_tr)  <  J·B'·(q·n_tr + n_te)·p
+/// G + J·B'·(q·n_tr² + n_te·n_tr + q²·n_tr + q³)  <  J·B'·((q·n_tr + n_te)·p + p·q·min(p, q))
 /// ```
 ///
 /// in multiply-adds, with `G = n²·p/2`, or `0` when `gram_held`: per
-/// column and split `G·Ỹ_tr` and `M·(Ỹ_tr·v)` against the primal's
-/// `X̃_tr'Ỹ_tr` and `X̃_te·u` (the `q × q` eigendecomposition and the
-/// `p × q` SVD are not counted). Also `q ≥ 1`, `0 < n_tr < p` and
+/// column and split `G·Ỹ_tr`, `M·(Ỹ_tr·v)`, `Ỹ_tr'(GỸ_tr)` and the `q × q`
+/// eigendecomposition against the primal's `X̃_tr'Ỹ_tr`, `X̃_te·u` and the
+/// `p × q` SVD, each decomposition counted as one multiply-add per entry
+/// of its cube (both cost a few times that, about equally). The sparse Y
+/// alternation's sweeps are not counted. Also `q ≥ 1`, `0 < n_tr < p` and
 /// `n_tr ≤ DUAL_ROUTE_MAX_N_TR`.
 ///
 /// This lives in one place so the tests can assert the real rule instead of
@@ -197,10 +199,10 @@ pub(crate) fn dual_route_eligible(
         return false;
     }
     let (j, b, q) = (n_splits as f64, (n_perm + 1) as f64, n_targets as f64);
-    let (t, s) = (n_tr as f64, n_te as f64);
-    let gram =
-        crate::dual_route::one_gram_cost(n, n_features, gram_held) + j * b * (q * t * t + s * t);
-    gram < j * b * (q * t + s) * n_features as f64
+    let (t, s, p) = (n_tr as f64, n_te as f64, n_features as f64);
+    let gram = crate::dual_route::one_gram_cost(n, n_features, gram_held)
+        + j * b * (q * t * t + s * t + q * q * t + q * q * q);
+    gram < j * b * ((q * t + s) * p + p * q * p.min(q))
 }
 
 /// Confirmatory PLS3 omnibus test at LV1.
@@ -482,20 +484,22 @@ fn pls3_test_body(
         // No permutation loop: the J held-out correlations go straight to the
         // NB t-reference. The statistic is the one split_exact reports —
         // `tanh(z̄)` over the same fixed splits — so only the reference
-        // changes. A held Gram matrix (the caller's, or the gate's on wide
-        // X with a dense X side) gives each split on the Gram route; else
-        // dense blocks are read from X block by block and a sparse side
-        // refits on materialized halves. At a shared seed the two methods
+        // changes. A caller's Gram matrix gives each split on the Gram
+        // route, and so does the gate's where `dual_route_eligible` takes
+        // that route with no permutations; else dense blocks are read from
+        // X block by block and a sparse side refits on materialized halves.
+        // At a shared seed the two methods
         // agree on the statistic to the route tolerance (~1e-10 relative),
         // and bit for bit when both fit materialized halves (a sparse side
         // on split_exact's primal route, which tall X with cells leaves for
-        // the cell route), except on X whose per-split centring overflows,
-        // which the streamed splits score as r = 0.
+        // the cell route).
         let dense_x = opts.keep_x.is_none_or(|kx| kx >= p);
         let dense = dense_x && opts.keep_y.is_none_or(|ky| ky >= y.ncols());
         let held = match src {
             Pls3X::Gram(g) => Some(g),
-            Pls3X::X(_) if dense_x => gate_gram.as_ref(),
+            Pls3X::X(_) if dual_route_eligible(opts.keep_x, n, p, y.ncols(), 0, n_splits, true) => {
+                gate_gram.as_ref()
+            }
             Pls3X::X(_) => None,
         };
         let r_obs = match (src, held) {
@@ -689,18 +693,7 @@ fn pls3_split_lv_correlations(
     let per_split = |sp: &SplitIdx| -> f64 {
         let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
         let (xs_tr, xs_te) = centered_halves(x, tr, te, x_scale);
-        // A non-finite held-out block gives `r = 0`, as in
-        // `pls3_split_columns_r_primal`, which explains it (change together).
-        if crate::fit::check_finite_mat(xs_te.as_ref()).is_err() {
-            return 0.0;
-        }
         let (ys_tr, ys_te) = centered_halves(y, tr, te, y_scale);
-        // Likewise a non-finite held-out Y block; `pls3_split_columns_r_primal`
-        // and `dual_route::pls3_split_zbars_columns` check it too (change
-        // together).
-        if crate::fit::check_finite_mat(ys_te.as_ref()).is_err() {
-            return 0.0;
-        }
 
         pls3_split_column_r_primal(
             xs_tr.as_ref(),
@@ -762,9 +755,8 @@ pub(crate) fn centered_halves(
 /// is the materialized fit's (`σ₁` against `pls3::SIGMA_FLOOR` and the
 /// relative floor), applied to this route's `σ₁`, so a split whose `σ₁`
 /// sits at the floor can keep LV1 here and not there, or the reverse; a
-/// dropped LV1 gives `r = 0`. A non-finite product or held-out Y block, and
-/// a failed SVD, give `r = 0`, the value the materialized fit gives a
-/// non-finite block or a failed fit.
+/// dropped LV1 gives `r = 0`. A failed SVD gives `r = 0`, the value the
+/// materialized fit gives a failed fit.
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
 fn pls3_split_r_streamed(
@@ -809,10 +801,6 @@ fn pls3_split_r_streamed(
             matmul(t_mat.as_mut(), Accum::Add, c, a_blk.as_ref(), 1.0, seq);
         },
     );
-    if !(a_mat.is_all_finite() && t_mat.is_all_finite() && ys_te.is_all_finite()) {
-        return 0.0;
-    }
-
     let rel_floor = crate::pls3::sigma_rel_floor(n_tr, p, q, x_fro, ys_tr.norm_l2());
     let Ok(Some(crate::pls3::Lv1 { v, .. })) =
         crate::pls3::pls3_lv1_from_cross_cov(a_mat, None, None, 0, 0.0, || rel_floor)
@@ -872,28 +860,10 @@ fn pls3_split_columns_r_primal(
     let (xs_tr, xs_te) = centered_halves(x, tr, te, x_scale);
     // The X-side input of the relative floor, likewise per split.
     let xs_tr_fro = xs_tr.norm_l2();
-    // A held-out block with a non-finite entry has no finite score, so every
-    // column gets `r = 0` (`atanh(0) = 0`), the value a non-finite training
-    // block gets in `pls3_split_column_r_primal`. Checked here once per
-    // split rather than in that per-column body, which would rescan `X̃_te`
-    // for every replicate column. `pls3_split_lv_correlations` makes the
-    // same check, and `signal_test::prepare_split` makes it for PLS1 as its
-    // `x_finite` (change together).
-    if crate::fit::check_finite_mat(xs_te.as_ref()).is_err() {
-        return vec![0.0; which.len()];
-    }
 
     crate::resample::map_indexed(which.len(), |i| {
         let y_c = cols.block(which[i]);
         let (ys_tr, ys_te) = centered_halves(y_c.as_ref(), tr, te, y_scale);
-        // A non-finite held-out Y block gives `r = 0` as a non-finite `X̃_te`
-        // does above; it is checked per column because Y is permuted per
-        // column. `pls3_split_lv_correlations` and the per-column body of
-        // `dual_route::pls3_split_zbars_columns` make the same check
-        // (change together).
-        if crate::fit::check_finite_mat(ys_te.as_ref()).is_err() {
-            return 0.0;
-        }
 
         pls3_split_column_r_primal(
             xs_tr.as_ref(),
@@ -1103,9 +1073,8 @@ pub(crate) fn cells_route_eligible(d: &SplitDesign, p: usize, q: usize, n_perm: 
 ///   within rounding of `tol` (see "Near-ties" on
 ///   `dual_route::pls3_split_zbars_columns`).
 ///
-/// A split whose X halves are not both finite gives `r = 0`, as on the
-/// primal route, and a Y whose halves can overflow (`y_halves_finite`)
-/// runs the primal route throughout.
+/// A Y whose raw sums can overflow (`y_halves_finite`) runs the primal
+/// route throughout.
 #[allow(clippy::many_single_char_names, clippy::similar_names)]
 pub(crate) fn pls3_split_zbars_columns_cells(
     x: MatRef<'_, f64>,
@@ -1166,8 +1135,9 @@ fn write_y_block(
 /// Whether every half of `y` the primal route can write, centred by any
 /// training rows' means and divided by `scale`, is finite: per column the
 /// sum of `n` entries cannot overflow (`n·max|y|` is finite) and
-/// `4·(max − min)/scale` is finite. The cell route's sums would hide an
-/// overflow that the primal route turns into `r = 0`.
+/// `4·(max − min)/scale` is finite. The cell route centres Y from its raw
+/// sums ([`write_y_block`]), which can overflow where the primal route's
+/// centring does not.
 #[allow(clippy::cast_precision_loss)]
 fn y_halves_finite(y: MatRef<'_, f64>, scale: ColRef<'_, f64>) -> bool {
     let n = y.nrows() as f64;
@@ -1268,9 +1238,6 @@ fn pls3_cell_r(
     opts: &Pls3ConfirmatoryTestOpts,
 ) -> Option<f64> {
     use crate::signal_test::{NR_RESOLVE_BAND as BAND, moments_resolved, r_from_moments};
-    if !f.x_finite[j] {
-        return Some(0.0);
-    }
     let (n, p) = (f.xs.nrows(), f.xs.ncols());
     let (nf, na, nb, eps) = (n as f64, n_tr as f64, n_te as f64, f64::EPSILON);
     let w = cs.y_sum.nrows();
@@ -1669,98 +1636,114 @@ mod tests {
         assert_eq!(a.pvalue.to_bits(), b.pvalue.to_bits());
     }
 
-    /// A held-out half that overflows in centring while its training half
-    /// does not gives `r = 0`, the value a non-finite training half gives.
-    /// Column 0 holds `-f64::MAX` on training row 0 and `f64::MAX` on
-    /// held-out row 6, which overflows when centred with the training mean.
+    /// `|a − b| ≤ 1e-12·max(|b|, 1e-300)`.
+    fn assert_close(a: f64, b: f64, what: &str) {
+        assert!(
+            (a - b).abs() <= 1e-12 * b.abs().max(1e-300),
+            "{what}: {a} vs {b}"
+        );
+    }
+
+    /// A held-out half whose plain centring overflows while its training
+    /// half does not gives the `r` of X/8. Column 0 holds `-f64::MAX` on
+    /// training row 0 and `f64::MAX` on held-out row 6, which overflows when
+    /// centred with the training mean.
     #[test]
-    fn a_held_out_half_that_overflows_gives_r_zero() {
+    fn a_held_out_half_near_max_reads_as_x_over_8() {
         let (mut x, y) = linked_blocks(12, 3, 2, 1.0, 5);
         x[(0, 0)] = -f64::MAX;
         x[(6, 0)] = f64::MAX;
-        let (xsc, ysc) = scales(&x, &y);
         let splits = vec![SplitIdx {
             tr: (0..6).collect(),
             te: (6..12).collect(),
         }];
         let opts = Pls3ConfirmatoryTestOpts::default();
-        let r = pls3_split_lv_correlations(
-            x.as_ref(),
-            y.as_ref(),
-            &splits,
-            xsc.as_ref(),
-            ysc.as_ref(),
-            &opts,
-        );
-        assert_eq!(r[0].to_bits(), 0.0_f64.to_bits(), "r = {}", r[0]);
-        let z = pls3_split_columns_r_primal(
-            x.as_ref(),
-            &observed(y.as_ref()),
-            &splits[0],
-            xsc.as_ref(),
-            ysc.as_ref(),
-            &opts,
-            &[0],
-        );
-        assert_eq!(z[0].to_bits(), 0.0_f64.to_bits(), "z = {}", z[0]);
+        let rz = |x: &Mat<f64>| {
+            let (xsc, ysc) = scales(x, &y);
+            let r = pls3_split_lv_correlations(
+                x.as_ref(),
+                y.as_ref(),
+                &splits,
+                xsc.as_ref(),
+                ysc.as_ref(),
+                &opts,
+            );
+            let z = pls3_split_columns_r_primal(
+                x.as_ref(),
+                &observed(y.as_ref()),
+                &splits[0],
+                xsc.as_ref(),
+                ysc.as_ref(),
+                &opts,
+                &[0],
+            );
+            (r[0], z[0])
+        };
+        let x8 = Mat::<f64>::from_fn(12, 3, |i, j| x[(i, j)] / 8.0);
+        let ((r, z), (r8, z8)) = (rz(&x), rz(&x8));
+        assert_close(r, r8, "r");
+        assert_close(z, z8, "z");
     }
 
-    /// The same overflow on the Y side gives `r = 0` (`z = 0`) on every
-    /// route: Y column 0 at `-f64::MAX` on training row 0 and `f64::MAX` on
-    /// held-out row 6. `split_nb` on the materialized halves and on the
-    /// streamed body, and `split_exact` on the primal and the Gram route.
+    /// The same on the Y side gives the value of Y/8 on every route: Y
+    /// column 0 at `-f64::MAX` on training row 0 and `f64::MAX` on held-out
+    /// row 6. `split_nb` on the materialized halves and on the streamed
+    /// body, and `split_exact` on the primal and the Gram route.
     #[test]
-    fn a_held_out_y_half_that_overflows_gives_r_zero() {
+    fn a_held_out_y_half_near_max_reads_as_y_over_8_on_every_route() {
         let (x, mut y) = linked_blocks(12, 3, 2, 1.0, 5);
         y[(0, 0)] = -f64::MAX;
         y[(6, 0)] = f64::MAX;
-        let (xsc, ysc) = scales(&x, &y);
         let splits = vec![SplitIdx {
             tr: (0..6).collect(),
             te: (6..12).collect(),
         }];
         let opts = Pls3ConfirmatoryTestOpts::default();
-        let r = pls3_split_lv_correlations(
-            x.as_ref(),
-            y.as_ref(),
-            &splits,
-            xsc.as_ref(),
-            ysc.as_ref(),
-            &opts,
-        );
-        assert_eq!(r[0].to_bits(), 0.0_f64.to_bits(), "r = {}", r[0]);
-        let r = pls3_split_lv_correlations_streamed(
-            x.as_ref(),
-            y.as_ref(),
-            &splits,
-            xsc.as_ref(),
-            ysc.as_ref(),
-        );
-        assert_eq!(r[0].to_bits(), 0.0_f64.to_bits(), "streamed r = {}", r[0]);
-        let z = pls3_split_columns_r_primal(
-            x.as_ref(),
-            &observed(y.as_ref()),
-            &splits[0],
-            xsc.as_ref(),
-            ysc.as_ref(),
-            &opts,
-            &[0],
-        );
-        assert_eq!(z[0].to_bits(), 0.0_f64.to_bits(), "primal z = {}", z[0]);
-        let z = crate::dual_route::pls3_split_zbars_columns(
-            &gram(&x, &xsc),
-            &observed(y.as_ref()),
-            &splits,
-            ysc.as_ref(),
-            None,
-            opts.max_iter,
-            opts.tol,
-        );
-        assert_eq!(z[0].to_bits(), 0.0_f64.to_bits(), "gram z = {}", z[0]);
+        let routes = |y: &Mat<f64>| {
+            let (xsc, ysc) = scales(&x, y);
+            let r = pls3_split_lv_correlations(
+                x.as_ref(),
+                y.as_ref(),
+                &splits,
+                xsc.as_ref(),
+                ysc.as_ref(),
+                &opts,
+            );
+            let rs = pls3_split_lv_correlations_streamed(
+                x.as_ref(),
+                y.as_ref(),
+                &splits,
+                xsc.as_ref(),
+                ysc.as_ref(),
+            );
+            let zp = pls3_split_columns_r_primal(
+                x.as_ref(),
+                &observed(y.as_ref()),
+                &splits[0],
+                xsc.as_ref(),
+                ysc.as_ref(),
+                &opts,
+                &[0],
+            );
+            let zg = crate::dual_route::pls3_split_zbars_columns(
+                &gram(&x, &xsc),
+                &observed(y.as_ref()),
+                &splits,
+                ysc.as_ref(),
+                None,
+                opts.max_iter,
+                opts.tol,
+            );
+            [r[0], rs[0], zp[0], zg[0]]
+        };
+        let y8 = Mat::<f64>::from_fn(12, 2, |i, j| y[(i, j)] / 8.0);
+        for (i, (a, b)) in routes(&y).iter().zip(routes(&y8)).enumerate() {
+            assert_close(*a, b, &format!("route {i}"));
+        }
     }
 
     /// Every PLS3 split statistic off the Gram route stays finite on an X
-    /// that overflows only in held-out halves (column 0 at `f64::MAX` on row
+    /// whose plain centring overflows only in held-out halves (column 0 at `f64::MAX` on row
     /// 0 and `-f64::MAX` on row 1: a split holding one of them in each half
     /// overflows when the held-out one is centred): dense `split_nb` (the
     /// streamed body), sparse `split_nb`, and `split_exact` on the primal
@@ -2407,9 +2390,12 @@ mod tests {
     #[test]
     fn pls3_gram_rule_crosses_over_at_the_one_gram_cost() {
         // 60 x 40, q = 3, J = 6 (halves of 30): without the gate's G the
-        // route pays from B' = 11; holding it, wherever n_tr < p.
-        assert!(!dual_route_eligible(None, 60, 40, 3, 9, 6, false));
-        assert!(dual_route_eligible(None, 60, 40, 3, 10, 6, false));
+        // route pays from B' = 10; holding it, wherever n_tr < p.
+        assert!(!dual_route_eligible(None, 60, 40, 3, 8, 6, false));
+        assert!(dual_route_eligible(None, 60, 40, 3, 9, 6, false));
+        // Many targets: the per-column `Ỹ'GỸ` and `q × q` eigendecomposition
+        // keep 60 x 40, q = 200 primal at any B', held G or not.
+        assert!(!dual_route_eligible(None, 60, 40, 200, 999, 6, true));
         assert!(!dual_route_eligible(None, 60, 40, 3, 5, 6, false));
         assert!(dual_route_eligible(None, 60, 40, 3, 5, 6, true));
     }
@@ -3692,5 +3678,55 @@ mod tests {
         assert!(lv1_reach(a(0.5).as_ref(), &lv1(true), 1e-15, &opts).is_some());
         assert!(lv1_reach(a(1.0).as_ref(), &lv1(true), 1e-15, &opts).is_none());
         assert!(lv1_reach(a(0.5).as_ref(), &lv1(false), 1e-15, &opts).is_none());
+    }
+
+    // PLS3 `split_nb` on wide X reads its splits from the gate's G where
+    // `dual_route_eligible` takes the Gram route (q = 3): its statistic is
+    // the `gram=` call's, not the streamed one's bits. Where the rule says
+    // primal (q = 200) it streams X. Either way the gate's G is the only
+    // one built.
+    #[test]
+    #[allow(clippy::many_single_char_names, clippy::similar_names)]
+    fn pls3_split_nb_reads_the_gate_gram() {
+        let (n, p, n_splits) = (60, 200, 8);
+        let opts = Pls3ConfirmatoryTestOpts {
+            args: ConfirmatoryArgs::SplitNb {
+                n_splits,
+                force: true,
+            },
+            seed: Some(31),
+            ..Default::default()
+        };
+        for q in [3, 200] {
+            let (x, y) = linked_blocks(n, p, q, 1.0, 31);
+            let before = crate::held_out_gram::grams_built();
+            let a = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, opts).expect("X call");
+            assert_eq!(crate::held_out_gram::grams_built(), before + 1, "q = {q}");
+            assert_eq!(a.test_method, "split_nb");
+            let stat = a.statistic.unwrap();
+            let (_, mut rng) = crate::rng::resolve_seed(Some(31)).unwrap();
+            let d = draw_design(n, 1, n_splits, &mut rng).unwrap();
+            let xsc = crate::linalg::held_out_scale(x.as_ref(), None, false);
+            let ysc = crate::linalg::held_out_scale(y.as_ref(), None, false);
+            let r = pls3_split_lv_correlations_streamed(
+                x.as_ref(),
+                y.as_ref(),
+                &d.splits,
+                xsc.as_ref(),
+                ysc.as_ref(),
+            );
+            let (n_tr, n_te) = crate::resample::split_sizes(n, 1);
+            let streamed = nb_test(&r, n_tr, n_te).1;
+            if q == 3 {
+                assert!(dual_route_eligible(None, n, p, q, 0, n_splits, true));
+                let g = crate::held_out_gram::gram_matrix(x.as_ref(), false).expect("gram");
+                let b = pls3_confirmatory_test_gram(&g, y.as_ref(), 1, opts).expect("gram call");
+                assert!((stat - b.statistic.unwrap()).abs() < 1e-12, "{stat}");
+                assert_ne!(stat.to_bits(), streamed.to_bits(), "the Gram route");
+            } else {
+                assert!(!dual_route_eligible(None, n, p, q, 0, n_splits, true));
+                assert_eq!(stat.to_bits(), streamed.to_bits(), "the streamed route");
+            }
+        }
     }
 }

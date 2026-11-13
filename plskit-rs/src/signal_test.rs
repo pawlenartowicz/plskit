@@ -344,11 +344,13 @@ impl SplitNbResolution {
 /// reported `n_eff` can never disagree by a rounding step.
 ///
 /// Reads X as the held-out tests do: centred over all rows (weighted means
-/// under `w_norm`) and divided by `scale`, the column scale the caller
+/// under `w_norm`), divided by `scale`, the column scale the caller
 /// computed once (`linalg::held_out_scale`: the fit's scale, or ones under
-/// `pre_standardized`, where X is only centred). Block by block on wide
-/// `x`, into its row-side Gram matrix (`HeldOutGram::from_x`), which the
-/// resolution keeps; into a copy on tall `x`.
+/// `pre_standardized`, where X is only centred), and its rows scaled by
+/// `√w_norm`, so a row of weight 0 does not enter the rank. Block by block
+/// on wide `x`, into its row-side Gram matrix (`HeldOutGram::from_x`),
+/// which the resolution keeps without the row scaling; into a copy on tall
+/// `x`.
 pub(crate) fn resolve_split_nb(
     x: MatRef<'_, f64>,
     w_norm: Option<ColRef<'_, f64>>,
@@ -363,12 +365,14 @@ pub(crate) fn resolve_split_nb(
     // `sr` is computed unconditionally even when the column precheck already
     // decided: it is reported as the gate's `stable_rank` diagnostic either way.
     let sr = if let Some(g) = &gram {
-        g.stable_rank()
+        w_norm.map_or_else(|| g.stable_rank(), |w| g.with_row_weights(w).stable_rank())
     } else {
         // Tall X: the Gram matrix is on the column side and does not sum
         // over column blocks.
         let rows: Vec<usize> = (0..n).collect();
-        let (xs, _, _) = crate::linalg::center_rows_fro(x, &rows, w_norm, None, scale);
+        let sw = w_norm.map(crate::linalg::sqrt_col);
+        let (xs, _, _) =
+            crate::linalg::center_rows_fro(x, &rows, w_norm, sw.as_ref().map(Col::as_ref), scale);
         crate::linalg::stable_rank(xs.as_ref())
     };
     let fires = split_nb_gate_fires(p, n_eff, sr);
@@ -546,9 +550,9 @@ pub struct SplitNbGateOutput {
     /// to `split_exact` unless the caller forces it.
     pub fires: bool,
     /// Stable rank of X as the tests read it: standardized, or only centred
-    /// under `pre_standardized`. NaN when its Gram matrix is not finite (an
-    /// entry of `x` near `±f64::MAX` whose standardization overflows, or a
-    /// product that overflows); the gate then fires.
+    /// under `pre_standardized`, with rows scaled by `√w` under weights (a
+    /// row of weight 0 does not count). NaN when its Gram matrix is not
+    /// finite (a product that overflows); the gate then fires.
     pub stable_rank: f64,
     /// Kish's effective sample size. Equals `n_samples` for uniform/absent weights.
     pub n_eff: f64,
@@ -608,9 +612,13 @@ pub(crate) fn split_nb_gate_impl(
 /// subsampling pass (separate child-seed branch from the test pass) and
 /// populates `ConfirmatoryTestOutput.ci`.
 ///
-/// The CI is beta, not to be trusted yet: it scales each half with its own
-/// moments, while the held-out tests scale once over all rows, so it no
-/// longer estimates exactly what they report.
+/// The CI is beta, not to be trusted yet. It scales X and y once over all
+/// rows, as the held-out tests do (not under `pre_standardized`). Its
+/// `holdout_corr` half split centres the training half with its own means
+/// and the held-out half with the training means, as the held-out tests do.
+/// The β and leverage resamples are centred with their own means too, except
+/// under `pre_standardized`, where they use X and y as given, as the
+/// reference fit does.
 #[derive(Debug, Clone, Copy)]
 pub struct CIOpts {
     /// Number of subsampling resamples. Must be ≥ 100.
@@ -1045,19 +1053,28 @@ fn null_y_map(ny: MatRef<'_, f64>) -> impl Fn(usize, faer::MatMut<'_, f64>) + Sy
     move |c, m| m.col_mut(0).copy_from(ny.col(c - 1))
 }
 
-/// `y` and each `null_y` column minus `y`'s all-row (weighted) mean. The
-/// split tests correlate held-out predictions with `√w·y` on `y` as given,
-/// so without this shift `y`'s location enters their statistic under
-/// weights, and costs the no-refit routes precision when it is far from 0.
+/// `y` minus its all-row (weighted) mean, and each `null_y` column minus
+/// its own weighted mean under weights (minus `y`'s mean unweighted, where
+/// the statistic does not read a column's location). The split tests
+/// correlate held-out predictions with `√w·y` on `y` as given, so without
+/// this shift a column's location enters their statistic under weights, and
+/// costs the no-refit routes precision when it is far from 0. Permutation
+/// nulls permute the centred `y`, so they keep `y`'s constant.
 fn centre_targets(
     y: ColRef<'_, f64>,
     w: Option<ColRef<'_, f64>>,
     null_y: Option<MatRef<'_, f64>>,
 ) -> (Col<f64>, Option<Mat<f64>>) {
-    let c = crate::linalg::standardize1_weighted(y, w).1;
+    let mean = |v: ColRef<'_, f64>| crate::linalg::standardize1_weighted(v, w).1;
+    let c = mean(y);
     (
         Col::from_fn(y.nrows(), |i| y[i] - c),
-        null_y.map(|m| Mat::from_fn(m.nrows(), m.ncols(), |i, j| m[(i, j)] - c)),
+        null_y.map(|m| {
+            let cs: Vec<f64> = (0..m.ncols())
+                .map(|j| w.map_or(c, |_| mean(m.col(j))))
+                .collect();
+            Mat::from_fn(m.nrows(), m.ncols(), |i, j| m[(i, j)] - cs[j])
+        }),
     )
 }
 
@@ -1615,7 +1632,11 @@ pub(crate) fn check_gram_flag(pre_standardized: bool) -> PlsKitResult<()> {
 /// from `G`'s stable rank. The draws from the seed are the X call's, so on
 /// `gram_matrix(x, flag)` every method equals the X call on `x` with the
 /// flag to rounding, `score` on X centred over all rows (it reads the
-/// centred `G`, while the X call reads X as given under the flag).
+/// centred `G`, while the X call reads X as given under the flag). Under
+/// the flag, on X whose largest entry is outside `[2^-256, 2^256]`, `G` is
+/// that of `X/c` (`c` a power of two `gram_matrix` does not store), so the
+/// `score` statistic is the one of `X/c` (the X call's divided by `c²`);
+/// its p-value is the X call's.
 #[allow(clippy::many_single_char_names, clippy::too_many_lines)]
 fn confirmatory_test_gram(
     gram: &crate::held_out_gram::GramMatrixOutput,
@@ -2346,32 +2367,17 @@ fn run_raw_perm(
         w_norm.is_some(),
     );
     let r2: Mat<f64> = match route {
-        // The K = 1 closed form on the call's all-row Gram matrix; where
-        // `block_gram` gives none, the primal route, whose fold checks then
-        // answer the call.
-        ReplicateRoute::Special => match block_gram(x, scale, None) {
-            Some(g) => {
-                // `y_mat` is not covered by the dual route's `n_tr` cap (see
-                // `DUAL_ROUTE_MAX_N_TR`), which bounds only the Gram matrix.
-                let y_mat = cols.matrix(0, cols.len());
-                one_row(&crate::dual_route::pls1_cv_r2_columns(
-                    &g,
-                    y_mat.as_ref(),
-                    &folds,
-                )?)
-            }
-            None => pooled_cv_r2_columns(
-                ReplicateRoute::Primal,
-                x,
+        // The K = 1 closed form on the call's all-row Gram matrix.
+        ReplicateRoute::Special => {
+            // `y_mat` is not covered by the dual route's `n_tr` cap (see
+            // `DUAL_ROUTE_MAX_N_TR`), which bounds only the Gram matrix.
+            let y_mat = cols.matrix(0, cols.len());
+            one_row(&crate::dual_route::pls1_cv_r2_columns(
+                &block_gram(x, scale, None),
+                y_mat.as_ref(),
                 &folds,
-                w_norm,
-                scale,
-                ks,
-                opts.keep,
-                cols.len(),
-                &|c| cols.column(c),
-            )?,
-        },
+            )?)
+        }
         // Folds outer, replicate columns inner: each fold's X side (gather,
         // centre, scale, √w) is built once instead of once per replicate.
         // The folds run in batches the memory budget allows, the
@@ -2522,38 +2528,20 @@ pub(crate) fn fold_train_rows(folds: &[Vec<usize>], fi: usize) -> Vec<usize> {
 /// The unweighted all-row Gram matrix whose blocks the n-space route and
 /// the K = 1 fold closed form read: `held` when the call holds it (the
 /// `split_nb` gate's, `HeldOutGram::from_x` of `x` and `scale`), else one
-/// built from `x` and `scale`. `None` when the answer would depend on a
-/// check of the halves this route does not write: a half of some fold or
-/// split could fail to be finite, or `G` is not finite. The caller then
-/// takes the route that prepares and checks the halves. The screen reads X
-/// once: an entry of a half is `(x − mean)/scale` with `|mean| ≤ max|x|`, so
-/// it is finite whenever every column `j` has `max_i |x_ij| ≤ MAX/(4n)` and
-/// `max_i |x_ij| ≤ (MAX/4)·scale_j`.
+/// built from `x` and `scale`. Unweighted, every half of a finite X on the
+/// all-row scale is finite (`linalg::requarter` centres without
+/// overflow, and `linalg::held_out_scale` keeps a flagged X within `2^±256`),
+/// and so is `G`.
 pub(crate) fn block_gram<'a>(
     x: MatRef<'_, f64>,
     scale: ColRef<'_, f64>,
     held: Option<&'a HeldOutGram>,
-) -> Option<std::borrow::Cow<'a, HeldOutGram>> {
+) -> std::borrow::Cow<'a, HeldOutGram> {
     use std::borrow::Cow;
-    #[allow(clippy::cast_precision_loss)]
-    let row_cap = f64::MAX / (4.0 * x.nrows() as f64);
-    let halves_finite = (0..x.ncols()).all(|j| {
-        // `max` skips a NaN, so finiteness is checked on its own; `a <= b`,
-        // so a NaN scale fails.
-        let m = (0..x.nrows()).fold(0.0_f64, |m, i| m.max(x[(i, j)].abs()));
-        m.is_finite()
-            && (0..x.nrows()).all(|i| !x[(i, j)].is_nan())
-            && m <= row_cap
-            && m <= f64::MAX / 4.0 * scale[j]
-    });
-    if !halves_finite {
-        return None;
-    }
-    let g = held.map_or_else(
+    held.map_or_else(
         || Cow::Owned(HeldOutGram::from_x(x, None, scale)),
         Cow::Borrowed,
-    );
-    g.g().is_all_finite().then_some(g)
+    )
 }
 
 /// Prepare fold `fi` of `folds` once. `weights` are the caller's mean-one
@@ -2573,8 +2561,7 @@ pub(crate) fn block_gram<'a>(
 /// the error every column's fit on this fold met first (`pls1_fit` checks X
 /// before y), so the driver returns the same error a per-column fit of
 /// column 0 would. `NonFiniteInput` too when the validation block is not
-/// finite (a finite X can overflow there alone, when a validation row sits
-/// far from the training means).
+/// finite.
 pub(crate) fn prepare_cv_fold(
     x: MatRef<'_, f64>,
     folds: &[Vec<usize>],
@@ -2893,9 +2880,7 @@ type FoldContributions = PlsKitResult<Vec<PlsKitResult<Vec<(f64, f64)>>>>;
 /// in parallel, so no `B·n` outcome buffer is held. On `Nspace` the call
 /// builds one all-row Gram matrix (`HeldOutGram::from_x` on `x` and
 /// `scale`) and each fold runs [`fold_columns_nspace`], which prepares no
-/// half of X; where [`block_gram`] gives
-/// none, the call runs on `Primal`, whose fold checks then answer it;
-/// `column_y(c)` builds
+/// half of X; `column_y(c)` builds
 /// column `c` (length n, raw) inside the unit that needs it. Every column
 /// is computed in every fold; the results are then read in fold order and
 /// `ss_res` and `ss_tot` accumulate per column from `0.0`, exactly as the
@@ -2928,16 +2913,10 @@ pub(crate) fn pooled_cv_r2_columns(
         "ks.last() <= p is the caller's precondition"
     );
     let par = crate::fit::par_fixed();
-    let gram = matches!(route, ReplicateRoute::Nspace)
-        .then(|| {
-            debug_assert!(weights.is_none() && keep.is_none());
-            block_gram(x, scale, None)
-        })
-        .flatten();
-    let route = match (route, &gram) {
-        (ReplicateRoute::Nspace, None) => ReplicateRoute::Primal,
-        _ => route,
-    };
+    let gram = matches!(route, ReplicateRoute::Nspace).then(|| {
+        debug_assert!(weights.is_none() && keep.is_none());
+        block_gram(x, scale, None)
+    });
     let unit_bytes = fold_unit_bytes(
         route,
         x.nrows(),
@@ -3230,8 +3209,8 @@ pub(crate) struct PreparedSplit {
     /// on the training half, and the same check on the held-out half, whose
     /// non-finite entries would make every score non-finite. Done once per
     /// split instead of once per column. When false, every column's `r` is
-    /// 0, as the failed per-half fit gave. Mirrors the PLS3 held-out check in
-    /// `pls3_signal_test::pls3_split_columns_z_primal` (change together).
+    /// 0, as the failed per-half fit gave. Only weights can make it false: a
+    /// row of zero weight far from the rest is outside the all-row scale.
     pub(crate) x_finite: bool,
     /// `xs_tr.norm_l2()`, taken once per split rather than once per column:
     /// the same call on the same view, so the same bits.
@@ -3718,23 +3697,9 @@ pub(crate) fn column_extremes(x: MatRef<'_, f64>) -> Vec<(f64, f64)> {
 
 /// `‖X̃_tr‖_F` of the training rows `tr` as [`prepare_split`] gives it,
 /// from their means without writing a half
-/// (`linalg::centered_part_moments`), and whether both halves
-/// [`prepare_split`] would write, centred by those means and divided by
-/// `scale`, are finite: read at each column's extremes `ext`
-/// ([`column_extremes`]), since the centring and the scaling are monotone
-/// in the entry. Unweighted.
-fn halves_finite(
-    x: MatRef<'_, f64>,
-    tr: &[usize],
-    scale: ColRef<'_, f64>,
-    ext: &[(f64, f64)],
-) -> (f64, bool) {
-    let (m, fro) = crate::linalg::centered_part_moments(x, tr, None, scale, Par::Seq);
-    // The standardizers' element expression, `(v − mean)/scale`.
-    let finite = ext.iter().enumerate().all(|(j, &(hi, lo))| {
-        ((hi - m[j]) / scale[j]).is_finite() && ((lo - m[j]) / scale[j]).is_finite()
-    });
-    (fro, finite)
+/// (`linalg::centered_part_moments`). Unweighted.
+fn train_fro(x: MatRef<'_, f64>, tr: &[usize], scale: ColRef<'_, f64>) -> f64 {
+    crate::linalg::centered_part_moments(x, tr, None, scale, Par::Seq).1
 }
 
 /// The all-row frame of the moment arms: the column means `m` of X over
@@ -3826,9 +3791,8 @@ pub(crate) fn test_moments_route(
 /// [`TestMoments`] and, from [`crate::cell_sums::cell_grams`], its training
 /// half's `X̃_A'1` and, with `with_grams` (for [`CellFrame::take_grams`]),
 /// its centred cross-product matrix `S_A`; and per split
-/// [`halves_finite`]: `‖X̃_tr‖_F` as [`prepare_split`] gives it (so the
-/// truncation floor reads the bits the other arms read) and whether the
-/// halves it would write are finite.
+/// [`train_fro`]: `‖X̃_tr‖_F` as [`prepare_split`] gives it (so the
+/// truncation floor reads the bits the other arms read).
 pub(crate) struct CellFrame {
     pub(crate) xs: Mat<f64>,
     pub(crate) x_sum: Col<f64>,
@@ -3837,7 +3801,6 @@ pub(crate) struct CellFrame {
     s_a: Vec<Mat<f64>>,
     pub(crate) xa_1: Vec<Col<f64>>,
     pub(crate) tr_fro: Vec<f64>,
-    pub(crate) x_finite: Vec<bool>,
 }
 
 impl CellFrame {
@@ -3851,27 +3814,18 @@ impl CellFrame {
         let all: Vec<usize> = (0..x.nrows()).collect();
         let xs = crate::linalg::standardize_apply_rows(x, &all, mean.as_ref(), scale, None);
         let (s_a, xa_1) = crate::cell_sums::cell_grams(xs.as_ref(), d, with_grams);
-        let ext = column_extremes(x);
         // One unit is one test half's copy while it is factored, the
         // per-split moment arm's unit (`cell_sums::cells_eligible` counts one).
         let n_b = d.splits.first().map_or(0, |sp| sp.te.len());
         let unit = test_moments_bytes(n_b, x.ncols());
         let per_split = crate::resample::map_units(d.splits.len(), unit, |j| {
             let sp = &d.splits[j];
-            let (fro, finite) = halves_finite(x, &sp.tr, scale, &ext);
             (
                 TestMoments::new(x, &sp.te, mean.as_ref(), scale),
-                fro,
-                finite,
+                train_fro(x, &sp.tr, scale),
             )
         });
-        let mut tms = Vec::with_capacity(per_split.len());
-        let (mut tr_fro, mut x_finite) = (Vec::new(), Vec::new());
-        for (tm, fro, finite) in per_split {
-            tms.push(tm);
-            tr_fro.push(fro);
-            x_finite.push(finite);
-        }
+        let (tms, tr_fro): (Vec<_>, Vec<_>) = per_split.into_iter().unzip();
         Self {
             x_fro: xs.norm_l2(),
             xs,
@@ -3880,7 +3834,6 @@ impl CellFrame {
             s_a,
             xa_1,
             tr_fro,
-            x_finite,
         }
     }
 
@@ -4051,9 +4004,6 @@ fn nr_cell_r(
     n_te: usize,
     levels: usize,
 ) -> Option<f64> {
-    if !f.x_finite[j] {
-        return Some(0.0);
-    }
     let CellColumn {
         sum_b,
         css_b,
@@ -4107,9 +4057,6 @@ fn gram_p_cell_r(
     ks: &[usize],
     keep: Option<usize>,
 ) -> Vec<Option<f64>> {
-    if !f.x_finite[j] {
-        return vec![Some(0.0); ks.len()];
-    }
     let Some(cc) = cell_column(f, cs, j, c, (n_tr, n_te), crate::dual_route::RESOLVE_BAND) else {
         return vec![None; ks.len()];
     };
@@ -4430,7 +4377,7 @@ fn split_unit_bytes(
 /// [`split_columns_nspace`] instead, in fixed runs, on the blocks of one all-row Gram matrix: `gram`, the
 /// unweighted `HeldOutGram::from_x` of `x` and `scale` when the caller
 /// holds it (the `split_nb` gate's), else one built here
-/// ([`block_gram`]); where that gives none, the call runs on `Primal`. `column_y(c)` builds
+/// ([`block_gram`]). `column_y(c)` builds
 /// column `c` (raw, length n) inside the unit (or run) that needs it, so no
 /// `B·n` buffer is held. On the `GramP` route, when [`test_moments_route`]
 /// admits the loop, each split also builds its [`TestMoments`] and every
@@ -4480,16 +4427,10 @@ pub(crate) fn split_zbars_columns(
     debug_assert!(k <= x.ncols(), "k <= p is the caller's precondition");
     debug_assert!(design.is_none_or(|d| std::ptr::eq(d.splits.as_ptr(), splits.as_ptr())));
     let par = crate::fit::par_fixed();
-    let all = matches!(route, ReplicateRoute::Nspace)
-        .then(|| {
-            debug_assert!(w_norm.is_none() && keep.is_none());
-            block_gram(x, scale, gram)
-        })
-        .flatten();
-    let route = match (route, &all) {
-        (ReplicateRoute::Nspace, None) => ReplicateRoute::Primal,
-        _ => route,
-    };
+    let all = matches!(route, ReplicateRoute::Nspace).then(|| {
+        debug_assert!(w_norm.is_none() && keep.is_none());
+        block_gram(x, scale, gram)
+    });
     let unit_bytes = split_unit_bytes(route, x.ncols(), splits, k, n_cols);
     // The Gram-p arm scores the test halves from moments when
     // `test_moments_route` admits the loop.
@@ -4716,7 +4657,7 @@ fn run_split_nb(
                     opts.keep.is_none() && w_norm.is_none(),
                 )
         })
-        .and_then(|g| block_gram(x, scale, Some(g)));
+        .map(|g| block_gram(x, scale, Some(g)));
     let r_splits = if split_exact_no_refit_route(k, opts.keep) {
         split_nb_correlations_nr(x, y, &splits, w_norm, scale, gram)
     } else if let Some(g) = &nspace_gram {
@@ -5347,8 +5288,7 @@ fn nr_column_r_primal(
 /// tests), `r` is finite and the kept component's `t't` clears the
 /// kernel's exit through its lower bound `‖X̃_tr'z‖²/‖z‖²`. Any other column
 /// is `None`: the caller computes it on route A's test-row arm
-/// ([`nr_split_r`]). A split whose halves are not both finite
-/// ([`halves_finite`]) gives `0` in every column, as on route A.
+/// ([`nr_split_r`]).
 #[allow(clippy::many_single_char_names, clippy::similar_names)]
 fn nr_split_r_moments(
     x: MatRef<'_, f64>,
@@ -5356,15 +5296,10 @@ fn nr_split_r_moments(
     sp: &SplitIdx,
     scale: ColRef<'_, f64>,
     am: &AllRowMoments,
-    ext: &[(f64, f64)],
 ) -> Vec<Option<f64>> {
     use crate::linalg::row_subset;
     let (n_cols, p_features) = (y_mat.ncols(), x.ncols());
     let (n_tr, n_te) = (sp.tr.len(), sp.te.len());
-    if !halves_finite(x, &sp.tr, scale, ext).1 {
-        // The refit route's answer for a non-finite half, as on route A.
-        return vec![Some(0.0); n_cols];
-    }
     let y_te = row_subset(y_mat, &sp.te);
     let shifted = |idx: &[usize]| {
         Mat::<f64>::from_fn(idx.len(), n_cols, |i, c| y_mat[(idx[i], c)] - am.y_shift[c])
@@ -5799,12 +5734,8 @@ fn split_perm_nr_zbars(
     let cells = design.filter(|d| {
         moments && crate::cell_sums::cells_eligible(d, p_features, batch, w_norm.is_some())
     });
-    let am = (moments && cells.is_none()).then(|| {
-        (
-            AllRowMoments::new(x, scale, n_cols, &|c| y_mat.col(c).to_owned()),
-            column_extremes(x),
-        )
-    });
+    let am = (moments && cells.is_none())
+        .then(|| AllRowMoments::new(x, scale, n_cols, &|c| y_mat.col(c).to_owned()));
     let unit_bytes = if am.is_some() {
         moment_bytes
     } else {
@@ -5842,9 +5773,7 @@ fn split_perm_nr_zbars(
                     .map(Some)
                     .collect()
             }
-            (None, Some((am, ext))) => {
-                nr_split_r_moments(x, y_mat.as_ref(), &splits[j], scale, am, ext)
-            }
+            (None, Some(am)) => nr_split_r_moments(x, y_mat.as_ref(), &splits[j], scale, am),
             (None, None) => nr_split_r(
                 x,
                 y_mat.as_ref(),
@@ -5942,11 +5871,14 @@ fn run_score(
     // Standardize with weighted moments when weights are present (matching
     // pls1_fit's path); the √w row-scaling below then sits on top.
     // Pre-standardized input is used as given, copied only when it is not
-    // column-major (`linalg::col_major_or_copy`).
-    let x_copy = if opts.pre_standardized {
-        crate::linalg::col_major_or_copy(x)
+    // column-major (`linalg::col_major_or_copy`), or divided by a power of
+    // two `c` when far from unit scale (`linalg::pre_standardized_input`):
+    // that leaves the p-value as it is and divides the statistic by `c²`,
+    // multiplied back below.
+    let (x_copy, c) = if opts.pre_standardized {
+        crate::linalg::pre_standardized_input(x)
     } else {
-        None
+        (None, 1.0)
     };
     let xs_std: Option<Mat<f64>> = if opts.pre_standardized {
         None
@@ -5982,9 +5914,8 @@ fn run_score(
         (None, ys)
     };
     let xs_eff: MatRef<'_, f64> = xs_w.as_ref().map_or(xs, Mat::as_ref);
-    // A finite X can overflow in `x − mean` (entries near `±f64::MAX` of
-    // both signs): non-finite input, as `pls1_fit` answers it, rather than
-    // an infinite statistic.
+    // A non-finite standardized X is non-finite input, as `pls1_fit`
+    // answers it, rather than an infinite statistic.
     if xs_std.is_some() {
         crate::fit::check_finite_mat(xs_eff)?;
     }
@@ -6005,7 +5936,11 @@ fn run_score(
         eigenvalues_symmetric(gram.as_ref(), par)
     };
 
-    Ok(score_result(t_obs, &lambdas))
+    let mut r = score_result(t_obs, &lambdas);
+    // Twice by `c`: `c²` alone can leave the `f64` range.
+    r.statistic *= c;
+    r.statistic *= c;
+    Ok(r)
 }
 
 /// The score test's p-value for `T = t_obs` against the Welch-Satterthwaite
@@ -6273,7 +6208,7 @@ mod tests {
         let (base, _) = signal_data(20, p, 201);
         let x = Mat::<f64>::from_fn(n, p, |i, j| base[(i / 2, j)] + 0.3 * j as f64);
         let scale = crate::linalg::held_out_scale(x.as_ref(), None, false);
-        let g = block_gram(x.as_ref(), scale.as_ref(), None).expect("finite G");
+        let g = block_gram(x.as_ref(), scale.as_ref(), None);
         let sp = SplitIdx {
             tr: (0..20).collect(),
             te: (20..40).collect(),
@@ -6351,7 +6286,7 @@ mod tests {
         let b3 = Mat::<f64>::from_fn(3, p, |i, j| (((i + 1) * (j + 2)) % 11) as f64 - 5.0);
         let x3 = crate::linalg::mat_mul(a3.as_ref(), b3.as_ref(), Par::Seq);
         let scale3 = crate::linalg::held_out_scale(x3.as_ref(), None, false);
-        let g3 = block_gram(x3.as_ref(), scale3.as_ref(), None).expect("finite G");
+        let g3 = block_gram(x3.as_ref(), scale3.as_ref(), None);
         let prep3 = prepare_split(x3.as_ref(), &sp, None, scale3.as_ref());
         let ones = Col::<f64>::from_fn(20, |_| 1.0);
         let basis = orthonormal_basis(ones.as_ref(), prep3.xs_tr.as_ref(), 1e-8);
@@ -6413,7 +6348,7 @@ mod tests {
             }
         });
         let scalec = crate::linalg::held_out_scale(xc.as_ref(), None, false);
-        let gc = block_gram(xc.as_ref(), scalec.as_ref(), None).expect("finite G");
+        let gc = block_gram(xc.as_ref(), scalec.as_ref(), None);
         let prepc = prepare_split(xc.as_ref(), &sp, None, scalec.as_ref());
         let yc = Col::<f64>::from_fn(n, |i| base[(i / 2, 0)] + 0.1 * noise[i]);
         let y_mat = nr_outcome_matrix(&Columns {
@@ -6502,15 +6437,8 @@ mod tests {
             });
             let route_a = nr_split_r(x, y_mat.as_ref(), &sp, None, scale.as_ref(), false)[0];
             let am1 = AllRowMoments::new(x, scale.as_ref(), 1, &|_| y_mat.col(0).to_owned());
-            let moment_1 = nr_split_r_moments(
-                x,
-                y_mat.as_ref(),
-                &sp,
-                scale.as_ref(),
-                &am1,
-                &column_extremes(x),
-            )[0]
-            .unwrap_or(route_a);
+            let moment_1 = nr_split_r_moments(x, y_mat.as_ref(), &sp, scale.as_ref(), &am1)[0]
+                .unwrap_or(route_a);
             let g_block = split_block(ReplicateRoute::GramP, &prep, Par::Seq);
             let y_of = |i: usize| y[i];
             let gram_k = split_unit(&g_block, &prep, &sp, &y_of, &[k], None)[0];
@@ -6892,126 +6820,90 @@ mod tests {
 
     // ── raw_perm dual (Gram) route tests ────────────────────────────────
 
-    /// A finite X whose standardization overflows: rows 0 and 1 of column 0
+    /// A finite X whose plain centring overflows: rows 0 and 1 of column 0
     /// at `f64::MAX`, row 2 at `-f64::MAX`, so `x − mean` overflows on row 2
     /// for the full X and for every training half or fold holding all
-    /// three rows.
+    /// three rows (`linalg::requarter` rewrites those columns from their
+    /// quarter).
     fn centering_overflow(x: &mut Mat<f64>) {
         x[(0, 0)] = f64::MAX;
         x[(1, 0)] = f64::MAX;
         x[(2, 0)] = -f64::MAX;
     }
 
-    /// The gate on a non-finite Gram matrix reports a NaN stable rank and
-    /// fires, on the tall and the wide branch: for a finite standardized X
-    /// whose Gram matrix overflows (a zero-weight row holding 1e200; the
-    /// gate standardizes with the weights but does not √w-scale the rows),
-    /// and on the tall branch for X whose standardization overflows. The
-    /// wide branch centres that X from quartered blocks
-    /// (`HeldOutGram::from_x`), so its rank is finite.
+    /// The gate on X far from unit scale, on the tall and the wide branch:
+    /// X whose plain centring overflows ([`centering_overflow`]) gets the
+    /// rank of X/8, and a zero-weight row holding 1e200 (whose product
+    /// overflows before the √w row scaling zeroes it) gets a finite rank.
     #[test]
-    fn split_nb_gate_fires_with_a_nan_rank_on_a_non_finite_gram_matrix() {
+    fn split_nb_gate_reads_x_near_max_and_a_far_zero_weight_row() {
         for (n, p) in [(40, 6), (6, 40), (400, 30), (30, 400)] {
             let (mut x, _) = signal_data(n, p, 3);
             centering_overflow(&mut x);
+            let x8 = Mat::<f64>::from_fn(n, p, |i, j| x[(i, j)] / 8.0);
             let g = split_nb_gate(x.as_ref(), None, false).expect("finite X");
-            if n > p {
-                assert!(g.stable_rank.is_nan() && g.fires, "{n}x{p}: {g:?}");
-            } else {
-                assert!(g.stable_rank.is_finite(), "{n}x{p}: {g:?}");
-            }
+            let g8 = split_nb_gate(x8.as_ref(), None, false).expect("finite X");
+            assert!(
+                (g.stable_rank - g8.stable_rank).abs() <= 1e-12 * g8.stable_rank,
+                "{n}x{p}: {g:?} vs {g8:?}"
+            );
 
             let (mut x, _) = signal_data(n, p, 3);
             x[(0, 0)] = 1e200;
             let w = Col::<f64>::from_fn(n, |i| if i == 0 { 0.0 } else { 1.0 });
             let g = split_nb_gate(x.as_ref(), Some(w.as_ref()), false).expect("finite X");
+            assert!(g.stable_rank.is_finite(), "{n}x{p}, weighted: {g:?}");
+        }
+    }
+
+    /// The gate reads X with the √w row scaling of the tests: a row of
+    /// weight 0 shifted by +50 leaves the stable rank of X without that row,
+    /// on the wide and the tall branch.
+    #[test]
+    fn split_nb_gate_ignores_a_zero_weight_row() {
+        for (n, p) in [(40, 200), (400, 30)] {
+            let (mut x, _) = signal_data(n, p, 5);
+            for j in 0..p {
+                x[(0, j)] += 50.0;
+            }
+            let w = Col::<f64>::from_fn(n, |i| if i == 0 { 0.0 } else { 1.0 });
+            let g = split_nb_gate(x.as_ref(), Some(w.as_ref()), false).unwrap();
+            let rest = Mat::<f64>::from_fn(n - 1, p, |i, j| x[(i + 1, j)]);
+            let want = split_nb_gate(rest.as_ref(), None, false).unwrap();
             assert!(
-                g.stable_rank.is_nan() && g.fires,
-                "{n}x{p}, weighted: {g:?}"
+                (g.stable_rank - want.stable_rank).abs() <= 1e-10 * want.stable_rank,
+                "{n}x{p}: {g:?} vs {want:?}"
             );
         }
     }
 
-    /// The gates inside the confirmatory tests meet a non-finite Gram
-    /// matrix: PLS1 `split_nb` and `auto`, and PLS3 `split_nb`, return a
-    /// result rather than panic in the eigendecomposition, and the fired
-    /// gate reroutes `split_nb` to `split_exact`. Tall PLS1 X overflows in
-    /// its standardization ([`centering_overflow`]); wide PLS1 X holds 1e200
-    /// on a zero-weight row; wide PLS3 X holds 1e200 under
-    /// `pre_standardized_x`.
+    /// PLS1 `split_nb` meets a non-finite Gram matrix in its gate and returns
+    /// a result rather than panic in the eigendecomposition: the NaN rank
+    /// fires the gate, which reroutes to `split_exact`. Wide X holds 1e200
+    /// on a row of subnormal weight, whose product overflows and which the
+    /// √w row scaling does not zero (a weight of 0 would). PLS3 has no
+    /// weights, and a finite X gives it a finite Gram matrix.
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn split_nb_reroutes_on_a_non_finite_gram_matrix_instead_of_panicking() {
-        for (n, p, args) in [
-            (
-                40,
-                200,
-                ConfirmatoryArgs::SplitNb {
-                    n_splits: 6,
-                    force: false,
-                },
-            ),
-            (
-                600,
-                20,
-                ConfirmatoryArgs::SplitNb {
-                    n_splits: 6,
-                    force: false,
-                },
-            ),
-            (
-                1200,
-                20,
-                ConfirmatoryArgs::Auto {
-                    n_perm: 19,
-                    n_splits: 6,
-                },
-            ),
-        ] {
-            let (mut x, y) = signal_data(n, p, 3);
-            let w = Col::<f64>::from_fn(n, |i| if i == 0 { 0.0 } else { 1.0 });
-            let weights = if n < p {
-                x[(0, 0)] = 1e200;
-                Some(w.as_ref())
-            } else {
-                centering_overflow(&mut x);
-                None
-            };
-            let r = pls1_confirmatory_test(
-                ConfirmatoryTestInput::Raw {
-                    x: x.as_ref(),
-                    y: y.as_ref(),
-                    k: Some(&[1]),
-                    weights,
-                    covariates: None,
-                    null_y: None,
-                },
-                ConfirmatoryTestOpts {
-                    args,
-                    seed: Some(7),
-                    ..Default::default()
-                },
-            )
-            .expect("a result");
-            assert_eq!(r.test_method, "split_exact", "{n}x{p} {args:?}");
-            assert!(
-                r.stable_rank.is_some_and(f64::is_nan),
-                "{n}x{p} {args:?}: {:?}",
-                r.stable_rank
-            );
-        }
-        let (mut x, _) = signal_data(40, 200, 3);
-        let y = Mat::<f64>::from_fn(40, 3, |i, j| x[(i, j + 1)]);
+        let (n, p) = (40, 200);
+        let (mut x, y) = signal_data(n, p, 3);
+        let w = Col::<f64>::from_fn(n, |i| if i == 0 { 1e-320 } else { 1.0 });
         x[(0, 0)] = 1e200;
-        let r = crate::pls3_confirmatory_test(
-            x.as_ref(),
-            y.as_ref(),
-            1,
-            crate::Pls3ConfirmatoryTestOpts {
+        let r = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: Some(&[1]),
+                weights: Some(w.as_ref()),
+                covariates: None,
+                null_y: None,
+            },
+            ConfirmatoryTestOpts {
                 args: ConfirmatoryArgs::SplitNb {
                     n_splits: 6,
                     force: false,
                 },
-                pre_standardized_x: true,
                 seed: Some(7),
                 ..Default::default()
             },
@@ -7025,76 +6917,98 @@ mod tests {
         );
     }
 
-    /// A finite X whose centering overflows ([`centering_overflow`]) is
-    /// non-finite input to the fits and to the `score` test, as it is to
-    /// `raw_perm`: `pls1_fit` at k = 1 on a tall and a wide X (both take the
-    /// implicit route), `pls3_fit` at k = 1 with three targets, and `score`
-    /// on a design under and over its `d <= n` branch.
+    /// `|a − b| ≤ 1e-12·max|b|` entry by entry: what the same computation
+    /// gives on X and on X divided by a power of two.
+    fn assert_scaled_close(a: &[f64], b: &[f64], what: &str) {
+        assert_eq!(a.len(), b.len(), "{what}");
+        let tol = 1e-12 * b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        for (i, (u, v)) in a.iter().zip(b).enumerate() {
+            assert!((u - v).abs() <= tol, "{what} [{i}]: {u} vs {v}");
+        }
+    }
+
+    /// The statistic and p of two confirmatory results, for
+    /// [`assert_scaled_close`].
+    fn stat_p(r: &ConfirmatoryTestOutput) -> [f64; 2] {
+        [r.statistic.unwrap_or(f64::NAN), r.pvalue]
+    }
+
+    /// A finite X whose plain centring overflows ([`centering_overflow`])
+    /// gives the fits and the `score` test what X/8 gives: `pls1_fit` at
+    /// k = 1 on a tall and a wide X (both take the implicit route),
+    /// `pls3_fit` at k = 1 with three targets, and `score` on a design under
+    /// and over its `d <= n` branch.
     #[test]
-    fn fits_and_score_reject_x_whose_centering_overflows() {
+    fn fits_and_score_read_x_near_max_as_x_over_8() {
+        let eighth =
+            |x: &Mat<f64>| Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| x[(i, j)] / 8.0);
         for (n, p) in [(40, 6), (40, 200)] {
             let (mut x, y) = signal_data(n, p, 3);
             centering_overflow(&mut x);
-            let r = pls1_fit(
-                x.as_ref(),
-                y.as_ref(),
-                KSpec::Fixed(1),
-                None,
-                None,
-                FitOpts::default(),
-            );
-            assert!(
-                matches!(r, Err(PlsKitError::NonFiniteInput)),
-                "pls1_fit {n}x{p}: {:?}",
-                r.map(|m| m.coef[0])
-            );
+            let coef = |x: &Mat<f64>| {
+                let m = pls1_fit(
+                    x.as_ref(),
+                    y.as_ref(),
+                    KSpec::Fixed(1),
+                    None,
+                    None,
+                    FitOpts::default(),
+                )
+                .expect("a fit");
+                (0..p).map(|j| m.coef[j]).collect::<Vec<_>>()
+            };
+            assert_scaled_close(&coef(&x), &coef(&eighth(&x)), &format!("pls1_fit {n}x{p}"));
         }
         let (mut x, _) = signal_data(40, 6, 3);
         centering_overflow(&mut x);
         let y3 = Mat::<f64>::from_fn(40, 3, |i, j| x[(i, j + 1)]);
-        let r = crate::pls3_fit(
-            x.as_ref(),
-            y3.as_ref(),
-            1,
-            None,
-            crate::Pls3FitOpts::default(),
-        );
-        assert!(
-            matches!(r, Err(PlsKitError::NonFiniteInput)),
-            "pls3_fit: {:?}",
-            r.map(|m| m.k_used)
-        );
+        let sv = |x: &Mat<f64>| {
+            let m = crate::pls3_fit(
+                x.as_ref(),
+                y3.as_ref(),
+                1,
+                None,
+                crate::Pls3FitOpts::default(),
+            )
+            .expect("a fit");
+            (0..m.singular_values.nrows())
+                .map(|i| m.singular_values[i])
+                .collect::<Vec<_>>()
+        };
+        assert_scaled_close(&sv(&x), &sv(&eighth(&x)), "pls3_fit");
         for (n, p) in [(40, 6), (600, 20), (20, 40)] {
             let (mut x, y) = signal_data(n, p, 3);
             centering_overflow(&mut x);
-            let r = pls1_confirmatory_test(
-                ConfirmatoryTestInput::Raw {
-                    x: x.as_ref(),
-                    y: y.as_ref(),
-                    k: Some(&[1]),
-                    weights: None,
-                    covariates: None,
-                    null_y: None,
-                },
-                ConfirmatoryTestOpts {
-                    args: ConfirmatoryArgs::Score,
-                    seed: Some(3),
-                    ..Default::default()
-                },
-            );
-            assert!(
-                matches!(r, Err(PlsKitError::NonFiniteInput)),
-                "score {n}x{p}: {r:?}"
-            );
+            let score = |x: &Mat<f64>| {
+                stat_p(
+                    &pls1_confirmatory_test(
+                        ConfirmatoryTestInput::Raw {
+                            x: x.as_ref(),
+                            y: y.as_ref(),
+                            k: Some(&[1]),
+                            weights: None,
+                            covariates: None,
+                            null_y: None,
+                        },
+                        ConfirmatoryTestOpts {
+                            args: ConfirmatoryArgs::Score,
+                            seed: Some(3),
+                            ..Default::default()
+                        },
+                    )
+                    .expect("a result"),
+                )
+            };
+            assert_scaled_close(&score(&x), &score(&eighth(&x)), &format!("score {n}x{p}"));
         }
     }
 
-    /// A finite X that overflows only where held-out rows are centred:
-    /// column 0 with row `a` at `f64::MAX` and row `b` at `-f64::MAX`. A
-    /// training part holding both, or neither, centres without overflow.
-    /// One holding exactly one of them has a mean of that row's sign far
-    /// from 0, so `x − mean` overflows on the other row when it is held
-    /// out.
+    /// A finite X whose plain centring overflows only where held-out rows
+    /// are centred: column 0 with row `a` at `f64::MAX` and row `b` at
+    /// `-f64::MAX`. A training part holding both, or neither, centres
+    /// without overflow. One holding exactly one of them has a mean of that
+    /// row's sign far from 0, so `x − mean` overflows on the other row when
+    /// it is held out.
     fn overflow_rows(x: &mut Mat<f64>, a: usize, b: usize) {
         x[(a, 0)] = f64::MAX;
         x[(b, 0)] = -f64::MAX;
@@ -7105,18 +7019,16 @@ mod tests {
         overflow_rows(x, 0, 1);
     }
 
-    /// A finite X whose fold centring overflows is non-finite input
-    /// on every `raw_perm` route, as the y of
-    /// `raw_perm_rejects_y_whose_fold_standardization_overflows_on_every_route`
-    /// is: in a training fold ([`centering_overflow`]: a fold holding rows
-    /// 0, 1 and 2, as at least two of the five do) or only in a validation
-    /// fold ([`overflow_rows`] on the first rows of folds 0 and 1 as the
-    /// seed draws them, so the folds holding either one meet it). The `e`
-    /// test meets the second X in its held-out half and rejects it the same
-    /// way.
+    /// An X whose plain fold centring overflows gives what X/8 gives on
+    /// every `raw_perm` route: in a training fold ([`centering_overflow`]: a
+    /// fold holding rows 0, 1 and 2, as at least two of the five do) or only
+    /// in a validation fold ([`overflow_rows`] on the first rows of folds 0
+    /// and 1 as the seed draws them, so the folds holding either one meet
+    /// it). The `e` test meets the second X in its held-out half and gives
+    /// what X/8 gives too.
     #[test]
     #[allow(clippy::many_single_char_names)]
-    fn raw_perm_rejects_x_whose_fold_standardization_overflows_on_every_route() {
+    fn raw_perm_reads_x_near_max_as_x_over_8_on_every_route() {
         // (n, p, n_perm, k, the route the shape takes)
         let rows = [
             (30, 5, 99, 1, ReplicateRoute::Primal),
@@ -7124,6 +7036,8 @@ mod tests {
             (30, 200, 99, 2, ReplicateRoute::Nspace),
             (2500, 20, 999, 1, ReplicateRoute::GramP),
         ];
+        let eighth =
+            |x: &Mat<f64>| Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| x[(i, j)] / 8.0);
         let run = |x: &Mat<f64>, y: &Col<f64>, k, args| {
             pls1_confirmatory_test(
                 ConfirmatoryTestInput::Raw {
@@ -7160,10 +7074,11 @@ mod tests {
                 } else {
                     centering_overflow(&mut x);
                 }
-                let r = run(&x, &y, k, ConfirmatoryArgs::RawPerm { n_perm, n_folds: 5 });
-                assert!(
-                    matches!(r, Err(PlsKitError::NonFiniteInput)),
-                    "{route:?}: {r:?}"
+                let args = ConfirmatoryArgs::RawPerm { n_perm, n_folds: 5 };
+                assert_scaled_close(
+                    &stat_p(&run(&x, &y, k, args).expect("a result")),
+                    &stat_p(&run(&eighth(&x), &y, k, args).expect("a result")),
+                    &format!("{route:?} held_out={held_out}"),
                 );
             }
         }
@@ -7174,17 +7089,19 @@ mod tests {
         let n_train = crate::resample::split_sizes(40, 1).0;
         let (tr, te) = crate::resample::one_split(40, n_train, &mut rng);
         overflow_rows(&mut x, tr[0], te[0]);
-        let r = run(&x, &y, 1, ConfirmatoryArgs::E);
-        assert!(matches!(r, Err(PlsKitError::NonFiniteInput)), "e: {r:?}");
+        assert_scaled_close(
+            &stat_p(&run(&x, &y, 1, ConfirmatoryArgs::E).expect("a result")),
+            &stat_p(&run(&eighth(&x), &y, 1, ConfirmatoryArgs::E).expect("a result")),
+            "e",
+        );
     }
 
-    /// A held-out half that overflows in centring gives `r = 0`, the value
-    /// a non-finite training half gives (`prepare_split`'s `x_finite`).
-    /// Column 0 is `-1.7e308` on the training rows and `1.7e308` on the
-    /// held-out ones, so the training mean is `-1.7e308` and `x − mean`
-    /// overflows on every held-out row.
+    /// A held-out half whose plain centring overflows is finite and gives
+    /// the `r` of X/8. Column 0 is `-1.7e308` on the training rows and
+    /// `1.7e308` on the held-out ones, so the training mean is `-1.7e308`
+    /// and `x − mean` overflows on every held-out row.
     #[test]
-    fn split_column_r_is_zero_when_the_held_out_half_overflows() {
+    fn split_column_r_reads_a_held_out_half_near_max_as_x_over_8() {
         let (mut x, y) = signal_data(12, 3, 5);
         for i in 0..12 {
             x[(i, 0)] = if i < 6 { -1.7e308 } else { 1.7e308 };
@@ -7193,22 +7110,115 @@ mod tests {
             tr: (0..6).collect(),
             te: (6..12).collect(),
         };
-        let prep = prepare_split(
-            x.as_ref(),
-            &sp,
-            None,
-            crate::linalg::held_out_scale(x.as_ref(), None, false).as_ref(),
-        );
-        assert!(!prep.x_finite);
-        let r = split_column_r(&prep, &sp, &|i| y[i], &[1], None)[0];
-        assert_eq!(r.to_bits(), 0.0_f64.to_bits(), "r = {r}");
+        let r = |x: &Mat<f64>| {
+            let prep = prepare_split(
+                x.as_ref(),
+                &sp,
+                None,
+                crate::linalg::held_out_scale(x.as_ref(), None, false).as_ref(),
+            );
+            assert!(prep.x_finite);
+            split_column_r(&prep, &sp, &|i| y[i], &[1], None)[0]
+        };
+        let x8 = Mat::<f64>::from_fn(12, 3, |i, j| x[(i, j)] / 8.0);
+        assert_scaled_close(&[r(&x)], &[r(&x8)], "r");
     }
 
-    /// On tall X that overflows only in held-out halves
-    /// ([`held_out_overflow`]), `split_exact` at k = 1 gives a split whose
-    /// halves are not both finite `r = 0` on every arm of route A: the cell
-    /// arm (default budget), the moment arm (400 KiB, below the cell
-    /// buffers) and the test-row arm (1 KiB). Premise: the budgets pick
+    /// The held-out tests give on X near `±f64::MAX` ([`centering_overflow`])
+    /// what they give on X/8, and under `pre_standardized` on `X·2^±600`
+    /// what they give on X: PLS1 `split_exact` at k = 1 and 2, `split_nb`
+    /// and `raw_perm`, and PLS3 `split_exact`, on a wide and a tall X.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn held_out_tests_read_x_at_any_magnitude() {
+        let exact = ConfirmatoryArgs::SplitExact {
+            n_perm: 19,
+            n_splits: 6,
+        };
+        let pls1 = [
+            (1, exact),
+            (2, exact),
+            (
+                1,
+                ConfirmatoryArgs::SplitNb {
+                    n_splits: 6,
+                    force: true,
+                },
+            ),
+            (
+                1,
+                ConfirmatoryArgs::RawPerm {
+                    n_perm: 19,
+                    n_folds: 5,
+                },
+            ),
+        ];
+        for (n, p) in [(40, 200), (600, 20)] {
+            let (x, y) = signal_data(n, p, 11);
+            let y3 = Mat::<f64>::from_fn(n, 3, |i, j| y[i] + x[(i, j + 1)]);
+            let mut big = x.clone();
+            centering_overflow(&mut big);
+            let times = |x: &Mat<f64>, f: f64| Mat::<f64>::from_fn(n, p, |i, j| x[(i, j)] * f);
+            let cases = [
+                (times(&big, 1.0), times(&big, 0.125), false),
+                (times(&x, 2f64.powi(600)), x.clone(), true),
+                (times(&x, 2f64.powi(-600)), x.clone(), true),
+            ];
+            for (a, b, pre) in &cases {
+                for (k, args) in pls1 {
+                    let run = |x: &Mat<f64>| {
+                        stat_p(
+                            &pls1_confirmatory_test(
+                                ConfirmatoryTestInput::Raw {
+                                    x: x.as_ref(),
+                                    y: y.as_ref(),
+                                    k: Some(&[k]),
+                                    weights: None,
+                                    covariates: None,
+                                    null_y: None,
+                                },
+                                ConfirmatoryTestOpts {
+                                    args,
+                                    pre_standardized: *pre,
+                                    seed: Some(7),
+                                    ..Default::default()
+                                },
+                            )
+                            .expect("a result"),
+                        )
+                    };
+                    assert_scaled_close(
+                        &run(a),
+                        &run(b),
+                        &format!("{n}x{p} pre={pre} k={k} {args:?}"),
+                    );
+                }
+                let run3 = |x: &Mat<f64>| {
+                    stat_p(
+                        &crate::pls3_confirmatory_test(
+                            x.as_ref(),
+                            y3.as_ref(),
+                            1,
+                            crate::Pls3ConfirmatoryTestOpts {
+                                args: exact,
+                                pre_standardized_x: *pre,
+                                seed: Some(7),
+                                ..Default::default()
+                            },
+                        )
+                        .expect("a result"),
+                    )
+                };
+                assert_scaled_close(&run3(a), &run3(b), &format!("PLS3 {n}x{p} pre={pre}"));
+            }
+        }
+    }
+
+    /// On tall X whose plain centring overflows only in held-out halves
+    /// ([`held_out_overflow`]), `split_exact` at k = 1 gives the same
+    /// statistic on every arm of route A: the cell arm (default budget), the
+    /// moment arm (400 KiB, below the cell buffers) and the test-row arm
+    /// (1 KiB). Premise: the budgets pick
     /// those arms.
     #[test]
     #[allow(clippy::many_single_char_names)]
@@ -7276,14 +7286,15 @@ mod tests {
         }
     }
 
-    /// Every PLS1 split statistic stays finite on an X that overflows only
-    /// in held-out halves ([`held_out_overflow`]). Checked on `split_nb` at
+    /// Every PLS1 split statistic stays finite on an X whose plain centring
+    /// overflows only in held-out halves ([`held_out_overflow`]). Checked on `split_nb` at
     /// K = 1 (the no-refit body) and K = 2, on `split_exact` on its no-refit
     /// route and on each refit route (the two Gram routes agreeing with the
     /// primal; on Gram-p both the cell arm and, on a budget under the cell
     /// buffers, the per-split moment arm), on a weighted run, whose held-out
-    /// half carries √w, and on `split_nb` forced past a gate that fired on a
-    /// NaN stable rank.
+    /// half carries √w, and on forced `split_nb` over X whose plain
+    /// centring overflows in the full X ([`centering_overflow`]), whose
+    /// stable rank is finite.
     #[test]
     #[allow(clippy::many_single_char_names, clippy::too_many_lines)]
     #[allow(clippy::cast_precision_loss)]
@@ -7484,7 +7495,7 @@ mod tests {
             )
             .expect("a result");
             assert_eq!(r.test_method, "split_nb", "k={k}");
-            assert!(r.stable_rank.is_some_and(f64::is_nan), "k={k}");
+            assert!(r.stable_rank.is_some_and(f64::is_finite), "k={k}");
             assert!(
                 r.statistic.unwrap().is_finite(),
                 "forced, k={k}: {}",
@@ -7698,7 +7709,7 @@ mod tests {
         folds: &[Vec<usize>],
         scale: ColRef<'_, f64>,
     ) -> PlsKitResult<Vec<f64>> {
-        let g = block_gram(x, scale, None).expect("a finite all-row Gram matrix");
+        let g = block_gram(x, scale, None);
         crate::dual_route::pls1_cv_r2_columns(&g, y_mat, folds)
     }
 
@@ -10240,7 +10251,6 @@ mod tests {
             }
         });
         let decided = cell.iter().flatten().filter(|(r, _)| r.is_some()).count();
-        let ext = column_extremes(x);
         let am = AllRowMoments::new(x, scale, n_cols, &column);
         let (mut cells, mut per_split) = (Vec::new(), Vec::new());
         for (j, sp) in d.splits.iter().enumerate() {
@@ -10249,7 +10259,7 @@ mod tests {
             // the per-split route's count.
             let (route, rows, own): (Vec<f64>, Vec<f64>, Vec<usize>) = if k == 1 {
                 let rows = nr_split_r(x, y_mat.as_ref(), sp, None, scale, false);
-                let moments = nr_split_r_moments(x, y_mat.as_ref(), sp, scale, &am, &ext);
+                let moments = nr_split_r_moments(x, y_mat.as_ref(), sp, scale, &am);
                 let route: Vec<f64> = (0..n_cols).map(|c| moments[c].unwrap_or(rows[c])).collect();
                 let own = route.iter().map(|&r| usize::from(r != 0.0)).collect();
                 (route, rows, own)
@@ -10918,17 +10928,10 @@ mod tests {
             let y_mat = nr_outcome_matrix(&cols);
             let am =
                 AllRowMoments::new(x, scale.as_ref(), cols.len(), &|c| y_mat.col(c).to_owned());
-            return nr_split_r_moments(
-                x,
-                y_mat.as_ref(),
-                sp,
-                scale.as_ref(),
-                &am,
-                &column_extremes(x),
-            )
-            .iter()
-            .filter(|r| r.is_some())
-            .count();
+            return nr_split_r_moments(x, y_mat.as_ref(), sp, scale.as_ref(), &am)
+                .iter()
+                .filter(|r| r.is_some())
+                .count();
         }
         let am = AllRowMoments::new(x, scale.as_ref(), cols.len(), &|c| cols.column(c));
         let prep = prepare_split(x, sp, None, scale.as_ref());
@@ -11509,7 +11512,8 @@ mod tests {
     }
 
     /// On wide X the gate sums the Gram matrix over column blocks; its
-    /// stable rank agrees with the one of the standardized copy.
+    /// stable rank agrees with the one of the standardized copy, rows scaled
+    /// by √w under weights.
     #[test]
     fn gate_stable_rank_matches_the_standardized_copy_on_wide_x() {
         // 30 rows give a block of 8,736 columns: p=20,000 is three blocks.
@@ -11527,6 +11531,9 @@ mod tests {
             )
             .stable_rank;
             let (xs, _, _) = crate::linalg::standardize_weighted(x.as_ref(), wopt);
+            let xs = Mat::<f64>::from_fn(xs.nrows(), xs.ncols(), |i, j| {
+                xs[(i, j)] * wopt.map_or(1.0, |w| w[i].sqrt())
+            });
             let want = crate::linalg::stable_rank(xs.as_ref());
             assert!(
                 ((got - want) / want).abs() <= 1e-12,
@@ -11639,7 +11646,7 @@ mod tests {
     fn gate_uses_n_eff_under_weights() {
         // Raw n = 40 clears the floor; the weights pull Kish n_eff under it.
         // Σw = 22, Σw² = 20.2 ⇒ n_eff = 22²/20.2 ≈ 23.96 < 25.
-        let (x, y) = synth(40, 5, 0, 0.0, 8);
+        let (x, y) = synth(40, 10, 0, 0.0, 8);
         let w = Col::<f64>::from_fn(40, |i| if i % 2 == 0 { 1.0 } else { 0.1 });
 
         let unweighted = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
@@ -11669,54 +11676,6 @@ mod tests {
             (got.fires, got.n_eff.to_bits()),
             (false, 25.0_f64.to_bits())
         );
-    }
-
-    /// Weights change the gate's rank through the standardization constants,
-    /// not through any row scaling: `standardize_weighted` divides each column
-    /// by its *weighted* sd, so down-weighting the rows that carry a column's
-    /// spread shrinks that divisor and inflates the column's share of the
-    /// energy. Here column 0 is 50× wider in the first half of the rows, and
-    /// the weights all but ignore that half — so under weighted standardization
-    /// column 0 swamps the spectrum (rank ≈ 1.5) while plain standardization
-    /// leaves it in scale with the other nine (rank ≈ 6).
-    ///
-    /// This is the one test that fails if the gate standardizes with `None`
-    /// where it should pass `w_norm`.
-    #[test]
-    #[allow(clippy::many_single_char_names)]
-    fn gate_weighted_standardization_drives_the_rank_clause() {
-        use rand::RngExt;
-        use rand::SeedableRng;
-        let (n, d) = (60, 10);
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(3);
-        let x = Mat::<f64>::from_fn(n, d, |i, j| {
-            let u = rng.random_range(-1.0..1.0);
-            if j == 0 && i < n / 2 { 50.0 * u } else { u }
-        });
-        let y = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
-        // Kish n_eff = 60²/(30·0.05² + 30·1.95²) ≈ 31.5 — comfortably over the
-        // size floor, so only the rank clause can fire.
-        let w = Col::<f64>::from_fn(n, |i| if i < n / 2 { 0.05 } else { 1.95 });
-
-        let unweighted = gate_run(x.as_ref(), y.as_ref(), None, 20, false);
-        assert_eq!(unweighted.test_method, "split_nb");
-
-        let weighted = gate_run(x.as_ref(), y.as_ref(), Some(w.as_ref()), 20, false);
-        assert_eq!(weighted.test_method, "split_exact");
-        assert!(
-            weighted.n_eff >= SPLIT_NB_GATE_MIN_N_EFF,
-            "{}",
-            weighted.n_eff
-        );
-        let (sr_u, sr_w) = (
-            unweighted.stable_rank.expect("gate was evaluated"),
-            weighted.stable_rank.expect("gate was evaluated"),
-        );
-        assert!(
-            sr_u >= SPLIT_NB_GATE_MIN_STABLE_RANK,
-            "unweighted sr={sr_u}"
-        );
-        assert!(sr_w < SPLIT_NB_GATE_MIN_STABLE_RANK, "weighted sr={sr_w}");
     }
 
     // ── the public gate query ────────────────────────────────────────────────
@@ -11790,7 +11749,7 @@ mod tests {
         let wide = crate::test_support::unif(30, 20_000, 17);
         let w30 = crate::test_support::test_weights(30);
         let half = Col::<f64>::from_fn(40, |i| if i % 2 == 0 { 1.0 } else { 0.1 });
-        let x40 = synth(40, 5, 0, 0.0, 8).0;
+        let x40 = synth(40, 10, 0, 0.0, 8).0;
         let designs: [Design<'_>; 8] = [
             ("wide", wide.clone(), None, false, 27.252_282_280_372_626),
             (
@@ -11798,7 +11757,7 @@ mod tests {
                 wide,
                 Some(&w30),
                 true,
-                19.722_718_874_654_547,
+                14.052_325_983_749_48,
             ),
             (
                 "tall",
@@ -11840,7 +11799,7 @@ mod tests {
                 x40,
                 Some(&half),
                 true,
-                3.518_929_237_459_711,
+                4.259_744_666_959_581,
             ),
         ];
         for (name, x, w, fires, sr) in &designs {
@@ -12634,8 +12593,10 @@ mod tests {
             let scale = crate::linalg::held_out_scale(x.as_ref(), w, false);
             let prep = prepare_split(x.as_ref(), &sp, w, scale.as_ref());
             let w_tr = renormalized_slice_weights(w, &sp.tr);
-            let (_, mean, _) =
-                crate::linalg::standardize_rows(x.as_ref(), &sp.tr, w_tr.as_ref().map(Col::as_ref));
+            let (_, mean, _) = crate::linalg::standardize_weighted(
+                crate::linalg::row_subset(x.as_ref(), &sp.tr).as_ref(),
+                w_tr.as_ref().map(Col::as_ref),
+            );
             for (rows, xs, wp) in [
                 (&sp.tr, &prep.xs_tr, &prep.w_tr),
                 (&sp.te, &prep.xs_te, &prep.w_te),
@@ -12669,9 +12630,8 @@ mod tests {
                 let what = format!("weighted={}, fold {fi}", w.is_some());
                 let fold = prepare_cv_fold(x.as_ref(), &folds, fi, w, scale.as_ref()).unwrap();
                 assert!(fold.w_tr.is_some() == w.is_some(), "{what}");
-                let (_, mean, _) = crate::linalg::standardize_rows(
-                    x.as_ref(),
-                    &fold.train_idx,
+                let (_, mean, _) = crate::linalg::standardize_weighted(
+                    crate::linalg::row_subset(x.as_ref(), &fold.train_idx).as_ref(),
                     fold.w_tr.as_ref().map(Col::as_ref),
                 );
                 for (rows, xs) in [
@@ -12690,7 +12650,7 @@ mod tests {
     }
 
     /// Every confirmatory runner reads X through owned row gathers
-    /// (`prepare_split`, `prepare_cv_fold`, `standardize_rows`), a
+    /// (`prepare_split`, `prepare_cv_fold`), a
     /// standardized owned copy (`score`, the `split_nb` gate) or
     /// `linalg::col_major_or_copy` (`score` with `pre_standardized`), so a
     /// padded submatrix, a row-major view and a negative-column-stride view
@@ -14102,6 +14062,28 @@ mod tests_null_y {
         let rank = r.pvalue * 100.0;
         assert!((rank - rank.round()).abs() < 1e-12, "p = {}", r.pvalue);
         assert!(r.pvalue > 0.01 && r.pvalue < 1.0, "p = {}", r.pvalue);
+    }
+
+    /// Weighted, each `null_y` column is centred by its own weighted mean,
+    /// so shifting the null columns moves neither p nor the statistic.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn weighted_null_y_ignores_the_null_columns_location() {
+        let (x, y) = synth(200, 40, 0, 0.0, 21);
+        let ny = unif(200, 199, 16);
+        let shifted = Mat::<f64>::from_fn(200, 199, |i, j| ny[(i, j)] + 5.0);
+        let w = Col::<f64>::from_fn(200, |i| 0.2 + 2.8 * ((i * 7) % 11) as f64 / 10.0);
+        let run = |ny: &Mat<f64>| {
+            let mut inp = raw(&x, &y, None, Some(ny));
+            if let ConfirmatoryTestInput::Raw { weights, .. } = &mut inp {
+                *weights = Some(w.as_ref());
+            }
+            pls1_confirmatory_test(inp, opts(exact())).unwrap()
+        };
+        let (a, b) = (run(&ny), run(&shifted));
+        assert_eq!(a.pvalue, b.pvalue);
+        let (sa, sb) = (a.statistic.unwrap(), b.statistic.unwrap());
+        assert!((sa - sb).abs() <= 1e-12, "{sa} vs {sb}");
     }
 
     #[test]

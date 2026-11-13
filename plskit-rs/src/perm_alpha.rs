@@ -130,6 +130,9 @@ pub fn pls1_perm_alpha(
 /// and a matrix built under `pre_standardized`, whose trace can exceed
 /// `n · n_features`, are accepted. `X̃` is then the rows of `gram_matrix`'s
 /// `X̃` behind `gram`, centred by their own means, and `coef = X̃'·alpha`.
+/// Under `pre_standardized`, on X whose largest entry is outside
+/// `[2^-256, 2^256]`, that `X̃` is `X/c` (`c` a power of two the Gram matrix
+/// does not store), so `alpha` is `c²` times the one of X itself.
 ///
 /// # Errors
 /// What [`pls1_perm_alpha`] returns, without the trace and row-sum checks,

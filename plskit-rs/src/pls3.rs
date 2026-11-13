@@ -365,6 +365,9 @@ struct Prepared {
     x_scale: Col<f64>,
     y_mean: Col<f64>,
     y_scale: Col<f64>,
+    /// The power of two a skipped X (Y) block was divided by, else 1.
+    x_div: f64,
+    y_div: f64,
 }
 
 impl Prepared {
@@ -488,7 +491,7 @@ impl Prepared {
     ) -> Pls3Model {
         let n_samples = x.nrows();
         let k_used = u.ncols();
-        let x_scores = self.x_scores(x, u.as_ref());
+        let mut x_scores = self.x_scores(x, u.as_ref());
         let mut y_scores = Mat::<f64>::zeros(n_samples, k_used);
         matmul(
             y_scores.as_mut(),
@@ -498,6 +501,15 @@ impl Prepared {
             1.0,
             self.par,
         );
+        // Back to the caller's scale of a block divided in `prepare`.
+        let mut singular_values = singular_values;
+        for c in 0..k_used {
+            singular_values[c] = singular_values[c] * self.x_div * self.y_div;
+            for i in 0..n_samples {
+                x_scores[(i, c)] *= self.x_div;
+                y_scores[(i, c)] *= self.y_div;
+            }
+        }
         let (keep_x, keep_y, converged, n_iter) = match sparse {
             Some(m) => (
                 Some(m.keep_x),
@@ -596,9 +608,14 @@ fn prepare(
     // given, so its bits are unchanged. A standardized X is written only
     // off the implicit route (see "The implicit route" on `Prepared`); its
     // moments are `linalg::standardize`'s bit for bit.
+    // A skipped block far from unit scale is divided by a power of two
+    // (`linalg::pre_standardized_input`); `into_model` maps back.
+    let (mut x_div, mut y_div) = (1.0, 1.0);
     let (xs_owned, x_mean, x_scale, x_implicit, x_fro) = if opts.pre_standardized_x {
+        let (xs, c) = crate::linalg::pre_standardized_input(x);
+        x_div = c;
         (
-            crate::linalg::col_major_or_copy(x),
+            xs,
             Col::<f64>::zeros(n_features),
             Col::<f64>::from_fn(n_features, |_| 1.0),
             None,
@@ -620,8 +637,10 @@ fn prepare(
         )
     };
     let (ys_owned, y_mean, y_scale) = if opts.pre_standardized_y {
+        let (ys, c) = crate::linalg::pre_standardized_input(y);
+        y_div = c;
         (
-            crate::linalg::col_major_or_copy(y),
+            ys,
             Col::<f64>::zeros(n_targets),
             Col::<f64>::from_fn(n_targets, |_| 1.0),
         )
@@ -640,6 +659,8 @@ fn prepare(
         x_scale,
         y_mean,
         y_scale,
+        x_div,
+        y_div,
     };
     let mut a = prepared.cross_cov(x, y);
     // Entries of `x` near `f64::MAX` overflow the implicit route's raw

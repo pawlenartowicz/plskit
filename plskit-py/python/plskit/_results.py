@@ -220,7 +220,7 @@ class GramMatrixResult:
     Pass it as ``gram=`` to `pls1_confirmatory_test`, `pls3_confirmatory_test`
     and `pls1_perm_alpha` in place of `X`.
     """
-    gram: np.ndarray        # shape (n, n); X̃ @ X̃.T, X̃ = X centred over all rows and divided by its column SDs (population), or only centred under pre_standardized
+    gram: np.ndarray        # shape (n, n); X̃ @ X̃.T, X̃ = X centred over all rows and divided by its column SDs (population), or only centred under pre_standardized (X past 2**±256 first divided by a power of two)
     n_features: int         # columns of X, constant columns included
     pre_standardized: bool  # whether X was read as given (only centred)
 

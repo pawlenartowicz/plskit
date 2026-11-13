@@ -168,8 +168,10 @@ fn unsupported(obj: &Bound<'_, PyAny>, path: &str) -> PyErr {
     )
 }
 
-/// An `ndarray`: a 0-d one is its item; a 1-D or 2-D one is read as
-/// float64. An array of another real dtype is cast (a copy), so that
+/// An `ndarray`: a 0-d one is its item; a 1-D bool one is a logical
+/// vector, as R's is, which plskit-bind reads as 1/0 where it takes a float
+/// vector and refuses where it takes integers; any other 1-D or 2-D one is
+/// read as float64. An array of another real dtype is cast (a copy), so that
 /// plskit-bind, which knows what the parameter takes, words the refusal
 /// where no array fits; an array of any other dtype is refused here. A
 /// float64 array must be aligned, because Rust may not read `f64` data
@@ -190,6 +192,10 @@ fn array<'py>(arr: &Bound<'py, PyUntypedArray>, path: &str) -> PyResult<Node<'py
             path,
             &format!("must be an array of at most 2 dimensions, got {ndim}-D"),
         ));
+    }
+    if ndim == 1 && arr.dtype().kind() == b'b' {
+        let bools: Vec<bool> = arr.call_method0("tolist")?.extract()?;
+        return Ok(Node::Leaf(Value::BoolVec(bools)));
     }
     let dtype = arr.dtype();
     let float64 = numpy::dtype::<f64>(py);
