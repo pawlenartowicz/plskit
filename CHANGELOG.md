@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented here.
 
+## [Unreleased]
+
+- Changed: `pca_basis`, `factors` and the folds of `profiles_find_n` compute only the singular values and right singular vectors of X, and the parallel analysis of `profiles_find_n` only the eigenvalues. Results are unchanged up to rounding, and the kept rank is unchanged.
+- Changed: `profiles_find_n`, and the `profiles_find_n` step of `profiles_search`, run the column shuffles of the parallel analysis and the folds in parallel. They now read `PLSKIT_NUM_THREADS` and `PLSKIT_MEMORY_BUDGET` like the other resampling functions, and give the same results on any number of threads.
+
 ## [0.9.0] - 2026-11-13
 
 - Added: `covariates` on `pls1_fit`, `spls1_fit`, `pls1_predict`, `pls1_confirmatory_test`, `pls1_perm_null`, the PLS1 and sPLS1 k-selection functions, `factors` and `rotate`. X is standardized, then X and y are replaced by their (weighted) least-squares residuals on `[1, Z]`; the permutation tests of `split_exact` and `raw_perm` use Freedman–Lane null columns (approximately exact, not exact), and `"auto"` runs `split_exact`. `split_nb`, `score` and `e` refuse covariates; `profiles` and `profiles_search` refuse a model fitted with them. Aliased columns of Z are dropped, as `lm` does. Results gain `n_covariates`, `PLS1Result` gains `covariate_coef` and `FactorsResult` gains `covariate_adjusted`; a prediction is `intercept + X_new·beta + Z_new·covariate_coef`. The new error code `insufficient_residual_df` covers too few rows after the covariates are removed.

@@ -74,13 +74,13 @@ pub(crate) fn factors(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     inp.finish()?;
     let (coef, fit_pre, adjusted, _) = first_arg(first, x.as_mat(), false)?;
     check_covariates("model", adjusted.map(|c| c.is_some()), z.is_some())?;
-    if let (Some(Some(q)), Some(z)) = (adjusted, &z)
-        && z.ncols() != q
-    {
-        return Err(BindError::new(
-            "shape_mismatch",
-            format!("covariates have {} columns; the model has {q}", z.ncols()),
-        ));
+    if let (Some(Some(q)), Some(z)) = (adjusted, &z) {
+        if z.ncols() != q {
+            return Err(BindError::new(
+                "shape_mismatch",
+                format!("covariates have {} columns; the model has {q}", z.ncols()),
+            ));
+        }
     }
     let out = engine(plskit::factors(
         coef.as_ref(),

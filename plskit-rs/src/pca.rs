@@ -5,7 +5,7 @@
 use faer::{Col, Mat, MatRef, Par};
 
 use crate::error::{PlsKitError, PlsKitResult};
-use crate::linalg::{scaled_moments, standardize, thin_svd};
+use crate::linalg::{scaled_moments, standardize, thin_svd_v};
 
 /// Output of [`pca_basis`].
 #[derive(Debug)]
@@ -50,13 +50,13 @@ pub fn pca_basis(x: MatRef<'_, f64>, pre_standardized: bool) -> PlsKitResult<Pca
     // An `x` used as given that is far from unit scale is divided by a
     // power of two `c`, and its singular values multiplied back.
     let mut c = 1.0;
-    let svd = if pre_standardized {
+    let (sv, v) = if pre_standardized {
         match crate::linalg::pre_standardized_div(x, None) {
             Some((xd, cd)) => {
                 c = cd;
-                thin_svd(xd.as_ref(), Par::Seq)
+                thin_svd_v(xd.as_ref(), Par::Seq)
             }
-            None => thin_svd(x, Par::Seq),
+            None => thin_svd_v(x, Par::Seq),
         }
     } else {
         // A constant column standardizes to rounding noise, not to zeros, so
@@ -67,31 +67,29 @@ pub fn pca_basis(x: MatRef<'_, f64>, pre_standardized: bool) -> PlsKitResult<Pca
                 "every column of X is constant".into(),
             ));
         }
-        thin_svd(standardize(x).0.as_ref(), Par::Seq)
+        thin_svd_v(standardize(x).0.as_ref(), Par::Seq)
     }
     .map_err(|e| PlsKitError::Internal(format!("SVD of X failed: {e:?}")))?;
 
     // Singular values are non-increasing, so the kept ones are a prefix.
     // The shape check above makes `min(N, D) ≥ 1`, so `s[0]` exists.
-    let s0 = svd.s[0];
-    let k = (0..svd.s.nrows())
-        .take_while(|&i| svd.s[i] > 1e-10 * s0)
-        .count();
+    let s0 = sv[0];
+    let k = (0..sv.nrows()).take_while(|&i| sv[i] > 1e-10 * s0).count();
     if k == 0 {
         return Err(PlsKitError::InvalidInput(
             "X has all singular values zero after standardization".into(),
         ));
     }
     Ok(PcaBasisOutput {
-        v: svd.v.as_ref().subcols(0, k).to_owned(),
-        s: Col::<f64>::from_fn(k, |i| svd.s[i] * c),
+        v: v.as_ref().subcols(0, k).to_owned(),
+        s: Col::<f64>::from_fn(k, |i| sv[i] * c),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linalg::mat_mul;
+    use crate::linalg::{mat_mul, thin_svd};
     use crate::test_support::{assert_bits_eq, assert_mat_bits_eq, col_vals, unif};
 
     fn assert_orthonormal(v: MatRef<'_, f64>) {
@@ -120,6 +118,43 @@ mod tests {
         assert_orthonormal(out.v.as_ref());
         for i in 1..4 {
             assert!(out.s[i - 1] >= out.s[i] && out.s[i] > 0.0);
+        }
+    }
+
+    #[test]
+    fn pca_matches_the_svd_with_u() {
+        // tall, square, wide, and rank 3 at both orientations.
+        let low = |n, d, seed| {
+            mat_mul(
+                unif(n, 3, seed).as_ref(),
+                unif(3, d, seed + 1).as_ref(),
+                Par::Seq,
+            )
+        };
+        for (name, x) in [
+            ("tall", unif(200, 12, 5)),
+            ("square", unif(40, 40, 6)),
+            ("wide", unif(20, 90, 7)),
+            ("rank 3 tall", low(60, 10, 8)),
+            ("rank 3 wide", low(10, 60, 10)),
+        ] {
+            let out = pca_basis(x.as_ref(), false).unwrap();
+            let full = thin_svd(standardize(x.as_ref()).0.as_ref(), Par::Seq).unwrap();
+            let k = (0..full.s.nrows())
+                .take_while(|&i| full.s[i] > 1e-10 * full.s[0])
+                .count();
+            assert_eq!(out.s.nrows(), k, "{name}: K");
+            for i in 0..k {
+                assert!(
+                    (out.s[i] - full.s[i]).abs() <= 1e-12 * full.s[0],
+                    "{name}: s[{i}]"
+                );
+            }
+            // Column signs are arbitrary, so compare the projectors V V'.
+            let vk = full.v.as_ref().subcols(0, k);
+            let a = mat_mul(out.v.as_ref(), out.v.transpose(), Par::Seq);
+            let b = mat_mul(vk, vk.transpose(), Par::Seq);
+            assert!((&a - &b).norm_max() < 1e-10, "{name}: V V'");
         }
     }
 

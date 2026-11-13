@@ -840,7 +840,7 @@ pub(crate) fn split_columns_r_nspace(
             Par::Seq,
         );
         for (j, out) in outcomes.iter().enumerate() {
-            rs[j].push(match out[ki] {
+            rs[j].push(match &out[ki] {
                 NspaceOutcome::ZeroModel => 0.0,
                 NspaceOutcome::Resolved { .. } => {
                     let s = scores.col(j);

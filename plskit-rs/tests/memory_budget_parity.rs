@@ -18,13 +18,14 @@ mod common;
 use std::ffi::OsStr;
 
 use common::{child_arg, emit_result, run_child, synth};
+use faer::linalg::evd::{ComputeEigenvectors, self_adjoint_evd_scratch};
 use faer::linalg::svd::{ComputeSvdVectors, svd_scratch};
 use faer::{Col, Mat};
 use plskit::{
     CIOpts, ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput,
     FindKOptimalOpts, FindKeepOptimalOpts, FitOpts, KSpec, Pls3ConfirmatoryTestOpts, PlsKitError,
-    Selector, pls1_confirmatory_test, pls1_find_k_optimal, pls1_fit, pls3_confirmatory_test,
-    spls1_find_keep_optimal,
+    ProfilesFindNOpts, Selector, pls1_confirmatory_test, pls1_find_k_optimal, pls1_fit,
+    pls3_confirmatory_test, profiles_find_n, spls1_find_keep_optimal,
 };
 
 fn row_weights(n: usize) -> Col<f64> {
@@ -100,6 +101,21 @@ fn lv1(p: usize, q: usize) -> usize {
     )
     .size_bytes();
     copy(p, q) + copy(p, r) + copy(q, r) + scratch
+}
+
+/// One shuffle of `profiles_find_n`'s parallel analysis on `n × p`:
+/// `factors::corr_eigen_bytes` (change together), the shuffled copy of X,
+/// its `m × m` Gram matrix (`m = min(n, p)`) and faer's eigenvalue scratch.
+fn corr_eigen(n: usize, p: usize) -> usize {
+    let m = n.min(p);
+    let scratch = self_adjoint_evd_scratch::<f64>(
+        m,
+        ComputeEigenvectors::No,
+        faer::Par::Seq,
+        faer::Spec::default(),
+    )
+    .size_bytes();
+    copy(n, p) + copy(m, m) + scratch
 }
 
 /// One PLS1 fit on `p` columns to `k` components: `fit::pls1_fit_bytes`
@@ -484,6 +500,18 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
                 format!("{out:?}")
             },
         ),
+        // `profiles_find_n`: the shuffles of its parallel analysis. Its two
+        // fold passes run under the same budget, at their own batch sizes.
+        case("profiles_find_n k=2", corr_eigen(PN, PP), 2, move || {
+            let opts = ProfilesFindNOpts {
+                seed: Some(31),
+                ..Default::default()
+            };
+            format!(
+                "{:?}",
+                profiles_find_n(x.as_ref(), y.as_ref(), 2, 9, opts).unwrap()
+            )
+        }),
         // `pls1_subsample_inference_confirmatory`: two n-row copies of X
         // and one PLS1 fit per replicate. `score` performs no fit, so the CI
         // is the only loop.

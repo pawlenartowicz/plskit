@@ -89,6 +89,38 @@ pub(crate) fn thin_svd(
     })
 }
 
+/// Singular values and right singular vectors of `a`: the `s` and `V` of
+/// [`thin_svd`], without computing `U`.
+#[allow(clippy::many_single_char_names)]
+pub(crate) fn thin_svd_v(
+    a: MatRef<'_, f64>,
+    par: Par,
+) -> Result<(Col<f64>, Mat<f64>), faer::linalg::svd::SvdError> {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::linalg::svd::{ComputeSvdVectors, svd, svd_scratch};
+    let (m, n) = a.shape();
+    let mut v = Mat::<f64>::zeros(n, m.min(n));
+    let mut s = faer::diag::Diag::<f64>::zeros(m.min(n));
+    let mut mem = MemBuffer::new(svd_scratch::<f64>(
+        m,
+        n,
+        ComputeSvdVectors::No,
+        ComputeSvdVectors::Thin,
+        par,
+        faer::Spec::default(),
+    ));
+    svd(
+        a,
+        s.as_mut(),
+        None,
+        Some(v.as_mut()),
+        par,
+        MemStack::new(&mut mem),
+        faer::Spec::default(),
+    )?;
+    Ok((s.column_vector().to_owned(), v))
+}
+
 /// The `R` factor of the Householder QR of `a` (`min(m, n) × n`, upper
 /// trapezoidal, `a'a = R'R` up to the QR's backward error), computed in
 /// place on `a` under `Par::Seq`, so its bits do not depend on the pool.
@@ -149,6 +181,33 @@ pub(crate) fn self_adjoint_eigen(
         faer::Spec::default(),
     )?;
     Ok((s.column_vector().to_owned(), u))
+}
+
+/// Eigenvalues of the self-adjoint `a`, ascending: the `λ` of
+/// [`self_adjoint_eigen`], without computing eigenvectors.
+pub(crate) fn self_adjoint_eigenvalues(
+    a: MatRef<'_, f64>,
+    par: Par,
+) -> Result<Col<f64>, faer::linalg::evd::EvdError> {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::linalg::evd::{ComputeEigenvectors, self_adjoint_evd, self_adjoint_evd_scratch};
+    let n = a.nrows();
+    let mut s = faer::diag::Diag::<f64>::zeros(n);
+    let mut mem = MemBuffer::new(self_adjoint_evd_scratch::<f64>(
+        n,
+        ComputeEigenvectors::No,
+        par,
+        faer::Spec::default(),
+    ));
+    self_adjoint_evd(
+        a,
+        s.as_mut(),
+        None,
+        par,
+        MemStack::new(&mut mem),
+        faer::Spec::default(),
+    )?;
+    Ok(s.column_vector().to_owned())
 }
 
 /// Solve `a x = b` in place of `b` (square `a`, any number of right-hand

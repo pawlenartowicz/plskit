@@ -3853,6 +3853,7 @@ mod covariate_tests {
     /// A constant covariate is only the intercept, which the plain fit
     /// already removes: an independent check of `adjust`'s standardization.
     #[test]
+    #[allow(clippy::float_cmp)] // an aliased covariate gets a coefficient of exactly 0
     fn fit_with_a_constant_covariate_equals_plain_fit() {
         let n = 60;
         let (x, y, _) = data(n);

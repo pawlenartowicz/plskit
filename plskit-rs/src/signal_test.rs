@@ -9696,7 +9696,8 @@ mod tests {
     fn with_null_column_routes(check: impl FnOnce(&[(&str, MatRef<'_, f64>, RouteRun<'_>)])) {
         use crate::resample::Columns;
         type Run<'a> = RouteRun<'a>;
-        const N_PERM: usize = 99;
+        // Whole n-space batches: a column of a shorter last batch can differ in its last bits (aarch64).
+        const N_PERM: usize = 6 * crate::dual_route::NSPACE_BATCH - 1;
         const SEED: u64 = 7;
         // `split_exact`: the no-refit route when `route` is `None`, else
         // the refit route on `route`.
@@ -10606,7 +10607,7 @@ mod tests {
     /// the design and the null columns are the same (n = 60 gives the same
     /// halves for every k ≤ 28), only the route can differ.
     #[test]
-    #[allow(clippy::many_single_char_names)]
+    #[allow(clippy::many_single_char_names, clippy::float_cmp)] // p-values are counts over the same nulls
     fn k_set_per_k_matches_single_calls() {
         let (x, y) = synth(60, 20, 3, 0.3, 7);
         let u = crate::test_support::unif_col(60, 8);
@@ -10661,6 +10662,7 @@ mod tests {
     /// dominant: `p_0 = [2, 2, 5, 4, 3]/5`, `p_1 = [1, 5, 4, 3, 2]/5`, so
     /// `m = [1, 2, 4, 3, 2]/5` and only c = 0 reaches `m(0) = 1/5`.
     #[test]
+    #[allow(clippy::float_cmp)] // p-values are exact multiples of 1/5
     fn min_p_combine_reference() {
         let rows = [[0.5, 0.5, 0.1, 0.2, 0.3], [0.9, 0.1, 0.2, 0.3, 0.4]];
         let t = Mat::<f64>::from_fn(2, 5, |i, c| rows[i][c]);
@@ -13960,6 +13962,7 @@ mod tests_covariates {
     /// the reference fit is the covariate fit, so the signed β z carries the
     /// sign of its β.
     #[test]
+    #[allow(clippy::float_cmp)] // compares signs, not values
     fn ci_with_covariates_runs_on_the_covariate_fit() {
         let n = 80;
         let (x, y) = synth(n, 6, 2, 1.0, 66);
@@ -14044,6 +14047,7 @@ mod tests_null_y {
 
     #[test]
     #[allow(clippy::many_single_char_names)]
+    #[allow(clippy::float_cmp)] // every null ties the observed value, so p is exactly 1
     fn null_y_equal_to_y_gives_p_one() {
         let (x, y) = synth(60, 6, 2, 1.0, 11);
         let ny = Mat::<f64>::from_fn(60, 99, |i, _| y[i]);
@@ -14068,6 +14072,7 @@ mod tests_null_y {
     /// so shifting the null columns moves neither p nor the statistic.
     #[test]
     #[allow(clippy::many_single_char_names)]
+    #[allow(clippy::float_cmp)] // p-values are counts over the same nulls
     fn weighted_null_y_ignores_the_null_columns_location() {
         let (x, y) = synth(200, 40, 0, 0.0, 21);
         let ny = unif(200, 199, 16);
@@ -14088,6 +14093,7 @@ mod tests_null_y {
 
     #[test]
     #[allow(clippy::many_single_char_names)]
+    #[allow(clippy::float_cmp)] // p-values are counts over the same nulls
     fn null_y_with_gram_equals_x_call() {
         let (x, y) = synth(50, 6, 2, 1.0, 15);
         let ny = unif(50, 40, 16);

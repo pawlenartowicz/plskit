@@ -28,14 +28,17 @@ use faer::{Col, ColRef, Mat, MatRef, Par};
 
 use crate::covariates::CovariateBasis;
 use crate::error::{PlsKitError, PlsKitResult};
+use crate::fit::pls1_fit_bytes;
 use crate::fit::{FitOpts, KSpec, ParChoice, pls1_fit_impl};
 use crate::linalg::{
     center_rows_fro, col_row_subset, constant_to_rounding, empirical_quantile, fold_split,
     held_out_scale, lu_solve_in_place, mat_mul, mat_vec, pow2_scale, scaled_moments,
-    self_adjoint_eigen, standardize, standardize_apply_rows, standardize1,
+    self_adjoint_eigenvalues, standardize, standardize_apply_rows, standardize1,
 };
 use crate::pca::pca_basis;
-use crate::resample::{permutation_from_seed, permute_indices};
+use crate::resample::{
+    copy_bytes, map_units, pair_blocks_bytes, permutation_from_seed, permute_indices,
+};
 use crate::rng::{child_rng, child_seeds, resolve_seed};
 use crate::rotate::{RotationMethod, VarimaxArgs, rotate};
 
@@ -517,13 +520,24 @@ pub struct ProfilesFindNOutput {
 /// - Errors of the fold fits (for example `k` too large) are returned as
 ///   they are.
 /// - [`PlsKitError::Internal`] — an SVD or eigendecomposition failed.
+pub fn profiles_find_n(
+    x: MatRef<'_, f64>,
+    y: ColRef<'_, f64>,
+    k: usize,
+    n_max: usize,
+    opts: ProfilesFindNOpts,
+) -> PlsKitResult<ProfilesFindNOutput> {
+    crate::fit::with_thread_limit(|| profiles_find_n_impl(x, y, k, n_max, opts))
+}
+
+/// Body of [`profiles_find_n`], on the caller's pool.
 // x, y, k, n, d, j are the math names; tr/te pairs are train/test.
 #[allow(
     clippy::many_single_char_names,
     clippy::similar_names,
     clippy::too_many_lines
 )]
-pub fn profiles_find_n(
+fn profiles_find_n_impl(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
     k: usize,
@@ -579,8 +593,7 @@ pub fn profiles_find_n(
     // Pass 1: the fold's leading right singular vectors. Folds are kept for
     // pass 2 so that K* can be capped by the smallest rank before any
     // fold is scored.
-    let mut n_failed_folds = 0;
-    let mut kept: Vec<KeptFold> = Vec::new();
+    let mut splits: Vec<(Vec<usize>, Vec<usize>)> = Vec::new();
     for &rep_seed in &rep_seeds {
         let folds = fold_split(&permutation_from_seed(n, rep_seed), opts.n_folds);
         for (fi, te) in folds.iter().enumerate() {
@@ -590,18 +603,25 @@ pub fn profiles_find_n(
                 .filter(|&(g, _)| g != fi)
                 .flat_map(|(_, f)| f.iter().copied())
                 .collect();
-            if constant_column(x, &tr) {
-                n_failed_folds += 1;
-                continue;
-            }
-            let (xs_tr, _, _) = center_rows_fro(x, &tr, None, None, scale.as_ref());
-            let basis = pca_basis(xs_tr.as_ref(), true)?;
-            let rank = basis.v.ncols();
-            kept.push(KeptFold {
-                tr,
-                te: te.clone(),
-                v: basis.v.as_ref().subcols(0, k_raw.min(rank)).to_owned(),
-            });
+            splits.push((tr, te.clone()));
+        }
+    }
+    let n_tr = splits.iter().map(|(tr, _)| tr.len()).max().unwrap_or(0);
+    let bases = map_units(splits.len(), fold_svd_bytes(n_tr, d), |u| {
+        let tr = &splits[u].0;
+        if constant_column(x, tr) {
+            return Ok(None);
+        }
+        let (xs_tr, _, _) = center_rows_fro(x, tr, None, None, scale.as_ref());
+        let v = pca_basis(xs_tr.as_ref(), true)?.v;
+        Ok(Some(v.as_ref().subcols(0, k_raw.min(v.ncols())).to_owned()))
+    });
+    let mut n_failed_folds = 0;
+    let mut kept: Vec<KeptFold> = Vec::new();
+    for ((tr, te), v) in splits.into_iter().zip(bases) {
+        match v? {
+            Some(v) => kept.push(KeptFold { tr, te, v }),
+            None => n_failed_folds += 1,
         }
     }
     if kept.len() < 2 {
@@ -618,8 +638,10 @@ pub fn profiles_find_n(
     let j_max = k_star.min(n_max);
 
     // Pass 2: rotate, order, score.
-    let mut rows: Vec<Vec<f64>> = Vec::with_capacity(kept.len());
-    for fold in &kept {
+    let unit = pair_blocks_bytes(kept.iter().map(|f| (f.tr.len(), f.te.len())), d)
+        .saturating_add(pls1_fit_bytes(d, k));
+    let scored = map_units(kept.len(), unit, |u| -> PlsKitResult<Vec<f64>> {
+        let fold = &kept[u];
         let y_tr = col_row_subset(y, &fold.tr);
         let (xs_tr, mean, _) = center_rows_fro(x, &fold.tr, None, None, scale.as_ref());
         // Fitted as standardized: `coef` only orders the axes below.
@@ -648,12 +670,16 @@ pub fn profiles_find_n(
         let z_tr = mat_mul(xs_tr.as_ref(), axes.as_ref(), Par::Seq);
         let xs_te = standardize_apply_rows(x, &fold.te, mean.as_ref(), scale.as_ref(), None);
         let z_te = mat_mul(xs_te.as_ref(), axes.as_ref(), Par::Seq);
-        let r2 = heldout_r2(
+        Ok(heldout_r2(
             z_tr.as_ref(),
             y_tr.as_ref(),
             z_te.as_ref(),
             col_row_subset(y, &fold.te).as_ref(),
-        );
+        ))
+    });
+    let mut rows: Vec<Vec<f64>> = Vec::with_capacity(kept.len());
+    for r2 in scored {
+        let r2 = r2?;
         if r2.iter().all(|v| v.is_finite()) {
             rows.push(r2);
         } else {
@@ -697,9 +723,7 @@ fn corr_eigenvalues(xs: MatRef<'_, f64>) -> PlsKitResult<Vec<f64>> {
     } else {
         mat_mul(xs, xs.transpose(), Par::Seq)
     };
-    // shortcut: the eigenvectors are computed and dropped; add a
-    // values-only variant to `linalg` when D is large enough to notice.
-    let (lambda, _) = self_adjoint_eigen(g.as_ref(), Par::Seq)
+    let lambda = self_adjoint_eigenvalues(g.as_ref(), Par::Seq)
         .map_err(|e| PlsKitError::Internal(format!("eigendecomposition failed: {e:?}")))?;
     Ok((0..lambda.nrows())
         .rev()
@@ -716,16 +740,19 @@ fn parallel_k(xs: MatRef<'_, f64>, perm_seeds: &[u64]) -> PlsKitResult<usize> {
     let (n, d) = xs.shape();
     let observed = corr_eigenvalues(xs)?;
     let mut null: Vec<Vec<f64>> = vec![Vec::with_capacity(perm_seeds.len()); observed.len()];
-    let mut shuffled = Mat::<f64>::zeros(n, d);
-    for &seed in perm_seeds {
-        let mut rng = child_rng(seed);
+    let shuffles = map_units(perm_seeds.len(), corr_eigen_bytes(n, d), |b| {
+        let mut rng = child_rng(perm_seeds[b]);
+        let mut shuffled = Mat::<f64>::zeros(n, d);
         for j in 0..d {
             let p = permute_indices(n, &mut rng);
             for i in 0..n {
                 shuffled[(i, j)] = xs[(p[i], j)];
             }
         }
-        for (r, v) in corr_eigenvalues(shuffled.as_ref())?.into_iter().enumerate() {
+        corr_eigenvalues(shuffled.as_ref())
+    });
+    for lambda in shuffles {
+        for (r, v) in lambda?.into_iter().enumerate() {
             null[r].push(v);
         }
     }
@@ -739,6 +766,44 @@ fn parallel_k(xs: MatRef<'_, f64>, perm_seeds: &[u64]) -> PlsKitResult<usize> {
         }
     }
     Ok(run.max(1))
+}
+
+/// Bytes of one shuffle of [`parallel_k`]: the shuffled copy of `X`
+/// (`n × d`), the Gram matrix of [`corr_eigenvalues`] (`m × m`,
+/// `m = min(n, d)`) and faer's eigenvalue scratch. Mirrored by `corr_eigen`
+/// in `tests/memory_budget_parity.rs` (change together).
+fn corr_eigen_bytes(n: usize, d: usize) -> usize {
+    use faer::linalg::evd::{ComputeEigenvectors, self_adjoint_evd_scratch};
+    let m = n.min(d);
+    let scratch = self_adjoint_evd_scratch::<f64>(
+        m,
+        ComputeEigenvectors::No,
+        Par::Seq,
+        faer::Spec::default(),
+    )
+    .size_bytes();
+    copy_bytes(n, d)
+        .saturating_add(copy_bytes(m, m))
+        .saturating_add(scratch)
+}
+
+/// Bytes of one fold of [`profiles_find_n`]'s first pass on `n_tr`
+/// training rows: the centred training copy of `X` (`n_tr × d`), the `V`
+/// of `linalg::thin_svd_v` (`d × min(n_tr, d)`) and faer's SVD scratch.
+fn fold_svd_bytes(n_tr: usize, d: usize) -> usize {
+    use faer::linalg::svd::{ComputeSvdVectors, svd_scratch};
+    let scratch = svd_scratch::<f64>(
+        n_tr,
+        d,
+        ComputeSvdVectors::No,
+        ComputeSvdVectors::Thin,
+        Par::Seq,
+        faer::Spec::default(),
+    )
+    .size_bytes();
+    copy_bytes(n_tr, d)
+        .saturating_add(copy_bytes(d, n_tr.min(d)))
+        .saturating_add(scratch)
 }
 
 /// True when some column of `x`, over the rows `rows`, is constant to
@@ -1528,6 +1593,31 @@ mod tests {
                 flat.r2_mean,
                 plain.r2_mean
             );
+        }
+    }
+
+    #[test]
+    fn corr_eigenvalues_match_the_decomposition_with_vectors() {
+        let low = mat_mul(unif(60, 3, 8).as_ref(), unif(3, 10, 9).as_ref(), Par::Seq);
+        for (name, x) in [
+            ("tall", unif(200, 12, 5)),
+            ("wide", unif(20, 90, 7)),
+            ("rank 3", low),
+        ] {
+            let xs = standardize(x.as_ref()).0;
+            let got = corr_eigenvalues(xs.as_ref()).unwrap();
+            let (n, d) = xs.shape();
+            let g = if d <= n {
+                mat_mul(xs.transpose(), xs.as_ref(), Par::Seq)
+            } else {
+                mat_mul(xs.as_ref(), xs.transpose(), Par::Seq)
+            };
+            let (lambda, _) = crate::linalg::self_adjoint_eigen(g.as_ref(), Par::Seq).unwrap();
+            let m = lambda.nrows();
+            for (r, v) in got.iter().enumerate() {
+                let want = lambda[m - 1 - r] / n as f64;
+                assert!((v - want).abs() <= 1e-12 * got[0], "{name}: rank {r}");
+            }
         }
     }
 

@@ -307,6 +307,7 @@ mod tests {
     /// The transform equals the product with the explicit ±1 Walsh matrix
     /// `(−1)^{|c & s|}`, exactly on small integers.
     #[test]
+    #[allow(clippy::float_cmp)] // sums of small integers are exact
     fn fwht_matches_the_walsh_matrix() {
         for h in [2_usize, 8, 128] {
             let mut r = rng(h as u64);

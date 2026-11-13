@@ -303,6 +303,7 @@ fn duplicated_pairs() -> (Mat<f64>, Col<f64>) {
 /// for the orthogonal outcome and for a constant one, and a finite fit of
 /// at most one component for an outcome orthogonal to X up to rounding.
 #[test]
+#[allow(clippy::float_cmp)] // the zero model's statistic is exactly 0
 fn degenerate_columns_give_finite_results() {
     let finite = |r: (f64, f64), what: &str| {
         assert!(
@@ -391,6 +392,7 @@ fn degenerate_columns_give_finite_results() {
 /// duplicated rows, `k = 2` on a rank-one X, and a column constant over half
 /// the rows each give a finite statistic and p-value.
 #[test]
+#[allow(clippy::float_cmp)] // the zero model's statistic is exactly 0
 fn degenerate_columns_give_finite_results_on_tall_data() {
     let (n, p) = (10_000_usize, 10_usize);
     let tall = |m: Method, x: &Mat<f64>, y: &Col<f64>| {

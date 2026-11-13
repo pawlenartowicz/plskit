@@ -18,7 +18,7 @@ Every function in the API reference that can run in parallel reads
 
 The value is not trimmed, so `" 4 "` is an error.
 
-`pls1_predict`, `pls3_transform`, `plssvd_transform`, `preprocess`, `rotate`, `factors`, `pca_basis`, `profiles_find_n`, `profiles` and `profiles_search` run on one thread and do not read the variable.
+`pls1_predict`, `pls3_transform`, `plssvd_transform`, `preprocess`, `rotate`, `factors`, `pca_basis`, `profiles` and `profiles_search` run on one thread and do not read the variable.
 
 ## Setting it
 
@@ -81,11 +81,13 @@ batch of units holds its buffers at once, whatever the thread count.
 - the functions that run these tests or this selection inside them: the
   steps of `pls1_find_k_sequence` and `spls1_find_k_sequence`, the
   `diagnostic` of `pls1_find_k_optimal` and `spls1_find_k_optimal`, and
-  `pls1_fit` with `k="optimal"` or `k="sequence"` (Python, R and Julia).
+  `pls1_fit` with `k="optimal"` or `k="sequence"` (Python, R and Julia);
+- the column shuffles of the parallel analysis and the folds of
+  `profiles_find_n`.
 
 `pls1_perm_null` holds at most one standardized copy of `X`, shared by all
 its permutations, and is not batched. `pls1_perm_alpha` holds one copy of
-`gram`, shared by all its columns, and is not batched. `factors`, `pca_basis`, `profiles_find_n`, `profiles` and `profiles_search` run on one thread and are not batched.
+`gram`, shared by all its columns, and is not batched. `factors`, `pca_basis`, `profiles` and `profiles_search` run on one thread and are not batched.
 
 | Value | Behaviour |
 |---|---|
@@ -98,8 +100,8 @@ The value is not trimmed. Every function that reads `PLSKIT_NUM_THREADS`
 also checks `PLSKIT_MEMORY_BUDGET` at the start of each call and raises the
 error before any work, including the functions that do not batch anything.
 `pls1_predict`, `pls3_transform`, `plssvd_transform`, `preprocess`,
-`rotate`, `factors`, `pca_basis`, `profiles_find_n`, `profiles` and
-`profiles_search` do not read it. It is set like `PLSKIT_NUM_THREADS` (for example
+`rotate`, `factors`, `pca_basis`, `profiles` and `profiles_search` do
+not read it. It is set like `PLSKIT_NUM_THREADS` (for example
 `export PLSKIT_MEMORY_BUDGET=8G`, or
 `os.environ["PLSKIT_MEMORY_BUDGET"] = "8G"` in Python) and applies to each
 call separately, so `N` worker processes can together use `N` times the
