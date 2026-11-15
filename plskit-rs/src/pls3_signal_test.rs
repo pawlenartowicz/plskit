@@ -45,6 +45,19 @@
 //! the test half when singular values are close, and whether the statistic
 //! should then be per-component or subspace-level is undecided — so k > 1
 //! errors rather than guessing.
+//!
+//! # `sv_perm`: the in-sample singular-value permutation test
+//! The PLSC test of McIntosh & Lobaugh (2004), "Partial least squares
+//! analysis of neuroimaging data: applications and advances", NeuroImage
+//! 23:S250–S263, at LV1, run for comparison with pyls; `split_exact` stays
+//! the recommendation. No split: the statistic is `d₁`, the largest
+//! singular value of `X̃ᵀỸ` on all rows (X̃, Ỹ centred and scaled once, as
+//! above), and each null replicate permutes the rows of Ỹ against X̃. With
+//! `rotate`, each permuted Y-side basis is Procrustes-rotated onto the
+//! observed one before LV1 is read, as pyls does by default. For LV1 that
+//! can only lower p, so the rotated test is not exact (see
+//! `run_sv_perm_pls3`). No fit runs, so `keep_x` / `keep_y` below the full
+//! column count are refused.
 
 use faer::{Col, ColRef, Mat, MatRef};
 
@@ -74,9 +87,9 @@ use crate::signal_test::{
 #[allow(clippy::struct_excessive_bools)]
 pub struct Pls3ConfirmatoryTestOpts {
     /// Method dispatch + per-method args. [`ConfirmatoryArgs::SplitExact`],
-    /// [`ConfirmatoryArgs::SplitNb`] and [`ConfirmatoryArgs::Auto`] (the
-    /// default, which runs `split_exact` on every design) are accepted; the
-    /// other three variants error.
+    /// [`ConfirmatoryArgs::SplitNb`], [`ConfirmatoryArgs::SvPerm`] and
+    /// [`ConfirmatoryArgs::Auto`] (the default, which runs `split_exact` on
+    /// every design) are accepted; the other three variants error.
     pub args: ConfirmatoryArgs,
     /// Caller asserts X is already standardized: skip the one
     /// standardization of X over all rows.
@@ -216,8 +229,11 @@ pub(crate) fn dual_route_eligible(
 /// - `PlsKitError::DimensionMismatch` when row counts disagree
 /// - `PlsKitError::InvalidArgument` for `k != 1` (`k = 0` with the
 ///   message every entry gives it, "k must be >= 1"), for any method other than
-///   `split_exact`, `split_nb` or `auto`, for `n_splits < 2`, for `n_perm < 1`, for
-///   `n < k + 5` (the split floor `draw_splits` enforces), for a `keep_x` /
+///   `split_exact`, `split_nb`, `sv_perm` or `auto`, for `n_splits < 2`, for
+///   `n_perm < 1`, for `sv_perm` with `keep_x` / `keep_y` below the full
+///   column count, for
+///   `n < k + 5` on the split methods (the split floor `draw_splits`
+///   enforces; `sv_perm` draws no splits), for a `keep_x` /
 ///   `keep_y` of `0` or above its dimension, or, when either keep-count
 ///   selects fewer than all columns, for `max_iter == 0` or a NaN,
 ///   infinite or negative `tol`
@@ -389,10 +405,13 @@ fn pls3_test_body(
         ConfirmatoryArgs::SplitExact { n_perm, n_splits }
         | ConfirmatoryArgs::Auto { n_perm, n_splits } => (Some(n_perm), n_splits, false),
         ConfirmatoryArgs::SplitNb { n_splits, force } => (None, n_splits, force),
+        ConfirmatoryArgs::SvPerm { n_perm, rotate } => {
+            return pls3_sv_perm(src, y, n_perm, rotate, &opts);
+        }
         other => {
             return Err(PlsKitError::InvalidArgument(format!(
-                "pls3_confirmatory_test supports test_method='split_exact', 'split_nb' or \
-                 'auto' (got '{}'): 'raw_perm' needs a CV statistic PLS3 does not have (there is no \
+                "pls3_confirmatory_test supports test_method='split_exact', 'split_nb', \
+                 'sv_perm' or 'auto' (got '{}'): 'raw_perm' needs a CV statistic PLS3 does not have (there is no \
                  pls3_predict); 'score' is not implemented (its symmetric analog, an \
                  RV-type test on ‖X'Y‖_F², tests a different estimand); 'e' needs a \
                  generative model that symmetric cross-decomposition does not supply",
@@ -540,6 +559,9 @@ fn pls3_test_body(
             statistics_by_k: std::collections::BTreeMap::from([(k, statistic)]),
             n_perm: None,
             n_splits: Some(n_splits),
+            n_folds: None,
+            force: Some(force),
+            rotate: None,
             seed: seed_used,
             ci: None,
             n_eff,
@@ -623,7 +645,7 @@ fn pls3_test_body(
 
     // A non-finite null statistic counts as an exceedance so p is biased
     // upward, never downward. Mirrors run_split_perm / run_split_perm_nr in
-    // signal_test.rs — change together.
+    // signal_test.rs and `run_sv_perm_pls3` here — change together.
     let exceedances = null_zbars
         .iter()
         .filter(|v| !v.is_finite() || **v >= z_bar_obs)
@@ -640,6 +662,9 @@ fn pls3_test_body(
         statistics_by_k: std::collections::BTreeMap::from([(k, z_bar_obs.tanh())]),
         n_perm: Some(n_perm),
         n_splits: Some(n_splits),
+        n_folds: None,
+        force: None,
+        rotate: None,
         seed: seed_used,
         ci: None,
         n_eff,
@@ -649,6 +674,215 @@ fn pls3_test_body(
         stable_rank: stable_rank_out,
         n_covariates: None,
     })
+}
+
+/// PLS3 `sv_perm`: its refusals, scales and seed, then the runner, with the
+/// output fields `split_exact` fills (no splits, no gate).
+fn pls3_sv_perm(
+    src: Pls3X<'_>,
+    y: MatRef<'_, f64>,
+    n_perm: usize,
+    rotate: bool,
+    opts: &Pls3ConfirmatoryTestOpts,
+) -> PlsKitResult<ConfirmatoryTestOutput> {
+    let (x, n_features) = match src {
+        Pls3X::X(x) => (Some(x), x.ncols()),
+        Pls3X::Gram(g) => (None, g.n_features()),
+    };
+    if opts.keep_x.is_some_and(|kx| kx < n_features) || opts.keep_y.is_some_and(|ky| ky < y.ncols())
+    {
+        return Err(PlsKitError::InvalidArgument(
+            "sv_perm takes keep_X / keep_Y only at the full column count: it fits no \
+             weights to make sparse"
+                .into(),
+        ));
+    }
+    // `n_splits` is not read; 2 is the floor's own minimum.
+    check_split_exact_counts(Some(n_perm), 2)?;
+    let x_scale = x.map_or_else(
+        || Col::<f64>::zeros(0),
+        |x| crate::linalg::held_out_scale(x, None, opts.pre_standardized_x),
+    );
+    let y_scale = crate::linalg::held_out_scale(y, None, opts.pre_standardized_y);
+    let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
+    // Wide X takes the Gram route by the rule `split_exact` uses
+    // (`dual_route_eligible`), so no `n × p` copy of X̃ is held there:
+    // `HeldOutGram::from_x` streams X in column blocks. `sv_perm` has no
+    // splits and runs one pass over its `B + 1` columns, hence
+    // `n_splits = 1`; no gate runs, so no Gram matrix is held yet.
+    let held = match src {
+        Pls3X::X(x)
+            if dual_route_eligible(None, y.nrows(), n_features, y.ncols(), n_perm, 1, false) =>
+        {
+            Some(HeldOutGram::from_x(x, None, x_scale.as_ref()))
+        }
+        _ => None,
+    };
+    let src = held.as_ref().map_or(src, Pls3X::Gram);
+    let (p, statistic) = run_sv_perm_pls3(
+        src,
+        y,
+        x_scale.as_ref(),
+        y_scale.as_ref(),
+        n_features,
+        n_perm,
+        rotate,
+        &mut rng,
+    )?;
+    Ok(ConfirmatoryTestOutput {
+        pvalue: p,
+        statistic: Some(statistic),
+        test_method: ConfirmatoryMethod::SvPerm.as_str().to_owned(),
+        k: vec![1],
+        pvalues_by_k: std::collections::BTreeMap::from([(1, p)]),
+        statistics_by_k: std::collections::BTreeMap::from([(1, statistic)]),
+        n_perm: Some(n_perm),
+        n_splits: None,
+        n_folds: None,
+        force: None,
+        rotate: Some(rotate),
+        seed: seed_used,
+        ci: None,
+        // No weights on this family, so Kish n_eff is exactly the row count.
+        n_eff: y.nrows() as f64,
+        rho_hat: None,
+        stable_rank: None,
+        n_covariates: None,
+    })
+}
+
+/// `(p-value, d₁)` of PLS3 `sv_perm` (McIntosh & Lobaugh 2004).
+///
+/// Every value, observed or permuted, comes from the `q × q` matrix
+/// `M = ỸᵀX̃X̃ᵀỸ`: its eigenvalues are the squared singular values of
+/// `X̃ᵀỸ` and its eigenvectors the Y-side singular vectors V, so
+/// `d₁² = λ_max(ỸᵀX̃X̃ᵀỸ)`. The raw form forms `C = X̃ᵀỸ_π` (`p × q`) and
+/// `M = CᵀC`; the gram form forms `M = Ỹ_πᵀ G Ỹ_π` without X. Column `c`
+/// of `resample::Columns` permutes the rows of Ỹ; X̃ and both scales stay
+/// on their rows. Without `rotate` the null value is `sqrt(λ_max(M_π))`;
+/// with it, see [`sv_null`].
+///
+/// p is `(1 + #{null ≥ d₁})/(B + 1)`; a non-finite null value counts as an
+/// exceedance (mirrors `split_exact` in [`pls3_test_body`]; change
+/// together). An eigen or SVD failure is `PlsKitError::Internal`.
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+#[allow(clippy::doc_markdown)] // "McIntosh"
+fn run_sv_perm_pls3(
+    src: Pls3X<'_>,
+    y: MatRef<'_, f64>,
+    x_scale: ColRef<'_, f64>,
+    y_scale: ColRef<'_, f64>,
+    n_features: usize,
+    n_perm: usize,
+    rotate: bool,
+    rng: &mut crate::rng::Rng,
+) -> PlsKitResult<(f64, f64)> {
+    let seq = faer::Par::Seq;
+    let all: Vec<usize> = (0..y.nrows()).collect();
+    let ys = crate::linalg::center_rows_fro(y, &all, None, None, y_scale, seq).0;
+    // X̃ once for the call. The raw form reaches here only where
+    // `dual_route_eligible` declines the Gram route, as on `split_exact`'s
+    // primal route, which materializes X's halves, `n × p` in all, per split.
+    let xs = match src {
+        Pls3X::X(x) => Some(crate::linalg::center_rows_fro(x, &all, None, None, x_scale, seq).0),
+        Pls3X::Gram(_) => None,
+    };
+    let m_of = |yc: MatRef<'_, f64>| match (src, &xs) {
+        (Pls3X::X(_), Some(xs)) => {
+            let c = crate::linalg::mat_mul(xs.transpose(), yc, seq);
+            crate::linalg::mat_mul(c.transpose(), c.as_ref(), seq)
+        }
+        (Pls3X::Gram(g), _) => {
+            let gy = crate::linalg::mat_mul(g.g(), yc, seq);
+            crate::linalg::mat_mul(yc.transpose(), gy.as_ref(), seq)
+        }
+        (Pls3X::X(_), None) => unreachable!("X̃ is formed for the raw form"),
+    };
+    let q = ys.ncols();
+    let (lambda, v) = crate::linalg::self_adjoint_eigen(m_of(ys.as_ref()).as_ref(), seq)
+        .map_err(|e| PlsKitError::Internal(format!("sv_perm eigendecomposition: {e:?}")))?;
+    let d1 = sqrt_psd(lambda[q - 1]);
+    // pyls keeps `min(p, q)` singular vectors on each side; at `p < q` the
+    // eigenvectors of M beyond rank p are arbitrary and are dropped.
+    let r = n_features.min(q);
+    let v_obs = Mat::<f64>::from_fn(q, r, |i, j| v[(i, q - 1 - j)]);
+
+    let seeds = crate::rng::child_seeds(rng, n_perm);
+    let cols = crate::resample::Columns {
+        y: ys.as_ref(),
+        seeds: &seeds,
+        null_map: None,
+    };
+    let mut exceedances = 0_usize;
+    for c in 1..cols.len() {
+        let m = m_of(cols.block(c).as_ref());
+        let null = sv_null(m.as_ref(), rotate.then_some(v_obs.as_ref()))?;
+        if !null.is_finite() || null >= d1 {
+            exceedances += 1;
+        }
+    }
+    Ok(((exceedances as f64 + 1.0) / (n_perm as f64 + 1.0), d1))
+}
+
+/// The LV1 null value of one permuted `M_π` (`q × q`): `sqrt(λ_max(M_π))`
+/// when `v_obs` is `None`, else the rotated value against the observed
+/// top-`r` Y-side vectors `v_obs` (`q × r`, descending).
+///
+/// Rotation (pyls `rotate=True`): with `V_π` the top-`r` eigenvectors of
+/// `M_π` and `svd(V_obsᵀV_π) = N S Pᵀ`, `R = P Nᵀ` is the `r × r`
+/// orthogonal Procrustes rotation with `V_π R ≈ V_obs`, and the null value
+/// is `‖D_π R[:, 0]‖ = sqrt(Σ_j λ_j^π R_{j0}²)`. Here `R` comes as `U Wᵀ`
+/// from `thin_svd(V_πᵀV_obs) = U Σ Wᵀ`, the same matrix. Since
+/// `‖D_π r₁‖ ≤ d₁^π` for a unit `r₁` and the observed data take `R = I`,
+/// the rotated p is never above the unrotated one at the same seed.
+///
+/// At `r = q` both bases are square orthogonal, so `V_πᵀV_obs` is
+/// orthogonal, its Procrustes rotation is itself, and
+/// `Σ_j λ_j (v_jᵀv₁)² = v₁ᵀ M_π v₁`: no eigendecomposition or SVD runs.
+/// The value is then sign-free in `v₁`, and at `r < q` sign-free in every
+/// column of either basis, since `R`'s rows and columns flip with them.
+#[allow(clippy::many_single_char_names)]
+fn sv_null(m: MatRef<'_, f64>, v_obs: Option<MatRef<'_, f64>>) -> PlsKitResult<f64> {
+    let seq = faer::Par::Seq;
+    let q = m.nrows();
+    let evd = |e: faer::linalg::evd::EvdError| {
+        PlsKitError::Internal(format!("sv_perm eigendecomposition: {e:?}"))
+    };
+    match v_obs {
+        None => {
+            let lambda = crate::linalg::self_adjoint_eigenvalues(m, seq).map_err(evd)?;
+            Ok(sqrt_psd(lambda[q - 1]))
+        }
+        Some(v) if v.ncols() == q => {
+            let v1 = v.col(0);
+            let mv = crate::linalg::mat_vec(m, v1, seq);
+            Ok(sqrt_psd((0..q).map(|i| v1[i] * mv[i]).sum()))
+        }
+        Some(v) => {
+            let r = v.ncols();
+            let (lambda, u) = crate::linalg::self_adjoint_eigen(m, seq).map_err(evd)?;
+            let v_pi = Mat::<f64>::from_fn(q, r, |i, j| u[(i, q - 1 - j)]);
+            let a = crate::linalg::mat_mul(v_pi.transpose(), v, seq);
+            let svd = crate::linalg::thin_svd(a.as_ref(), seq)
+                .map_err(|e| PlsKitError::Internal(format!("sv_perm rotation SVD: {e:?}")))?;
+            // R[j, 0] = Σ_k U[j, k]·W[0, k].
+            let d2 = (0..r)
+                .map(|j| {
+                    let r_j0: f64 = (0..r).map(|k| svd.u[(j, k)] * svd.v[(0, k)]).sum();
+                    lambda[q - 1 - j] * r_j0 * r_j0
+                })
+                .sum();
+            Ok(sqrt_psd(d2))
+        }
+    }
+}
+
+/// `sqrt` of a quantity that is non-negative in exact arithmetic: a zero
+/// eigenvalue of a rank-deficient `M` (a constant or all-zero Ỹ, or wide X
+/// past its rank) can round to a tiny negative, which reads as 0. NaN
+/// passes through, so a non-finite null still counts as an exceedance.
+fn sqrt_psd(v: f64) -> f64 {
+    if v < 0.0 { 0.0 } else { v.sqrt() }
 }
 
 /// The large buffers of one split on the primal route when `n_cols`
@@ -724,7 +958,7 @@ pub(crate) fn centered_halves(
     te: &[usize],
     scale: ColRef<'_, f64>,
 ) -> (Mat<f64>, Mat<f64>) {
-    let (train, mean, _) = crate::linalg::center_rows_fro(a, tr, None, None, scale);
+    let (train, mean, _) = crate::linalg::center_rows_fro(a, tr, None, None, scale, faer::Par::Seq);
     let held = crate::linalg::standardize_apply_rows(a, te, mean.as_ref(), scale, None);
     (train, held)
 }
@@ -1823,7 +2057,8 @@ mod tests {
                 n_perm: 10,
                 n_folds: 5,
             },
-            ConfirmatoryArgs::Score,
+            ConfirmatoryArgs::Score { n_perm: None },
+            ConfirmatoryArgs::Score { n_perm: Some(10) },
             ConfirmatoryArgs::E,
         ] {
             let o = Pls3ConfirmatoryTestOpts {
@@ -1983,6 +2218,7 @@ mod tests {
         let r = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, nb_opts(4, true, 7)).unwrap();
         assert_eq!(r.test_method, "split_nb");
         assert!(r.n_perm.is_none());
+        assert_eq!((r.n_folds, r.force, r.rotate), (None, Some(true), None));
     }
 
     /// Dense `split_nb` reads X block by block; each split's `r` agrees
@@ -3727,6 +3963,228 @@ mod tests {
                 assert!(!dual_route_eligible(None, n, p, q, 0, n_splits, true));
                 assert_eq!(stat.to_bits(), streamed.to_bits(), "the streamed route");
             }
+        }
+    }
+
+    fn sv_opts(n_perm: usize, rotate: bool, seed: u64) -> Pls3ConfirmatoryTestOpts {
+        Pls3ConfirmatoryTestOpts {
+            args: ConfirmatoryArgs::SvPerm { n_perm, rotate },
+            seed: Some(seed),
+            ..Pls3ConfirmatoryTestOpts::default()
+        }
+    }
+
+    #[test]
+    fn pls3_sv_perm_statistic_is_top_singular_value() {
+        let (x, y) = linked_blocks(40, 12, 4, 1.0, 3);
+        assert!(
+            !dual_route_eligible(None, 40, 12, 4, 99, 1, false),
+            "premise: primal route"
+        );
+        let r = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, sv_opts(99, false, 3)).unwrap();
+        assert_eq!(r.test_method, "sv_perm");
+        assert_eq!(r.n_perm, Some(99));
+        assert_eq!(r.n_splits, None);
+        assert_eq!((r.n_folds, r.force, r.rotate), (None, None, Some(false)));
+        assert_eq!(r.stable_rank, None);
+        assert_eq!(r.n_covariates, None);
+        assert!((r.n_eff - 40.0).abs() < 1e-12);
+        let xs = crate::linalg::standardize(x.as_ref()).0;
+        let ys = crate::linalg::standardize(y.as_ref()).0;
+        let c = xs.transpose() * &ys;
+        let s0 = crate::linalg::thin_svd(c.as_ref(), faer::Par::Seq)
+            .unwrap()
+            .s[0];
+        let rel = (r.statistic.unwrap() / s0 - 1.0).abs();
+        assert!(rel < 1e-10, "rel {rel}");
+    }
+
+    #[test]
+    fn pls3_sv_perm_rotation_never_raises_p() {
+        let floor = 1.0 / 200.0;
+        let mut seen_strict_drop = false;
+        for seed in 0..5 {
+            let (x, y) = linked_blocks(30, 20, 5, 0.4, 100 + seed);
+            let un =
+                pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, sv_opts(199, false, 9)).unwrap();
+            let rot =
+                pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, sv_opts(199, true, 9)).unwrap();
+            assert_eq!(rot.statistic, un.statistic);
+            assert_eq!((rot.rotate, un.rotate), (Some(true), Some(false)));
+            assert!(
+                rot.pvalue <= un.pvalue,
+                "seed {seed}: {} > {}",
+                rot.pvalue,
+                un.pvalue
+            );
+            seen_strict_drop |= un.pvalue > floor && rot.pvalue < un.pvalue;
+        }
+        assert!(
+            seen_strict_drop,
+            "no seed had p off the floor with rotation lowering it"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // p-values are counts over the same nulls
+    fn pls3_sv_perm_q1_rotation_is_identity() {
+        let (x, y) = linked_blocks(30, 6, 1, 0.5, 4);
+        let un = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, sv_opts(199, false, 2)).unwrap();
+        let rot = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, sv_opts(199, true, 2)).unwrap();
+        assert_eq!(rot.pvalue, un.pvalue);
+    }
+
+    #[test]
+    fn pls3_sv_perm_refusals() {
+        let (x, y) = linked_blocks(40, 6, 3, 1.0, 5);
+        let bad = |o: Pls3ConfirmatoryTestOpts, k: usize| {
+            pls3_confirmatory_test(x.as_ref(), y.as_ref(), k, o)
+        };
+        let keep_x = Pls3ConfirmatoryTestOpts {
+            keep_x: Some(5),
+            ..sv_opts(19, false, 1)
+        };
+        assert!(matches!(
+            bad(keep_x, 1),
+            Err(PlsKitError::InvalidArgument(_))
+        ));
+        let keep_y = Pls3ConfirmatoryTestOpts {
+            keep_y: Some(2),
+            ..sv_opts(19, true, 1)
+        };
+        assert!(matches!(
+            bad(keep_y, 1),
+            Err(PlsKitError::InvalidArgument(_))
+        ));
+        // The full column counts are the dense endpoint and run.
+        let full = Pls3ConfirmatoryTestOpts {
+            keep_x: Some(6),
+            keep_y: Some(3),
+            ..sv_opts(19, false, 1)
+        };
+        bad(full, 1).expect("keep at the full counts");
+        assert!(bad(sv_opts(19, false, 1), 2).is_err());
+        assert!(matches!(
+            bad(sv_opts(0, false, 1), 1),
+            Err(PlsKitError::InvalidArgument(_))
+        ));
+        let score = Pls3ConfirmatoryTestOpts {
+            args: ConfirmatoryArgs::Score { n_perm: Some(19) },
+            seed: Some(1),
+            ..Pls3ConfirmatoryTestOpts::default()
+        };
+        assert!(matches!(
+            bad(score, 1),
+            Err(PlsKitError::InvalidArgument(_))
+        ));
+    }
+
+    /// `q` above `n_features` keeps `r = n_features` eigenpairs on both sides.
+    #[test]
+    fn pls3_sv_perm_q_above_p_runs() {
+        let (x, y) = linked_blocks(30, 2, 5, 1.0, 6);
+        for rotate in [false, true] {
+            let r =
+                pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, sv_opts(99, rotate, 3)).unwrap();
+            assert!(
+                r.pvalue > 0.0 && r.pvalue <= 1.0,
+                "rotate {rotate}: {}",
+                r.pvalue
+            );
+        }
+    }
+
+    /// A constant Y column answers as `split_exact` answers it.
+    #[test]
+    fn pls3_sv_perm_constant_y_column_answers_as_split_exact() {
+        let (x, mut y) = linked_blocks(40, 6, 3, 1.0, 7);
+        for i in 0..40 {
+            y[(i, 1)] = 2.5;
+        }
+        let se = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, opts(99, 8, 1));
+        for rotate in [false, true] {
+            let sv = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, sv_opts(99, rotate, 1));
+            match (&se, sv) {
+                (Err(a), Err(b)) => assert_eq!(
+                    std::mem::discriminant(a),
+                    std::mem::discriminant(&b),
+                    "{a:?} vs {b:?}"
+                ),
+                (Ok(_), Ok(b)) => {
+                    assert!(b.statistic.unwrap().is_finite());
+                    assert!(b.pvalue > 0.0 && b.pvalue <= 1.0);
+                }
+                (a, b) => panic!("split_exact {a:?} vs sv_perm {b:?}"),
+            }
+        }
+    }
+
+    /// Wide X with `p` far above `n` (the Gram route) and rotation at
+    /// `r = q = 4`, the closed form: the p-value and statistic are finite.
+    #[test]
+    fn pls3_sv_perm_wide_rank_deficient_rotation_is_finite() {
+        let (x, y) = linked_blocks(20, 200, 4, 1.0, 8);
+        assert!(
+            dual_route_eligible(None, 20, 200, 4, 99, 1, false),
+            "premise: Gram route"
+        );
+        let r = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, sv_opts(99, true, 3)).unwrap();
+        assert!(r.pvalue.is_finite() && r.statistic.unwrap().is_finite());
+    }
+
+    #[allow(clippy::many_single_char_names)]
+    #[test]
+    fn pls3_sv_perm_pre_standardized_matches_default() {
+        let (x, y) = linked_blocks(40, 12, 4, 1.0, 9);
+        let xs = crate::linalg::standardize(x.as_ref()).0;
+        let ys = crate::linalg::standardize(y.as_ref()).0;
+        let a = pls3_confirmatory_test(x.as_ref(), y.as_ref(), 1, sv_opts(99, false, 3)).unwrap();
+        let o = Pls3ConfirmatoryTestOpts {
+            pre_standardized_x: true,
+            pre_standardized_y: true,
+            ..sv_opts(99, false, 3)
+        };
+        let b = pls3_confirmatory_test(xs.as_ref(), ys.as_ref(), 1, o).unwrap();
+        let rel = (a.statistic.unwrap() / b.statistic.unwrap() - 1.0).abs();
+        assert!(rel < 1e-10, "rel {rel}");
+    }
+
+    /// The rotated null value against `‖D_π R[:, 0]‖`, with R built here in
+    /// pyls's form: `svd(V_obsᵀV_π) = N S Pᵀ`, `R = P Nᵀ`. At r = q the
+    /// helper takes its closed form, at r < q the SVD.
+    #[allow(clippy::many_single_char_names)]
+    #[test]
+    fn pls3_sv_perm_rotated_null_matches_explicit_procrustes() {
+        use rand::RngExt;
+        use rand::SeedableRng;
+        let seq = faer::Par::Seq;
+        for (q, r) in [(4_usize, 4_usize), (5, 2)] {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(40 + q as u64);
+            let mut psd = |rows: usize| {
+                let a = Mat::<f64>::from_fn(rows, q, |_, _| rng.random_range(-1.0..1.0));
+                a.transpose() * &a
+            };
+            let m_obs = psd(r);
+            let m_pi = psd(r);
+            let top = |m: &Mat<f64>| {
+                let (l, v) = crate::linalg::self_adjoint_eigen(m.as_ref(), seq).unwrap();
+                let lam: Vec<f64> = (0..r).map(|j| l[q - 1 - j]).collect();
+                (lam, Mat::<f64>::from_fn(q, r, |i, j| v[(i, q - 1 - j)]))
+            };
+            let (_, v_obs) = top(&m_obs);
+            let (lam, v_pi) = top(&m_pi);
+            let a = v_obs.transpose() * &v_pi;
+            let svd = crate::linalg::thin_svd(a.as_ref(), seq).unwrap();
+            let rot = &svd.v * svd.u.transpose();
+            let want = (0..r)
+                .map(|j| lam[j] * rot[(j, 0)].powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let got = sv_null(m_pi.as_ref(), Some(v_obs.as_ref())).unwrap();
+            assert!(
+                (got / want - 1.0).abs() < 1e-10,
+                "q {q} r {r}: {got} vs {want}"
+            );
         }
     }
 }

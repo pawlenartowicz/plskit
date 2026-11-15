@@ -463,6 +463,13 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_confirmatory_test::gram_split_nb(root)?);
     cases.push(pls1_confirmatory_test::gram_raw_perm(root)?);
     cases.push(pls1_confirmatory_test::gram_score(root)?);
+    cases.push(pls1_confirmatory_test::sv_perm(root)?);
+    cases.push(pls1_confirmatory_test::sv_perm_weighted(root)?);
+    cases.push(pls1_confirmatory_test::sv_perm_covariates(root)?);
+    cases.push(pls1_confirmatory_test::score_n_perm(root)?);
+    cases.push(pls1_confirmatory_test::sv_perm_gram(root)?);
+    cases.push(pls1_confirmatory_test::score_n_perm_gram(root)?);
+    cases.push(pls1_confirmatory_test::sv_perm_covariates_gram(root)?);
     cases.push(pls1_confirmatory_test::split_exact_covariates(root)?);
     cases.push(pls1_confirmatory_test::raw_perm_covariates(root)?);
     cases.push(pls1_confirmatory_test::split_exact_covariates_weighted(
@@ -521,6 +528,10 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls3::confirmatory_split_nb(root)?);
     cases.push(pls3::confirmatory_auto_split_exact(root)?);
     cases.push(pls3::confirmatory_gram_split_exact(root)?);
+    cases.push(pls3::confirmatory_sv_perm(root)?);
+    cases.push(pls3::confirmatory_sv_perm_rotate(root)?);
+    cases.push(pls3::confirmatory_sv_perm_rotate_gram(root)?);
+    cases.push(pls3::confirmatory_sv_perm_gram(root)?);
 
     cases.push(spls3_fit::small_n50_p10_q4_keep3_2_k2(root)?);
     cases.push(spls3_fit::dense_endpoint_n50_p10_q4_k2(root)?);

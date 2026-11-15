@@ -178,6 +178,44 @@ test_that("subset() on a gram_matrix_result takes 1-based rows and checks them",
   expect_identical(catch_plskit(subset(g, 1:2, drop = TRUE))$code, "invalid_argument")
 })
 
+test_that("gram_matrix_blocks matches gram_matrix on the joined X and checks its blocks", {
+  X <- matrix(stats::rnorm(40 * 30), 40, 30)
+  cuts <- c(0, 5, 13, ncol(X))
+  i <- 0L
+  feed <- function() {
+    i <<- i + 1L
+    if (i >= length(cuts)) return(NULL)
+    X[, (cuts[i] + 1):cuts[i + 1], drop = FALSE]
+  }
+  b <- gram_matrix_blocks(feed)
+  g <- gram_matrix(X)
+  expect_s3_class(b, c("gram_matrix_result", "plskit_result"), exact = TRUE)
+  expect_equal(b$gram, g$gram, tolerance = 1e-12 * max(abs(g$gram)))
+  expect_identical(b$n_features, g$n_features)
+  i <- 0L
+  bs <- gram_matrix_blocks(feed, pre_standardized = TRUE)
+  gs <- gram_matrix(X, pre_standardized = TRUE)
+  expect_true(bs$pre_standardized)
+  expect_equal(bs$gram, gs$gram, tolerance = 1e-12 * max(abs(gs$gram)))
+  Xs <- matrix(stats::rnorm(30 * 80), 30, 80)
+  ys <- Xs[, 1] + stats::rnorm(30)
+  j <- 0L
+  half <- function() {
+    j <<- j + 1L
+    if (j > 2L) NULL else Xs[, (40 * (j - 1) + 1):(40 * j)]
+  }
+  p1 <- pls1_confirmatory_test(gram = gram_matrix_blocks(half), y = ys, seed = 1)
+  p2 <- pls1_confirmatory_test(Xs, ys, seed = 1)
+  expect_equal(p1$pvalue, p2$pvalue, tolerance = 1e-12)
+  expect_identical(catch_plskit(gram_matrix_blocks(function() NULL))$code, "invalid_input")
+  k <- 0L
+  uneven <- function() {
+    k <<- k + 1L
+    if (k > 2L) NULL else X[seq_len(40 - k), 1:3]
+  }
+  expect_identical(catch_plskit(gram_matrix_blocks(uneven))$code, "shape_mismatch")
+})
+
 test_that("gram= takes a gram_matrix_result, its subset, or a matrix with n_features", {
   X <- matrix(stats::rnorm(30 * 80), 30, 80)
   y <- X[, 1] + stats::rnorm(30)

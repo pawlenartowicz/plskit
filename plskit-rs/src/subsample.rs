@@ -341,7 +341,7 @@ fn fit_rows(
 
     let rows = |a: MatRef<'_, f64>, scale: ColRef<'_, f64>| {
         if centre {
-            let (s, mean, _) = center_rows_fro(a, idx, wsr, None, scale);
+            let (s, mean, _) = center_rows_fro(a, idx, wsr, None, scale, faer::Par::Seq);
             (s, mean)
         } else {
             let mean = Col::<f64>::zeros(a.ncols());
@@ -647,8 +647,8 @@ mod tests_worker {
             .unwrap();
             let wsr = w_sub.as_ref().map(Col::as_ref);
             let basis = CovariateBasis::new(row_subset(z.as_ref(), &idx).as_ref(), wsr).unwrap();
-            let (mut xs, _, _) = center_rows_fro(x.as_ref(), &idx, wsr, None, xsc);
-            let (mut ys, _, _) = center_rows_fro(y.as_mat(), &idx, wsr, None, ysc);
+            let (mut xs, _, _) = center_rows_fro(x.as_ref(), &idx, wsr, None, xsc, faer::Par::Seq);
+            let (mut ys, _, _) = center_rows_fro(y.as_mat(), &idx, wsr, None, ysc, faer::Par::Seq);
             basis.residualize(xs.as_mut());
             basis.residualize(ys.as_mut());
             let want = pls1_fit_impl(

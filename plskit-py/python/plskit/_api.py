@@ -7,7 +7,7 @@ import functools
 import json
 import sys
 import warnings
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Literal
 
@@ -538,7 +538,7 @@ def pls3_confirmatory_test(
     Y: np.ndarray | None = None,
     k: int = 1,
     *,
-    test_method: Literal["auto", "split_exact", "split_nb"] = "auto",
+    test_method: Literal["auto", "split_exact", "split_nb", "sv_perm"] = "auto",
     args: dict | None = None,
     pre_standardized_X: bool = False,
     pre_standardized_Y: bool = False,
@@ -569,7 +569,7 @@ def pls3_confirmatory_test(
         Must be 1. Above LV1 the training-half component ordering need not
         survive to the test half, and whether the statistic should then be
         per-component or subspace-level is not settled.
-    test_method : {'auto', 'split_exact', 'split_nb'}, default 'auto'
+    test_method : {'auto', 'split_exact', 'split_nb', 'sv_perm'}, default 'auto'
         ``'auto'`` runs ``'split_exact'`` on every design, and
         ``result.test_method`` says so; ``'split_nb'`` runs only when
         requested. This may change between versions. See
@@ -612,14 +612,25 @@ def pls3_confirmatory_test(
         ``'raw_perm'`` needs a CV statistic that a method with no
         ``predict`` does not have. ``'score'`` is not implemented: its
         symmetric analog is an RV-type test on ``||X'Y||_F^2``, which tests
-        a different estimand from the LV1 held-out correlation. ``'e'``
-        needs a generative model that symmetric cross-decomposition does
-        not supply.
+        a different estimand from the LV1 held-out correlation.
+
+        ``'sv_perm'``: a permutation test on the first singular value of
+        ``X̃ᵀỸ`` (McIntosh and Lobaugh 2004). The rows of Y are shuffled
+        against X ``n_perm`` times, and ``p = (1 + #{null >= observed}) /
+        (n_perm + 1)``. It runs at ``k=1`` only. With ``rotate=True`` each
+        permuted singular vector set is Procrustes-rotated to the observed
+        one before its singular value is taken.
+
+        ``'e'`` needs a generative model that symmetric
+        cross-decomposition does not supply.
     args : dict | None
         ``'split_exact'``: ``{'n_perm': int, 'n_splits': int}``, defaults
         1000 and 32. ``'split_nb'``: ``{'n_splits': int, 'force': bool}``,
         defaults 32 and False. ``'auto'``: ``{'n_perm': int, 'n_splits': int}``,
         defaults 1000 and 32; ``n_perm`` is ignored when ``'split_nb'`` runs.
+        ``'sv_perm'``: ``{'n_perm': int, 'rotate': bool}``, defaults 1000 and
+        False. ``rotate`` is a PLS3 option, recorded on ``result.rotate``;
+        ``rotate=True`` is refused in ``pls1_confirmatory_test``.
     pre_standardized_X, pre_standardized_Y : bool, default False
         Skip the one standardization of that block over all rows. Without
         the flag, the block's columns are divided once by their standard
@@ -637,7 +648,7 @@ def pls3_confirmatory_test(
         The Gram matrix of X in place of ``X``: ``gram_matrix(X)``'s result,
         or an ``(n, n)`` array ``X̃ @ X̃.T`` with ``n_features``. It is centred
         over its rows (so ``result.subset(rows)`` is accepted) and checked on
-        its entries, and both methods run from it: on ``gram_matrix(X, ...)``
+        its entries, and every method runs from it: on ``gram_matrix(X, ...)``
         the result equals the call on ``X`` at the same seed, to rounding.
         ``pre_standardized_X`` is read from the result (passing it raises
         ``invalid_argument``); with an array it says how ``X̃`` was scaled.
@@ -667,7 +678,7 @@ def pls1_confirmatory_test(
     k: int | Sequence[int] | range | None = None,
     *,
     test_method: Literal[
-        "auto", "raw_perm", "split_nb", "split_exact", "score", "e"
+        "auto", "raw_perm", "split_nb", "split_exact", "score", "sv_perm", "e"
     ] = "auto",
     args: dict | None = None,
     ci: bool = False,
@@ -708,14 +719,19 @@ def pls1_confirmatory_test(
         ``gram``) is an error, never cut. ``None`` is ``1..8``, cut at
         ``min(8, d, n // 2 - 2)`` and below the weights' effective n
         (``n_eff >= k + 1``) and the covariates' residual df, never below 1;
-        it is ``{1}`` for ``'split_nb'``, ``'score'``, ``'e'`` and
+        it is ``{1}`` for ``'split_nb'``, ``'score'``, ``'sv_perm'``, ``'e'`` and
         ``ci=True``, which refuse a set of more than one k. ``'auto'`` with
         more than one k runs ``'split_exact'``, which refits for every
         permutation: on data where ``'auto'`` would pick ``'split_nb'`` the
         default call costs much more than ``k=1, test_method='split_nb'``.
     test_method : str, default 'auto'
         Test method: ``'auto'``, ``'raw_perm'``, ``'split_nb'``,
-        ``'split_exact'``, ``'score'``, or ``'e'``.
+        ``'split_exact'``, ``'score'``, ``'sv_perm'``, or ``'e'``.
+
+        ``'sv_perm'`` is a permutation test on the largest singular value of
+        ``X̃ᵀỹ``, at ``k=1`` only. ``'score'`` takes ``{'n_perm': int | None}``:
+        ``None`` (the default) is the closed form, and an integer runs the
+        same permutation test as ``'sv_perm'`` and reports ``T = ||X̃ᵀỹ||²``.
 
         ``'auto'`` runs ``'split_exact'`` or ``'split_nb'``, chosen once per
         call from X and ``weights`` (never y), and ``result.test_method`` says
@@ -759,7 +775,10 @@ def pls1_confirmatory_test(
     args : dict | None
         Method-specific kwargs (e.g. ``{'n_perm': 500}`` for ``raw_perm``,
         ``{'force': True}`` for ``split_nb``; ``'auto'`` takes ``n_perm`` and
-        ``n_splits``, with ``n_perm`` ignored when ``'split_nb'`` runs).
+        ``n_splits``, with ``n_perm`` ignored when ``'split_nb'`` runs;
+        ``'score'`` takes ``n_perm`` (default ``None``: the closed form);
+        ``'sv_perm'`` takes ``n_perm`` (default 1000), and ``rotate`` must stay
+        False).
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
@@ -771,10 +790,11 @@ def pls1_confirmatory_test(
         standardized first, then X and y are replaced by their (weighted)
         least-squares residuals on ``[1, Z]`` over all rows. See
         docs/concepts/PLS1/covariates.md.
-        Taken by ``'split_exact'`` and ``'raw_perm'``, whose null columns
+        Taken by ``'split_exact'``, ``'raw_perm'``, ``'sv_perm'`` and
+        ``'score'`` with ``n_perm`` set, whose null columns
         are then Freedman–Lane residuals (approximately exact, not exact);
         ``'auto'`` runs ``'split_exact'``, and ``'split_nb'``, ``'score'``
-        and ``'e'`` raise ``invalid_argument``. With ``gram`` the Gram
+        without ``n_perm`` and ``'e'`` raise ``invalid_argument``. With ``gram`` the Gram
         matrix is adjusted as ``M_Z @ G @ M_Z``, Z having one row per row of
         ``gram``.
     null_y : np.ndarray | None, shape (n, B), default None
@@ -1540,6 +1560,57 @@ def gram_matrix(X: np.ndarray, *, pre_standardized: bool = False) -> GramMatrixR
     return _call("gram_matrix", X=X, pre_standardized=pre_standardized)
 
 
+@_convert_errors
+def gram_matrix_blocks(
+    blocks: Iterable[np.ndarray], *, pre_standardized: bool = False
+) -> GramMatrixResult:
+    """The `gram_matrix` of `X` given as column blocks, summed block by block.
+
+    ``X`` is the blocks side by side, and its Gram matrix is the sum of the
+    blocks' Gram matrices, so with a generator only one block is in memory
+    at a time (plus the ``(n, n)`` sum). Each block is read as
+    `gram_matrix` reads `X`, with the same `pre_standardized`.
+
+    Parameters
+    ----------
+    blocks : iterable of np.ndarray, each shape (n, d_i)
+        Every block has the same ``n`` rows as the first. No blocks raises
+        ``PlsKitError(code="invalid_input")``; a different row count raises
+        ``PlsKitError(code="shape_mismatch")``. Anything else a block gets
+        wrong is raised as `gram_matrix` raises it.
+    pre_standardized : bool, default False
+        As in `gram_matrix`.
+
+    Returns
+    -------
+    GramMatrixResult
+        As `gram_matrix` returns, with ``n_features`` the sum of the
+        blocks' column counts.
+
+    Notes
+    -----
+    The result equals ``gram_matrix(X)`` to rounding, not bit for bit.
+    Under ``pre_standardized`` each block is scaled on its own, so data
+    outside ``2**-256 .. 2**256`` must use `gram_matrix` on the whole ``X``.
+    """
+    g, p = None, 0
+    for block in blocks:
+        r = gram_matrix(block, pre_standardized=pre_standardized)
+        if g is None:
+            g = r.gram
+        elif r.gram.shape != g.shape:
+            raise PlsKitError(
+                f"block has {r.gram.shape[0]} rows, the first block has {g.shape[0]}",
+                code="shape_mismatch",
+            )
+        else:
+            g += r.gram
+        p += r.n_features
+    if g is None:
+        raise PlsKitError("blocks holds no block", code="invalid_input")
+    return GramMatrixResult(gram=g, n_features=p, pre_standardized=pre_standardized)
+
+
 __all__ = [
     "preprocess",
     "pls1_fit",
@@ -1554,6 +1625,7 @@ __all__ = [
     "pls1_perm_null",
     "pls1_perm_alpha",
     "gram_matrix",
+    "gram_matrix_blocks",
     "rotate",
     "factors",
     "pca_basis",

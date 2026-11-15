@@ -87,6 +87,8 @@ unclassed copy (`unclass(fit)`) still works.
 
 Python's `result.subset(rows)` on a `GramMatrixResult` is the S3 method `subset(g, rows)` on a `gram_matrix_result`. `rows` are 1-based row numbers.
 
+Python's `gram_matrix_blocks(blocks)` takes any iterable of matrices. In R, `blocks` is a function called with no arguments that returns the next matrix, or `NULL` when none are left.
+
 ## Seeds
 
 Seeds are unsigned 64-bit integers, and about half of all drawn seeds

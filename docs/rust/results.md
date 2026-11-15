@@ -166,13 +166,16 @@ field semantics are identical to the Python counterpart; see
 | Field | Rust type | Notes |
 |---|---|---|
 | `pvalue` | `f64` | always; for a set of more than one `k`, the min-p p for the whole set |
-| `statistic` | `Option<f64>` | `Some` for one `k`; `None` for a set of more than one `k` |
-| `test_method` | `String` | the method that ran: one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`, never `"auto"`; `"split_exact"` when an explicit `"split_nb"` request was rerouted by the auto-gate |
+| `statistic` | `Option<f64>` | `Some` for one `k` (for `sv_perm`, `d₁`, the largest singular value of `X̃ᵀỸ`); `None` for a set of more than one `k` |
+| `test_method` | `String` | the method that ran: one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"sv_perm"` / `"score"` / `"e"`, never `"auto"`; `"split_exact"` when an explicit `"split_nb"` request was rerouted by the auto-gate |
 | `k` | `Vec<usize>` | the tested set, sorted ascending; one `k` gives a one-element vector (`pls3_confirmatory_test` gives `vec![k]`) |
 | `pvalues_by_k` | `BTreeMap<usize, f64>` | each tested `k` → its own p, not adjusted for the set |
 | `statistics_by_k` | `BTreeMap<usize, f64>` | each tested `k` → its statistic |
-| `n_perm` | `Option<usize>` | `Some` for `raw_perm` / `split_exact`, `None` for `split_nb` / `score` / `e` |
-| `n_splits` | `Option<usize>` | `Some` for `split_*` methods, `None` for `raw_perm` / `score` / `e` |
+| `n_perm` | `Option<usize>` | `Some` for `raw_perm` / `split_exact` / `sv_perm` / `score` with `n_perm`, `None` for `split_nb` / closed-form `score` / `e` |
+| `n_splits` | `Option<usize>` | `Some` for `split_*` methods, `None` for `raw_perm` / `sv_perm` / `score` / `e` |
+| `n_folds` | `Option<usize>` | `Some` for `raw_perm` only |
+| `force` | `Option<bool>` | the `force` that `split_nb` ran with; `None` for every other method, including a `split_nb` request the auto-gate rerouted to `split_exact` |
+| `rotate` | `Option<bool>` | the `rotate` that `sv_perm` ran with (always `Some(false)` from `pls1_confirmatory_test`); `None` for every other method |
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | always; Kish effective sample size, equals `n_samples` for uniform/absent weights |
 | `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |

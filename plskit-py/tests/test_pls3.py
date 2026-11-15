@@ -308,5 +308,21 @@ def test_unknown_method_names_are_listed_as_a_python_list():
     assert ei.value.code == "invalid_args"
     assert str(ei.value) == (
         "test_method='raw_perm' is not available for pls3_confirmatory_test; "
-        "allowed: ['split_exact', 'split_nb', 'auto']"
+        "allowed: ['split_exact', 'split_nb', 'auto', 'sv_perm']"
     )
+
+
+def test_sv_perm_runs_raw_and_from_a_gram():
+    X, Y = _data(snr=3.0, seed=2)
+    r = plskit.pls3_confirmatory_test(
+        X, Y, test_method="sv_perm", args={"n_perm": 99, "rotate": True}, seed=1
+    )
+    assert r.test_method == "sv_perm"
+    assert 0 < r.pvalue <= 1
+    Xc = X - X.mean(axis=0)
+    g = plskit.pls3_confirmatory_test(
+        None, Y, test_method="sv_perm", args={"n_perm": 99, "rotate": True},
+        seed=1, gram=Xc @ Xc.T, n_features=X.shape[1],
+    )
+    assert g.test_method == "sv_perm"
+    assert 0 < g.pvalue <= 1

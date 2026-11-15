@@ -570,6 +570,7 @@ fn method_from_str(s: &str) -> ConfirmatoryMethod {
         "split_nb" => ConfirmatoryMethod::SplitNb,
         "split_exact" => ConfirmatoryMethod::SplitExact,
         "score" => ConfirmatoryMethod::Score,
+        "sv_perm" => ConfirmatoryMethod::SvPerm,
         "e" => ConfirmatoryMethod::E,
         "auto" => ConfirmatoryMethod::Auto,
         other => panic!("unknown method {other}"),
@@ -596,7 +597,14 @@ fn confirmatory_args(method: ConfirmatoryMethod, args: &Value) -> ConfirmatoryAr
             n_perm: kw_opt_usize(args, "n_perm").unwrap_or(n_perm),
             n_splits: kw_opt_usize(args, "n_splits").unwrap_or(n_splits),
         },
-        a @ (ConfirmatoryArgs::Score | ConfirmatoryArgs::E) => a,
+        ConfirmatoryArgs::Score { n_perm } => ConfirmatoryArgs::Score {
+            n_perm: kw_opt_usize(args, "n_perm").or(n_perm),
+        },
+        ConfirmatoryArgs::SvPerm { n_perm, rotate } => ConfirmatoryArgs::SvPerm {
+            n_perm: kw_opt_usize(args, "n_perm").unwrap_or(n_perm),
+            rotate: args.get("rotate").map_or(rotate, |v| v.as_bool().unwrap()),
+        },
+        a @ ConfirmatoryArgs::E => a,
     }
 }
 
@@ -851,7 +859,7 @@ fn pls1_confirmatory_test_cases_match_corpus() {
             "test_method",
             "weights",
         ],
-        args: &["force", "n_folds", "n_perm", "n_splits"],
+        args: &["force", "n_folds", "n_perm", "n_splits", "rotate"],
     };
     for_each_case("pls1_confirmatory_test", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];
@@ -1398,7 +1406,7 @@ fn check_k_set(fx: &Fixture, r: &plskit::ConfirmatoryTestOutput) {
 fn pls3_confirmatory_test_cases_match_corpus() {
     let kwargs = Kwargs {
         top: &["args", "gram", "k", "seed", "test_method"],
-        args: &["force", "n_folds", "n_perm", "n_splits"],
+        args: &["force", "n_folds", "n_perm", "n_splits", "rotate"],
     };
     for_each_case("pls3_confirmatory_test", kwargs, |case, inputs, fx| {
         let kw = &case["kwargs"];

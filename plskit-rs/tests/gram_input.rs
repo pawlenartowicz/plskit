@@ -87,7 +87,7 @@ fn pls1_methods(k: usize) -> Vec<ConfirmatoryArgs> {
         ConfirmatoryArgs::E,
     ]
     .into_iter()
-    .chain((k == 1).then_some(ConfirmatoryArgs::Score))
+    .chain((k == 1).then_some(ConfirmatoryArgs::Score { n_perm: None }))
     .collect()
 }
 
@@ -315,7 +315,7 @@ fn gram_subset_equals_x_call_scaled_over_all_rows() {
             for k in [1, 2] {
                 for args in pls1_methods(k) {
                     let what = format!("{n}x{p} flag={flag} k={k} {args:?}");
-                    let y_x = if matches!(args, ConfirmatoryArgs::Score) && !flag {
+                    let y_x = if matches!(args, ConfirmatoryArgs::Score { .. }) && !flag {
                         standardize1(ys.as_ref()).0
                     } else {
                         ys.clone()
@@ -520,7 +520,7 @@ fn gram_refuses_k_above_n_minus_1() {
                 covariates: None,
                 null_y: None,
             },
-            opts(ConfirmatoryArgs::Score, false),
+            opts(ConfirmatoryArgs::Score { n_perm: None }, false),
         ),
         pls1_confirmatory_test(
             ConfirmatoryTestInput::Gram {
@@ -530,7 +530,7 @@ fn gram_refuses_k_above_n_minus_1() {
                 covariates: None,
                 null_y: None,
             },
-            opts(ConfirmatoryArgs::Score, false),
+            opts(ConfirmatoryArgs::Score { n_perm: None }, false),
         ),
     ] {
         invalid_argument(r, "insufficient n for k=3");
@@ -720,7 +720,7 @@ fn gram_with_covariates_refuses_split_nb_score_e() {
             n_splits: 8,
             force: false,
         },
-        ConfirmatoryArgs::Score,
+        ConfirmatoryArgs::Score { n_perm: None },
         ConfirmatoryArgs::E,
     ] {
         let r = gram_with_z(&g, y.as_ref(), z.as_ref(), 1, opts(args, false));
@@ -776,5 +776,74 @@ fn more_perms(args: ConfirmatoryArgs) -> ConfirmatoryArgs {
             n_folds,
         },
         other => other,
+    }
+}
+
+/// `sv_perm` and `score` with `n_perm` on G equal the X call at the same
+/// seed, plain and with covariates: the same permutations, so the same
+/// p-value, and the statistic to rounding.
+#[test]
+fn sv_perm_gram_equals_raw() {
+    let methods = [
+        ConfirmatoryArgs::SvPerm {
+            n_perm: 199,
+            rotate: false,
+        },
+        ConfirmatoryArgs::Score { n_perm: Some(199) },
+    ];
+    for (n, p) in [(40, 90), (60, 8)] {
+        let (x, y) = data(n, p, 71);
+        let z = covariates(x.as_ref(), 72);
+        let g = gram_matrix(x.as_ref(), false).unwrap();
+        for args in methods {
+            let plain = (
+                on_x(x.as_ref(), y.as_ref(), 1, opts(args, false)),
+                on_gram(&g, y.as_ref(), 1, opts(args, false)),
+            );
+            let with_z = (
+                raw_with_z(x.as_ref(), y.as_ref(), z.as_ref(), 1, opts(args, false)),
+                gram_with_z(&g, y.as_ref(), z.as_ref(), 1, opts(args, false)).unwrap(),
+            );
+            for (case, (raw, gram)) in [("plain", plain), ("covariates", with_z)] {
+                assert_eq!(raw.pvalue, gram.pvalue, "{n}x{p} {args:?} {case}");
+                assert_eq!(raw.test_method, gram.test_method);
+                assert_eq!(raw.n_perm, gram.n_perm);
+                let rel = (raw.statistic.unwrap() / gram.statistic.unwrap() - 1.0).abs();
+                assert!(rel < 1e-10, "{n}x{p} {args:?} {case}: rel {rel}");
+            }
+        }
+    }
+}
+
+/// PLS3 `sv_perm` on G equals the X call at the same seed, both `rotate`
+/// settings: the same p-value and the statistic within 1e-10 relative. On
+/// the wide shapes (40 x 90, 20 x 200) the X call takes the Gram route too,
+/// so the X call's `HeldOutGram::from_x` is checked against `gram_matrix`;
+/// on 60 x 8 the X call forms X̃ itself (the primal route). At q = 4 ≤ p,
+/// rotation takes the `r = q` closed form.
+#[test]
+fn pls3_sv_perm_gram_equals_raw() {
+    for (n, p, q) in [(40, 90, 3), (60, 8, 3), (20, 200, 4)] {
+        let (x, _) = data(n, p, 81);
+        let mut s = Stream(82);
+        let yy = Mat::<f64>::from_fn(n, q, |i, j| x[(i, j % 2)] + 2.0 * s.next());
+        let g = gram_matrix(x.as_ref(), false).unwrap();
+        for rotate in [false, true] {
+            let args = ConfirmatoryArgs::SvPerm {
+                n_perm: 199,
+                rotate,
+            };
+            let raw = pls3_confirmatory_test(x.as_ref(), yy.as_ref(), 1, pls3_opts(args, false))
+                .expect("PLS3 X call");
+            let gram = pls3_confirmatory_test_gram(&g, yy.as_ref(), 1, pls3_opts(args, false))
+                .expect("PLS3 gram call");
+            let what = format!("{n}x{p} q={q} rotate={rotate}");
+            assert_eq!(raw.pvalue, gram.pvalue, "{what}");
+            assert!(raw.pvalue.is_finite(), "{what}");
+            assert_eq!(raw.test_method, gram.test_method);
+            assert_eq!(raw.n_perm, gram.n_perm);
+            let rel = (raw.statistic.unwrap() / gram.statistic.unwrap() - 1.0).abs();
+            assert!(rel < 1e-10, "{what}: rel {rel}");
+        }
     }
 }

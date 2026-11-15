@@ -121,6 +121,66 @@ pub(crate) fn thin_svd_v(
     Ok((s.column_vector().to_owned(), v))
 }
 
+/// Smallest `s_min / s[0]` at which [`tall_svd_v`] takes the Gram route.
+pub(crate) const GRAM_TAU: f64 = 1e-3;
+
+/// [`thin_svd_v`] for tall `a`, taken from the eigendecomposition of the
+/// Gram matrix `a'a` when that cannot change the rank: same contract (`s`
+/// of length `min(m, n)`, non-increasing; `V` of shape `n × min(m, n)`).
+///
+/// When `n < m`, the lower triangle of `G = a'a` is formed with `par` and
+/// decomposed at `Par::Seq`. The result is used when `λ_max > 0` and
+/// `λ_min > τ² λ_max` (`τ = GRAM_TAU`): then `s = sqrt(λ)` and `V` are the
+/// eigenvalues and eigenvectors in non-increasing order. Anything else (a
+/// wide or square `a`, a small `λ_min`, a failed eigendecomposition) runs
+/// [`thin_svd_v`] at `Par::Seq`, after `G` is dropped. The route depends
+/// only on `λ`, whose bits do not depend on the pool when `par` has a
+/// fixed degree.
+///
+/// Why `τ = 1e-3` keeps every component. Squaring the condition number
+/// leaves the eigenvalues an absolute error of about `ε λ_max`, so a
+/// singular value below about `1.5e-8 s[0]` cannot be told from zero on
+/// this route; the rank cut of `pca::pca_basis` (`1e-10 s[0]`) lies inside
+/// that noise. An accepted `s_i ≥ τ s[0]` is far above both, so the SVD
+/// route keeps all `n` components too, and the Gram route costs digits
+/// only in the small components: at most about `c n ε / (2τ) · s[0]`
+/// absolute error for a small constant `c`, `9e-11 s[0]` at `n = 800`.
+///
+/// `factors::fold_svd_bytes` counts what this allocates (change together).
+#[allow(clippy::many_single_char_names)]
+pub(crate) fn tall_svd_v(
+    a: MatRef<'_, f64>,
+    par: Par,
+) -> Result<(Col<f64>, Mat<f64>), faer::linalg::svd::SvdError> {
+    let (m, n) = a.shape();
+    if 0 < n && n < m {
+        // Only the lower triangle: `self_adjoint_eigen` reads no other.
+        use faer::linalg::matmul::triangular::{BlockStructure, matmul as tri_matmul};
+        let mut g = Mat::<f64>::zeros(n, n);
+        tri_matmul(
+            g.as_mut(),
+            BlockStructure::TriangularLower,
+            Accum::Replace,
+            a.transpose(),
+            BlockStructure::Rectangular,
+            a,
+            BlockStructure::Rectangular,
+            1.0,
+            par,
+        );
+        let eig = self_adjoint_eigen(g.as_ref(), Par::Seq);
+        drop(g);
+        if let Ok((lam, u)) = eig {
+            if lam[n - 1] > 0.0 && lam[0] > GRAM_TAU * GRAM_TAU * lam[n - 1] {
+                let s = Col::<f64>::from_fn(n, |i| lam[n - 1 - i].sqrt());
+                let v = Mat::<f64>::from_fn(n, n, |i, j| u[(i, n - 1 - j)]);
+                return Ok((s, v));
+            }
+        }
+    }
+    thin_svd_v(a, Par::Seq)
+}
+
 /// The `R` factor of the Householder QR of `a` (`min(m, n) × n`, upper
 /// trapezoidal, `a'a = R'R` up to the QR's backward error), computed in
 /// place on `a` under `Par::Seq`, so its bits do not depend on the pool.
@@ -441,7 +501,8 @@ pub(crate) fn pre_standardized_input(
 /// scale is not the part's own. Returns the matrix, the means and
 /// `‖result‖_F` from the column moments ([`fro_from_terms`]), to rounding
 /// when `row_scale[i]²` equals `w[i]` renormalized to mean one, or when `w`
-/// and `row_scale` are both `None`.
+/// and `row_scale` are both `None`. Under `Par::Rayon` the 8-column groups
+/// run in parallel; no bit depends on `par` or on the pool size.
 ///
 /// # Panics
 /// When `scale` does not have one entry per column of `x`.
@@ -451,6 +512,7 @@ pub(crate) fn center_rows_fro(
     w: Option<ColRef<'_, f64>>,
     row_scale: Option<ColRef<'_, f64>>,
     scale: ColRef<'_, f64>,
+    par: Par,
 ) -> (Mat<f64>, Col<f64>, f64) {
     assert_eq!(
         scale.nrows(),
@@ -469,6 +531,7 @@ pub(crate) fn center_rows_fro(
         row_scale.as_deref(),
         Some(&scale),
         true,
+        par,
     );
     (xs, mean, fro_from_terms(&terms))
 }
@@ -552,7 +615,7 @@ pub(crate) fn centered_blocks(
         let w = width.min(p - j0);
         let xb = x.subcols(j0, w);
         let sb = scale.subrows(j0, w);
-        let (a, mean, fro_b) = center_rows_fro(xb, tr, w_tr, sw_tr, sb);
+        let (a, mean, fro_b) = center_rows_fro(xb, tr, w_tr, sw_tr, sb, Par::Seq);
         let c = standardize_apply_rows(xb, te, mean.as_ref(), sb, sw_te);
         fro.push(fro_b);
         f(j0, a.as_ref(), c.as_ref());
@@ -773,7 +836,8 @@ fn standardize_columns(
     row_scale: Option<&[f64]>,
     write: bool,
 ) -> (Mat<f64>, Col<f64>, Col<f64>, f64) {
-    let (xs, mean, scale, terms) = standardize_columns_terms(x, rows, w, row_scale, None, write);
+    let (xs, mean, scale, terms) =
+        standardize_columns_terms(x, rows, w, row_scale, None, write, Par::Seq);
     (xs, mean, scale, fro_from_terms(&terms))
 }
 
@@ -799,6 +863,13 @@ fn standardize_columns(
 /// column `j` is divided by `fixed_scale[j]` in place of its own scale,
 /// which is also the scale returned and the one its `fro_term` uses; the
 /// moments still give the mean ([`center_rows_fro`]).
+///
+/// Under `Par::Rayon` with `write`, the groups of `STD_BLOCK` columns run in
+/// parallel, each writing its own columns of a zero-filled block (the same
+/// column stride as the serial path's) and its own entries of the moments,
+/// so no bit depends on `par` or on the pool size. As in [`fit_x_moments`],
+/// the groups use the whole pool, whatever the `Par`'s degree.
+#[allow(clippy::too_many_lines)]
 fn standardize_columns_terms(
     x: MatRef<'_, f64>,
     rows: Option<&[usize]>,
@@ -806,6 +877,7 @@ fn standardize_columns_terms(
     row_scale: Option<&[f64]>,
     fixed_scale: Option<&[f64]>,
     write: bool,
+    par: Par,
 ) -> (Mat<f64>, Col<f64>, Col<f64>, Vec<f64>) {
     let n_rows = rows.map_or(x.nrows(), <[usize]>::len);
     let n_cols = x.ncols();
@@ -820,22 +892,16 @@ fn standardize_columns_terms(
     } else {
         None
     };
-    let mut scratch: Vec<f64> = Vec::new();
-    if xr.is_some() {
-        scratch.resize(STD_BLOCK * n_rows, 0.0);
-    }
-    let mut block_moments: Vec<ScaledMoments> = Vec::with_capacity(STD_BLOCK);
-    // Columns are appended one block at a time, each written once: no
-    // zero-fill pass. Same capacity request, so the same column stride and
-    // alignment as `Mat::zeros(n_rows, n_cols)`.
-    let mut xs = Mat::<f64>::with_capacity(n_rows, if write { n_cols } else { 0 });
-    // Set the row count now (no entry is created), so that an input with
-    // no columns still gives an `n_rows × 0` result.
-    xs.resize_with(n_rows, 0, |_, _| 0.0);
-    let mut mean = Col::<f64>::zeros(n_cols);
-    let mut scale = Col::<f64>::zeros(n_cols);
-    let mut fro = Vec::with_capacity(n_cols);
-    for j0 in (0..n_cols).step_by(STD_BLOCK) {
+    let new_scratch = || -> Vec<f64> {
+        if xr.is_some() {
+            vec![0.0; STD_BLOCK * n_rows]
+        } else {
+            Vec::new()
+        }
+    };
+    // The group of columns `j0 ..`: copies it into `scratch` when it is not
+    // read in place, and returns each column's `(mean, scale)` and `fro_term`.
+    let group = |j0: usize, scratch: &mut Vec<f64>| {
         let width = STD_BLOCK.min(n_cols - j0);
         if let Some(xr) = xr {
             for i in 0..n_rows {
@@ -855,61 +921,129 @@ fn standardize_columns_terms(
                 }
             }
         }
-        let cols: [&[f64]; STD_BLOCK] = core::array::from_fn(|b| {
-            if b >= width {
-                &[][..]
-            } else if let Some(xc) = xc {
-                xc.col(j0 + b).as_slice()
-            } else {
-                &scratch[b * n_rows..(b + 1) * n_rows]
-            }
-        });
-        block_moments.clear();
-        if width == STD_BLOCK {
-            block_moments.extend(scaled_moments_block(cols, w));
-        } else {
-            for &col in &cols[..width] {
-                block_moments.extend(scaled_moments_block([col], w));
-            }
-        }
+        let cols = group_cols(xc, scratch, j0, width, n_rows);
         let mut stats = [(0.0_f64, 1.0_f64); STD_BLOCK];
-        for (b, moments) in block_moments.iter().enumerate() {
+        let mut terms = [0.0_f64; STD_BLOCK];
+        let mut put = |b: usize, moments: &ScaledMoments| {
             let (col_mean, own_scale) = mean_and_scale_from(moments, n_rows);
             let col_scale = fixed_scale.map_or(own_scale, |s| s[j0 + b]);
-            mean[j0 + b] = col_mean;
-            scale[j0 + b] = col_scale;
             stats[b] = (col_mean, col_scale);
-            fro.push(fro_term(moments, col_scale));
+            terms[b] = fro_term(moments, col_scale);
+        };
+        if width == STD_BLOCK {
+            for (b, moments) in scaled_moments_block(cols, w).iter().enumerate() {
+                put(b, moments);
+            }
+        } else {
+            for (b, &col) in cols[..width].iter().enumerate() {
+                put(b, &scaled_moments_block([col], w)[0]);
+            }
         }
+        (stats, terms)
+    };
+    // The element expression of every standardizer, times the row factor
+    // when given.
+    let entry =
+        |cols: &[&[f64]; STD_BLOCK], stats: &[(f64, f64); STD_BLOCK], i: usize, b: usize| {
+            let (col_mean, col_scale) = stats[b];
+            let z = standardized(cols[b][i], col_mean, col_scale);
+            row_scale.map_or(z, |f| times_row_factor(z, f[i]))
+        };
+    let requarter_group =
+        |mut dst: MatMut<'_, f64>, cols: &[&[f64]; STD_BLOCK], stats: &[(f64, f64); STD_BLOCK]| {
+            for b in 0..dst.ncols() {
+                let (col_mean, col_scale) = stats[b];
+                requarter(
+                    n_rows,
+                    col_mean,
+                    col_scale,
+                    |i| cols[b][i],
+                    |i, v| dst[(i, b)] = row_scale.map_or(v, |f| times_row_factor(v, f[i])),
+                );
+            }
+        };
+    let mut mean = Col::<f64>::zeros(n_cols);
+    let mut scale = Col::<f64>::zeros(n_cols);
+    if let (Par::Rayon(_), true) = (par, write) {
+        use rayon::prelude::*;
+        // `Mat::zeros` makes the same capacity request as the serial path's
+        // `with_capacity`, so the same column stride.
+        let mut xs = Mat::<f64>::zeros(n_rows, n_cols);
+        let mut fro = vec![0.0_f64; n_cols];
+        let ms = mean
+            .try_as_col_major_mut()
+            .expect("an owned Col is contiguous")
+            .as_slice_mut();
+        let ss = scale
+            .try_as_col_major_mut()
+            .expect("an owned Col is contiguous")
+            .as_slice_mut();
+        xs.par_col_chunks_mut(STD_BLOCK)
+            .zip(ms.par_chunks_mut(STD_BLOCK))
+            .zip(ss.par_chunks_mut(STD_BLOCK))
+            .zip(fro.par_chunks_mut(STD_BLOCK))
+            .enumerate()
+            .for_each_init(new_scratch, |scratch, (g, (((mut dst, mo), so), to))| {
+                let j0 = g * STD_BLOCK;
+                let width = dst.ncols();
+                let (stats, terms) = group(j0, scratch);
+                let cols = group_cols(xc, scratch, j0, width, n_rows);
+                for b in 0..width {
+                    (mo[b], so[b]) = stats[b];
+                    to[b] = terms[b];
+                    for i in 0..n_rows {
+                        dst[(i, b)] = entry(&cols, &stats, i, b);
+                    }
+                }
+                requarter_group(dst, &cols, &stats);
+            });
+        return (xs, mean, scale, fro);
+    }
+    let mut scratch = new_scratch();
+    // Columns are appended one block at a time, each written once: no
+    // zero-fill pass. Same capacity request, so the same column stride and
+    // alignment as `Mat::zeros(n_rows, n_cols)`.
+    let mut xs = Mat::<f64>::with_capacity(n_rows, if write { n_cols } else { 0 });
+    // Set the row count now (no entry is created), so that an input with
+    // no columns still gives an `n_rows × 0` result.
+    xs.resize_with(n_rows, 0, |_, _| 0.0);
+    let mut fro = Vec::with_capacity(n_cols);
+    for j0 in (0..n_cols).step_by(STD_BLOCK) {
+        let width = STD_BLOCK.min(n_cols - j0);
+        let (stats, terms) = group(j0, &mut scratch);
+        for b in 0..width {
+            (mean[j0 + b], scale[j0 + b]) = stats[b];
+        }
+        fro.extend_from_slice(&terms[..width]);
         if !write {
             continue;
         }
-        // The element expression of every standardizer, times the row
-        // factor when given.
-        match row_scale {
-            None => xs.resize_with(n_rows, j0 + width, |i, j| {
-                let (col_mean, col_scale) = stats[j - j0];
-                standardized(cols[j - j0][i], col_mean, col_scale)
-            }),
-            Some(factor) => xs.resize_with(n_rows, j0 + width, |i, j| {
-                let (col_mean, col_scale) = stats[j - j0];
-                times_row_factor(
-                    standardized(cols[j - j0][i], col_mean, col_scale),
-                    factor[i],
-                )
-            }),
-        }
-        for (b, &(col_mean, col_scale)) in stats[..width].iter().enumerate() {
-            requarter(
-                n_rows,
-                col_mean,
-                col_scale,
-                |i| cols[b][i],
-                |i, v| xs[(i, j0 + b)] = row_scale.map_or(v, |f| times_row_factor(v, f[i])),
-            );
-        }
+        let cols = group_cols(xc, &scratch, j0, width, n_rows);
+        xs.resize_with(n_rows, j0 + width, |i, j| entry(&cols, &stats, i, j - j0));
+        requarter_group(xs.as_mut().subcols_mut(j0, width), &cols, &stats);
     }
     (xs, mean, scale, fro)
+}
+
+/// The `width` columns from `j0` that [`standardize_columns_terms`] reads:
+/// in place from a column-major `xc`, otherwise from `scratch`; empty past
+/// `width`.
+fn group_cols<'a>(
+    xc: Option<MatRef<'a, f64, usize, usize, faer::ContiguousFwd>>,
+    scratch: &'a [f64],
+    j0: usize,
+    width: usize,
+    n_rows: usize,
+) -> [&'a [f64]; STD_BLOCK] {
+    core::array::from_fn(|b| {
+        if b >= width {
+            &[][..]
+        } else if let Some(xc) = xc {
+            xc.col(j0 + b).as_slice()
+        } else {
+            &scratch[b * n_rows..(b + 1) * n_rows]
+        }
+    })
 }
 
 /// `(v - mean) / scale`: the element expression of every standardizer,
@@ -1165,7 +1299,8 @@ pub(crate) fn fit_x_moments(
         if row_major {
             row_major_moments(xb, w)
         } else {
-            let (_, mean, scale, terms) = standardize_columns_terms(xb, None, w, None, None, false);
+            let (_, mean, scale, terms) =
+                standardize_columns_terms(xb, None, w, None, None, false, Par::Seq);
             (mean, scale, terms)
         }
     };
@@ -1270,6 +1405,7 @@ pub(crate) fn centered_part_moments(
                 None,
                 Some(&scale[j0..j0 + b]),
                 false,
+                Par::Seq,
             );
             for (o, j) in mo.iter_mut().zip(0..b) {
                 *o = sm[j];
@@ -2934,7 +3070,8 @@ mod row_standardize_tests {
             let w_part = w_part.as_ref().map(Col::as_ref);
             let sw = w_part.map(|w| sqrt_col(renormalize_mean_one(w).as_ref()));
             let sw = sw.as_ref().map(Col::as_ref);
-            let (xc, mean, fro) = center_rows_fro(x.as_ref(), &idx, w_part, sw, scale.as_ref());
+            let (xc, mean, fro) =
+                center_rows_fro(x.as_ref(), &idx, w_part, sw, scale.as_ref(), Par::Seq);
             let (_, mean_ref, _) =
                 standardize_weighted(row_subset(x.as_ref(), &idx).as_ref(), w_part);
             assert_bits_eq(
@@ -2998,7 +3135,8 @@ mod row_standardize_tests {
                 f.w.as_ref()
                     .map(|w| Col::<f64>::from_fn(idx.len(), |i| w[idx[i]]));
             let wr = w_rows.as_ref().map(Col::as_ref);
-            let (_, mean, fro) = center_rows_fro(f.x.as_ref(), &idx, wr, None, scale.as_ref());
+            let (_, mean, fro) =
+                center_rows_fro(f.x.as_ref(), &idx, wr, None, scale.as_ref(), Par::Seq);
             let (_, mean_rows, _) =
                 standardize_weighted(row_subset(f.x.as_ref(), &idx).as_ref(), wr);
             assert_bits_eq(
@@ -3070,7 +3208,8 @@ mod row_standardize_tests {
                 } else {
                     (None, None, None)
                 };
-                let (full_a, mean, full_fro) = center_rows_fro(xv, &tr, wr, sr, scale.as_ref());
+                let (full_a, mean, full_fro) =
+                    center_rows_fro(xv, &tr, wr, sr, scale.as_ref(), Par::Seq);
                 let full_c = standardize_apply_rows(xv, &te, mean.as_ref(), scale.as_ref(), se);
                 for width in [1, 3, 8, 64] {
                     let what = format!("{view} weighted={weighted} width={width}");
@@ -3098,7 +3237,7 @@ mod row_standardize_tests {
         let x = data();
         let rows: Vec<usize> = (0..24).collect();
         let scale = held_out_scale(x.as_ref(), None, false);
-        let (full, _, _) = center_rows_fro(x.as_ref(), &rows, None, None, scale.as_ref());
+        let (full, _, _) = center_rows_fro(x.as_ref(), &rows, None, None, scale.as_ref(), Par::Seq);
         let (a, c, _, _) =
             collect_centered_blocks(x.as_ref(), &rows, &[], None, None, None, scale.as_ref(), 2);
         assert_mat_bits_eq(a.as_ref(), full.as_ref(), "all rows, no held-out");
@@ -3361,6 +3500,7 @@ mod row_standardize_tests {
             Some(wn.as_ref()),
             Some(sw.as_ref()),
             scale.as_ref(),
+            Par::Seq,
         );
         let c = standardize_apply_rows(
             x.as_ref(),
@@ -3613,6 +3753,135 @@ mod fast_standardize_tests {
                 (t, pool)
             })
             .collect()
+    }
+
+    /// `standardize_columns_terms` under `par_fixed()`, in pools of 1, 3 and
+    /// 5 threads, gives `Par::Seq`'s matrix (and its column stride), mean,
+    /// scale and `fro` terms, bit for bit: widths 0, below one group, one
+    /// group and not a multiple of it; column-major, row-major and strided
+    /// X; all rows, rows in place and gathered rows with a repeat; a
+    /// zero-weight row and a zero row factor; a fixed scale; and a column
+    /// whose mean overflows (`requarter`).
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn standardize_columns_terms_par_matches_seq() {
+        let n = 37;
+        let pools: Vec<_> = [1_usize, 3, 5]
+            .into_iter()
+            .map(|t| {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(t)
+                    .build()
+                    .expect("thread pool");
+                (t, pool)
+            })
+            .collect();
+        let all: Vec<usize> = (0..n).collect();
+        let mut idx: Vec<usize> = (0..n).rev().collect();
+        idx[5] = idx[4];
+        for p in [0_usize, 5, 8, 61] {
+            let mut x = test_matrix(n, p, 990 + p as u64);
+            if p == 61 {
+                for i in 0..n {
+                    x[(i, 9)] += 2f64.powi(970);
+                    // Column 19's mean is about 0.3·MAX, so `v − mean`
+                    // overflows on its negative rows unless `requarter`
+                    // rewrites them.
+                    x[(i, 19)] = if i % 3 == 0 { -0.9 } else { 0.9 } * f64::MAX;
+                }
+            }
+            let row_major = x.transpose().to_owned();
+            let rows_rev = x.as_ref().reverse_rows().to_owned();
+            let strided = rows_rev.as_ref().reverse_rows();
+            assert!(strided.try_as_col_major().is_none() && strided.try_as_row_major().is_none());
+            let views = [
+                ("col-major", x.as_ref()),
+                ("row-major", row_major.as_ref().transpose()),
+                ("strided", strided),
+            ];
+            for (view, xv) in views {
+                for (rlabel, rows) in [
+                    ("none", None),
+                    ("all", Some(&all[..])),
+                    ("idx", Some(&idx[..])),
+                ] {
+                    let m = rows.map_or(n, <[usize]>::len);
+                    let raw =
+                        Col::<f64>::from_fn(m, |i| if i == 3 { 0.0 } else { 0.5 + (i % 4) as f64 });
+                    let w = renormalize_mean_one(raw.as_ref());
+                    let sw: Vec<f64> = (0..m).map(|i| w[i].sqrt()).collect();
+                    let w = owned_col_slice(&w).to_vec();
+                    let (_, _, own_scale, _) =
+                        standardize_columns_terms(xv, rows, None, None, None, false, Par::Seq);
+                    let own_scale = crate::test_support::col_vals(own_scale.as_ref());
+                    for wv in [None, Some(&w[..])] {
+                        for rs in [None, Some(&sw[..])] {
+                            for fixed in [None, Some(&own_scale[..])] {
+                                let what = format!(
+                                    "p={p} {view} rows={rlabel} w={} rs={} fixed={}",
+                                    wv.is_some(),
+                                    rs.is_some(),
+                                    fixed.is_some()
+                                );
+                                let (xs, mean, scale, fro) = standardize_columns_terms(
+                                    xv,
+                                    rows,
+                                    wv,
+                                    rs,
+                                    fixed,
+                                    true,
+                                    Par::Seq,
+                                );
+                                if p == 61 {
+                                    assert!(mean_overflows(mean[9]), "{what}: mean 9");
+                                    assert!(
+                                        (0..xs.nrows()).all(|i| xs[(i, 19)].is_finite()),
+                                        "{what}: column 19 not requartered"
+                                    );
+                                }
+                                for (t, pool) in &pools {
+                                    let (xp, mp, sp, fp) = pool.install(|| {
+                                        standardize_columns_terms(
+                                            xv,
+                                            rows,
+                                            wv,
+                                            rs,
+                                            fixed,
+                                            true,
+                                            crate::fit::par_fixed(),
+                                        )
+                                    });
+                                    let what = format!("{what} threads={t}");
+                                    assert_eq!(
+                                        mat_bits(xp.as_ref()),
+                                        mat_bits(xs.as_ref()),
+                                        "{what}: xs"
+                                    );
+                                    assert_eq!(
+                                        xp.col_stride(),
+                                        xs.col_stride(),
+                                        "{what}: col stride"
+                                    );
+                                    assert_eq!(
+                                        col_bits(mp.as_ref()),
+                                        col_bits(mean.as_ref()),
+                                        "{what}: mean"
+                                    );
+                                    assert_eq!(
+                                        col_bits(sp.as_ref()),
+                                        col_bits(scale.as_ref()),
+                                        "{what}: scale"
+                                    );
+                                    let fb: Vec<u64> = fp.iter().map(|&v| bits(v)).collect();
+                                    let fs: Vec<u64> = fro.iter().map(|&v| bits(v)).collect();
+                                    assert_eq!(fb, fs, "{what}: fro");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// `fit_x_moments` reads X in strips of columns, on one thread or in

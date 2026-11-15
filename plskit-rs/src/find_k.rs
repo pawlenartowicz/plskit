@@ -228,7 +228,7 @@ pub fn pls1_default_k_max(
 /// - `InvalidArgument` for `k_max == 0`
 /// - `KExceedsMax` for `k_max > n_features`
 /// - `DimensionMismatch` for shape disagreements
-/// - `InvalidArgument` if `diagnostic == Some(Score)` or `Some(Auto)`
+/// - `InvalidArgument` if `diagnostic == Some(Score)`, `Some(SvPerm)` or `Some(Auto)`
 /// - `NonFiniteInput` when X, y, or weights contain NaN/inf
 /// - `InvalidWeights` for negative, all-zero, or insufficient-`n_eff` weights
 /// - `ShapeMismatch` when `covariates` does not have `n_samples` rows
@@ -303,7 +303,10 @@ fn find_k_optimal_impl(
 ) -> PlsKitResult<FindKOptimalOutput> {
     if covariates.is_some() {
         if let Some(method) = opts.diagnostic {
-            crate::signal_test::check_covariate_method(method, "split_exact and raw_perm")?;
+            crate::signal_test::check_covariate_method(
+                &crate::signal_test::ConfirmatoryArgs::defaults_for(method),
+                "split_exact and raw_perm",
+            )?;
         }
     }
     let n = x.nrows();
@@ -323,10 +326,11 @@ fn find_k_optimal_impl(
             k_max: max_allowed,
         });
     }
-    if matches!(opts.diagnostic, Some(ConfirmatoryMethod::Score)) {
-        return Err(PlsKitError::InvalidArgument(
-            "score has no sequential variant".into(),
-        ));
+    if let Some(m @ (ConfirmatoryMethod::Score | ConfirmatoryMethod::SvPerm)) = opts.diagnostic {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "{} has no sequential variant",
+            m.as_str()
+        )));
     }
     if matches!(opts.diagnostic, Some(ConfirmatoryMethod::Auto)) {
         return Err(PlsKitError::InvalidArgument(
@@ -660,7 +664,7 @@ impl FindKSequenceOutput {
 /// - `InvalidArgument` for `k_max == 0`
 /// - `KExceedsMax` for `k_max > n_features`
 /// - `DimensionMismatch` for shape disagreements
-/// - `InvalidArgument` for `Score` test method (no sequential variant)
+/// - `InvalidArgument` for `Score` or `SvPerm` test method (no sequential variant)
 /// - `InvalidArgument` for `Auto` with `n_splits < 2`, `n_perm < 1`, or
 ///   `force = true`
 /// - `NonFiniteInput` when X, y, or weights contain NaN/inf
@@ -733,7 +737,7 @@ fn find_k_sequence_impl(
 ) -> PlsKitResult<FindKSequenceOutput> {
     if covariates.is_some() {
         crate::signal_test::check_covariate_method(
-            opts.test_method,
+            &crate::signal_test::ConfirmatoryArgs::defaults_for(opts.test_method),
             "split_exact, raw_perm and auto",
         )?;
     }
@@ -1124,7 +1128,8 @@ impl FoldData {
         let train_wref = self.train_w.as_ref().map(Col::as_ref);
         let (xs_tr, xs_val) = self.blocks.get_or_insert_with(|| {
             let scale = self.scale.as_ref();
-            let (xs_tr, mean, _) = center_rows_fro(x, &self.train_idx, train_wref, None, scale);
+            let (xs_tr, mean, _) =
+                center_rows_fro(x, &self.train_idx, train_wref, None, scale, faer::Par::Seq);
             let xs_val = standardize_apply_rows(x, &self.val_idx, mean.as_ref(), scale, None);
             (xs_tr, xs_val)
         });
@@ -3529,6 +3534,7 @@ mod tests {
                 fd.train_w.as_ref().map(Col::as_ref),
                 None,
                 scale.as_ref(),
+                faer::Par::Seq,
             );
             crate::test_support::assert_bits_eq(
                 &crate::test_support::col_vals(fd.mean.as_ref()),

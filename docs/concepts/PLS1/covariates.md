@@ -109,7 +109,8 @@ With weights, `e` is the raw-scale weighted residual of y, `π(e)` is permuted, 
 | `pls1_confirmatory_test`, `test_method="split_exact"` | Freedman–Lane null columns |
 | `pls1_confirmatory_test`, `test_method="raw_perm"` | Freedman–Lane null columns |
 | `pls1_confirmatory_test`, `test_method="auto"` | runs `split_exact` |
-| `pls1_confirmatory_test`, `test_method="split_nb"`, `"score"`, `"e"` | refused (`invalid_argument`) |
+| `pls1_confirmatory_test`, `test_method="sv_perm"`, and `"score"` with `n_perm` | Freedman–Lane null columns |
+| `pls1_confirmatory_test`, `test_method="split_nb"`, `"score"` without `n_perm`, `"e"` | refused (`invalid_argument`) |
 | `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_k_optimal`, `spls1_find_k_sequence`, `spls1_find_keep_optimal` | selection on the adjusted data; their test methods follow the rules above |
 | `pls1_perm_null` | Freedman–Lane null columns, β maps on `X̃` |
 | `factors`, `rotate` | X is adjusted before use |

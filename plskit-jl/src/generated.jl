@@ -23,7 +23,7 @@ const _RESULT_FIELDS = Dict{Symbol,Vector{Symbol}}(
     :FindKOptimalResult => [:k_star, :selector, :cv_scores, :cv_scores_se, :bic_scores, :pvalues, :diagnostic, :seed, :n_eff, :stable_rank, :n_covariates],
     :FindKSequenceResult => [:k_star, :pvalues, :test_method, :alpha, :seed, :n_eff, :stable_rank, :n_covariates],
     :FindKeepOptimalResult => [:keep_star, :k, :cv_scores, :cv_scores_se, :keep_grid, :seed, :n_eff, :n_covariates],
-    :ConfirmatoryTestResult => [:pvalue, :statistic, :test_method, :k, :pvalues_by_k, :statistics_by_k, :n_perm, :n_splits, :seed, :n_eff, :rho_hat, :stable_rank, :ci, :n_covariates],
+    :ConfirmatoryTestResult => [:pvalue, :statistic, :test_method, :k, :pvalues_by_k, :statistics_by_k, :n_perm, :n_splits, :n_folds, :force, :rotate, :seed, :n_eff, :rho_hat, :stable_rank, :ci, :n_covariates],
     :SplitNbGateResult => [:fires, :stable_rank, :n_eff],
     :PermNullResult => [:n_perm, :k, :seed, :beta_ref, :beta_perm_mean, :beta_perm_sd, :beta_perm_z, :beta_perm_matrix, :n_eff, :n_covariates],
     :PermAlphaResult => [:alpha, :k_used, :k, :n_features],
@@ -106,7 +106,7 @@ const FindKeepOptimalResult = PlsKitResult{:FindKeepOptimalResult}
     ConfirmatoryTestResult
 
 `PlsKitResult{:ConfirmatoryTestResult}`, the Julia form of Python's `plskit.ConfirmatoryTestResult`.
-Fields: `pvalue`, `statistic`, `test_method`, `k`, `pvalues_by_k`, `statistics_by_k`, `n_perm`, `n_splits`, `seed`, `n_eff`, `rho_hat`, `stable_rank`, `ci`, `n_covariates`.
+Fields: `pvalue`, `statistic`, `test_method`, `k`, `pvalues_by_k`, `statistics_by_k`, `n_perm`, `n_splits`, `n_folds`, `force`, `rotate`, `seed`, `n_eff`, `rho_hat`, `stable_rank`, `ci`, `n_covariates`.
 Reference: [results](https://github.com/pawlenartowicz/plskit/blob/main/docs/python/results.md).
 """
 const ConfirmatoryTestResult = PlsKitResult{:ConfirmatoryTestResult}

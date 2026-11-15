@@ -35,7 +35,7 @@ use crate::linalg::{
     held_out_scale, lu_solve_in_place, mat_mul, mat_vec, pow2_scale, scaled_moments,
     self_adjoint_eigenvalues, standardize, standardize_apply_rows, standardize1,
 };
-use crate::pca::pca_basis;
+use crate::pca::pca_basis_impl;
 use crate::resample::{
     copy_bytes, map_units, pair_blocks_bytes, permutation_from_seed, permute_indices,
 };
@@ -146,8 +146,19 @@ fn block_ends(c: &[f64], n: usize) -> Vec<usize> {
 ///   to infinity; `x` with no rows, with every column left in constant
 ///   (when standardized), or with all singular values zero.
 /// - [`PlsKitError::Internal`] — the SVD failed.
-#[allow(clippy::many_single_char_names)] // x, n, d, c, w, j are the math names
 pub fn factors(
+    coef: ColRef<'_, f64>,
+    x: MatRef<'_, f64>,
+    n: usize,
+    pre_standardized: bool,
+    covariates: Option<MatRef<'_, f64>>,
+) -> PlsKitResult<FactorsOutput> {
+    crate::fit::with_thread_limit(|| factors_impl(coef, x, n, pre_standardized, covariates))
+}
+
+/// Body of [`factors`], on the caller's pool.
+#[allow(clippy::many_single_char_names)] // x, n, d, c, w, j are the math names
+fn factors_impl(
     coef: ColRef<'_, f64>,
     x: MatRef<'_, f64>,
     n: usize,
@@ -191,9 +202,9 @@ pub fn factors(
             standardize(x_kept.as_ref()).0
         };
         basis.residualize(xs.as_mut());
-        pca_basis(xs.as_ref(), true)?.v
+        pca_basis_impl(xs.as_ref(), true, crate::fit::par_fixed())?.v
     } else {
-        pca_basis(x_kept.as_ref(), pre_standardized)?.v
+        pca_basis_impl(x_kept.as_ref(), pre_standardized, crate::fit::par_fixed())?.v
     };
     let coef_kept = Col::<f64>::from_fn(kept.len(), |i| coef[kept[i]]);
     let resid = |u: ColRef<'_, f64>| {
@@ -612,8 +623,8 @@ fn profiles_find_n_impl(
         if constant_column(x, tr) {
             return Ok(None);
         }
-        let (xs_tr, _, _) = center_rows_fro(x, tr, None, None, scale.as_ref());
-        let v = pca_basis(xs_tr.as_ref(), true)?.v;
+        let (xs_tr, _, _) = center_rows_fro(x, tr, None, None, scale.as_ref(), Par::Seq);
+        let v = pca_basis_impl(xs_tr.as_ref(), true, Par::Seq)?.v;
         Ok(Some(v.as_ref().subcols(0, k_raw.min(v.ncols())).to_owned()))
     });
     let mut n_failed_folds = 0;
@@ -643,7 +654,7 @@ fn profiles_find_n_impl(
     let scored = map_units(kept.len(), unit, |u| -> PlsKitResult<Vec<f64>> {
         let fold = &kept[u];
         let y_tr = col_row_subset(y, &fold.tr);
-        let (xs_tr, mean, _) = center_rows_fro(x, &fold.tr, None, None, scale.as_ref());
+        let (xs_tr, mean, _) = center_rows_fro(x, &fold.tr, None, None, scale.as_ref(), Par::Seq);
         // Fitted as standardized: `coef` only orders the axes below.
         let fit = pls1_fit_impl(
             xs_tr.as_ref(),
@@ -788,11 +799,16 @@ fn corr_eigen_bytes(n: usize, d: usize) -> usize {
 }
 
 /// Bytes of one fold of [`profiles_find_n`]'s first pass on `n_tr`
-/// training rows: the centred training copy of `X` (`n_tr × d`), the `V`
-/// of `linalg::thin_svd_v` (`d × min(n_tr, d)`) and faer's SVD scratch.
+/// training rows: the centred training copy of `X` (`n_tr × d`) plus the
+/// larger of the two phases of `linalg::tall_svd_v`. The SVD phase holds
+/// `V` (`d × min(n_tr, d)`) and faer's SVD scratch; the Gram phase, run
+/// only when `d < n_tr`, holds `G` and its eigenvectors (`d × d` each) and
+/// faer's eigendecomposition scratch. `G` is dropped before the fallback
+/// SVD, so the phases do not add up.
 fn fold_svd_bytes(n_tr: usize, d: usize) -> usize {
+    use faer::linalg::evd::{ComputeEigenvectors, self_adjoint_evd_scratch};
     use faer::linalg::svd::{ComputeSvdVectors, svd_scratch};
-    let scratch = svd_scratch::<f64>(
+    let svd = svd_scratch::<f64>(
         n_tr,
         d,
         ComputeSvdVectors::No,
@@ -800,10 +816,22 @@ fn fold_svd_bytes(n_tr: usize, d: usize) -> usize {
         Par::Seq,
         faer::Spec::default(),
     )
-    .size_bytes();
-    copy_bytes(n_tr, d)
-        .saturating_add(copy_bytes(d, n_tr.min(d)))
-        .saturating_add(scratch)
+    .size_bytes()
+    .saturating_add(copy_bytes(d, n_tr.min(d)));
+    let gram = if d < n_tr {
+        self_adjoint_evd_scratch::<f64>(
+            d,
+            ComputeEigenvectors::Yes,
+            Par::Seq,
+            faer::Spec::default(),
+        )
+        .size_bytes()
+        .saturating_add(copy_bytes(d, d))
+        .saturating_add(copy_bytes(d, d))
+    } else {
+        0
+    };
+    copy_bytes(n_tr, d).saturating_add(svd.max(gram))
 }
 
 /// True when some column of `x`, over the rows `rows`, is constant to
@@ -1128,7 +1156,7 @@ mod tests {
         let (x, coef) = x_and_coef();
         let xs = standardize(x.as_ref()).0;
         let got = factors(coef.as_ref(), x.as_ref(), 3, false, None).unwrap();
-        let v = pca_basis(xs.as_ref(), true).unwrap().v;
+        let v = crate::pca::pca_basis(xs.as_ref(), true).unwrap().v;
         let want = split_on_basis(v.as_ref(), coef.as_ref(), 3, false, false).unwrap();
         for j in 0..3 {
             assert!((got.size[j] - want.size[j]).abs() <= 1e-12, "size {j}");
@@ -1265,7 +1293,7 @@ mod tests {
             raw[(i, j)] * [1.0, 10.0, 100.0, 1000.0][j % 4]
         });
         let coef = mat_vec(x.transpose(), unif_col(50, 42).as_ref(), Par::Seq);
-        let v = pca_basis(x.as_ref(), true).unwrap().v;
+        let v = crate::pca::pca_basis(x.as_ref(), true).unwrap().v;
         let want = split_on_basis(v.as_ref(), coef.as_ref(), 3, true, false).unwrap();
         let got = factors(coef.as_ref(), x.as_ref(), 3, true, None).unwrap();
         let other = factors(coef.as_ref(), x.as_ref(), 3, false, None).unwrap();

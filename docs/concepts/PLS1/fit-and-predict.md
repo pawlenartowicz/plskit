@@ -166,13 +166,14 @@ effect on `ŷ`. This is a property of the fit, not something
 
 ## Confirmatory testing: picking a method
 
-After fitting, the natural next question is: **is this model statistically supported, or could the apparent fit be noise?** `pls1_confirmatory_test` answers it without taking a `k` from the fit: by default it tests the set `k = 1..8`, cut by the design, and returns one p-value for signal at some `k` in the set ([A set of `k`](inference.md#a-set-of-k)). It provides five methods; `test_method` is a keyword argument that defaults to `"auto"` (see [`test_method="auto"`](inference.md#test_methodauto)). The honest split rule applies (see [Find K](find-k.md)): if `k` was chosen on the same data, the inference is exploratory, not confirmatory.
+After fitting, the natural next question is: **is this model statistically supported, or could the apparent fit be noise?** `pls1_confirmatory_test` answers it without taking a `k` from the fit: by default it tests the set `k = 1..8`, cut by the design, and returns one p-value for signal at some `k` in the set ([A set of `k`](inference.md#a-set-of-k)). It provides six methods; `test_method` is a keyword argument that defaults to `"auto"` (see [`test_method="auto"`](inference.md#test_methodauto)). The honest split rule applies (see [Find K](find-k.md)): if `k` was chosen on the same data, the inference is exploratory, not confirmatory.
 
 | Method | When to use | Cost |
 |---|---|---|
 | `split_exact` | **Recommended.** Split-half test on Fisher-z of held-out correlation, calibrated by permutation, so it holds its level on any design. Takes a set of `k`. At K = 1 the engine uses a no-refit route: the fitted direction is a fixed linear map of `y`, so every permutation reuses it, which keeps this route cheap; K ≥ 2 and a set of `k` fall back to a per-permutation refit, where one fit up to the largest `k` gives every `k` of the set. | `O(n_splits)` GEMM pairs of width `n_perm` at K = 1; `O(n_splits × n_perm)` fits at K ≥ 2 or over a set |
 | `split_nb` | Same statistic as `split_exact`, calibrated by a Fisher-z t approximation instead of permutation: cheaper, but only appropriate for `n` large relative to `p` with a flat X spectrum. A design with `n_eff < 25`, 4 columns or fewer, or a stable rank `< 3` is auto-gated: an explicit `split_nb` request reroutes to `split_exact` (at `n_perm=1000`) unless you pass `args={"force": True}`. | `O(n_splits)` fits |
-| `score` | Fast pre-fit screening test on `‖X′ y‖²`. **Detects signal in `span(X)`; does not validate the PLS fit at your chosen `k`.** Faster and more powerful than the split tests when its assumptions hold, but sensitive to heavy tails / outliers in `y`. Use as a cheap omnibus check, not as a fit-validation test. | One matvec + one eigendecomp |
+| `score` | Fast pre-fit screening test on `‖X′ y‖²`. **Detects signal in `span(X)`; does not validate the PLS fit at your chosen `k`.** Faster and more powerful than the split tests when its assumptions hold, but sensitive to heavy tails / outliers in `y`. Use as a cheap omnibus check, not as a fit-validation test. With `args={"n_perm": N}` the same statistic `T` is calibrated by `N` permutations instead (`p = (1 + #{null ≥ observed}) / (N + 1)`), and `covariates`, and `weights` in the raw form (with `X`), are then accepted. `"auto"` never picks `score`. | One matvec + one eigendecomp; `O(n_perm)` matvecs with `n_perm` |
+| `sv_perm` | Permutation test on `d₁ = ‖X̃ᵀỹ‖`, the largest singular value of `X̃ᵀỹ`, at `k = 1` only. In-sample, so like `score` it detects signal in `span(X)` and does not validate the fit at your chosen `k`. Takes `covariates`, and `weights` in the raw form (with `X`); `rotate` is refused. `"auto"` never picks it. | `O(n_perm)` matvecs |
 | `e` | Universal-inference e-value. Run only when you specifically need an **e-value**: for anytime-valid sequential testing, optional-stopping inference, or composition with other e-processes. Substantially less powerful than `split_exact` for the omnibus K-fixed test. | One PLS fit |
 | `raw_perm` | **Legacy. Do not use for new analyses.** Implemented for compatibility with the chemometrics permutation-Q² convention; included so users porting workflows from older tools can reproduce historical numbers. Power and calibration are uniformly worse than `split_exact`. | `O(n_perm)` fits |
 
@@ -184,7 +185,7 @@ Rao / Lagrange-Multiplier framework, see [Inference](inference.md).
 
 - [Find K](find-k.md): choosing `k` (`pls1_find_k_optimal`,
   `pls1_find_k_sequence`)
-- [Inference](inference.md): full treatment of the five confirmatory
+- [Inference](inference.md): full treatment of the six confirmatory
   tests, with the split-half construction and validity proofs
 - [Confidence intervals](ci.md): rotation-invariant subsample CIs
   via `pls1_confirmatory_test(ci=True)`

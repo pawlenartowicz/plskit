@@ -104,3 +104,38 @@ function subset(g::PlsKitResult{:GramMatrixResult}, rows::AbstractVector{<:Union
     _check_main_thread()
     return _pycall(getfield(g, :py).subset, collect(Int, rows) .- 1)
 end
+
+"""
+    gram_matrix_blocks(blocks; pre_standardized=false) -> GramMatrixResult
+
+The `gram_matrix` of `X` given as column blocks, summed block by block. `blocks`
+is any iterable of matrices (a generator keeps one block in memory at a time,
+plus the `(n, n)` sum), all with the same number of rows. Each block goes through
+`gram_matrix`, so its conversion rules and errors apply. Equal to
+`gram_matrix(hcat(blocks...))` up to rounding. With `pre_standardized=true`, data
+beyond `2^±256` must use `gram_matrix` on the whole `X`. Throws `:invalid_input`
+for no blocks and `:shape_mismatch` for a block with another row count.
+"""
+function gram_matrix_blocks(blocks; pre_standardized=false)
+    _check_main_thread()
+    acc = nothing
+    p = 0
+    for b in blocks
+        r = gram_matrix(b; pre_standardized)
+        g = r.gram
+        if acc === nothing
+            acc = g
+        elseif size(g, 1) != size(acc, 1)
+            throw(PlsKitError(:shape_mismatch,
+                "gram_matrix_blocks: every block needs the same number of rows " *
+                "($(size(acc, 1)) in the first block, $(size(g, 1)) in a later one)",
+                NamedTuple()))
+        else
+            acc .+= g
+        end
+        p += r.n_features
+    end
+    acc === nothing && throw(PlsKitError(:invalid_input,
+        "gram_matrix_blocks: `blocks` is empty; give at least one block", NamedTuple()))
+    return _pycall(_plskit.GramMatrixResult; gram=acc, n_features=p, pre_standardized)
+end

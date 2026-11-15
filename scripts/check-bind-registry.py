@@ -23,6 +23,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PKG = ROOT / "plskit-py" / "python" / "plskit"
+# Written in each wrapper, with no registry entry: a loop over `gram_matrix`.
+WRAPPER_ONLY = {"gram_matrix_blocks"}
 
 
 def python_signatures() -> dict[str, tuple[list[tuple], str | None]]:
@@ -68,7 +70,7 @@ def main() -> int:
         return 2
     dump = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     sigs = python_signatures()
-    python_fns = exported_names() & set(sigs)
+    python_fns = (exported_names() & set(sigs)) - WRAPPER_ONLY
     registry = {f["name"]: f for f in dump["functions"]}
 
     problems = []

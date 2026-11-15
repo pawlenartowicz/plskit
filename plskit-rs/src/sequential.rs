@@ -74,8 +74,8 @@ impl SequentialArgs {
         }
     }
 
-    /// Default args for a given method. Returns `None` for `Score` (rejected
-    /// at the dispatch boundary in the wrapper — score has no per-component
+    /// Default args for a given method. Returns `None` for `Score` and `SvPerm` (rejected
+    /// at the dispatch boundary in the wrapper — neither has a per-component
     /// reading).
     #[must_use]
     pub(crate) fn defaults_for(method: ConfirmatoryMethod) -> Option<Self> {
@@ -94,7 +94,7 @@ impl SequentialArgs {
                 n_perm: 1000,
                 n_splits: 32,
             },
-            ConfirmatoryMethod::Score => return None,
+            ConfirmatoryMethod::Score | ConfirmatoryMethod::SvPerm => return None,
         })
     }
 

@@ -9,7 +9,7 @@ module PLSKit
 
 using PythonCall
 
-export PlsKitResult, PlsKitError
+export PlsKitResult, PlsKitError, gram_matrix_blocks
 
 include("python.jl")
 include("results.jl")

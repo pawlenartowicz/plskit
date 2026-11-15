@@ -10,6 +10,7 @@ except PackageNotFoundError:
 from plskit._api import (
     factors,
     gram_matrix,
+    gram_matrix_blocks,
     pca_basis,
     profiles,
     profiles_find_n,
@@ -68,7 +69,7 @@ __all__ = [
     "split_nb_gate",
     "pls1_find_k_optimal", "pls1_find_k_sequence",
     "pls1_perm_alpha", "pls1_perm_null",
-    "gram_matrix", "GramMatrixResult",
+    "gram_matrix", "gram_matrix_blocks", "GramMatrixResult",
     "pls3_fit", "plssvd_fit",
     "pls3_transform", "plssvd_transform",
     "pls3_confirmatory_test",

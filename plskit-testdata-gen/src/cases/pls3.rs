@@ -208,6 +208,9 @@ struct Pls3SplitExactCase<'a> {
     name: &'a str,
     auto: bool,
     gram: bool,
+    /// `Some(rotate)` runs `sv_perm` with that flag instead; `n_splits` is then unused.
+    sv_rotate: Option<bool>,
+    snr: f64,
     n: usize,
     p: usize,
     q: usize,
@@ -227,7 +230,7 @@ struct Pls3SplitExactCase<'a> {
 fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
     let function = "pls3_confirmatory_test";
     let paths = CasePaths::build(root, function, c.name)?;
-    let (x, y) = synth_xy(c.n, c.p, c.q, SYNTH_K_SIGNAL, SYNTH_SNR, CASE_SEED);
+    let (x, y) = synth_xy(c.n, c.p, c.q, SYNTH_K_SIGNAL, c.snr, CASE_SEED);
 
     {
         let mut w = NpzWriter::create(&paths.abs_inputs)?;
@@ -239,7 +242,12 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
     let xf = ndarray_to_faer_mat(&x);
     let yf = ndarray_to_faer_mat(&y);
     let opts = Pls3ConfirmatoryTestOpts {
-        args: if c.auto {
+        args: if let Some(rotate) = c.sv_rotate {
+            ConfirmatoryArgs::SvPerm {
+                n_perm: c.n_perm,
+                rotate,
+            }
+        } else if c.auto {
             ConfirmatoryArgs::Auto {
                 n_perm: c.n_perm,
                 n_splits: c.n_splits,
@@ -274,12 +282,9 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
                 r.n_perm.expect("split_exact reports n_perm"),
             )?),
         )?;
-        w.add_i64(
-            "n_splits",
-            &scalar_i64(i64::try_from(
-                r.n_splits.expect("split_exact reports n_splits"),
-            )?),
-        )?;
+        if let Some(ns) = r.n_splits {
+            w.add_i64("n_splits", &scalar_i64(i64::try_from(ns)?))?;
+        }
         if let Some(sr) = r.stable_rank {
             w.add_f64("stable_rank", &scalar_f64(sr))?;
         }
@@ -298,10 +303,13 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
         kwargs: {
             let mut kw = serde_json::json!({
                 "k": 1,
-                "test_method": if c.auto { "auto" } else { "split_exact" },
+                "test_method": if c.sv_rotate.is_some() { "sv_perm" } else if c.auto { "auto" } else { "split_exact" },
                 "args": {"n_perm": c.n_perm, "n_splits": c.n_splits},
                 "seed": CASE_SEED
             });
+            if let Some(rotate) = c.sv_rotate {
+                kw["args"] = serde_json::json!({"n_perm": c.n_perm, "rotate": rotate});
+            }
             if c.gram {
                 kw["gram"] = serde_json::Value::Bool(true);
             }
@@ -326,6 +334,8 @@ pub fn confirmatory_split_exact(root: &Path) -> Result<Case> {
             name: "pls3_confirmatory_split_exact",
             auto: false,
             gram: false,
+            sv_rotate: None,
+            snr: SYNTH_SNR,
             n: 80,
             p: 6,
             q: 3,
@@ -348,6 +358,8 @@ pub fn confirmatory_auto_split_exact(root: &Path) -> Result<Case> {
             name: "pls3_confirmatory_auto_split_exact",
             auto: true,
             gram: false,
+            sv_rotate: None,
+            snr: SYNTH_SNR,
             n: 80,
             p: 6,
             q: 3,
@@ -378,6 +390,8 @@ pub fn confirmatory_split_exact_wide(root: &Path) -> Result<Case> {
             name: "pls3_confirmatory_split_exact_wide",
             auto: false,
             gram: false,
+            sv_rotate: None,
+            snr: SYNTH_SNR,
             n: 30,
             p: 100,
             q: 3,
@@ -399,12 +413,103 @@ pub fn confirmatory_gram_split_exact(root: &Path) -> Result<Case> {
             name: "pls3_confirmatory_test_gram_split_exact",
             auto: false,
             gram: true,
+            sv_rotate: None,
+            snr: SYNTH_SNR,
             n: 30,
             p: 100,
             q: 3,
             n_perm: 100,
             n_splits: 30,
         },
+    )
+}
+
+/// Weak signal for the raw `sv_perm` pair: at the shared `SYNTH_SNR` the
+/// observed singular value beats every permutation and p sits at the floor
+/// whether or not `rotate` is applied.
+const SV_PERM_RAW_SNR: f64 = 0.1;
+
+/// A `pls3_confirmatory_test` `sv_perm` case (`n_perm = 99`).
+fn sv_perm_case(
+    root: &Path,
+    name: &str,
+    (gram, rotate): (bool, bool),
+    (n, p): (usize, usize),
+    snr: f64,
+) -> Result<Case> {
+    split_exact_case(
+        root,
+        &Pls3SplitExactCase {
+            name,
+            auto: false,
+            gram,
+            sv_rotate: Some(rotate),
+            snr,
+            n,
+            p,
+            q: 3,
+            n_perm: 99,
+            n_splits: 0,
+        },
+    )
+}
+
+/// Case: `pls3_confirmatory_test` with `test_method=sv_perm`, `n_perm=99`,
+/// `rotate=false` on n=80, p=6, q=3.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or the test fails.
+pub fn confirmatory_sv_perm(root: &Path) -> Result<Case> {
+    sv_perm_case(
+        root,
+        "pls3_confirmatory_sv_perm",
+        (false, false),
+        (80, 6),
+        SV_PERM_RAW_SNR,
+    )
+}
+
+/// Case: [`confirmatory_sv_perm`] with `rotate=true`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or the test fails.
+pub fn confirmatory_sv_perm_rotate(root: &Path) -> Result<Case> {
+    sv_perm_case(
+        root,
+        "pls3_confirmatory_sv_perm_rotate",
+        (false, true),
+        (80, 6),
+        SV_PERM_RAW_SNR,
+    )
+}
+
+/// Case: `sv_perm` with `rotate=false` on `gram_matrix(X)` of the inputs of
+/// [`confirmatory_sv_perm_rotate_gram`].
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or the test fails.
+pub fn confirmatory_sv_perm_gram(root: &Path) -> Result<Case> {
+    sv_perm_case(
+        root,
+        "pls3_confirmatory_test_gram_sv_perm",
+        (true, false),
+        (30, 100),
+        SYNTH_SNR,
+    )
+}
+
+/// Case: `sv_perm` with `rotate=true` on `gram_matrix(X)` of the wide
+/// design (n=30, p=100, q=3).
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or the test fails.
+pub fn confirmatory_sv_perm_rotate_gram(root: &Path) -> Result<Case> {
+    sv_perm_case(
+        root,
+        "pls3_confirmatory_test_gram_sv_perm_rotate",
+        (true, true),
+        (30, 100),
+        SYNTH_SNR,
     )
 }
 

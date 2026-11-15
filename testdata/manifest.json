@@ -957,6 +957,138 @@
       }
     },
     {
+      "name": "pls1_confirmatory_sv_perm",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_sv_perm_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_sv_perm.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 99
+        },
+        "k": 1,
+        "seed": 42,
+        "test_method": "sv_perm"
+      },
+      "hashes": {
+        "inputs_sha256": "134b289d5a11b63345e0cb36a58db3fb6a7f7832cb6b61ea3e28d79189cf8c32",
+        "outputs_sha256": "7389a1785f5084aa8ce055fb9cadcd7aa91dadb8de0b629a0e069564d9a07c68"
+      }
+    },
+    {
+      "name": "pls1_confirmatory_sv_perm_weighted",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_sv_perm_weighted_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_sv_perm_weighted.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 99
+        },
+        "k": 1,
+        "seed": 42,
+        "test_method": "sv_perm",
+        "weights": "nonuniform"
+      },
+      "hashes": {
+        "inputs_sha256": "c77fc84e970dd7f53d4c8c77d0b925ce81fb73316fb34ebd4e75ee6e69a5c8f7",
+        "outputs_sha256": "e0a8b79ff6a4d95e27824f49a945d427fc4498167131b04d53b848f310694957"
+      }
+    },
+    {
+      "name": "pls1_confirmatory_sv_perm_covariates",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_sv_perm_covariates_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_sv_perm_covariates.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 99
+        },
+        "covariates": "Z",
+        "k": 1,
+        "seed": 42,
+        "test_method": "sv_perm"
+      },
+      "hashes": {
+        "inputs_sha256": "200517c471681f640239a95ef33c7c68ff4f1d8efd4c9168ac7c3d517f0311bf",
+        "outputs_sha256": "598f5339b13ec7f2a44857badd2b880a443d1c5a1eeeca61b9dcfc69a3726843"
+      }
+    },
+    {
+      "name": "pls1_confirmatory_score_n_perm",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_sv_perm_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_score_n_perm.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 99
+        },
+        "k": 1,
+        "seed": 42,
+        "test_method": "score"
+      },
+      "hashes": {
+        "inputs_sha256": "134b289d5a11b63345e0cb36a58db3fb6a7f7832cb6b61ea3e28d79189cf8c32",
+        "outputs_sha256": "cc0d7acaf8fa6b396ee01dc894d1c8e135e0c71a8542615ad04616ac918effec"
+      }
+    },
+    {
+      "name": "pls1_confirmatory_test_gram_sv_perm",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_sv_perm_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_test_gram_sv_perm.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 99
+        },
+        "gram": true,
+        "k": 1,
+        "seed": 42,
+        "test_method": "sv_perm"
+      },
+      "hashes": {
+        "inputs_sha256": "134b289d5a11b63345e0cb36a58db3fb6a7f7832cb6b61ea3e28d79189cf8c32",
+        "outputs_sha256": "7389a1785f5084aa8ce055fb9cadcd7aa91dadb8de0b629a0e069564d9a07c68"
+      }
+    },
+    {
+      "name": "pls1_confirmatory_test_gram_score_n_perm",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_sv_perm_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_test_gram_score_n_perm.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 99
+        },
+        "gram": true,
+        "k": 1,
+        "seed": 42,
+        "test_method": "score"
+      },
+      "hashes": {
+        "inputs_sha256": "134b289d5a11b63345e0cb36a58db3fb6a7f7832cb6b61ea3e28d79189cf8c32",
+        "outputs_sha256": "cc0d7acaf8fa6b396ee01dc894d1c8e135e0c71a8542615ad04616ac918effec"
+      }
+    },
+    {
+      "name": "pls1_confirmatory_test_gram_sv_perm_covariates",
+      "function": "pls1_confirmatory_test",
+      "inputs": "inputs/pls1_confirmatory_sv_perm_covariates_inputs.npz",
+      "outputs": "outputs/pls1_confirmatory_test/pls1_confirmatory_test_gram_sv_perm_covariates.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 99
+        },
+        "covariates": "Z",
+        "gram": true,
+        "k": 1,
+        "seed": 42,
+        "test_method": "sv_perm"
+      },
+      "hashes": {
+        "inputs_sha256": "200517c471681f640239a95ef33c7c68ff4f1d8efd4c9168ac7c3d517f0311bf",
+        "outputs_sha256": "598f5339b13ec7f2a44857badd2b880a443d1c5a1eeeca61b9dcfc69a3726843"
+      }
+    },
+    {
       "name": "pls1_confirmatory_split_exact_covariates",
       "function": "pls1_confirmatory_test",
       "inputs": "inputs/pls1_confirmatory_covariates_inputs.npz",
@@ -1877,6 +2009,84 @@
       "hashes": {
         "inputs_sha256": "f486451d2a37ceea7d84ed59def2c7a6357ad00912c532151a7bee9564207a4f",
         "outputs_sha256": "1b3b2064f81d7760fad790a8331c209b3c8e577e29f1f8be775a6b0332b0a669"
+      }
+    },
+    {
+      "name": "pls3_confirmatory_sv_perm",
+      "function": "pls3_confirmatory_test",
+      "inputs": "inputs/pls3_confirmatory_sv_perm.npz",
+      "outputs": "outputs/pls3_confirmatory_test/pls3_confirmatory_sv_perm.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 99,
+          "rotate": false
+        },
+        "k": 1,
+        "seed": 42,
+        "test_method": "sv_perm"
+      },
+      "hashes": {
+        "inputs_sha256": "d3d42ac2738cb309f1d8391227afc57c8126ba70943fa7d4e44764cc1ccefa7b",
+        "outputs_sha256": "411e57befdc9016e3ec230551f49563d45a0135e15cb7e3a575a9e5731ded0fa"
+      }
+    },
+    {
+      "name": "pls3_confirmatory_sv_perm_rotate",
+      "function": "pls3_confirmatory_test",
+      "inputs": "inputs/pls3_confirmatory_sv_perm_rotate.npz",
+      "outputs": "outputs/pls3_confirmatory_test/pls3_confirmatory_sv_perm_rotate.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 99,
+          "rotate": true
+        },
+        "k": 1,
+        "seed": 42,
+        "test_method": "sv_perm"
+      },
+      "hashes": {
+        "inputs_sha256": "d3d42ac2738cb309f1d8391227afc57c8126ba70943fa7d4e44764cc1ccefa7b",
+        "outputs_sha256": "f149b9f164e94477f364d6ebae0ee95819e6acce3576a8a610d3074f05261978"
+      }
+    },
+    {
+      "name": "pls3_confirmatory_test_gram_sv_perm_rotate",
+      "function": "pls3_confirmatory_test",
+      "inputs": "inputs/pls3_confirmatory_test_gram_sv_perm_rotate.npz",
+      "outputs": "outputs/pls3_confirmatory_test/pls3_confirmatory_test_gram_sv_perm_rotate.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 99,
+          "rotate": true
+        },
+        "gram": true,
+        "k": 1,
+        "seed": 42,
+        "test_method": "sv_perm"
+      },
+      "hashes": {
+        "inputs_sha256": "f486451d2a37ceea7d84ed59def2c7a6357ad00912c532151a7bee9564207a4f",
+        "outputs_sha256": "c33bcd0a0aa4eb679bb84c38e5ba98bf6a94eaebdc2ee38af84220a2f9f47993"
+      }
+    },
+    {
+      "name": "pls3_confirmatory_test_gram_sv_perm",
+      "function": "pls3_confirmatory_test",
+      "inputs": "inputs/pls3_confirmatory_test_gram_sv_perm.npz",
+      "outputs": "outputs/pls3_confirmatory_test/pls3_confirmatory_test_gram_sv_perm.npz",
+      "kwargs": {
+        "args": {
+          "n_perm": 99,
+          "rotate": false
+        },
+        "gram": true,
+        "k": 1,
+        "seed": 42,
+        "test_method": "sv_perm"
+      },
+      "hashes": {
+        "inputs_sha256": "f486451d2a37ceea7d84ed59def2c7a6357ad00912c532151a7bee9564207a4f",
+        "outputs_sha256": "e9e3d92f10e73a4b2f6c4670dbf3dc531018a17c51f61e60ef79c1136856cdb3"
       }
     },
     {

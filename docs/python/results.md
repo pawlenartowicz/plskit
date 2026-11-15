@@ -166,13 +166,16 @@ input gives `k_star = 0` from `spls1_find_k_optimal`.
 | Field | Python type | Notes |
 |---|---|---|
 | `pvalue` | `float` | always; for a set of more than one `k`, the min-p p for the whole set |
-| `statistic` | `float \| None` | the statistic for one `k`; `None` for a set of more than one `k` |
-| `test_method` | `str` | the method that ran: one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"score"` / `"e"`, never `"auto"`; `"split_exact"` when an explicit `"split_nb"` request was rerouted by the auto-gate |
+| `statistic` | `float \| None` | the statistic for one `k` (for `sv_perm`, `d₁`, the largest singular value of `X̃ᵀỸ`); `None` for a set of more than one `k` |
+| `test_method` | `str` | the method that ran: one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"sv_perm"` / `"score"` / `"e"`, never `"auto"`; `"split_exact"` when an explicit `"split_nb"` request was rerouted by the auto-gate |
 | `k` | `list[int]` | the tested set, sorted ascending; one `k` gives a one-element list (`pls3_confirmatory_test` gives `[k]`) |
 | `pvalues_by_k` | `dict[int, float]` | each tested `k` → its own p, not adjusted for the set; `{k: pvalue}` for one `k` |
 | `statistics_by_k` | `dict[int, float]` | each tested `k` → its statistic; `{k: statistic}` for one `k` |
-| `n_perm` | `int \| None` | not None for `raw_perm` / `split_exact`, None for `split_nb` / `score` / `e` |
-| `n_splits` | `int \| None` | not None for `split_*` methods, None for `raw_perm` / `score` / `e` |
+| `n_perm` | `int \| None` | not None for `raw_perm` / `split_exact` / `sv_perm` / `score` with `n_perm`, None for `split_nb` / closed-form `score` / `e` |
+| `n_splits` | `int \| None` | not None for `split_*` methods, None for `raw_perm` / `sv_perm` / `score` / `e` |
+| `n_folds` | `int \| None` | not None for `raw_perm` only |
+| `force` | `bool \| None` | the `force` that `split_nb` ran with; None for every other method, including a `split_nb` request the auto-gate rerouted to `split_exact` |
+| `rotate` | `bool \| None` | the `rotate` that `sv_perm` ran with (always `False` from `pls1_confirmatory_test`); None for every other method |
 | `seed` | `int` | always |
 | `n_eff` | `float` | always; Kish effective sample size, equals `n` for uniform/absent weights |
 | `rho_hat` | `float \| None` | `split_nb` only, and only when unweighted (no weights, or all-equal weights) with a test half of at least 4 rows; `None` for every other method, including `split_exact` |

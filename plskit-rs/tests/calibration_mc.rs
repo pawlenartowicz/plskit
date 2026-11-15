@@ -13,6 +13,8 @@
 //!   split_exact (its refit route) and `spls1_find_k_sequence`.
 //! - PLS3 cells (two blocks; that family takes no weights): split_exact and
 //!   split_nb of `pls3_confirmatory_test`.
+//! - `sv_perm` cells: PLS3, PLS1 unweighted, and PLS1 with covariates that
+//!   drive both X and y (so only the covariate-adjusted null holds).
 //! - Ignored k-set cell (`k_set_level_under_null`): the min-p `split_exact`
 //!   test over the default k set, upper edge of the 99% binomial band (see
 //!   its doc).
@@ -110,8 +112,24 @@ fn assert_calibrated(
     seed_base: u64,
     keep: Option<usize>,
 ) {
+    assert_calibrated_reps(n, d, k, make_args, label, weighted, seed_base, keep, N_REPS);
+}
+
+/// `assert_calibrated` over `n_reps` replications instead of `N_REPS`.
+#[allow(clippy::too_many_arguments)]
+fn assert_calibrated_reps(
+    n: usize,
+    d: usize,
+    k: usize,
+    make_args: impl Fn() -> ConfirmatoryArgs,
+    label: &str,
+    weighted: bool,
+    seed_base: u64,
+    keep: Option<usize>,
+    n_reps: usize,
+) {
     let mut rejects = 0usize;
-    for rep in 0..N_REPS {
+    for rep in 0..n_reps {
         let (x, y, w) = null_data(n, d, rep);
         let r = pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
@@ -134,7 +152,7 @@ fn assert_calibrated(
             rejects += 1;
         }
     }
-    assert_fpr_within_band(label, rejects, N_REPS);
+    assert_fpr_within_band(label, rejects, n_reps);
 }
 
 /// One H0 replication for the PLS3 cells: X and a multi-column Y drawn
@@ -153,8 +171,18 @@ fn pls3_null_data(n: usize, p: usize, q: usize, rep: usize) -> (Mat<f64>, Mat<f6
 /// `N_REPS` replications. `method` is the method the cell measures; every
 /// replication must report it.
 fn assert_pls3_calibrated(args: ConfirmatoryArgs, method: &str, seed_base: u64) {
+    assert_pls3_calibrated_reps(args, method, seed_base, N_REPS);
+}
+
+/// `assert_pls3_calibrated` over `n_reps` replications instead of `N_REPS`.
+fn assert_pls3_calibrated_reps(
+    args: ConfirmatoryArgs,
+    method: &str,
+    seed_base: u64,
+    n_reps: usize,
+) {
     let mut rejects = 0usize;
-    for rep in 0..N_REPS {
+    for rep in 0..n_reps {
         let (x, y) = pls3_null_data(40, 4, 3, rep);
         let r = pls3_confirmatory_test(
             x.as_ref(),
@@ -172,7 +200,7 @@ fn assert_pls3_calibrated(args: ConfirmatoryArgs, method: &str, seed_base: u64) 
             rejects += 1;
         }
     }
-    assert_fpr_within_band(&format!("pls3 {method}"), rejects, N_REPS);
+    assert_fpr_within_band(&format!("pls3 {method}"), rejects, n_reps);
 }
 
 #[test]
@@ -246,7 +274,7 @@ fn score_weighted_h0_fpr_within_band() {
         40,
         4,
         1,
-        || ConfirmatoryArgs::Score,
+        || ConfirmatoryArgs::Score { n_perm: None },
         "score",
         true,
         1000,
@@ -502,6 +530,87 @@ fn pls3_split_nb_h0_fpr_within_band() {
         "split_nb",
         11_000,
     );
+}
+
+/// Replications for the `sv_perm` cells: 2000 puts the 3·SD band at about
+/// 0.065, tight enough to catch a size of 0.10 reliably.
+const SV_PERM_REPS: usize = 2000;
+
+#[test]
+fn pls3_sv_perm_h0_fpr_within_band() {
+    assert_pls3_calibrated_reps(
+        ConfirmatoryArgs::SvPerm {
+            n_perm: 199,
+            rotate: false,
+        },
+        "sv_perm",
+        100_000,
+        SV_PERM_REPS,
+    );
+}
+
+#[test]
+fn sv_perm_unweighted_h0_fpr_within_band() {
+    assert_calibrated_reps(
+        40,
+        4,
+        1,
+        || ConfirmatoryArgs::SvPerm {
+            n_perm: 199,
+            rotate: false,
+        },
+        "sv_perm unweighted",
+        false,
+        110_000,
+        None,
+        SV_PERM_REPS,
+    );
+}
+
+/// One H0 replication with two covariates Z that drive both X (a shared
+/// loading on every column) and y (`y = Z·γ + ε`); X's own noise is
+/// independent of ε, so y ⟂ X given Z.
+fn covariate_null_data(n: usize, d: usize, rep: usize) -> (Mat<f64>, Col<f64>, Mat<f64>) {
+    let mut rng = ChaCha8Rng::seed_from_u64(0x2222_00C0_FFEE ^ rep as u64);
+    let z = Mat::<f64>::from_fn(n, 2, |_, _| rng.random_range(-1.0..1.0));
+    let x = Mat::<f64>::from_fn(n, d, |i, _| {
+        z[(i, 0)] + 0.5 * z[(i, 1)] + rng.random_range(-1.0..1.0)
+    });
+    let y = Col::<f64>::from_fn(n, |i| {
+        2.0 * z[(i, 0)] - z[(i, 1)] + rng.random_range(-1.0..1.0)
+    });
+    (x, y, z)
+}
+
+#[test]
+fn sv_perm_covariates_h0_fpr_within_band() {
+    let mut rejects = 0usize;
+    for rep in 0..SV_PERM_REPS {
+        let (x, y, z) = covariate_null_data(40, 4, rep);
+        let r = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: Some(&[1]),
+                weights: None,
+                covariates: Some(z.as_ref()),
+                null_y: None,
+            },
+            ConfirmatoryTestOpts {
+                args: ConfirmatoryArgs::SvPerm {
+                    n_perm: 199,
+                    rotate: false,
+                },
+                seed: Some(120_000 + rep as u64),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        if r.pvalue <= ALPHA {
+            rejects += 1;
+        }
+    }
+    assert_fpr_within_band("sv_perm covariates", rejects, SV_PERM_REPS);
 }
 
 /// The upper edge of the 99% binomial band of rejection counts at `ALPHA`

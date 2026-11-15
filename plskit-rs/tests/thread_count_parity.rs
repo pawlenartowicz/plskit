@@ -43,10 +43,10 @@ use faer::{Col, Mat, MatRef};
 use plskit::{
     CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
     FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, ParChoice, PermNullOpts,
-    Pls3ConfirmatoryTestOpts, Pls3FitOpts, ProfilesFindNOpts, Selector, pls1_confirmatory_test,
-    pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_alpha, pls1_perm_null,
-    pls3_confirmatory_test, pls3_fit, profiles_find_n, split_nb_gate, spls1_find_k_sequence,
-    spls1_fit, spls3_fit,
+    Pls3ConfirmatoryTestOpts, Pls3FitOpts, ProfilesFindNOpts, Selector, factors, pca_basis,
+    pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_alpha,
+    pls1_perm_null, pls3_confirmatory_test, pls3_fit, profiles_find_n, split_nb_gate,
+    spls1_find_k_sequence, spls1_fit, spls3_fit,
 };
 
 const POOL_SIZES: [usize; 3] = [1, 3, 5];
@@ -485,6 +485,7 @@ fn split_exact_nspace_is_pool_size_invariant() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn other_pls1_confirmatory_methods_are_pool_size_invariant() {
     let mut c = Checker::default();
     let (x, y) = synth(40, 4000, 1.0, 6);
@@ -508,7 +509,15 @@ fn other_pls1_confirmatory_methods_are_pool_size_invariant() {
     // and the EVD's parallel threshold.
     let (xt, yt) = synth(2000, 600, 1.0, 7);
     c.check("score 2000x600 k=1", || {
-        confirmatory(&xt, &yt, 1, None, ConfirmatoryArgs::Score, None, 13)
+        confirmatory(
+            &xt,
+            &yt,
+            1,
+            None,
+            ConfirmatoryArgs::Score { n_perm: None },
+            None,
+            13,
+        )
     });
     c.check("e 2000x600 k=2", || {
         confirmatory(&xt, &yt, 2, None, ConfirmatoryArgs::E, None, 13)
@@ -608,7 +617,15 @@ fn subsample_ci_holdout_is_pool_size_invariant() {
     // faer's GEMV split.
     let (x, y) = synth(100, 4000, 1.0, 8);
     c.check("score + ci 100x4000 k=2", || {
-        confirmatory(&x, &y, 2, None, ConfirmatoryArgs::Score, Some(CI), 14)
+        confirmatory(
+            &x,
+            &y,
+            2,
+            None,
+            ConfirmatoryArgs::Score { n_perm: None },
+            Some(CI),
+            14,
+        )
     });
     c.finish();
 }
@@ -795,6 +812,21 @@ fn find_k_is_pool_size_invariant() {
         )
         .unwrap()
     });
+    // Guard only: the folds take the Gram route of `pca_basis` inside workers.
+    let (xt, yt) = synth(300, 12, 1.0, 12);
+    c.check("profiles_find_n 300x12", || {
+        profiles_find_n(
+            xt.as_ref(),
+            yt.as_ref(),
+            2,
+            9,
+            ProfilesFindNOpts {
+                seed: Some(20),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    });
     c.check("profiles_find_n 60x3000", || {
         profiles_find_n(
             x.as_ref(),
@@ -807,6 +839,24 @@ fn find_k_is_pool_size_invariant() {
             },
         )
         .unwrap()
+    });
+    c.finish();
+}
+
+#[test]
+fn pca_basis_and_factors_are_pool_size_invariant() {
+    let mut c = Checker::default();
+    // Guard only: tall full-rank X takes the Gram route. Its product `X'X`
+    // runs at `par_fixed()`, but faer's GEMM gave the same bits at a
+    // pool-sized degree too (checked at 20000x600), so only a route choice
+    // or a decomposition that read the pool would fail here.
+    let (x, _) = synth(2000, 200, 1.0, 13);
+    let (coef, _) = synth(200, 2, 1.0, 14);
+    c.check("pca_basis 2000x200", || {
+        pca_basis(x.as_ref(), false).unwrap()
+    });
+    c.check("factors 2000x200 n=3", || {
+        factors(coef.col(0), x.as_ref(), 3, false, None).unwrap()
     });
     c.finish();
 }

@@ -360,7 +360,7 @@ are not singular values of `X'Y`.
 
 ### 3.1 Confirmatory omnibus test
 
-**Five test methods.** `raw_perm` / `split_nb` / `split_exact` are the
+**Six test methods.** `raw_perm` / `split_nb` / `split_exact` are the
 predictive-validity split-resampling family (`split_exact` is the same
 held-out-correlation statistic as `split_nb`, calibrated by permutation
 instead of the Fisher-z t approximation, so it holds its level on any
@@ -369,7 +369,9 @@ design; it is the recommended method);
 y, anisotropy-aware by construction, K-free); `e` is universal
 inference (split-LR e-value, calibration-free, non-asymptotic α bound
 — `P(reject | H₀) ≤ α` exactly, with a power tax of ~30–50% vs.
-`split_exact` as the validity cost). `score` and `split_exact` complement
+`split_exact` as the validity cost). `sv_perm` is a permutation test on `d₁ = ‖X̃ᵀỹ‖` at `k = 1`; `score` with
+`args={"n_perm": ...}` runs the same permutation test and keeps `T = ‖X̃ᵀỹ‖²` as
+its statistic. `score` and `split_exact` complement
 rather than replace each other — `score` wins on diffuse signal across
 many directions, `split_exact` wins on signal concentrated in a few
 directions; reporting both side-by-side is the canonical pattern.
@@ -382,7 +384,7 @@ directions; reporting both side-by-side is the canonical pattern.
 **options:**
 
 - `test_method` (`"raw_perm"` | `"split_nb"` | `"split_exact"` |
-  `"score"` | `"e"` | `"auto"`; keyword-only, default `"auto"`, which picks
+  `"score"` | `"sv_perm"` | `"e"` | `"auto"`; keyword-only, default `"auto"`, which picks
   `"split_exact"` or `"split_nb"` from `X` at one `k` and runs `"split_exact"` over a set of more than one `k`; see
   [`test_method="auto"`](../concepts/PLS1/inference.md#test_methodauto))
 - `args` (dict of method-specific kwargs)
@@ -404,7 +406,7 @@ directions; reporting both side-by-side is the canonical pattern.
   value, not `None`; `max_skip_rate` and `max_failure_rate` are not
   carried on any result field (they only gate the resampling loop).
 - `pre_standardized`; `weights`; `seed`; `verbose`.
-- `covariates` (`(n, p_Z)` matrix or length-`n` vector; see [Covariates](../concepts/PLS1/covariates.md)): `split_exact` and `raw_perm` take it, with Freedman–Lane null columns (approximately exact, not exact). `"auto"` runs `split_exact`. `split_nb`, `score` and `e` raise `invalid_argument`. With `gram`, the call adjusts the Gram matrix itself and Z has one row per row of `gram`. The result records `n_covariates`.
+- `covariates` (`(n, p_Z)` matrix or length-`n` vector; see [Covariates](../concepts/PLS1/covariates.md)): `split_exact` and `raw_perm` take it, with Freedman–Lane null columns (approximately exact, not exact). `"auto"` runs `split_exact`. `split_nb`, `score` without `n_perm` and `e` raise `invalid_argument`; `score` with `n_perm` and `sv_perm` take it, with Freedman–Lane null columns. With `gram`, the call adjusts the Gram matrix itself and Z has one row per row of `gram`. The result records `n_covariates`.
 - `null_y` (`(n, B)` matrix): your own null outcomes, on the scale of `y`, for `split_exact` only (the default `"auto"` is refused: pass `test_method="split_exact"`). The statistic of each column, on the same splits as `y`, makes the null distribution, and `p = (#{null ≥ observed} + 1) / (B + 1)` at one `k`; over a set the reported p is the min-p p over the set (per-k p in `pvalues_by_k`). An `n_perm` in `args` raises `invalid_args`; `covariates` and any other method raise `invalid_argument`. It works with `gram`.
 - `gram` (keyword-only, in place of `X`; passing both raises `invalid_argument`): a `GramMatrixResult` from `gram_matrix` (§3.6), or an `(n, n)` array `X̃ @ X̃.T` with `n_features` (required with an array, refused with the result, which records it). Every method runs from it: the call centres it over its rows, so `result.subset(rows)` is accepted, and checks its entries (a non-negative diagonal, symmetry and the Cauchy-Schwarz bound; `invalid_input` otherwise). On `gram_matrix(X, pre_standardized=flag)` the result equals the call on `X` with `pre_standardized=flag` at the same seed, to rounding (except as §3.6 says for a pre-standardized `X` beyond `2**±256`); `"score"` reads the centred matrix, so it equals the call on `X` centred over all rows. `pre_standardized` is read from the result (`True` with it raises `invalid_argument`) and says how `X̃` was scaled with an array. `weights`, `ci=True` and `k` above 10 raise `invalid_argument` with `gram`.
 
@@ -422,12 +424,13 @@ directions; reporting both side-by-side is the canonical pattern.
   even on a design the auto-gate flags)
 - `"split_exact"`: `n_perm`, `n_splits`
 - `"auto"`: `n_perm`, `n_splits` (no `force`)
-- `"score"`: none (anisotropy handled internally by Welch–Satterthwaite)
+- `"score"`: `n_perm` (default `None`: the closed form, anisotropy handled internally by Welch–Satterthwaite; an integer runs the permutation test of `sv_perm` and reports `T = ‖X̃ᵀỹ‖²`)
+- `"sv_perm"`: `n_perm` (default `1000`), `rotate` (must stay `False`; `rotate=True` raises `invalid_argument`)
 - `"e"`: none
 
-**A set of `k`:** with more than one `k` the test asks whether `X` predicts `y` at some `k` in the set and returns one p-value, combined over the set by min-p (each column's smallest per-`k` permutation p, compared with the observed one; Westfall and Young 1993), which keeps the permutation p exact. A set is sorted; an empty set, a duplicate or a `k` of 0 raises `invalid_argument`, and a set past a limit of the method (`k ≤ d`, the split sizes, `k ≤ 10` with `gram`) is an error, never cut. `split_exact` and `raw_perm` take a set; `split_nb`, `score`, `e` and `ci=True` raise `invalid_argument` on a set of more than one `k`. `"auto"` with more than one `k` runs `split_exact`, which refits for every permutation up to the largest `k`: on data where `"auto"` at one `k` picks `split_nb`, the default call costs much more than `k=1, test_method="split_nb"`, the fast choice. See [A set of `k`](../concepts/PLS1/inference.md#a-set-of-k).
+**A set of `k`:** with more than one `k` the test asks whether `X` predicts `y` at some `k` in the set and returns one p-value, combined over the set by min-p (each column's smallest per-`k` permutation p, compared with the observed one; Westfall and Young 1993), which keeps the permutation p exact. A set is sorted; an empty set, a duplicate or a `k` of 0 raises `invalid_argument`, and a set past a limit of the method (`k ≤ d`, the split sizes, `k ≤ 10` with `gram`) is an error, never cut. `split_exact` and `raw_perm` take a set; `split_nb`, `score`, `sv_perm`, `e` and `ci=True` raise `invalid_argument` on a set of more than one `k`. `"auto"` with more than one `k` runs `split_exact`, which refits for every permutation up to the largest `k`: on data where `"auto"` at one `k` picks `split_nb`, the default call costs much more than `k=1, test_method="split_nb"`, the fast choice. See [A set of `k`](../concepts/PLS1/inference.md#a-set-of-k).
 
-**default `k`:** `None` is the set `1..8`, cut at `min(8, d, n // 2 - 2)`, then lowered until the weights' Kish effective sample size (`n_eff ≥ k + 1`) and the covariates' residual degrees of freedom (`n_pos - rank([1, Z]) ≥ k + 1`, `n_pos` the rows with positive weight) allow it, never below 1. It is `[1]` for `split_nb`, `score`, `e` and `ci=True`.
+**default `k`:** `None` is the set `1..8`, cut at `min(8, d, n // 2 - 2)`, then lowered until the weights' Kish effective sample size (`n_eff ≥ k + 1`) and the covariates' residual degrees of freedom (`n_pos - rank([1, Z]) ≥ k + 1`, `n_pos` the rows with positive weight) allow it, never below 1. It is `[1]` for `split_nb`, `score`, `sv_perm`, `e` and `ci=True`.
 
 **No `k` to fit at:** the result names no `k` to fit at. The documented pairing is `r = pls1_confirmatory_test(X, y)` for the claim, then `fit = pls1_fit(X, y)` for the model, which chooses its own `k` by cross-validation; pass no `k` from one to the other.
 
@@ -501,12 +504,13 @@ There is no `gram`: the per-feature outputs need `X`. A caller who holds only th
 latent-variable correlation, calibrated by permutation or against a t
 reference.
 **arguments:** `X` (or `gram`, below), `Y`, `k` (must be `1`)
-**options:** `test_method` (`"split_exact"` | `"split_nb"` | `"auto"`;
+**options:** `test_method` (`"split_exact"` | `"split_nb"` | `"sv_perm"` | `"auto"`;
 keyword-only, default `"auto"`, which runs `"split_exact"` on every
-design, see
+design and never `"sv_perm"`, see
 [`test_method="auto"`](../concepts/PLS1/inference.md#test_methodauto)); `args`
 (`"split_exact"`: `{"n_perm": int, "n_splits": int}`, defaults `1000` / `32`;
 `"split_nb"`: `{"n_splits": int, "force": bool}`, defaults `32` / `False`;
+`"sv_perm"`: `{"n_perm": int, "rotate": bool}`, defaults `1000` / `False`;
 `"auto"`: `{"n_perm": int, "n_splits": int}`, defaults `1000` / `32`);
 `pre_standardized_X`; `pre_standardized_Y`; `seed`; `verbose`. Each block is
 standardized once over all rows and each split only centres its halves with
@@ -561,11 +565,13 @@ PLSC, so a stable-rank floor on Y would flag almost every design. The gate
 thresholds are the PLS1 ones and have not been re-derived for a two-block
 design.
 
+**`sv_perm`.** A permutation test on `d₁`, the largest singular value of `X̃ᵀỸ`, in-sample, at `k=1` only. The rows of Y are shuffled against X `n_perm` times and `p = (1 + #{null ≥ observed}) / (n_perm + 1)`. `rotate=True` Procrustes-rotates each permuted singular vector set to the observed one before its singular value is taken (McIntosh and Lobaugh 2004); `rotate` is a PLS3 option, and `result.rotate` records which one ran. On the same permutations, rotation can only lower the LV1 p-value, so a rotated p is not exact. `covariates` and `keep_x` / `keep_y` below full are refused. plskit's `d₁` is `n` times the first singular value pyls reports. See [PLS3 inference](../concepts/PLS3/inference.md#sv_perm).
+
 **The three methods that are not available.** `raw_perm` needs a
 cross-validated R², which a method with no `predict` does not have. `score`
 is not implemented: its symmetric analog is an RV-type test on `‖X'Y‖_F²`,
-which tests a different estimand from the LV1 held-out correlation. `e`
-needs a generative model that symmetric cross-decomposition does not
+which tests a different estimand from the LV1 held-out correlation.
+`e` needs a generative model that symmetric cross-decomposition does not
 supply.
 
 **Why only `k=1`.** Above LV1 neither the component ordering nor the
@@ -673,6 +679,21 @@ half = pls1_confirmatory_test(; gram=PLSKit.subset(g, rows), y=y[rows])
 Fewer than 2 rows of `X` raise `invalid_argument`; NaN or infinity in `X` raises `non_finite_input`; `X` with no columns raises `invalid_input`. `subset` raises `invalid_argument` when `rows` is not a 1-D sequence of integer row indices of `gram`, or holds fewer than 2 entries. There is no `weights`.
 
 Under `pre_standardized`, an `X` whose largest entry is outside `2**-256 .. 2**256` gives the Gram matrix of `X` divided by a power of two `c` near that entry, and the result does not keep `c`: p-values computed from it are those of `X`, but the `"score"` statistic of `pls1_confirmatory_test` and the `alpha` of `pls1_perm_alpha` are those of `X / c`.
+
+**function:** `gram_matrix_blocks`
+**need:** the `gram_matrix` of an `X` too wide to hold at once, given as column blocks (for example read from disk one block at a time).
+**arguments:** `blocks` (an iterable of matrices, each with the same number of rows; in R a function returning the next matrix, or `NULL` when there are none left)
+**options:** `pre_standardized` (as in `gram_matrix`, applied to each block).
+**returns:** the `GramMatrixResult` of `gram_matrix` on the blocks side by side, with `n_features` the sum of the blocks' column counts. It is the sum of the blocks' Gram matrices, computed one block at a time, so only one block is in memory at once.
+
+```python
+X = np.load("X.npy", mmap_mode="r")                         # n rows, many columns
+cuts = [*range(0, X.shape[1], 5000), X.shape[1]]
+blocks = (X[:, a:b] for a, b in zip(cuts, cuts[1:]))        # a generator: one block at a time
+g = plskit.gram_matrix_blocks(blocks)
+```
+
+No blocks raises `invalid_input`; a block with a different row count from the first raises `shape_mismatch`; any other problem in a block is raised as `gram_matrix` raises it. The result equals `gram_matrix` on the joined `X` to rounding, not bit for bit. Under `pre_standardized` each block is scaled on its own, so an `X` beyond `2**-256 .. 2**256` must use `gram_matrix` on the whole `X`.
 
 ---
 

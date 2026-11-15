@@ -90,13 +90,16 @@ class ConfirmatoryCI:
 @dataclass(frozen=True)
 class ConfirmatoryTestResult:
     pvalue: float             # for a set of k, the min-p combined p over the set
-    statistic: float | None   # None for a set of more than one k
-    test_method: str          # what actually ran, never "auto": "raw_perm" | "split_nb" | "split_exact" | "score" | "e"
+    statistic: float | None   # None for a set of more than one k; for "sv_perm", d₁, the largest singular value of X̃ᵀỸ
+    test_method: str          # what actually ran, never "auto": "raw_perm" | "split_nb" | "split_exact" | "sv_perm" | "score" | "e"
     k: list[int]              # the tested set, sorted ascending; one k gives a one-element list
     pvalues_by_k: dict[int, float]     # each k's unadjusted per-k p
     statistics_by_k: dict[int, float]  # each k's statistic
-    n_perm: int | None
-    n_splits: int | None
+    n_perm: int | None        # not None for "raw_perm" / "split_exact" / "sv_perm" / "score" with n_perm; None for "split_nb", closed-form "score", "e"
+    n_splits: int | None      # not None for "split_exact" / "split_nb"; None for "raw_perm" / "sv_perm" / "score" / "e"
+    n_folds: int | None       # not None for "raw_perm" only
+    force: bool | None        # the force "split_nb" ran with; None for every other method, and for a rerouted "split_nb" request
+    rotate: bool | None       # the rotate "sv_perm" ran with; None for every other method
     seed: int
     n_eff: float = float("nan")
     # Populated (non-None) for test_method="split_nb" only, when the weights are

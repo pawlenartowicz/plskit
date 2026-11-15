@@ -506,3 +506,27 @@ def test_k_set_refused_with_split_nb():
     ) as ei:
         plskit.pls1_confirmatory_test(X, y, k=[1, 2], test_method="split_nb", seed=1)
     assert ei.value.code == "invalid_argument"
+
+
+def test_sv_perm_is_wired_with_its_default_n_perm():
+    X, y = _data()
+    r = plskit.pls1_confirmatory_test(X, y, test_method="sv_perm", seed=1)
+    assert r.test_method == "sv_perm"
+    assert r.n_perm == 1000
+
+
+def test_score_n_perm_is_none_by_default_and_set_by_args():
+    X, y = _data()
+    assert plskit.pls1_confirmatory_test(X, y, test_method="score", seed=1).n_perm is None
+    r = plskit.pls1_confirmatory_test(
+        X, y, test_method="score", args={"n_perm": 99}, seed=1
+    )
+    assert r.n_perm == 99
+
+
+def test_sv_perm_rotate_is_refused_for_pls1():
+    X, y = _data()
+    with pytest.raises(plskit.PlsKitError):
+        plskit.pls1_confirmatory_test(
+            X, y, test_method="sv_perm", args={"rotate": True}, seed=1
+        )

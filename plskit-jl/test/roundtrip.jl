@@ -59,6 +59,30 @@ end
     @test size(r.alpha) == (25, 1)
 end
 
+@testset "gram_matrix_blocks sums the block Gram matrices" begin
+    X, y = pls1_data(5; n=30, d=80)
+    cuts = [0, 5, 13, size(X, 2)]
+    blocks() = (X[:, a+1:b] for (a, b) in zip(cuts, cuts[2:end]))
+    whole = gram_matrix(X)
+    g = gram_matrix_blocks(blocks())
+    @test g isa GramMatrixResult
+    @test g.n_features == whole.n_features
+    @test isapprox(g.gram, whole.gram; atol=1e-12 * maximum(abs, whole.gram))
+    gs = gram_matrix_blocks(blocks(); pre_standardized=true)
+    @test gs.pre_standardized
+    @test isapprox(gs.gram, gram_matrix(X; pre_standardized=true).gram;
+                   atol=1e-12 * maximum(abs, whole.gram))
+    one = gram_matrix_blocks([X])
+    @test one.gram == whole.gram && one.n_features == whole.n_features
+    kw = (k=1, test_method="split_exact", args=(n_perm=19, n_splits=8), seed=1)
+    @test pls1_confirmatory_test(; gram=g, y, kw...).pvalue ==
+          pls1_confirmatory_test(; gram=whole, y, kw...).pvalue
+    e = try gram_matrix_blocks(Matrix{Float64}[]); nothing catch err; err end
+    @test e isa PlsKitError && e.code == :invalid_input
+    e = try gram_matrix_blocks([X, X[1:20, :]]); nothing catch err; err end
+    @test e isa PlsKitError && e.code == :shape_mismatch
+end
+
 @testset "k takes a set" begin
     X, y = pls1_data()
     r = pls1_confirmatory_test(X, y; k=1:3, test_method="split_exact",

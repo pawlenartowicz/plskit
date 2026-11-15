@@ -15,6 +15,9 @@
 //! `raw_perm`, weighted `split_exact`, `split_exact` on `gram_matrix(X)`,
 //! `auto` with no `k` (the default set), and `split_exact` on the wide n=60
 //! inputs, whose combined p is off the permutation floor.
+//! Five `sv_perm` / `score` `n_perm` cases (`n_perm = 99`) reuse existing inputs:
+//! `sv_perm` unweighted, weighted, with covariates and on `gram_matrix(X)`, and
+//! `score` with `n_perm`.
 
 use std::path::Path;
 
@@ -400,7 +403,7 @@ pub fn score(root: &Path) -> Result<Case> {
         root,
         &ConfirmatoryCase {
             name: "pls1_confirmatory_score",
-            args: ConfirmatoryArgs::Score,
+            args: ConfirmatoryArgs::Score { n_perm: None },
             ci: None,
             kwargs: serde_json::json!({
                 "k": 2,
@@ -825,7 +828,7 @@ pub fn weighted_score(root: &Path) -> Result<Case> {
         root,
         &ConfirmatoryCase {
             name: "pls1_confirmatory_weighted_score",
-            args: ConfirmatoryArgs::Score,
+            args: ConfirmatoryArgs::Score { n_perm: None },
             ci: None,
             kwargs: serde_json::json!({
                 "k": 1,
@@ -939,7 +942,7 @@ const RAW_PERM_TALL_SNR: f64 = 0.05;
 pub fn score_wide_pre_standardized(root: &Path) -> Result<Case> {
     let c = ConfirmatoryCase {
         name: "pls1_confirmatory_score_wide_pre_standardized",
-        args: ConfirmatoryArgs::Score,
+        args: ConfirmatoryArgs::Score { n_perm: None },
         ci: None,
         kwargs: serde_json::json!({
             "k": 1,
@@ -1009,7 +1012,7 @@ pub fn weighted_score_wide_pre_standardized(root: &Path) -> Result<Case> {
         }
         ConfirmatoryCase {
             name,
-            args: ConfirmatoryArgs::Score,
+            args: ConfirmatoryArgs::Score { n_perm: None },
             ci: None,
             kwargs,
             inputs_name: "pls1_confirmatory_weighted_score_wide_pre_standardized",
@@ -1350,7 +1353,7 @@ pub fn gram_score(root: &Path) -> Result<Case> {
     gram_case(
         root,
         "pls1_confirmatory_test_gram_score",
-        ConfirmatoryArgs::Score,
+        ConfirmatoryArgs::Score { n_perm: None },
         &[1],
         serde_json::json!({"k": 1, "test_method": "score", "seed": 42, "gram": true}),
     )
@@ -1380,10 +1383,15 @@ fn covariate_case(root: &Path, c: &ConfirmatoryCase, data: &Xyw) -> Result<Case>
     })
 }
 
-/// `synth_data(n, d, 2, 4.0, seed)` with [`synth_covariates`]`(x, 7)`.
+/// `synth_data(n, d, 2, snr, seed)` with [`synth_covariates`]`(x, 7)`.
 #[allow(clippy::many_single_char_names)]
-fn covariate_data((n, d): (usize, usize), seed: u64, weights: Option<ndarray::Array1<f64>>) -> Xyw {
-    let (x, y) = synth_data(n, d, SYNTH_K_SIGNAL, SYNTH_SNR, seed);
+fn covariate_data(
+    (n, d): (usize, usize),
+    seed: u64,
+    weights: Option<ndarray::Array1<f64>>,
+    snr: f64,
+) -> Xyw {
+    let (x, y) = synth_data(n, d, SYNTH_K_SIGNAL, snr, seed);
     let z = Some(synth_covariates(&x, 7));
     Xyw {
         x,
@@ -1440,7 +1448,7 @@ pub fn split_exact_covariates(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 200, "n_splits": 30}, "seed": 42
             }),
         ),
-        &covariate_data((SYNTH_N, SYNTH_D), CASE_SEED, None),
+        &covariate_data((SYNTH_N, SYNTH_D), CASE_SEED, None, SYNTH_SNR),
     )
 }
 
@@ -1465,7 +1473,7 @@ pub fn raw_perm_covariates(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 200, "n_folds": 5}, "seed": 42
             }),
         ),
-        &covariate_data((SYNTH_N, SYNTH_D), CASE_SEED, None),
+        &covariate_data((SYNTH_N, SYNTH_D), CASE_SEED, None, SYNTH_SNR),
     )
 }
 
@@ -1495,6 +1503,7 @@ pub fn split_exact_covariates_weighted(root: &Path) -> Result<Case> {
             (SYNTH_N, SYNTH_D),
             77,
             Some(weighted_confirmatory_weights()),
+            SYNTH_SNR,
         ),
     )
 }
@@ -1521,7 +1530,7 @@ pub fn gram_split_exact_covariates(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 100, "n_splits": 20}, "seed": 42, "gram": true
             }),
         ),
-        &covariate_data((30, 100), CASE_SEED, None),
+        &covariate_data((30, 100), CASE_SEED, None, SYNTH_SNR),
     )
 }
 
@@ -1765,5 +1774,174 @@ pub fn kset_wide_split_exact(root: &Path) -> Result<Case> {
             weights: None,
             snr: SYNTH_SNR,
         },
+    )
+}
+
+/// Weak signal for the `sv_perm` and `score` with `n_perm` cases: at
+/// `SYNTH_SNR` the observed statistic beats every permutation and p sits at
+/// the floor `1/(n_perm + 1)`, which pins nothing about the null.
+const SV_PERM_SNR: f64 = 0.1;
+
+/// A permutation-quadratic case (`sv_perm`, or `score` with `n_perm`) at
+/// `k = 1` on the weak-signal inputs (n = 80, p = 6), raw or (kwarg
+/// `"gram": true`) on `gram_matrix(X)` of the same X.
+fn quad_perm_case(
+    name: &'static str,
+    args: ConfirmatoryArgs,
+    kwargs: serde_json::Value,
+) -> ConfirmatoryCase {
+    ConfirmatoryCase {
+        name,
+        args,
+        ci: None,
+        kwargs,
+        inputs_name: "pls1_confirmatory_sv_perm_inputs",
+        n: SYNTH_N,
+        d: SYNTH_D,
+        synth_seed: CASE_SEED,
+        k: Some(vec![1]),
+        weights: None,
+        snr: SV_PERM_SNR,
+    }
+}
+
+const SV_PERM_99: ConfirmatoryArgs = ConfirmatoryArgs::SvPerm {
+    n_perm: 99,
+    rotate: false,
+};
+
+/// Case: `sv_perm` (`n_perm = 99`) at `k = 1` on the weak-signal inputs.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn sv_perm(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &quad_perm_case(
+            "pls1_confirmatory_sv_perm",
+            SV_PERM_99,
+            serde_json::json!({
+                "k": 1, "test_method": "sv_perm", "args": {"n_perm": 99}, "seed": 42
+            }),
+        ),
+    )
+}
+
+/// Case: `sv_perm` (`n_perm = 99`) on weak-signal inputs with the weights of
+/// [`weighted_split_exact`].
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn sv_perm_weighted(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &ConfirmatoryCase {
+            name: "pls1_confirmatory_sv_perm_weighted",
+            args: SV_PERM_99,
+            ci: None,
+            kwargs: serde_json::json!({
+                "k": 1, "test_method": "sv_perm", "args": {"n_perm": 99}, "seed": 42,
+                "weights": "nonuniform"
+            }),
+            inputs_name: "pls1_confirmatory_sv_perm_weighted_inputs",
+            n: SYNTH_N,
+            d: SYNTH_D,
+            synth_seed: 77,
+            k: Some(vec![1]),
+            weights: Some(weighted_confirmatory_weights()),
+            snr: SV_PERM_SNR,
+        },
+    )
+}
+
+/// Case: `sv_perm` (`n_perm = 99`) on weak-signal inputs with the covariates
+/// of [`split_exact_covariates`]; `gram` runs it on `gram_matrix(X)`.
+fn sv_perm_covariates_case(root: &Path, name: &'static str, gram: bool) -> Result<Case> {
+    let mut kwargs = serde_json::json!({
+        "k": 1, "test_method": "sv_perm", "args": {"n_perm": 99}, "seed": 42
+    });
+    if gram {
+        kwargs["gram"] = serde_json::Value::Bool(true);
+    }
+    covariate_case(
+        root,
+        &covariate_descriptor(
+            name,
+            "pls1_confirmatory_sv_perm_covariates_inputs",
+            SV_PERM_99,
+            1,
+            kwargs,
+        ),
+        &covariate_data((SYNTH_N, SYNTH_D), CASE_SEED, None, SV_PERM_SNR),
+    )
+}
+
+/// Case: `sv_perm` with covariates (Freedman-Lane null columns).
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn sv_perm_covariates(root: &Path) -> Result<Case> {
+    sv_perm_covariates_case(root, "pls1_confirmatory_sv_perm_covariates", false)
+}
+
+/// Case: [`sv_perm_covariates`] on `gram_matrix(X)` of the same X.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn sv_perm_covariates_gram(root: &Path) -> Result<Case> {
+    sv_perm_covariates_case(root, "pls1_confirmatory_test_gram_sv_perm_covariates", true)
+}
+
+/// Case: `score` with `n_perm = 99` (permutation p in place of the closed
+/// form) on the inputs of [`sv_perm`]; at one seed it gives the same p.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn score_n_perm(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &quad_perm_case(
+            "pls1_confirmatory_score_n_perm",
+            ConfirmatoryArgs::Score { n_perm: Some(99) },
+            serde_json::json!({
+                "k": 1, "test_method": "score", "args": {"n_perm": 99}, "seed": 42
+            }),
+        ),
+    )
+}
+
+/// Case: [`score_n_perm`] on `gram_matrix(X)` of the same X.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn score_n_perm_gram(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &quad_perm_case(
+            "pls1_confirmatory_test_gram_score_n_perm",
+            ConfirmatoryArgs::Score { n_perm: Some(99) },
+            serde_json::json!({
+                "k": 1, "test_method": "score", "args": {"n_perm": 99}, "seed": 42,
+                "gram": true
+            }),
+        ),
+    )
+}
+
+/// Case: [`sv_perm`] on `gram_matrix(X)` of the same X.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
+pub fn sv_perm_gram(root: &Path) -> Result<Case> {
+    run_confirmatory_case(
+        root,
+        &quad_perm_case(
+            "pls1_confirmatory_test_gram_sv_perm",
+            SV_PERM_99,
+            serde_json::json!({
+                "k": 1, "test_method": "sv_perm", "args": {"n_perm": 99}, "seed": 42,
+                "gram": true
+            }),
+        ),
     )
 }

@@ -527,7 +527,15 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
                 };
                 format!(
                     "{:?}",
-                    pls1_test(x, y, 2, None, ConfirmatoryArgs::Score, Some(ci), 30)
+                    pls1_test(
+                        x,
+                        y,
+                        2,
+                        None,
+                        ConfirmatoryArgs::Score { n_perm: None },
+                        Some(ci),
+                        30
+                    )
                 )
             },
         ),

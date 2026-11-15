@@ -2,7 +2,13 @@
 import numpy as np
 import pytest
 
-from plskit import GramMatrixResult, PlsKitError, gram_matrix
+from plskit import (
+    GramMatrixResult,
+    PlsKitError,
+    gram_matrix,
+    gram_matrix_blocks,
+    pls1_confirmatory_test,
+)
 
 
 def _raw_x(n=30, p=12, seed=0):
@@ -38,3 +44,56 @@ def test_gram_matrix_subset():
         with pytest.raises(PlsKitError) as e:
             r.subset(bad)
         assert e.value.code == "invalid_argument", bad
+
+
+def _blocks(X, cuts):
+    return (X[:, a:b] for a, b in zip(cuts, cuts[1:]))
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_gram_matrix_blocks_equals_gram_matrix(flag):
+    X = _raw_x(30, 40)
+    r = gram_matrix_blocks(_blocks(X, [0, 5, 13, 40]), pre_standardized=flag)
+    want = gram_matrix(X, pre_standardized=flag).gram
+    assert (r.n_features, r.pre_standardized) == (40, flag)
+    np.testing.assert_allclose(r.gram, want, rtol=0, atol=1e-12 * np.abs(want).max())
+
+
+def test_gram_matrix_blocks_one_block():
+    X = _raw_x(30, 12)
+    r = gram_matrix_blocks(iter([X]))
+    assert r.n_features == 12
+    assert np.array_equal(r.gram, gram_matrix(X).gram)
+
+
+def test_gram_matrix_blocks_float32_and_c_order():
+    X = _raw_x(30, 40)
+    blocks = (np.ascontiguousarray(b, dtype=np.float32) for b in _blocks(X, [0, 20, 40]))
+    X32 = np.hstack([np.asarray(b, dtype=np.float32) for b in _blocks(X, [0, 20, 40])]).astype(np.float64)
+    want = gram_matrix(X32).gram
+    r = gram_matrix_blocks(blocks)
+    np.testing.assert_allclose(r.gram, want, rtol=0, atol=1e-12 * np.abs(want).max())
+
+
+def test_gram_matrix_blocks_as_gram():
+    X = _raw_x(30, 40)
+    y = np.random.default_rng(1).standard_normal(30)
+    r = gram_matrix_blocks(_blocks(X, [0, 17, 40]))
+    a = pls1_confirmatory_test(gram=r, y=y, seed=1)
+    b = pls1_confirmatory_test(X, y, seed=1)
+    assert a.pvalue == b.pvalue
+
+
+def test_gram_matrix_blocks_errors():
+    X = _raw_x(30, 12)
+    with pytest.raises(PlsKitError) as e:
+        gram_matrix_blocks([])
+    assert e.value.code == "invalid_input"
+    with pytest.raises(PlsKitError) as e:
+        gram_matrix_blocks([X, X[:29]])
+    assert e.value.code == "shape_mismatch"
+    bad = X.copy()
+    bad[0, 0] = np.nan
+    with pytest.raises(PlsKitError) as e:
+        gram_matrix_blocks([X, bad])
+    assert e.value.code == "non_finite_input"

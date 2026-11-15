@@ -11,6 +11,7 @@ and `run.sh` times the same routines.
 | `pls1` | `pls1_fit`, `pls1_fit` with `pre_standardized=True`, `spls1_fit` at the dense endpoint | scikit-learn `PLSRegression`, ikpls (Algorithms 1 and 2) | predictions on new rows |
 | `pls1_weighted` | `pls1_fit`, `spls1_fit` at the dense endpoint, both with `weights` | ikpls `sample_weight` | predictions on new rows |
 | `pls3` | `pls3_fit`, `spls3_fit` at the dense endpoint | scikit-learn `PLSSVD` | `U`, `V`, `x_scores`, `y_scores`, up to sign |
+| `pyls_sv_perm.py` (standalone) | `pls3_confirmatory_test` and `pls1_confirmatory_test`, `sv_perm` | pyls `behavioral_pls` | statistic to `1e-8`; p-value within Monte Carlo error |
 
 - **Sparse fits** have no outside reference for the selection. R `mixOmics::spls` also keeps a fixed count of X variables per component (`keepX`), but it soft-thresholds the weight vector: each kept weight shrinks by the largest dropped one, where `spls1_fit` keeps the kept weights as they are. Both keep the same variables on the first component; from there the weights, scores and later selections differ, so the two agree only at `keep` = 1 and at the dense endpoint. Sparse fits appear here only at the dense endpoint (`keep` = every variable), where they must equal the dense fit. That row says nothing about the selection itself.
 - **PLS3 singular values** are not compared: `PLSSVD` does not expose them.
@@ -24,6 +25,7 @@ and `run.sh` times the same routines.
 ./setup.sh                      # once per host (NICE="nice -n 19" ./setup.sh on a shared box)
 .venv/bin/python validate.py [--save]
 ./run.sh [--save]
+.venv/bin/python pyls_sv_perm.py   # sv_perm against pyls; about 10 minutes
 .venv/bin/python report.py [--host NAME]   # tables from a saved results/<host>/
 ```
 

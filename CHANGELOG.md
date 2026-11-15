@@ -4,8 +4,15 @@ All notable changes to this project will be documented here.
 
 ## [Unreleased]
 
+- Changed: `pca_basis`, `factors` and the folds of `profiles_find_n` use the eigendecomposition of the Gram matrix `X'X` on tall full-rank X (more rows than columns, smallest eigenvalue above 1e-6 of the largest); any other X still takes the SVD. Results change by rounding only, and the kept rank is unchanged.
+- Changed: `pca_basis` and `factors` now use several threads for the Gram product and honour `PLSKIT_NUM_THREADS` (and check `PLSKIT_MEMORY_BUDGET`). Results do not depend on the thread count.
 - Changed: `pca_basis`, `factors` and the folds of `profiles_find_n` compute only the singular values and right singular vectors of X, and the parallel analysis of `profiles_find_n` only the eigenvalues. Results are unchanged up to rounding, and the kept rank is unchanged.
 - Changed: `profiles_find_n`, and the `profiles_find_n` step of `profiles_search`, run the column shuffles of the parallel analysis and the folds in parallel. They now read `PLSKIT_NUM_THREADS` and `PLSKIT_MEMORY_BUDGET` like the other resampling functions, and give the same results on any number of threads.
+- Added: `test_method="sv_perm"` for `pls1_confirmatory_test` and `pls3_confirmatory_test`: a permutation test on the largest singular value of `X̃ᵀỸ` (for PLS1, `‖X̃ᵀỹ‖`), at `k = 1` only. `args` are `n_perm` (default 1000) and `rotate` (default `False`; PLS3 only, refused in PLS1). The p-value is `(1 + #{null ≥ observed}) / (n_perm + 1)`.
+- Added: `args={"n_perm": ...}` for `score`. With it, `score` runs the same permutation test as `sv_perm` and still reports `T = ‖X̃ᵀỹ‖²`; without it, `score` is the closed form as before.
+- Added: PLS1 `sv_perm`, and `score` with `n_perm`, accept `covariates` (Freedman–Lane null columns) and, in the raw form (with `X`), `weights`. PLS3 `sv_perm` refuses covariates, and refuses `keep_x` / `keep_y` below the full column count.
+- Changed (Rust API): `ConfirmatoryArgs::Score` is now `Score { n_perm }`.
+- Added: `n_folds`, `force` and `rotate` on the confirmatory test result: the `raw_perm` fold count, the `force` that `split_nb` ran with, and the `rotate` that `sv_perm` ran with. Each is `None` for the other methods.
 
 ## [0.9.0] - 2026-11-13
 

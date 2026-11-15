@@ -33,9 +33,11 @@ impl HeldOutGram {
     /// `w_norm` when given) and divided by `scale`, with no row weights.
     /// `X̃` streams in `stream_block_width(n)` column blocks
     /// (`linalg::center_rows_fro`, as `linalg::centered_blocks` forms them),
-    /// each adding its product to the lower triangle with
+    /// each centred with its 8-column groups on the pool, the bits unchanged,
+    /// and each adding its product to the lower triangle with
     /// `fit::par_fixed()`, which is mirrored once at the end: `n²p/2`
-    /// multiply-adds, and the bits do not depend on the pool size.
+    /// multiply-adds, and the bits do not depend on the pool size. On `x86_64` they
+    /// do not depend on the faer degree either (8, 16 and 64 tested).
     ///
     /// # Panics
     /// When `scale` does not have one entry per column of `x`.
@@ -66,6 +68,7 @@ impl HeldOutGram {
                 w_norm,
                 None,
                 scale.subrows(j0, w),
+                crate::fit::par_fixed(),
             );
             matmul(
                 g.as_mut(),
@@ -455,6 +458,75 @@ mod tests {
         }
     }
 
+    /// `from_x`'s accumulate loop at the matmul degree `par`.
+    #[allow(clippy::many_single_char_names)]
+    fn gram_at(x: MatRef<'_, f64>, scale: ColRef<'_, f64>, par: Par) -> Mat<f64> {
+        let (n, p) = (x.nrows(), x.ncols());
+        let all: Vec<usize> = (0..n).collect();
+        let mut g = Mat::<f64>::zeros(n, n);
+        let width = crate::linalg::stream_block_width(n);
+        let mut j0 = 0;
+        while j0 < p {
+            let w = width.min(p - j0);
+            let (a, _, _) = crate::linalg::center_rows_fro(
+                x.subcols(j0, w),
+                &all,
+                None,
+                None,
+                scale.subrows(j0, w),
+                Par::Seq,
+            );
+            matmul(
+                g.as_mut(),
+                BlockStructure::TriangularLower,
+                Accum::Add,
+                a.as_ref(),
+                BlockStructure::Rectangular,
+                a.transpose(),
+                BlockStructure::Rectangular,
+                1.0,
+                par,
+            );
+            j0 += w;
+        }
+        mirror_lower(&mut g);
+        g
+    }
+
+    /// Entries of `a` and `b` whose bits differ.
+    fn differing_entries(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> usize {
+        let mut d = 0;
+        for j in 0..a.ncols() {
+            for i in 0..a.nrows() {
+                d += usize::from(a[(i, j)].to_bits() != b[(i, j)].to_bits());
+            }
+        }
+        d
+    }
+
+    /// Degrees 8, 16 and 64 in pools of 1, 4 and 16 threads give the bits of
+    /// degree 8 in one thread.
+    #[test]
+    fn gram_product_bits_across_degrees() {
+        let (n, p) = (512, 1100);
+        let x = raw_x(n, p, 12);
+        let scale = held_out_scale(x.as_ref(), None, false);
+        let base = gram_at(x.as_ref(), scale.as_ref(), Par::rayon(8));
+        let real = HeldOutGram::from_x(x.as_ref(), None, scale.as_ref());
+        assert_mat_bits_eq(real.g(), base.as_ref(), "from_x vs the loop at degree 8");
+        for threads in [1_usize, 4, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("pool");
+            for d in [8_usize, 16, 64] {
+                let g = pool.install(|| gram_at(x.as_ref(), scale.as_ref(), Par::rayon(d)));
+                let diff = differing_entries(g.as_ref(), base.as_ref());
+                assert_eq!(diff, 0, "degree {d}, {threads} threads");
+            }
+        }
+    }
+
     /// `K_A` and `M` equal the products of `prepare_split`'s halves (test
     /// half centred by the training means, all-row scale), on unequal
     /// interleaved halves, from a `G` centred with plain or weighted means.
@@ -596,6 +668,21 @@ mod tests {
                 matches!(err, PlsKitError::InvalidArgument(_)),
                 "{rows:?}: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn gram_matrix_is_the_sum_over_column_blocks() {
+        let x = raw_x(40, 1003, 21);
+        let cuts = [0, 5, 13, 600, 1003];
+        for flag in [false, true] {
+            let mut sum = Mat::<f64>::zeros(40, 40);
+            for w in cuts.windows(2) {
+                let g = gram_matrix(x.as_ref().subcols(w[0], w[1] - w[0]), flag).unwrap();
+                sum += &g.gram;
+            }
+            let whole = gram_matrix(x.as_ref(), flag).unwrap();
+            assert_close(sum.as_ref(), whole.gram.as_ref(), 1e-13, "block sum");
         }
     }
 }

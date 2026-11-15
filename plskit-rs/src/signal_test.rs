@@ -2,6 +2,10 @@
 //!
 //! A set of k is combined by min-p (Westfall & Young 1993, *Resampling-Based
 //! Multiple Testing*, Wiley).
+//!
+//! `sv_perm` is the PLSC permutation test of McIntosh & Lobaugh 2004,
+//! "Partial least squares analysis of neuroimaging data: applications and
+//! advances", `NeuroImage` 23:S250–S263.
 
 use std::collections::BTreeMap;
 
@@ -27,8 +31,12 @@ pub enum ConfirmatoryMethod {
     /// input, never by the caller. Both routes report `tanh(z̄)` against a
     /// fixed-split permutation reference.
     SplitExact,
-    /// Score test (closed-form, Welch-Satterthwaite χ² approximation).
+    /// Score test (closed-form, Welch-Satterthwaite χ² approximation), or
+    /// its permutation form when `n_perm` is set.
     Score,
+    /// Permutation test on the leading singular value of `X̃ᵀỸ` (`sv_perm`),
+    /// at k = 1; for PLS1 that is `‖X̃ᵀỹ‖`.
+    SvPerm,
     /// Universal-inference split-LR e-value.
     E,
     /// Pick `split_exact` or `split_nb` from X and the weights (never from
@@ -53,6 +61,7 @@ impl ConfirmatoryMethod {
             ConfirmatoryMethod::SplitNb => "split_nb",
             ConfirmatoryMethod::SplitExact => "split_exact",
             ConfirmatoryMethod::Score => "score",
+            ConfirmatoryMethod::SvPerm => "sv_perm",
             ConfirmatoryMethod::E => "e",
             ConfirmatoryMethod::Auto => "auto",
         }
@@ -86,8 +95,8 @@ pub enum ConfirmatoryTestInput<'a> {
         /// `pre_standardized` semantics). Permutation null columns are
         /// Freedman–Lane: null column c is `M_Z·π_c(ỹ)`, the residual of the
         /// permuted residual `ỹ`, which keeps the test approximately exact,
-        /// not exact. Accepted by `split_exact`, `raw_perm` and `auto` (which
-        /// then runs `split_exact`).
+        /// not exact. Accepted by `split_exact`, `raw_perm`, `auto` (which
+        /// then runs `split_exact`), `sv_perm` and `score` with `n_perm`.
         covariates: Option<MatRef<'a, f64>>,
         /// Optional caller-built null outcomes, `(n_samples, B)`. Column c
         /// replaces permutation null column c + 1 of `split_exact`: the
@@ -119,9 +128,11 @@ pub enum ConfirmatoryTestInput<'a> {
         /// Optional covariates `Z`, `(n_samples, p_z)`, one row per row of
         /// `gram` (a `GramMatrixOutput::subset` takes `Z[rows]`). `gram.gram`
         /// is replaced by `M_Z·G·M_Z`, the Gram matrix of X with `[1, Z]`
-        /// removed, and y by its residual; the permutation null columns are
-        /// Freedman–Lane as in the Raw form. Accepted by `split_exact`,
-        /// `raw_perm` and `auto`.
+        /// removed, and y by its residual (for `sv_perm` and `score` with
+        /// `n_perm`, the residual of standardized y, as in the Raw form); the
+        /// permutation null columns are Freedman–Lane as in the Raw form.
+        /// Accepted by `split_exact`, `raw_perm`, `auto`, `sv_perm` and
+        /// `score` with `n_perm`.
         covariates: Option<MatRef<'a, f64>>,
         /// Optional caller-built null outcomes, `(n_samples, B)`, as in the
         /// Raw form: `split_exact` only, refused with `covariates`, `n_perm`
@@ -176,8 +187,20 @@ pub enum ConfirmatoryArgs {
         /// all permutations.
         n_splits: usize,
     },
-    /// Closed-form score test (Welch-Satterthwaite generalized χ²).
-    Score,
+    /// Score test: closed-form Welch-Satterthwaite generalized χ², or
+    /// permutation-calibrated with `n_perm` permutations.
+    Score {
+        /// Number of permutations; `None` is the closed form.
+        n_perm: Option<usize>,
+    },
+    /// Permutation test on the leading singular value, at k = 1.
+    SvPerm {
+        /// Number of permutations.
+        n_perm: usize,
+        /// Procrustes-rotate each permuted null to the observed singular
+        /// vectors (PLS3 only).
+        rotate: bool,
+    },
     /// Universal-inference split-LR e-value.
     E,
     /// `split_exact` or `split_nb`, resolved per design (see
@@ -200,9 +223,21 @@ impl ConfirmatoryArgs {
             ConfirmatoryArgs::RawPerm { .. } => ConfirmatoryMethod::RawPerm,
             ConfirmatoryArgs::SplitNb { .. } => ConfirmatoryMethod::SplitNb,
             ConfirmatoryArgs::SplitExact { .. } => ConfirmatoryMethod::SplitExact,
-            ConfirmatoryArgs::Score => ConfirmatoryMethod::Score,
+            ConfirmatoryArgs::Score { .. } => ConfirmatoryMethod::Score,
+            ConfirmatoryArgs::SvPerm { .. } => ConfirmatoryMethod::SvPerm,
             ConfirmatoryArgs::E => ConfirmatoryMethod::E,
             ConfirmatoryArgs::Auto { .. } => ConfirmatoryMethod::Auto,
+        }
+    }
+
+    /// The args a result records beside `n_perm` and `n_splits`:
+    /// `(n_folds, force, rotate)`, each `Some` only for the method that takes it.
+    pub(crate) fn recorded(self) -> (Option<usize>, Option<bool>, Option<bool>) {
+        match self {
+            ConfirmatoryArgs::RawPerm { n_folds, .. } => (Some(n_folds), None, None),
+            ConfirmatoryArgs::SplitNb { force, .. } => (None, Some(force), None),
+            ConfirmatoryArgs::SvPerm { rotate, .. } => (None, None, Some(rotate)),
+            _ => (None, None, None),
         }
     }
 
@@ -223,7 +258,11 @@ impl ConfirmatoryArgs {
                 n_perm: 1000,
                 n_splits: 32,
             },
-            ConfirmatoryMethod::Score => ConfirmatoryArgs::Score,
+            ConfirmatoryMethod::Score => ConfirmatoryArgs::Score { n_perm: None },
+            ConfirmatoryMethod::SvPerm => ConfirmatoryArgs::SvPerm {
+                n_perm: 1000,
+                rotate: false,
+            },
             ConfirmatoryMethod::E => ConfirmatoryArgs::E,
             ConfirmatoryMethod::Auto => ConfirmatoryArgs::Auto {
                 n_perm: 1000,
@@ -371,8 +410,14 @@ pub(crate) fn resolve_split_nb(
         // over column blocks.
         let rows: Vec<usize> = (0..n).collect();
         let sw = w_norm.map(crate::linalg::sqrt_col);
-        let (xs, _, _) =
-            crate::linalg::center_rows_fro(x, &rows, w_norm, sw.as_ref().map(Col::as_ref), scale);
+        let (xs, _, _) = crate::linalg::center_rows_fro(
+            x,
+            &rows,
+            w_norm,
+            sw.as_ref().map(Col::as_ref),
+            scale,
+            Par::Seq,
+        );
         crate::linalg::stable_rank(xs.as_ref())
     };
     let fires = split_nb_gate_fires(p, n_eff, sr);
@@ -710,9 +755,10 @@ pub struct ConfirmatoryTestOutput {
     /// Observed test statistic (CV R² for `raw_perm`; mean Fisher-z back-transformed
     /// (`tanh(z̄)`) for `split_exact` and `split_nb`, one statistic across both,
     /// on the same splits at one seed and `n_splits`; `||X'y||²` for `score`;
-    /// log-e for `e`). `None` over a set of more than one k.
+    /// `d₁`, the largest singular value of `X̃ᵀỸ`, for `sv_perm`; log-e for
+    /// `e`). `None` over a set of more than one k.
     pub statistic: Option<f64>,
-    /// Method name as a lowercase string (e.g. `"raw_perm"`, `"split_nb"`, `"e"`).
+    /// Method name as a lowercase string (e.g. `"raw_perm"`, `"split_nb"`, `"sv_perm"`, `"e"`).
     pub test_method: String,
     /// The tested numbers of components, sorted ascending.
     pub k: Vec<usize>,
@@ -720,10 +766,22 @@ pub struct ConfirmatoryTestOutput {
     pub pvalues_by_k: BTreeMap<usize, f64>,
     /// Each tested k's own statistic.
     pub statistics_by_k: BTreeMap<usize, f64>,
-    /// Number of `raw_perm` / `split_exact` iterations used. `None` when the method has no permutation count.
+    /// Number of permutations used. `Some` for `raw_perm`, `split_exact`,
+    /// `sv_perm`, and `score` with `n_perm`; `None` for `split_nb`,
+    /// closed-form `score` and `e`.
     pub n_perm: Option<usize>,
-    /// Number of split-half repetitions used. `None` when the method has no split count.
+    /// Number of split-half repetitions used. `Some` for `split_exact` and
+    /// `split_nb`; `None` for `raw_perm`, `sv_perm`, `score` and `e`.
     pub n_splits: Option<usize>,
+    /// Number of CV folds used. `Some` for `raw_perm` only.
+    pub n_folds: Option<usize>,
+    /// The `force` flag `split_nb` ran with. `Some` for `split_nb` only
+    /// (`None` when an explicit `split_nb` request was rerouted to
+    /// `split_exact`).
+    pub force: Option<bool>,
+    /// The `rotate` flag `sv_perm` ran with. `Some` for `sv_perm` only
+    /// (always `Some(false)` from `pls1_confirmatory_test`).
+    pub rotate: Option<bool>,
     /// RNG seed actually used.
     pub seed: u64,
     /// CI bundle. `Some` when the caller passed `ConfirmatoryTestOpts.ci = Some(...)`.
@@ -796,12 +854,12 @@ pub struct ConfirmatoryTestOutput {
 /// - `PlsKitError::NonFiniteInput` when X, y, or weights contain NaN/inf
 /// - `PlsKitError::InvalidWeights` for negative, all-zero, or insufficient-`n_eff` weights
 /// - Raw form with covariates: `PlsKitError::InvalidArgument` for
-///   `test_method` `split_nb`, `score` or `e`; `ShapeMismatch` when
+///   `test_method` `split_nb`, `score` without `n_perm`, or `e`; `ShapeMismatch` when
 ///   `covariates` does not have `n_samples` rows; `NonFiniteInput` when it
 ///   holds NaN/inf; `InsufficientResidualDf` when
 ///   `n_samples − rank([1, Z]) < k + 1`
 /// - Gram form with covariates: `PlsKitError::InvalidArgument` for
-///   `test_method` `split_nb`, `score` or `e`; `ShapeMismatch` when
+///   `test_method` `split_nb`, `score` without `n_perm`, or `e`; `ShapeMismatch` when
 ///   `covariates` does not have one row per row of `gram.gram`;
 ///   `NonFiniteInput` when it holds NaN/inf; `InsufficientResidualDf` when
 ///   `n_samples − rank([1, Z]) < k + 1`
@@ -853,8 +911,8 @@ pub(crate) fn k_limit(
 
 /// The sorted set of k a call tests. `None` is the default set:
 /// `1..=default_cut`, or `{1}` where a set of more than one k is refused
-/// (`split_nb`, `score`, `e`, `ci`, `keep`). An explicit set is sorted and
-/// otherwise taken as given; empty, duplicates, or more than one k where
+/// (`split_nb`, `score`, `sv_perm`, `e`, `ci`, `keep`). An explicit set is
+/// sorted and otherwise taken as given; empty, duplicates, or more than one k where
 /// refused is an error. Every other limit is checked at the largest k by
 /// the caller.
 fn resolve_k_set(
@@ -865,9 +923,10 @@ fn resolve_k_set(
     default_cut: usize,
 ) -> PlsKitResult<Vec<usize>> {
     let single_only = match method {
-        ConfirmatoryMethod::SplitNb | ConfirmatoryMethod::Score | ConfirmatoryMethod::E => {
-            Some(method.as_str())
-        }
+        ConfirmatoryMethod::SplitNb
+        | ConfirmatoryMethod::Score
+        | ConfirmatoryMethod::SvPerm
+        | ConfirmatoryMethod::E => Some(method.as_str()),
         _ => None,
     }
     .or(ci.then_some("ci"))
@@ -1005,7 +1064,7 @@ pub(crate) fn confirmatory_test_impl(
     let Some(z) = covariates else {
         return confirmatory_test_run(x, y, k, weights, opts, gate, None, null_y, None);
     };
-    check_covariate_method(opts.args.method(), "split_exact, raw_perm and auto")?;
+    check_covariate_method(&opts.args, COVARIATE_METHODS)?;
     let n = x.nrows();
     if y.nrows() != n {
         return Err(PlsKitError::DimensionMismatch {
@@ -1078,19 +1137,20 @@ fn centre_targets(
     )
 }
 
-/// The refusal of `split_nb`, `score` and `e` with covariates: they have no
-/// permutation null to correct.
-pub(crate) fn check_covariate_method(
-    method: ConfirmatoryMethod,
-    accepted: &str,
-) -> PlsKitResult<()> {
-    match method {
-        ConfirmatoryMethod::SplitNb | ConfirmatoryMethod::Score | ConfirmatoryMethod::E => {
-            Err(PlsKitError::InvalidArgument(format!(
-                "covariates are accepted by test_method {accepted}, not {}",
-                method.as_str()
-            )))
-        }
+/// The methods `pls1_confirmatory_test` runs with covariates, named in the
+/// refusal [`check_covariate_method`] gives.
+const COVARIATE_METHODS: &str = "split_exact, raw_perm, auto, sv_perm and score with n_perm";
+
+/// The refusal of `split_nb`, closed-form `score` and `e` with covariates:
+/// they have no permutation null to correct.
+pub(crate) fn check_covariate_method(args: &ConfirmatoryArgs, accepted: &str) -> PlsKitResult<()> {
+    match args {
+        ConfirmatoryArgs::SplitNb { .. }
+        | ConfirmatoryArgs::Score { n_perm: None }
+        | ConfirmatoryArgs::E => Err(PlsKitError::InvalidArgument(format!(
+            "covariates are accepted by test_method {accepted}, not {}",
+            args.method().as_str()
+        ))),
         _ => Ok(()),
     }
 }
@@ -1168,7 +1228,7 @@ pub(crate) fn confirmatory_test_core(
     cov: Option<&crate::covariates::CovariateBasis>,
 ) -> PlsKitResult<ConfirmatoryTestOutput> {
     if cov.is_some() {
-        check_covariate_method(opts.args.method(), "split_exact, raw_perm and auto")?;
+        check_covariate_method(&opts.args, COVARIATE_METHODS)?;
         // The `ci` branch with covariates refits on the raw data, which
         // only `confirmatory_test_impl` holds.
         debug_assert!(
@@ -1192,7 +1252,11 @@ pub(crate) fn confirmatory_test_core(
 /// [`confirmatory_test_core`], with the `ci` branch's raw data and
 /// covariates (`ci_input`) when the test runs on adjusted data; `None`
 /// refits on `(x_ref, y_ref)` under `opts.pre_standardized`.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::too_many_arguments,
+    clippy::many_single_char_names
+)]
 fn confirmatory_test_run(
     x_ref: MatRef<'_, f64>,
     y_ref: ColRef<'_, f64>,
@@ -1230,6 +1294,11 @@ fn confirmatory_test_run(
     )?;
     // The single-k methods and options run at this k: their set is `{k}`.
     let k_max = *ks.last().expect("a resolved set is non-empty");
+    if matches!(opts.args, ConfirmatoryArgs::SvPerm { .. }) && k_max != 1 {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "sv_perm runs at k = 1, got k = {k_max}"
+        )));
+    }
     // k = 0 is rejected here, before dispatch, for every method: if it were
     // left to the runners, `raw_perm` and `e` would reject it through
     // `pls1_fit` while `split_exact` / `split_nb` would return a constant p
@@ -1252,9 +1321,12 @@ fn confirmatory_test_run(
     // The one column scale of X the held-out methods (`split_exact`,
     // `split_nb` and its gate, `e`, `raw_perm`) divide by, taken over all
     // rows: the fit's (weighted moments when weighted), or ones under
-    // `pre_standardized`. `score` scales X itself and never reads it; its
-    // empty scale would trip the helpers' length checks if it did.
-    let x_scale = if matches!(opts.args, ConfirmatoryArgs::Score) {
+    // `pre_standardized`. `score` and `sv_perm` scale X themselves and never
+    // read it; their empty scale would trip the helpers' length checks if it did.
+    let x_scale = if matches!(
+        opts.args,
+        ConfirmatoryArgs::Score { .. } | ConfirmatoryArgs::SvPerm { .. }
+    ) {
         Col::<f64>::zeros(0)
     } else {
         crate::linalg::held_out_scale(
@@ -1473,11 +1545,34 @@ fn confirmatory_test_run(
             };
             (result, Some(n_perm), Some(n_splits))
         }
-        ConfirmatoryArgs::Score => (
+        ConfirmatoryArgs::Score { n_perm: None } => (
             run_score(x_ref, y_ref, w_norm.as_ref().map(Col::as_ref), &opts)?.into(),
             None,
             None,
         ),
+        ConfirmatoryArgs::Score {
+            n_perm: Some(n_perm),
+        }
+        | ConfirmatoryArgs::SvPerm { n_perm, .. } => {
+            let s = score_inputs(x_ref, y_ref, w_norm.as_ref().map(Col::as_ref), &opts)?;
+            let mut r = run_quad_perm(
+                // Single-threaded loop: no rayon inside a permutation.
+                |v| score_t(&s, v, Par::Seq),
+                s.ys.as_ref(),
+                n_perm,
+                null_map,
+                &mut rng,
+            );
+            // sv_perm reports d₁ = √T and score reports T. Both scale back
+            // by c as run_score does.
+            if matches!(args_resolved, ConfirmatoryArgs::SvPerm { .. }) {
+                r.statistic = r.statistic.sqrt() * s.c;
+            } else {
+                r.statistic *= s.c;
+                r.statistic *= s.c;
+            }
+            (r.into(), Some(n_perm), None)
+        }
         ConfirmatoryArgs::E => (
             run_e(
                 x_ref,
@@ -1543,6 +1638,7 @@ fn confirmatory_test_run(
         None
     };
 
+    let (n_folds, force, rotate) = args_resolved.recorded();
     let (statistic, pvalues_by_k, statistics_by_k) = result.by_k(&ks);
     Ok(ConfirmatoryTestOutput {
         pvalue: result.pvalue,
@@ -1553,6 +1649,9 @@ fn confirmatory_test_run(
         statistics_by_k,
         n_perm: n_perm_out,
         n_splits: n_splits_out,
+        n_folds,
+        force,
+        rotate,
         seed: seed_used,
         ci: ci_payload,
         n_eff: n_eff_val,
@@ -1602,7 +1701,21 @@ fn check_method_counts(args: ConfirmatoryArgs, n: usize) -> PlsKitResult<()> {
         | ConfirmatoryArgs::Auto { n_perm, n_splits } => {
             check_split_exact_counts(Some(n_perm), n_splits)?;
         }
-        ConfirmatoryArgs::Score | ConfirmatoryArgs::E => {}
+        ConfirmatoryArgs::Score { n_perm: None } | ConfirmatoryArgs::E => {}
+        ConfirmatoryArgs::Score {
+            n_perm: Some(n_perm),
+        }
+        | ConfirmatoryArgs::SvPerm { n_perm, .. } => {
+            // `n_splits` is not read; 2 is the floor's own minimum.
+            check_split_exact_counts(Some(n_perm), 2)?;
+            // Rotation aligns the singular vectors of the PLS3 cross-block;
+            // PLS1 has a single one.
+            if matches!(args, ConfirmatoryArgs::SvPerm { rotate: true, .. }) {
+                return Err(PlsKitError::InvalidArgument(
+                    "sv_perm rotate is for PLS3: a PLS1 call has one singular vector".into(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1628,7 +1741,8 @@ pub(crate) fn check_gram_flag(pre_standardized: bool) -> PlsKitResult<()> {
 /// [`fold_columns_nspace`]; `split_exact` and `split_nb` at `k = 1` by the
 /// no-refit body's Gram route (`nr_split_r_gram`) and otherwise per split by
 /// [`split_columns_nspace`]; `e` on one split's blocks; `score` from
-/// `y'Gy` and the eigenvalues of `G`; and the `split_nb` gate and `auto`
+/// `y'Gy` and the eigenvalues of `G`, or with `n_perm`, like `sv_perm`, from
+/// `y'Gy` on permuted y; and the `split_nb` gate and `auto`
 /// from `G`'s stable rank. The draws from the seed are the X call's, so on
 /// `gram_matrix(x, flag)` every method equals the X call on `x` with the
 /// flag to rounding, `score` on X centred over all rows (it reads the
@@ -1662,7 +1776,7 @@ fn confirmatory_test_gram(
     // reads its residual df.
     let basis = covariates
         .map(|z| {
-            check_covariate_method(opts.args.method(), "split_exact, raw_perm and auto")?;
+            check_covariate_method(&opts.args, COVARIATE_METHODS)?;
             if gram.gram.ncols() != n {
                 return Err(PlsKitError::ShapeMismatch(format!(
                     "gram must be square, got {n} x {}",
@@ -1699,6 +1813,11 @@ fn confirmatory_test_gram(
     }
     // Every check below is a single call's, at the largest k.
     let k = *ks.last().expect("a resolved set is non-empty");
+    if matches!(opts.args, ConfirmatoryArgs::SvPerm { .. }) && k != 1 {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "sv_perm runs at k = 1, got k = {k}"
+        )));
+    }
     if k > p {
         return Err(PlsKitError::KExceedsMax { k, k_max: p });
     }
@@ -1723,11 +1842,21 @@ fn confirmatory_test_gram(
             "ci does not combine with gram: the CI resamples the fit on X".into(),
         ));
     }
+    // `sv_perm` and `score` with `n_perm` read y standardized before the
+    // residual is taken, as the X call's `covariates::adjust` orders it, so
+    // their statistic is the X call's. The other methods take the residual
+    // of y as given; `split_exact` and `raw_perm` do not read y's scale.
+    let quad = matches!(
+        opts.args,
+        ConfirmatoryArgs::Score { n_perm: Some(_) } | ConfirmatoryArgs::SvPerm { .. }
+    );
     let (g, y_adj) = if let Some(basis) = &basis {
         basis.check_df(k)?;
         // Non-finite entries of G reach `from_gram` through the projection.
         let g = HeldOutGram::from_gram(basis.project_gram(gram.gram.as_ref()), p)?;
-        let mut y_adj = Mat::<f64>::from_fn(n, 1, |i, _| y[i]);
+        let y_in = quad.then(|| gram_score_y(y, gram.pre_standardized));
+        let y_in = y_in.as_ref().map_or(y, Col::as_ref);
+        let mut y_adj = Mat::<f64>::from_fn(n, 1, |i, _| y_in[i]);
         basis.residualize(y_adj.as_mut());
         (g, Some(y_adj))
     } else {
@@ -1809,11 +1938,35 @@ fn confirmatory_test_gram(
             Some(n_perm),
             Some(n_splits),
         ),
-        ConfirmatoryArgs::Score => (
+        ConfirmatoryArgs::Score { n_perm: None } => (
             run_score_gram(&g, y, gram.pre_standardized).into(),
             None,
             None,
         ),
+        ConfirmatoryArgs::Score {
+            n_perm: Some(n_perm),
+        }
+        | ConfirmatoryArgs::SvPerm { n_perm, .. } => {
+            // With covariates `y` is already standardized, then residualized.
+            let ys = if basis.is_some() {
+                y.to_owned()
+            } else {
+                gram_score_y(y, gram.pre_standardized)
+            };
+            // Single-threaded loop: no rayon inside a permutation.
+            let mut r = run_quad_perm(
+                |v| gram_score_t(&g, v, Par::Seq),
+                ys.as_ref(),
+                n_perm,
+                null_map,
+                &mut rng,
+            );
+            // sv_perm reports d₁ = √T, score reports T (see `run_quad_perm`).
+            if matches!(args, ConfirmatoryArgs::SvPerm { .. }) {
+                r.statistic = r.statistic.sqrt();
+            }
+            (r.into(), Some(n_perm), None)
+        }
         ConfirmatoryArgs::E => (run_e_gram(&g, y, k, &mut rng)?.into(), None, None),
         ConfirmatoryArgs::Auto { .. } => {
             return Err(PlsKitError::Internal(
@@ -1821,6 +1974,7 @@ fn confirmatory_test_gram(
             ));
         }
     };
+    let (n_folds, force, rotate) = args.recorded();
     let (statistic, pvalues_by_k, statistics_by_k) = result.by_k(&ks);
     Ok(ConfirmatoryTestOutput {
         pvalue: result.pvalue,
@@ -1831,6 +1985,9 @@ fn confirmatory_test_gram(
         statistics_by_k,
         n_perm: n_perm_out,
         n_splits: n_splits_out,
+        n_folds,
+        force,
+        rotate,
         seed: seed_used,
         ci: None,
         n_eff,
@@ -1980,15 +2137,27 @@ fn run_split_perm_gram(
 /// standardized (as given under `pre_standardized`), and the
 /// Welch-Satterthwaite reference from the eigenvalues of `G`.
 fn run_score_gram(g: &HeldOutGram, y: ColRef<'_, f64>, pre_standardized: bool) -> RunResult {
-    let ys = if pre_standardized {
+    let ys = gram_score_y(y, pre_standardized);
+    let par = crate::fit::par_fixed();
+    let t_obs = gram_score_t(g, ys.as_ref(), par);
+    score_result(t_obs, &eigenvalues_symmetric(g.g(), par))
+}
+
+/// The `y` the gram-form score statistic reads: standardized, or as given
+/// under `pre_standardized`.
+fn gram_score_y(y: ColRef<'_, f64>, pre_standardized: bool) -> Col<f64> {
+    if pre_standardized {
         y.to_owned()
     } else {
         crate::linalg::standardize1(y).0
-    };
-    let par = crate::fit::par_fixed();
-    let gy = crate::linalg::mat_vec(g.g(), ys.as_ref(), par);
-    let t_obs: f64 = (0..ys.nrows()).map(|i| ys[i] * gy[i]).sum();
-    score_result(t_obs, &eigenvalues_symmetric(g.g(), par))
+    }
+}
+
+/// `vᵀGv`, the score statistic of outcome `v` on the centred Gram matrix
+/// `g` (`= ‖X̃ᵀv‖²` for `G = X̃X̃ᵀ`).
+fn gram_score_t(g: &HeldOutGram, v: ColRef<'_, f64>, par: Par) -> f64 {
+    let gv = crate::linalg::mat_vec(g.g(), v, par);
+    (0..v.nrows()).map(|i| v[i] * gv[i]).sum()
 }
 
 /// `e` from the centred all-row Gram matrix `g`: the split [`run_e`]
@@ -2578,8 +2747,14 @@ pub(crate) fn prepare_cv_fold(
     // materialized fold of `dual_route::pls1_cv_r2_columns`, and the checks
     // of `xs_tr` and `xs_val` by that function's first pass (change
     // together).
-    let (xs_tr, x_mean, _) =
-        center_rows_fro(x, &train_idx, w_tr.as_ref().map(Col::as_ref), None, scale);
+    let (xs_tr, x_mean, _) = center_rows_fro(
+        x,
+        &train_idx,
+        w_tr.as_ref().map(Col::as_ref),
+        None,
+        scale,
+        Par::Seq,
+    );
     check_finite_mat(xs_tr.as_ref())?;
     let xs_val = standardize_apply_rows(x, &val_idx, x_mean.as_ref(), scale, None);
     check_finite_mat(xs_val.as_ref())?;
@@ -3245,6 +3420,7 @@ pub(crate) fn prepare_split(
         w_tr.as_ref().map(Col::as_ref),
         sw_tr.as_ref().map(Col::as_ref),
         scale,
+        Par::Seq,
     );
     let xs_te = standardize_apply_rows(
         x,
@@ -4802,7 +4978,7 @@ fn run_split_perm(
 /// `split_exact`'s p-value and statistic `tanh(z̄)` from every column's
 /// `z̄`, column 0 the observed `y`. A non-finite null statistic counts as
 /// an exceedance so it biases p upward, never downward (mirrors
-/// `raw_perm_result`; change together). A failed per-half fit already
+/// `raw_perm_result` and `run_quad_perm`; change together). A failed per-half fit already
 /// degrades to r = 0 inside the units rather than surfacing here.
 fn split_perm_result(z: &[f64], n_perm: usize) -> RunResult {
     let (z_bar_obs, null_zbars) = (z[0], &z[1..]);
@@ -5857,13 +6033,33 @@ fn run_split_perm_nr(
 // score test (Welch-Satterthwaite generalized χ²)
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// The data the score statistic `T = ‖X̃ᵀỹ‖²` reads, closed form or by
+/// permutation: X̃ is standardized X row-scaled by `√w` (`xs_eff`), ỹ is
+/// `sqrt_w ⊙ ys`. `ys` stays unscaled so a permutation shuffles it before
+/// `√w` is applied, keeping each weight on its row. Pre-standardized X far
+/// from unit scale is divided by `c`, so `T` comes out divided by `c²`.
+struct ScoreInputs<'a> {
+    /// X as given; read when nothing needed scaling or copying.
+    x: MatRef<'a, f64>,
+    xs_owned: Option<Mat<f64>>,
+    ys: Col<f64>,
+    sqrt_w: Option<Col<f64>>,
+    c: f64,
+}
+
+impl ScoreInputs<'_> {
+    fn xs_eff(&self) -> MatRef<'_, f64> {
+        self.xs_owned.as_ref().map_or(self.x, Mat::as_ref)
+    }
+}
+
 #[allow(clippy::many_single_char_names)]
-fn run_score(
-    x: MatRef<'_, f64>,
+fn score_inputs<'a>(
+    x: MatRef<'a, f64>,
     y: ColRef<'_, f64>,
     w_norm: Option<ColRef<'_, f64>>,
     opts: &ConfirmatoryTestOpts,
-) -> PlsKitResult<RunResult> {
+) -> PlsKitResult<ScoreInputs<'a>> {
     use crate::linalg::{standardize, standardize_weighted, standardize1, standardize1_weighted};
 
     let n = x.nrows();
@@ -5874,7 +6070,7 @@ fn run_score(
     // column-major (`linalg::col_major_or_copy`), or divided by a power of
     // two `c` when far from unit scale (`linalg::pre_standardized_input`):
     // that leaves the p-value as it is and divides the statistic by `c²`,
-    // multiplied back below.
+    // multiplied back by the caller.
     let (x_copy, c) = if opts.pre_standardized {
         crate::linalg::pre_standardized_input(x, w_norm)
     } else {
@@ -5887,10 +6083,9 @@ fn run_score(
     } else {
         Some(standardize(x).0)
     };
-    let xs: MatRef<'_, f64> = match (&xs_std, &x_copy) {
-        (Some(m), _) | (None, Some(m)) => m.as_ref(),
-        (None, None) => x,
-    };
+    let standardized_here = xs_std.is_some();
+    let xs_owned: Option<Mat<f64>> = xs_std.or(x_copy);
+    let xs: MatRef<'_, f64> = xs_owned.as_ref().map_or(x, Mat::as_ref);
 
     let ys: Col<f64> = if opts.pre_standardized {
         Col::<f64>::from_fn(n, |i| y[i])
@@ -5903,27 +6098,52 @@ fn run_score(
     // When weights are present, further row-scale the standardized data by √w'.
     // T_w = ||X̃'ỹ||² where X̃ = diag(√w')·X_std, ỹ = diag(√w')·y_std.
     // This equals the unweighted T on (X̃, ỹ).
-    let (xs_w, ys_eff): (Option<Mat<f64>>, Col<f64>) = if let Some(w) = w_norm {
-        (
-            Some(Mat::<f64>::from_fn(n, xs.ncols(), |i, j| {
-                xs[(i, j)] * w[i].sqrt()
-            })),
-            Col::<f64>::from_fn(n, |i| ys[i] * w[i].sqrt()),
-        )
-    } else {
-        (None, ys)
+    let sqrt_w = w_norm.map(|w| Col::<f64>::from_fn(n, |i| w[i].sqrt()));
+    let xs_w = sqrt_w
+        .as_ref()
+        .map(|s| Mat::<f64>::from_fn(n, xs.ncols(), |i, j| xs[(i, j)] * s[i]));
+    let r = ScoreInputs {
+        x,
+        xs_owned: xs_w.or(xs_owned),
+        ys,
+        sqrt_w,
+        c,
     };
-    let xs_eff: MatRef<'_, f64> = xs_w.as_ref().map_or(xs, Mat::as_ref);
     // A non-finite standardized X is non-finite input, as `pls1_fit`
     // answers it, rather than an infinite statistic.
-    if xs_std.is_some() {
-        crate::fit::check_finite_mat(xs_eff)?;
+    if standardized_here {
+        crate::fit::check_finite_mat(r.xs_eff())?;
     }
+    Ok(r)
+}
+
+/// `‖xs_effᵀ (sqrt_w ⊙ v)‖²`, the score statistic of outcome `v`.
+fn score_t(s: &ScoreInputs<'_>, v: ColRef<'_, f64>, par: Par) -> f64 {
+    let v_eff = s
+        .sqrt_w
+        .as_ref()
+        .map(|sw| Col::<f64>::from_fn(v.nrows(), |i| v[i] * sw[i]));
+    let xy = crate::linalg::mat_vec(
+        s.xs_eff().transpose(),
+        v_eff.as_ref().map_or(v, Col::as_ref),
+        par,
+    );
+    (0..xy.nrows()).map(|i| xy[i].powi(2)).sum::<f64>()
+}
+
+#[allow(clippy::many_single_char_names)]
+fn run_score(
+    x: MatRef<'_, f64>,
+    y: ColRef<'_, f64>,
+    w_norm: Option<ColRef<'_, f64>>,
+    opts: &ConfirmatoryTestOpts,
+) -> PlsKitResult<RunResult> {
+    let s = score_inputs(x, y, w_norm, opts)?;
+    let xs_eff = s.xs_eff();
+    let par = crate::fit::par_fixed();
 
     // T_obs = ||X'y||² = y'XX'y
-    let par = crate::fit::par_fixed();
-    let xy = crate::linalg::mat_vec(xs_eff.transpose(), ys_eff.as_ref(), par);
-    let t_obs: f64 = (0..xy.nrows()).map(|i| xy[i].powi(2)).sum::<f64>();
+    let t_obs = score_t(&s, s.ys.as_ref(), par);
 
     // Eigenvalues of the smaller Gram matrix (X'X for d≤n, XX' otherwise).
     let nn = xs_eff.nrows();
@@ -5938,9 +6158,47 @@ fn run_score(
 
     let mut r = score_result(t_obs, &lambdas);
     // Twice by `c`: `c²` alone can leave the `f64` range.
-    r.statistic *= c;
-    r.statistic *= c;
+    r.statistic *= s.c;
+    r.statistic *= s.c;
     Ok(r)
+}
+
+/// The permutation form of `score` and PLS1 `sv_perm`: one code path, the
+/// same permutations at a given seed. Both test the leading singular value
+/// `d₁` of `X̃ᵀỸ`, with `d₁² = λ_max(ỸᵀX̃X̃ᵀỸ)`. At one target (q = 1) that
+/// matrix is the scalar `‖X̃ᵀỹ‖²`, so `d₁² = T`, the score statistic, and
+/// comparing on `T` or on `d₁` ranks the nulls identically.
+/// Column `c ≥ 1` permutes the rows of the standardized `ys` (X and the
+/// weights stay on their rows) and goes through `null_map` (Freedman–Lane
+/// under covariates). This is the PLSC permutation test (McIntosh &
+/// Lobaugh 2004) at q = 1.
+///
+/// A non-finite null value counts as an exceedance (mirrors
+/// `split_perm_result`; change together).
+#[allow(clippy::doc_markdown)] // "McIntosh"
+fn run_quad_perm(
+    t_of: impl Fn(ColRef<'_, f64>) -> f64,
+    ys: ColRef<'_, f64>,
+    n_perm: usize,
+    null_map: Option<crate::resample::NullMap<'_>>,
+    rng: &mut crate::rng::Rng,
+) -> RunResult {
+    let seeds = crate::rng::child_seeds(rng, n_perm);
+    let cols = crate::resample::Columns {
+        y: ys.as_mat(),
+        seeds: &seeds,
+        null_map,
+    };
+    let t_obs = t_of(ys);
+    let exceedances = (1..cols.len())
+        .map(|c| t_of(cols.column(c).as_ref()))
+        .filter(|t| !t.is_finite() || *t >= t_obs)
+        .count();
+    RunResult {
+        pvalue: (exceedances as f64 + 1.0) / (n_perm as f64 + 1.0),
+        statistic: t_obs,
+        rho_hat: None,
+    }
 }
 
 /// The score test's p-value for `T = t_obs` against the Welch-Satterthwaite
@@ -6991,7 +7249,7 @@ mod tests {
                             null_y: None,
                         },
                         ConfirmatoryTestOpts {
-                            args: ConfirmatoryArgs::Score,
+                            args: ConfirmatoryArgs::Score { n_perm: None },
                             seed: Some(3),
                             ..Default::default()
                         },
@@ -10759,7 +11017,11 @@ mod tests {
             n_splits: 8,
             force: true,
         };
-        for args in [nb, ConfirmatoryArgs::Score, ConfirmatoryArgs::E] {
+        for args in [
+            nb,
+            ConfirmatoryArgs::Score { n_perm: None },
+            ConfirmatoryArgs::E,
+        ] {
             assert_eq!(one(args, d), vec![1], "{:?}", args.method());
         }
         let ci = Some(CIOpts {
@@ -10802,7 +11064,11 @@ mod tests {
             n_splits: 8,
             force: true,
         };
-        for args in [nb, ConfirmatoryArgs::Score, ConfirmatoryArgs::E] {
+        for args in [
+            nb,
+            ConfirmatoryArgs::Score { n_perm: None },
+            ConfirmatoryArgs::E,
+        ] {
             invalid(call(&[1, 2], args, d, false), args.method().as_str());
         }
         let ci = Some(CIOpts {
@@ -12328,7 +12594,7 @@ mod tests {
                 null_y: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::Score,
+                args: ConfirmatoryArgs::Score { n_perm: None },
                 seed: Some(7),
                 ci: Some(CIOpts {
                     n_boot: 200,
@@ -12403,7 +12669,7 @@ mod tests {
                 null_y: None,
             },
             ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::Score,
+                args: ConfirmatoryArgs::Score { n_perm: None },
                 seed: Some(0),
                 ci: Some(CIOpts {
                     n_boot: 500,
@@ -12734,7 +13000,7 @@ mod tests {
                                 null_y: None,
                             },
                             ConfirmatoryTestOpts {
-                                args: ConfirmatoryArgs::Score,
+                                args: ConfirmatoryArgs::Score { n_perm: None },
                                 pre_standardized: pre,
                                 seed: Some(21),
                                 ..Default::default()
@@ -13881,7 +14147,7 @@ mod tests_covariates {
         let z = aliased_z(n, 65);
         for args in [
             ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::SplitNb),
-            ConfirmatoryArgs::Score,
+            ConfirmatoryArgs::Score { n_perm: None },
             ConfirmatoryArgs::E,
         ] {
             let r = pls1_confirmatory_test(
@@ -14133,7 +14399,7 @@ mod tests_null_y {
                 n_folds: 5,
             },
             ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::SplitNb),
-            ConfirmatoryArgs::Score,
+            ConfirmatoryArgs::Score { n_perm: None },
             ConfirmatoryArgs::E,
             ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::Auto),
         ] {
@@ -14228,5 +14494,330 @@ mod tests_null_y {
         bad[(3, 2)] = f64::NAN;
         let r = pls1_confirmatory_test(gram_in(&g, &y, &[1], None, &bad), opts(exact()));
         assert!(matches!(r, Err(PlsKitError::NonFiniteInput)), "{r:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests_sv_perm_surface {
+    use super::*;
+    use crate::test_support::{synth, unif};
+
+    fn call(
+        args: ConfirmatoryArgs,
+        k: &[usize],
+        cov: Option<&Mat<f64>>,
+        ny: Option<&Mat<f64>>,
+    ) -> PlsKitResult<ConfirmatoryTestOutput> {
+        let (x, y) = synth(40, 5, 2, 1.0, 31);
+        pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: Some(k),
+                weights: None,
+                covariates: cov.map(Mat::as_ref),
+                null_y: ny.map(Mat::as_ref),
+            },
+            ConfirmatoryTestOpts {
+                args,
+                seed: Some(7),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// `n_folds`, `force` and `rotate` are each recorded by their own method only.
+    #[test]
+    fn result_records_method_args() {
+        let cases = [
+            (
+                ConfirmatoryArgs::RawPerm {
+                    n_perm: 9,
+                    n_folds: 4,
+                },
+                (Some(4), None, None),
+            ),
+            (
+                ConfirmatoryArgs::SplitNb {
+                    n_splits: 8,
+                    force: true,
+                },
+                (None, Some(true), None),
+            ),
+            (
+                ConfirmatoryArgs::SvPerm {
+                    n_perm: 9,
+                    rotate: false,
+                },
+                (None, None, Some(false)),
+            ),
+            (
+                ConfirmatoryArgs::SplitExact {
+                    n_perm: 9,
+                    n_splits: 4,
+                },
+                (None, None, None),
+            ),
+            (ConfirmatoryArgs::Score { n_perm: None }, (None, None, None)),
+        ];
+        for (args, want) in cases {
+            let r = call(args, &[1], None, None).unwrap();
+            assert_eq!((r.n_folds, r.force, r.rotate), want, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn sv_perm_defaults_and_name() {
+        assert_eq!(ConfirmatoryMethod::SvPerm.as_str(), "sv_perm");
+        assert!(matches!(
+            ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::SvPerm),
+            ConfirmatoryArgs::SvPerm {
+                n_perm: 1000,
+                rotate: false
+            }
+        ));
+        assert!(matches!(
+            ConfirmatoryArgs::defaults_for(ConfirmatoryMethod::Score),
+            ConfirmatoryArgs::Score { n_perm: None }
+        ));
+    }
+
+    #[test]
+    fn sv_perm_refusals() {
+        let sv = |n_perm, rotate| ConfirmatoryArgs::SvPerm { n_perm, rotate };
+        let z = unif(40, 2, 32);
+        let ny = unif(40, 9, 33);
+        let cases = [
+            ("k = 2", call(sv(50, false), &[2], None, None)),
+            ("rotate on PLS1", call(sv(50, true), &[1], None, None)),
+            ("sv_perm n_perm = 0", call(sv(0, false), &[1], None, None)),
+            (
+                "score n_perm = 0",
+                call(
+                    ConfirmatoryArgs::Score { n_perm: Some(0) },
+                    &[1],
+                    None,
+                    None,
+                ),
+            ),
+            (
+                "score with covariates",
+                call(
+                    ConfirmatoryArgs::Score { n_perm: None },
+                    &[1],
+                    Some(&z),
+                    None,
+                ),
+            ),
+            ("sv_perm null_y", call(sv(50, false), &[1], None, Some(&ny))),
+            (
+                "score null_y",
+                call(
+                    ConfirmatoryArgs::Score { n_perm: None },
+                    &[1],
+                    None,
+                    Some(&ny),
+                ),
+            ),
+        ];
+        for (what, r) in cases {
+            assert!(
+                matches!(r, Err(PlsKitError::InvalidArgument(_))),
+                "{what}: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_k_refuses_sv_perm_diagnostic_and_sequence_default_is_none() {
+        let (x, y) = synth(40, 5, 2, 1.0, 34);
+        let r = crate::pls1_find_k_optimal(
+            x.as_ref(),
+            y.as_ref(),
+            3,
+            None,
+            None,
+            crate::FindKOptimalOpts {
+                diagnostic: Some(ConfirmatoryMethod::SvPerm),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(r, Err(PlsKitError::InvalidArgument(_))), "{r:?}");
+        assert!(
+            crate::sequential::SequentialArgs::defaults_for(ConfirmatoryMethod::SvPerm).is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_sv_perm_pls1 {
+    use super::*;
+    use crate::test_support::{unif, unif_col};
+
+    const N: usize = 40;
+    const P: usize = 15;
+
+    fn data() -> (Mat<f64>, Col<f64>) {
+        let x = unif(N, P, 7);
+        let e = unif_col(N, 8);
+        let y = Col::<f64>::from_fn(N, |i| 0.3 * x[(i, 0)] + e[i]);
+        (x, y)
+    }
+
+    fn weights() -> Col<f64> {
+        let u = unif_col(N, 9);
+        Col::<f64>::from_fn(N, |i| 0.2 + 1.4 * (u[i] + 1.0))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        x: &Mat<f64>,
+        y: &Col<f64>,
+        w: Option<&Col<f64>>,
+        z: Option<&Mat<f64>>,
+        args: ConfirmatoryArgs,
+        pre_standardized: bool,
+    ) -> PlsKitResult<ConfirmatoryTestOutput> {
+        pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: Some(&[1]),
+                weights: w.map(Col::as_ref),
+                covariates: z.map(Mat::as_ref),
+                null_y: None,
+            },
+            ConfirmatoryTestOpts {
+                args,
+                seed: Some(7),
+                pre_standardized,
+                ..Default::default()
+            },
+        )
+    }
+
+    const SV: ConfirmatoryArgs = ConfirmatoryArgs::SvPerm {
+        n_perm: 199,
+        rotate: false,
+    };
+    const SCORE_B: ConfirmatoryArgs = ConfirmatoryArgs::Score { n_perm: Some(199) };
+
+    #[test]
+    #[allow(clippy::float_cmp)] // p-values are counts over the same nulls
+    fn score_n_perm_matches_sv_perm() {
+        let (x, y) = data();
+        let w = weights();
+        let z = unif(N, 2, 10);
+        for (what, w, z) in [
+            ("plain", None, None),
+            ("weights", Some(&w), None),
+            ("covariates", None, Some(&z)),
+        ] {
+            let r_s = run(&x, &y, w, z, SCORE_B, false).unwrap();
+            let r_v = run(&x, &y, w, z, SV, false).unwrap();
+            assert_eq!(r_s.pvalue, r_v.pvalue, "{what}");
+            assert!(
+                (r_v.statistic.unwrap().powi(2) / r_s.statistic.unwrap() - 1.0).abs() < 1e-12,
+                "{what}"
+            );
+            assert_eq!(r_s.n_perm, Some(199), "{what}");
+            assert_eq!(r_v.n_perm, Some(199), "{what}");
+            assert_eq!(r_s.test_method, "score", "{what}");
+            assert_eq!(r_v.test_method, "sv_perm", "{what}");
+            assert!(r_v.pvalue > 0.0 && r_v.pvalue <= 1.0, "{what}");
+        }
+    }
+
+    #[test]
+    fn score_closed_form_unchanged() {
+        let (x, y) = data();
+        let r = run(
+            &x,
+            &y,
+            None,
+            None,
+            ConfirmatoryArgs::Score { n_perm: None },
+            false,
+        )
+        .unwrap();
+        let par = crate::fit::par_fixed();
+        let xs = crate::linalg::standardize(x.as_ref()).0;
+        let ys = crate::linalg::standardize1(y.as_ref()).0;
+        let xy = crate::linalg::mat_vec(xs.transpose(), ys.as_ref(), par);
+        let t: f64 = (0..xy.nrows()).map(|i| xy[i].powi(2)).sum();
+        let gram = crate::linalg::mat_mul(xs.transpose(), xs.as_ref(), par);
+        let want = score_result(t, &eigenvalues_symmetric(gram.as_ref(), par));
+        assert_eq!(r.statistic.unwrap().to_bits(), want.statistic.to_bits());
+        assert_eq!(r.pvalue.to_bits(), want.pvalue.to_bits());
+        assert_eq!(r.n_perm, None);
+    }
+
+    #[test]
+    fn sv_perm_statistic_is_norm_xty() {
+        let (x, y) = data();
+        let r = run(&x, &y, None, None, SV, false).unwrap();
+        let xs = crate::linalg::standardize(x.as_ref()).0;
+        let ys = crate::linalg::standardize1(y.as_ref()).0;
+        let xy = xs.transpose() * ys.as_ref();
+        let want = xy.norm_l2();
+        assert!((r.statistic.unwrap() / want - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)] // the floor 1/(B+1) is exact
+    fn sv_perm_strong_signal_hits_floor() {
+        let (x, _) = data();
+        let e = unif_col(N, 11);
+        let y = Col::<f64>::from_fn(N, |i| 3.0 * x[(i, 0)] + 0.1 * e[i]);
+        let args = ConfirmatoryArgs::SvPerm {
+            n_perm: 99,
+            rotate: false,
+        };
+        let r = run(&x, &y, None, None, args, false).unwrap();
+        assert_eq!(r.pvalue, 1.0 / 100.0);
+    }
+
+    /// A constant y answers as `split_exact` answers it: both return
+    /// statistic 0 and p = 1 rather than an error; never NaN.
+    #[test]
+    #[allow(clippy::float_cmp)] // statistic 0 and p-values are exact
+    fn sv_perm_constant_y_answers_as_split_exact() {
+        let (x, _) = data();
+        let y = Col::<f64>::from_fn(N, |_| 2.5);
+        let se = run(
+            &x,
+            &y,
+            None,
+            None,
+            ConfirmatoryArgs::SplitExact {
+                n_perm: 99,
+                n_splits: 8,
+            },
+            false,
+        );
+        let sv = run(&x, &y, None, None, SV, false);
+        match (se, sv) {
+            (Err(a), Err(b)) => assert_eq!(
+                std::mem::discriminant(&a),
+                std::mem::discriminant(&b),
+                "{a:?} vs {b:?}"
+            ),
+            (Ok(a), Ok(b)) => {
+                assert_eq!(a.statistic, Some(0.0));
+                assert_eq!(b.statistic, Some(0.0));
+                assert_eq!(a.pvalue, b.pvalue);
+            }
+            (a, b) => panic!("split_exact {a:?} vs sv_perm {b:?}"),
+        }
+    }
+
+    #[test]
+    fn sv_perm_pre_standardized_matches_default() {
+        let (x, y) = data();
+        let xs = crate::linalg::standardize(x.as_ref()).0;
+        let ys = crate::linalg::standardize1(y.as_ref()).0;
+        let a = run(&x, &y, None, None, SV, false).unwrap();
+        let b = run(&xs, &ys, None, None, SV, true).unwrap();
+        assert!((a.statistic.unwrap() / b.statistic.unwrap() - 1.0).abs() < 1e-10);
     }
 }

@@ -81,6 +81,7 @@ pub(crate) fn parse_method(s: &str) -> Result<ConfirmatoryMethod, BindError> {
         "split_exact" => Ok(ConfirmatoryMethod::SplitExact),
         "auto" => Ok(ConfirmatoryMethod::Auto),
         "score" => Ok(ConfirmatoryMethod::Score),
+        "sv_perm" => Ok(ConfirmatoryMethod::SvPerm),
         "e" => Ok(ConfirmatoryMethod::E),
         _ => Err(BindError::invalid_args(format!("unknown method: {s}"))),
     }
@@ -123,8 +124,18 @@ pub(crate) fn confirmatory_args(
             }
         }
         (ConfirmatoryMethod::Score, _) => {
-            validate_keys(&label, args, &[])?;
-            ConfirmatoryArgs::Score
+            validate_keys(&label, args, &["n_perm"])?;
+            let n_perm = arg(args, "n_perm")
+                .map(|v| coerce::to_usize(v).map_err(|w| value_err("n_perm", &label, &w)))
+                .transpose()?;
+            ConfirmatoryArgs::Score { n_perm }
+        }
+        (ConfirmatoryMethod::SvPerm, ConfirmatoryArgs::SvPerm { n_perm, rotate }) => {
+            validate_keys(&label, args, &["n_perm", "rotate"])?;
+            ConfirmatoryArgs::SvPerm {
+                n_perm: arg_usize(args, &label, "n_perm", n_perm)?,
+                rotate: arg_bool(args, &label, "rotate", rotate)?,
+            }
         }
         (ConfirmatoryMethod::E, _) => {
             validate_keys(&label, args, &[])?;
@@ -138,12 +149,12 @@ pub(crate) fn confirmatory_args(
     })
 }
 
-/// `method` + `args` for `pls3_confirmatory_test`: three of the six methods.
+/// `method` + `args` for `pls3_confirmatory_test`: four of the seven methods.
 pub(crate) fn pls3_confirmatory_args(
     method: &str,
     args: Option<&Record<'_>>,
 ) -> Result<ConfirmatoryArgs, BindError> {
-    const ALLOWED: [&str; 3] = ["split_exact", "split_nb", "auto"];
+    const ALLOWED: [&str; 4] = ["split_exact", "split_nb", "auto", "sv_perm"];
     if !ALLOWED.contains(&method) {
         return Err(BindError::invalid_args(format!(
             "test_method='{method}' is not available for pls3_confirmatory_test; \
@@ -259,8 +270,8 @@ pub(crate) fn find_k_sequence_opts(
         ConfirmatoryMethod::SplitNb => &["n_splits", "force"],
         ConfirmatoryMethod::SplitExact | ConfirmatoryMethod::Auto => &["n_perm", "n_splits"],
         ConfirmatoryMethod::E => &[],
-        // Score has no per-component reading, so no sequential variant.
-        ConfirmatoryMethod::Score => {
+        // Score and sv_perm have no per-component reading, so no sequential variant.
+        ConfirmatoryMethod::Score | ConfirmatoryMethod::SvPerm => {
             return Err(BindError::invalid_args(format!(
                 "test_method='{}' has no sequential variant",
                 tm.as_str()
@@ -375,7 +386,7 @@ mod tests {
                 .unwrap_err()
                 .message,
             "test_method='raw_perm' is not available for pls3_confirmatory_test; \
-             allowed: ['split_exact', 'split_nb', 'auto']"
+             allowed: ['split_exact', 'split_nb', 'auto', 'sv_perm']"
         );
     }
 
@@ -407,6 +418,33 @@ mod tests {
         assert!(e.message.contains("does not accept arg 'force'"));
         assert!(pls3_confirmatory_args("auto", None).is_ok());
         assert!(pls3_confirmatory_args("split_nb", None).is_ok());
+    }
+
+    #[test]
+    fn sv_perm_and_score_args() {
+        let dbg = |r: Result<ConfirmatoryArgs, BindError>| format!("{:?}", r.unwrap());
+        assert_eq!(
+            dbg(confirmatory_args("sv_perm", None)),
+            "SvPerm { n_perm: 1000, rotate: false }"
+        );
+        let a = args(&[("rotate", Value::Bool(true))]);
+        assert_eq!(
+            dbg(pls3_confirmatory_args("sv_perm", Some(&a))),
+            "SvPerm { n_perm: 1000, rotate: true }"
+        );
+        let a = args(&[("n_perm", Value::Null)]);
+        assert_eq!(
+            dbg(confirmatory_args("score", Some(&a))),
+            "Score { n_perm: None }"
+        );
+        let a = args(&[("n_perm", Value::I64(50))]);
+        assert_eq!(
+            dbg(confirmatory_args("score", Some(&a))),
+            "Score { n_perm: Some(50) }"
+        );
+        let a = args(&[("bogus", Value::I64(1))]);
+        assert!(confirmatory_args("sv_perm", Some(&a)).is_err());
+        assert!(confirmatory_args("score", Some(&a)).is_err());
     }
 
     #[test]

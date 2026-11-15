@@ -3374,7 +3374,7 @@ mod boundary_tests {
                 n_perm: 19,
                 n_splits: 10,
             },
-            ConfirmatoryArgs::Score,
+            ConfirmatoryArgs::Score { n_perm: None },
             ConfirmatoryArgs::E,
         ];
         let tiny = signal_data(3, 5, 7);
@@ -3538,7 +3538,7 @@ mod boundary_tests {
                 n_perm: 19,
                 n_splits: 10,
             },
-            ConfirmatoryArgs::Score,
+            ConfirmatoryArgs::Score { n_perm: None },
             ConfirmatoryArgs::E,
         ];
         let seed = Some(5);

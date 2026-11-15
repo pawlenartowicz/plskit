@@ -32,7 +32,7 @@ specific to the correlation; it would not extend to per-coordinate
 intervals on the saliences, which is one reason the family offers none
 (`result.ci` is always `None`).
 
-## Two methods
+## Two split methods, and `sv_perm`
 
 `test_method` is keyword-only and defaults to `"auto"`, which runs
 `split_exact` on every design (see
@@ -74,6 +74,18 @@ heuristic, and its use here rests on the developers' simulations
 which `split_nb` came out conservative, never anti-conservative. Use it
 when `split_exact` is too slow; prefer `split_exact` otherwise.
 
+## `sv_perm`
+
+`test_method="sv_perm"` is the classic PLSC permutation test (McIntosh and Lobaugh 2004). It asks whether the first latent variable (LV1) of the whole sample is larger than the rows of Y shuffled against X would give. It is in-sample: it does not hold out rows, so it does not check that the LV1 pattern predicts new rows.
+
+- **Statistic.** `d₁`, the largest singular value of `X̃ᵀỸ`, with both blocks standardized once over all rows as in `pls3_fit` (`pre_standardized_X` / `pre_standardized_Y` apply). Only LV1 is tested, so `k` must be `1`.
+- **Null and p-value.** The rows of Y are shuffled as whole units `n_perm` times (default 1000), and `p = (1 + #{null d₁ ≥ observed d₁}) / (n_perm + 1)`. A non-finite null value counts as an exceedance.
+- **`args`.** `{"n_perm": 1000, "rotate": False}`.
+- **`rotate`.** With `rotate=True`, each permuted decomposition is Procrustes-rotated onto the observed one before its singular value is read, as pyls does. For LV1 the rotated null value is never larger than the unrotated one on the same permutation, so rotation can only lower the p-value. A rotated test is not exact, and pyls's own docstring warns that rotation can inflate false positives. `rotate` is a PLS3 option: `pls1_confirmatory_test` refuses `rotate=True`. `result.rotate` records which `rotate` ran.
+- **Relation to pyls.** plskit's `d₁` is `n` times the first singular value pyls reports. With no groups in pyls, the permutation scheme is the same.
+- **Refused.** `covariates` are not accepted by PLS3 `sv_perm`, nor is `keep_x` / `keep_y` below the full column count.
+- **`auto` never picks it.** `split_exact` stays the recommended method: it tests prediction on held-out rows and is exact whenever rows are exchangeable under the null.
+
 ## The `split_nb` auto-gate runs on X only
 
 An explicit `split_nb` request first goes through the same auto-gate as `pls1_confirmatory_test`, applied to X as the test reads it (standardized once over all rows, or only centred under `pre_standardized_X`). The gate flags a design when any of these holds:
@@ -92,7 +104,7 @@ conservative guard, not a tuned boundary.
 
 ## Why only `k = 1`
 
-`k` other than `1` raises `invalid_argument`. Above LV1, when singular
+`k` other than `1` raises `invalid_argument`, for `sv_perm` as well. Above LV1, when singular
 values are close, neither the component ordering nor the individual
 directions need survive from the training half to the test half, and it is
 not settled whether the statistic should then be per-component or
@@ -101,8 +113,8 @@ not the issue; they cancel, as above.)
 
 ## Methods that are not available
 
-`pls1_confirmatory_test` has five methods; this function accepts two. The
-other three are refused, each for its own reason:
+`pls1_confirmatory_test` has six methods; this function accepts three
+(`split_exact`, `split_nb`, `sv_perm`). The other three are refused, each for its own reason:
 
 - **`raw_perm`** needs a cross-validated prediction statistic, and PLS3 has
   no `predict`.
@@ -134,7 +146,7 @@ first.
   for their block, which is then used as given and only centred. Y's scale
   comes from its rows before any permutation. The `split_nb` gate reads X
   under the same rule.
-- Minimum sizes: `n ≥ 6`, `n_splits ≥ 2`, `n_perm ≥ 1`; smaller values
+- Minimum sizes: `n ≥ 6` and `n_splits ≥ 2` (split methods; `sv_perm` draws no splits), `n_perm ≥ 1`; smaller values
   raise `invalid_argument`.
 - On the result, `n_eff` equals `n`, `ci` is `None`, `n_perm` is `None`
   for `split_nb`, and `rho_hat` is filled for `split_nb` only (and only

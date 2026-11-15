@@ -46,8 +46,10 @@ end
     keywords = [pnames[i] for i in eachindex(params)
                 if !(required[i] && kinds[i] == "POSITIONAL_OR_KEYWORD")]
     # The rendered stub; call.jl adds positional methods to two functions.
-    m = only(filter(m -> endswith(String(m.file), "generated.jl"),
-                    methods(getfield(PLSKit, Symbol(name)))))
+    # gram_matrix_blocks is wrapper-only: no registry stub, one method in call.jl.
+    ms = methods(getfield(PLSKit, Symbol(name)))
+    m = name == "gram_matrix_blocks" ? only(ms) :
+        only(filter(m -> endswith(String(m.file), "generated.jl"), ms))
     @test Base.method_argnames(m)[2:end] == positional
     @test Base.kwarg_decl(m) == keywords
 end
