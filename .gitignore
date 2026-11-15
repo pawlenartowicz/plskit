@@ -1,0 +1,6 @@
+src/*.o
+src/*.so
+src/*.dll
+src/rust/target/
+tests/testthat/_problems/
+tests/testthat/testthat-problems.rds
