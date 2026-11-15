@@ -139,7 +139,7 @@ plskit runs its parallel work on the caller's current Rayon pool, so a call made
 Function names, argument
 names and output fields are stable across versions, but defaults,
 algorithms and implementation details may shift numbers between
-releases: pin the version (`plskit = "=0.9.0"`) if you need numerical
+releases: pin the version (`plskit = "=0.10.0"`) if you need numerical
 reproducibility. The [root README](../README.md#versioning) explains how
 the engine and wrapper versions relate.
 

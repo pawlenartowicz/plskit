@@ -13,3 +13,7 @@ updates:
       faer:
         patterns:
           - "faer*"
+    ignore:
+      # Newer releases need Rust 1.88 (the MSRV is 1.85); zip must also match ndarray-npy's zip 6.
+      - dependency-name: sha2
+      - dependency-name: zip

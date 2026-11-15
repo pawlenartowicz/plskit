@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented here.
 
-## [Unreleased]
+## [0.10.0] - 2026-11-15
 
 - Changed: `pca_basis`, `factors` and the folds of `profiles_find_n` use the eigendecomposition of the Gram matrix `X'X` on tall full-rank X (more rows than columns, smallest eigenvalue above 1e-6 of the largest); any other X still takes the SVD. Results change by rounding only, and the kept rank is unchanged.
 - Changed: `pca_basis` and `factors` now use several threads for the Gram product and honour `PLSKIT_NUM_THREADS` (and check `PLSKIT_MEMORY_BUDGET`). Results do not depend on the thread count.
