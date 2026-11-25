@@ -13,13 +13,12 @@ pls3_confirmatory_test(
   pre_standardized_X = FALSE,
   pre_standardized_Y = FALSE,
   seed = NULL,
-  verbose = FALSE,
   gram = NULL,
   n_features = NULL
 )
 }
 \arguments{
-\item{X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, verbose, gram, n_features}{See the canonical reference.}
+\item{X, Y, k, test_method, args, pre_standardized_X, pre_standardized_Y, seed, gram, n_features}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("confirmatory_test_result", "plskit_result")}.
@@ -28,4 +27,11 @@ A list of class \code{c("confirmatory_test_result", "plskit_result")}.
 R binding of \code{pls3_confirmatory_test}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
 "3.4 Confirmatory PLS3 omnibus test" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
+}
+\examples{
+set.seed(1)
+X <- matrix(rnorm(40 * 20), 40, 20)
+y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+Y <- cbind(y, y + rnorm(40))
+pls3_confirmatory_test(X, Y, k = 1, test_method = "split_exact", args = list(n_perm = 19, n_splits = 5), seed = 1)
 }

@@ -22,9 +22,9 @@ Demonstrates the recommended pipeline (`docs/python/api.md` §3.1):
      β CIs" in `docs/python/results.md`),
      and the engine's diagnostic counters.
 
-The CI bundle is computed in an independent subsampling pass that uses
-its own child-seed branch; you get one user-facing seed but two
-non-interfering RNG streams.
+The CI bundle is computed in an independent subsampling pass. The CI
+pass draws on its own tagged random streams from the same seed, so it
+does not share draws with the test.
 """
 
 from __future__ import annotations

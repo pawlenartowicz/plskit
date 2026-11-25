@@ -21,7 +21,7 @@
 //!   then fits pre_standardized; pls1_fit standardizes internally).
 //!
 //! Methods deliberately NOT given a parity test here (split_nb/split_exact/score
-//! are FPR-calibrated in `calibration_mc.rs`; weighted raw_perm / e numbers are
+//! are FPR-calibrated in `src/calibration_mc.rs`; weighted raw_perm / e numbers are
 //! pinned by the corpus):
 //! - `score` → its statistic `T = ‖X̃'ỹ‖²` and the χ² p-value scale with the
 //!   *total* weight: row duplication inflates n_eff from n to total, so weighted
@@ -42,8 +42,9 @@ mod common;
 use common::duplicate_rows;
 use faer::{Col, Mat};
 use plskit::{
-    ConfirmatoryMethod, FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, PermNullOpts,
-    Selector, pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_null,
+    ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
+    FindKOptimalOpts, FindKSequenceOpts, FitOpts, PermNullOpts, Selector, pls1_confirmatory_test,
+    pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_null,
 };
 
 /// Seeded synthetic data with planted signal in the first feature.
@@ -74,7 +75,6 @@ fn perm_null_beta_ref_integer_weights_match_row_duplication() {
         n_perm,
         return_perm_matrix: false,
         pre_standardized: false,
-        verbose: false,
     };
 
     let weighted = pls1_perm_null(
@@ -186,7 +186,6 @@ fn perm_null_beta_ref_matches_weighted_fit_coef() {
             n_perm: 100,
             return_perm_matrix: false,
             pre_standardized: false,
-            verbose: false,
         },
         Some(7),
     )
@@ -195,7 +194,7 @@ fn perm_null_beta_ref_matches_weighted_fit_coef() {
     let fit = pls1_fit(
         x.as_ref(),
         y.as_ref(),
-        KSpec::Fixed(2),
+        2,
         Some(w.as_ref()),
         None,
         FitOpts::default(),
@@ -220,29 +219,23 @@ fn find_k_sequence_weighted_deflation_not_inflated() {
     // leak (1−√w′ᵢ) of each removed component back into the step-h test. With
     // strongly non-uniform weights (alternating 2.0/0.25) that leak would make
     // every deflated step "significant" and drive the weighted k_star to
-    // k_max=4 while the unweighted run on the same data stops at 2. The
-    // √W⁻¹-deflated residual must reach the same structural verdict as the
-    // unweighted run. (A duplication-parity oracle is impossible here: the
-    // per-step splits are RNG-drawn over different row counts, see the module
-    // doc, so equality of k_star on a fixed seed is the strongest pin.)
+    // k_max=4 while the unweighted run on the same data stops at 2. (A
+    // duplication-parity oracle is impossible here: the per-step splits are
+    // RNG-drawn over different row counts, see the module doc.) The bound is
+    // 2 because over seeds 0 to 99 the weighted run stops at 1 or 2, never
+    // above, while the leak drives it to 4.
     let (x, y) = synth(60, 5, 6.0, 11);
     let w = Col::<f64>::from_fn(60, |i| if i % 2 == 0 { 2.0 } else { 0.25 });
     let opts = FindKSequenceOpts {
         test_method: ConfirmatoryMethod::SplitNb,
         n_splits: 30,
         alpha: 0.05,
-        seed: Some(19),
+        seed: Some(1),
         ..Default::default()
     };
     let weighted =
         pls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, Some(w.as_ref()), None, opts).unwrap();
-    let unweighted = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 4, None, None, opts).unwrap();
-    assert_eq!(
-        weighted.k_star, unweighted.k_star,
-        "weighted pvalues={:?}, unweighted pvalues={:?}",
-        weighted.pvalues, unweighted.pvalues
-    );
-    assert_eq!(weighted.k_star, 2, "pvalues={:?}", weighted.pvalues);
+    assert!(weighted.k_star <= 2, "pvalues={:?}", weighted.pvalues);
 }
 
 /// A CV score map as `(k, bit pattern)` pairs, for exact comparison.
@@ -270,8 +263,8 @@ fn find_k_optimal_cv_ignores_zero_weight_rows() {
     let n = 60;
     let (x, y) = synth(n, 5, 3.0, 5);
     // Six exact zeros among non-uniform positive weights: fewer than the 12
-    // rows of a fold, so no fold's weight slice sums to zero (such a slice
-    // runs unweighted).
+    // rows of a fold, so no fold's weight slice sums to zero (such a fold
+    // is left out).
     let zeroed = |i: usize| i % 10 == 3;
     let w = Col::<f64>::from_fn(n, |i| {
         if zeroed(i) {
@@ -346,4 +339,123 @@ fn find_k_optimal_cv_ignores_zero_weight_rows() {
         moved > 1e-3,
         "unweighted control: cv_scores moved by only {moved}"
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn permutation_nulls_ignore_zero_weight_rows() {
+    // PROPERTY: a row of weight 0 takes no part in a weighted call, so its y
+    // enters neither the observed statistic nor a null column. Overwriting y
+    // on the zero-weight rows (first with an extreme value, then with
+    // another) leaves every weighted permutation result unchanged bit for
+    // bit: the statistic and p-value of `split_exact` (no-refit route at
+    // k = 1, refit route at k = 1..2, and with covariates), `score` with
+    // `n_perm` and `sv_perm`, the step p-values of `find_k_sequence`, and
+    // the null moments of `pls1_perm_null`. A null that permuted y over
+    // every row would move a zero-weight row's y onto a positive-weight row.
+    // `raw_perm` is left out: its CV R² scores zero-weight validation rows,
+    // so their y does enter its observed statistic.
+    let n = 60;
+    let (x, y) = synth(n, 5, 0.3, 8);
+    let zeroed = |i: usize| i % 10 == 3;
+    let w = Col::<f64>::from_fn(n, |i| {
+        if zeroed(i) {
+            0.0
+        } else {
+            0.5 + (i as f64).sin().abs()
+        }
+    });
+    let z = Mat::<f64>::from_fn(n, 1, |i, _| (i as f64 * 0.7).cos());
+    let with_zeroed = |v: f64| Col::<f64>::from_fn(n, |i| if zeroed(i) { v } else { y[i] });
+    let (y_extreme, y_other) = (with_zeroed(1e3), with_zeroed(-7.0));
+
+    let confirm = |y: &Col<f64>, k: &[usize], args: ConfirmatoryArgs, cov: bool| {
+        let out = pls1_confirmatory_test(
+            ConfirmatoryTestInput::Raw {
+                x: x.as_ref(),
+                y: y.as_ref(),
+                k: Some(k),
+                weights: Some(w.as_ref()),
+                covariates: cov.then(|| z.as_ref()),
+                null_y: None,
+            },
+            ConfirmatoryTestOpts {
+                args,
+                seed: Some(31),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{args:?} k={k:?}: {e:?}"));
+        let stats: Vec<(usize, u64, u64)> = out
+            .pvalues_by_k
+            .iter()
+            .map(|(&k, p)| (k, p.to_bits(), out.statistics_by_k[&k].to_bits()))
+            .collect();
+        (out.pvalue.to_bits(), out.statistic.map(f64::to_bits), stats)
+    };
+    let split_exact = ConfirmatoryArgs::SplitExact {
+        n_perm: 199,
+        n_splits: 20,
+    };
+    let cases: [(&[usize], ConfirmatoryArgs, bool); 5] = [
+        (&[1], split_exact, false),
+        (&[1, 2], split_exact, false),
+        (&[1], split_exact, true),
+        (&[1], ConfirmatoryArgs::Score { n_perm: Some(199) }, false),
+        (
+            &[1],
+            ConfirmatoryArgs::SvPerm {
+                n_perm: 199,
+                rotate: false,
+            },
+            false,
+        ),
+    ];
+    for (k, args, cov) in cases {
+        assert_eq!(
+            confirm(&y_extreme, k, args, cov),
+            confirm(&y_other, k, args, cov),
+            "{args:?} k={k:?} covariates={cov}: moved with the zero-weight rows' y"
+        );
+    }
+
+    let sequence = |y: &Col<f64>| {
+        let out = pls1_find_k_sequence(
+            x.as_ref(),
+            y.as_ref(),
+            3,
+            Some(w.as_ref()),
+            None,
+            FindKSequenceOpts {
+                test_method: ConfirmatoryMethod::SplitExact,
+                n_perm: 199,
+                n_splits: 20,
+                seed: Some(31),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let p: Vec<u64> = out.pvalues.iter().map(|v| v.to_bits()).collect();
+        (out.k_star, p)
+    };
+    assert_eq!(sequence(&y_extreme), sequence(&y_other), "find_k_sequence");
+
+    let perm_null = |y: &Col<f64>| {
+        let out = pls1_perm_null(
+            x.as_ref(),
+            y.as_ref(),
+            1,
+            Some(w.as_ref()),
+            None,
+            PermNullOpts {
+                n_perm: 199,
+                ..Default::default()
+            },
+            Some(31),
+        )
+        .unwrap();
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        (bits(&out.beta_perm_mean), bits(&out.beta_perm_sd))
+    };
+    assert_eq!(perm_null(&y_extreme), perm_null(&y_other), "pls1_perm_null");
 }

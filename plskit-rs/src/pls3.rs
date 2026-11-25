@@ -32,18 +32,14 @@ pub struct Pls3FitOpts {
     /// The returned `x_mean` / `x_scale` are then the identity moments
     /// (0 / 1), matching what `pls1_fit` records on the same branch.
     ///
-    /// **Scale contract.** Same failure mode as
-    /// [`FitOpts::pre_standardized`](crate::fit::FitOpts::pre_standardized)
-    /// (see the "Scale contract" paragraph of its doc comment), deliberately
-    /// reused here. When `pre_standardized_x=true`, `pls3_fit` compares
-    /// every `σ` of `X̃'Ỹ` against the fixed `SIGMA_FLOOR = 1e-14` absolute
-    /// threshold (as well as a floor relative to `‖X̃‖_F·‖Ỹ‖_F`, which is
-    /// scale-free). If the "pre-standardized" X
-    /// passed in is not genuinely close to zero-mean / unit-variance, that
-    /// threshold can silently truncate `k_used` below the requested `k`
-    /// instead of erroring. Unlike `pls1_fit`, PLS3 has no `check_n_eff`-equivalent
-    /// opt-in to turn truncation into a hard error (out of scope for this
-    /// family) — callers passing `pre_standardized_x=true` must ensure the
+    /// **Scale contract.** `pls3_fit` compares every `σ` of `X̃'Ỹ` with the
+    /// fixed `SIGMA_FLOOR = 1e-14` and with a floor relative to
+    /// `‖X̃‖_F·‖Ỹ‖_F`, which is scale-free. A flagged block whose largest
+    /// entry is outside `[2^-20, 2^20]` is divided by a power of two near
+    /// that entry and the fit is mapped back, so a block's scale does not
+    /// cut components. Unlike `pls1_fit`, which returns `InvalidInput` when a
+    /// `pre_standardized` fit truncates below `k`, PLS3 has no such guard (out of
+    /// scope for this family): callers passing `pre_standardized_x=true` must ensure the
     /// inputs are genuinely standardized.
     pub pre_standardized_x: bool,
     /// Skip Y centering/scaling; same contract as `pre_standardized_x`.
@@ -157,9 +153,10 @@ impl Pls3Model {
     /// - `PlsKitError::ShapeMismatch` when `r` is not `(k_used, k_used)`, or
     ///   when `u_saliences`, `v_saliences`, `x_scores`, `y_scores` or
     ///   `singular_values` disagree with `k_used`
-    /// - `PlsKitError::InvalidInput` when `k_used` is 0, `r` has non-finite
-    ///   entries, the model's saliences, scores or singular values are
-    ///   non-finite, or `r` is not orthogonal
+    /// - `PlsKitError::NonFiniteInput` when `r` or the model's saliences,
+    ///   scores or singular values hold a NaN or an infinity
+    /// - `PlsKitError::InvalidInput` when `k_used` is 0 or `r` is not
+    ///   orthogonal
     pub fn rotated(&self, r: MatRef<'_, f64>) -> PlsKitResult<(Pls3Model, Mat<f64>)> {
         let k = self.k_used;
         let counts = [
@@ -187,7 +184,7 @@ impl Pls3Model {
             return Err(PlsKitError::InvalidInput("model has k_used = 0".into()));
         }
         if !r.is_all_finite() {
-            return Err(PlsKitError::InvalidInput("R has non-finite values".into()));
+            return Err(PlsKitError::NonFiniteInput);
         }
         let finite = self.u_saliences.as_ref().is_all_finite()
             && self.v_saliences.as_ref().is_all_finite()
@@ -195,9 +192,7 @@ impl Pls3Model {
             && self.y_scores.as_ref().is_all_finite()
             && self.singular_values.as_ref().is_all_finite();
         if !finite {
-            return Err(PlsKitError::InvalidInput(
-                "model has non-finite values in U, V, the scores or singular_values".into(),
-            ));
+            return Err(PlsKitError::NonFiniteInput);
         }
         let defect = orthonormality_defect(r);
         if defect > ORTHO_TOL {
@@ -1053,11 +1048,12 @@ fn spls3_component(
     // σ = u'Av on the current (deflated) A. Formed through matmul rather
     // than a hand-rolled double loop so the reduction order matches the
     // rest of the crate.
-    // Mathematically this equals `nv`, the norm computed at the end of the
-    // last sweep (u'Av = u'(A'u)'... = ‖A'u‖ once v = A'u/‖A'u‖). It is
-    // recomputed anyway: the three reductions have different shapes and
-    // disagree in the last bits, and σ is both an output and the deflation
-    // coefficient below, so the two are not interchangeable here.
+    // Mathematically σ = ‖sel(A'u)‖, the norm `fit::select_and_normalize`
+    // returns on the last v step (its `nv`): u'Av = (A'u)'v = ‖sel(A'u)‖
+    // once v = sel(A'u)/‖sel(A'u)‖. It is recomputed anyway: the three
+    // reductions have different shapes and disagree in the last bits, and σ
+    // is both an output and the deflation coefficient below, so the two are
+    // not interchangeable here.
     let mut av: Col<f64> = Col::<f64>::zeros(p);
     matmul(
         av.as_mut().as_mat_mut(),
@@ -1288,10 +1284,11 @@ fn sparse_component_loop(
         // ordered, so this is a stopping heuristic matched to the dense
         // path's shape, not a proof that nothing further exists.
         //
-        // Defensive, and deliberately untested: σ = u'Av equals the last
-        // sweep's `nv` in exact arithmetic, and `nv < SIGMA_FLOOR` has
-        // already taken the dust exit in `spls3_component`, so this fires
-        // only when σ rounds under the floor while `nv` sits on it.
+        // Defensive, and deliberately untested: σ = u'Av equals `nv`, the
+        // norm `fit::select_and_normalize` returns on the last v step, in
+        // exact arithmetic, and `nv < SIGMA_FLOOR` has already taken the
+        // dust exit in `spls3_component`, so this fires only when σ rounds
+        // under the floor while `nv` sits on it.
         if c.sigma < SIGMA_FLOOR {
             break;
         }
@@ -1402,6 +1399,7 @@ pub fn plssvd_fit(
 
 /// Which score block [`pls3_transform`] should produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransformWhich {
     /// Project new X only.
     XScores,
@@ -1616,6 +1614,53 @@ mod tests {
             if j == 0 { f[i] + noise } else { noise }
         });
         (x, y)
+    }
+
+    /// Both blocks standardized and then times `2^-27`, both flags set: each
+    /// block is divided by a power of two first, so `SIGMA_FLOOR` does not
+    /// cut the components. The fit keeps the unscaled fit's components, with
+    /// the saliences bit for bit and `σ` and the scores times the powers of
+    /// two.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn pls3_small_pre_standardized_blocks_keep_their_components() {
+        use crate::test_support::{assert_bits_eq, assert_mat_bits_eq, col_vals, mat_vals};
+        let (x, y) = shared_factor_data(20, 10, 3, 31);
+        let xs = crate::linalg::standardize(x.as_ref()).0;
+        let ys = crate::linalg::standardize(y.as_ref()).0;
+        let s = 2f64.powi(-27);
+        let times = |m: &Mat<f64>| Mat::<f64>::from_fn(m.nrows(), m.ncols(), |i, j| m[(i, j)] * s);
+        let opts = Pls3FitOpts {
+            pre_standardized_x: true,
+            pre_standardized_y: true,
+            ..Pls3FitOpts::default()
+        };
+        let a = pls3_fit(xs.as_ref(), ys.as_ref(), 2, None, opts).unwrap();
+        assert_eq!(a.k_used, 2, "premise: the unscaled fit keeps 2 components");
+        assert!(
+            a.singular_values[0] * s * s < 1e-14,
+            "premise: σ₁ of the scaled blocks is under SIGMA_FLOOR"
+        );
+        let b = pls3_fit(times(&xs).as_ref(), times(&ys).as_ref(), 2, None, opts).unwrap();
+        assert_eq!(b.k_used, a.k_used, "k_used");
+        assert_mat_bits_eq(b.u_saliences.as_ref(), a.u_saliences.as_ref(), "u");
+        assert_mat_bits_eq(b.v_saliences.as_ref(), a.v_saliences.as_ref(), "v");
+        let scaled = |v: Vec<f64>, f: f64| v.iter().map(|e| e * f).collect::<Vec<_>>();
+        assert_bits_eq(
+            &col_vals(b.singular_values.as_ref()),
+            &scaled(col_vals(a.singular_values.as_ref()), s * s),
+            "σ",
+        );
+        assert_bits_eq(
+            &mat_vals(b.x_scores.as_ref()),
+            &scaled(mat_vals(a.x_scores.as_ref()), s),
+            "x_scores",
+        );
+        assert_bits_eq(
+            &mat_vals(b.y_scores.as_ref()),
+            &scaled(mat_vals(a.y_scores.as_ref()), s),
+            "y_scores",
+        );
     }
 
     fn varimax_r(u: &Mat<f64>) -> Mat<f64> {
@@ -1838,30 +1883,30 @@ mod tests {
         let mut nan = r.clone();
         nan[(0, 0)] = f64::NAN;
         let res = m.rotated(nan.as_ref());
-        assert!(matches!(res, Err(PlsKitError::InvalidInput(_))), "{res:?}");
+        assert!(matches!(res, Err(PlsKitError::NonFiniteInput)), "{res:?}");
         let scaled = Mat::<f64>::from_fn(3, 3, |i, j| 2.0 * r[(i, j)]);
         let res = m.rotated(scaled.as_ref());
         assert!(matches!(res, Err(PlsKitError::InvalidInput(_))), "{res:?}");
 
-        let invalid = |b: &Pls3Model| {
+        let non_finite = |b: &Pls3Model| {
             let res = b.rotated(r.as_ref());
-            assert!(matches!(res, Err(PlsKitError::InvalidInput(_))), "{res:?}");
+            assert!(matches!(res, Err(PlsKitError::NonFiniteInput)), "{res:?}");
         };
         let mut b = m.clone();
         b.u_saliences[(0, 0)] = f64::NAN;
-        invalid(&b);
+        non_finite(&b);
         let mut b = m.clone();
         b.v_saliences[(0, 0)] = f64::NAN;
-        invalid(&b);
+        non_finite(&b);
         let mut b = m.clone();
         b.x_scores[(0, 0)] = f64::NAN;
-        invalid(&b);
+        non_finite(&b);
         let mut b = m.clone();
         b.y_scores[(0, 0)] = f64::INFINITY;
-        invalid(&b);
+        non_finite(&b);
         let mut b = m.clone();
         b.singular_values[0] = f64::NAN;
-        invalid(&b);
+        non_finite(&b);
     }
 
     #[test]
@@ -2582,11 +2627,12 @@ mod tests {
         // absolute break fires).
         //
         // The absolute `c.sigma < SIGMA_FLOOR` break in `spls3_fit` is not
-        // exercised by any test on purpose: σ = u'Av equals the last sweep's
-        // `nv` in exact arithmetic, and `nv < SIGMA_FLOOR` already takes the
-        // dust exit, so that break fires only when σ rounds under the floor
-        // while `nv` sits on it. An input that hits it is a bit-searched
-        // one-ulp coincidence that faer's per-platform kernels can undo.
+        // exercised by any test on purpose: σ = u'Av equals `nv`, the norm
+        // `fit::select_and_normalize` returns on the last v step, in exact
+        // arithmetic, and `nv < SIGMA_FLOOR` already takes the dust exit, so
+        // that break fires only when σ rounds under the floor while `nv`
+        // sits on it. An input that hits it is a bit-searched one-ulp
+        // coincidence that faer's per-platform kernels can undo.
         let (k, keep_x, keep_y) = (2, 1, 2);
         let (x, y, opts) = identity_x_with_cross_cov(&two_block_cross_cov(1e6, 1e-11));
         let m = spls3_fit(x.as_ref(), y.as_ref(), k, keep_x, keep_y, None, opts).unwrap();
@@ -2818,7 +2864,7 @@ mod tests {
         let m1 = crate::fit::pls1_fit(
             x.as_ref(),
             y1.col(0),
-            crate::fit::KSpec::Fixed(1),
+            1,
             None,
             None,
             crate::fit::FitOpts::default(),

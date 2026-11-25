@@ -98,14 +98,7 @@ span X), every singular value is rounding noise and the fit returns
 policy `pls1_fit` follows: at `q = 1` the two families return the same
 `k_used` on such input.
 
-**Mis-scaled pre-standardized blocks.** With `pre_standardized_X=True` (or
-`_Y`), the engine takes your word that the block is zero-mean and
-unit-variance. The relative floor does not care about scale, but the
-absolute one does: if the block is on a much smaller scale, real
-components can fall under `1e-14` and `k_used` silently comes back below
-`k` instead of raising an error. PLS3 has no option to turn this
-truncation into an error. If you pass a `pre_standardized_*` flag, make
-sure the block really is standardized.
+**Mis-scaled pre-standardized blocks.** A block passed with `pre_standardized_X=True` (or `_Y`) whose largest entry is outside `2^-20 .. 2^20` is divided by a power of two before the fit, and the fit is mapped back, so its scale does not cut components. The flag still asserts centred columns on a common scale: the division is one power of two for the whole block.
 
 ## Observation weights are refused
 

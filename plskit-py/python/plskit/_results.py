@@ -111,13 +111,16 @@ class ConfirmatoryTestResult:
     # Stable rank of X as the split_nb auto-gate read it (standardized once
     # over all rows, or only centred under pre_standardized).
     # Not None on an explicit "split_nb" request (whether the gate fired or
-    # not, and also under args={"force": True}), and on a PLS1 "auto"
+    # not; None under args={"force": True}), and on a PLS1 "auto"
     # request with one k that reached the stable-rank check (p > 4, n_eff above 1000 at k=1
     # without keep, at least 250 otherwise, and, at k=1 without keep, p <= 100*n); None otherwise, and on every
     # pls3_confirmatory_test "auto" request.
     stable_rank: float | None = None
     ci: ConfirmatoryCI | None = None
     n_covariates: int | None = None  # rank([1, Z]) - 1; None without covariates
+    n_failed_splits: int | None = None  # splits left out (a zero-weight half) or with held-out r exactly 0 at the largest k; None unless split_exact / split_nb
+    n_failed_perms: int | None = None   # null statistics that are not finite, each counted as an exceedance; None when n_perm is None
+    n_failed_folds: int | None = None   # raw_perm folds left out for a side of zero total weight; None for every other method
 
 
 @dataclass(frozen=True)
@@ -134,10 +137,13 @@ class FindKOptimalResult:
     # Stable rank of X as the sequence-level auto-gate read it (standardized
     # once over all rows, or only centred under pre_standardized). Same
     # meaning as on ConfirmatoryTestResult: not None whenever
-    # "split_nb" was the REQUESTED diagnostic, fired or not, including under
+    # "split_nb" was the REQUESTED diagnostic, fired or not, except under
     # args={"force": True}. None otherwise, and None when no diagnostic ran.
     stable_rank: float | None = None
     n_covariates: int | None = None  # rank([1, Z]) - 1; None without covariates
+    n_failed_folds: int | None = None          # CV folds with a non-finite held-out R² at some candidate or no validation spread; None for "bic"
+    n_failed_splits: list[int] | None = None   # per diagnostic step that ran, its ConfirmatoryTestResult.n_failed_splits; None unless split_exact / split_nb
+    n_failed_perms: list[int] | None = None    # per diagnostic step that ran, its ConfirmatoryTestResult.n_failed_perms; None unless raw_perm / split_exact
 
 
 @dataclass(frozen=True)
@@ -149,11 +155,13 @@ class FindKSequenceResult:
     seed: int
     n_eff: float = float("nan")
     # As on ConfirmatoryTestResult: not None on an explicit "split_nb"
-    # request, and on an "auto" request that reached the stable-rank check
+    # request without force, and on an "auto" request that reached the stable-rank check
     # (p > 4, n_eff above 1000 without keep, at least 250 with it, and
     # p <= 100*n without keep); None otherwise.
     stable_rank: float | None = None
     n_covariates: int | None = None  # rank([1, Z]) - 1; None without covariates
+    n_failed_splits: list[int] | None = None   # per step that ran, its ConfirmatoryTestResult.n_failed_splits; None unless split_exact / split_nb
+    n_failed_perms: list[int] | None = None    # per step that ran, its ConfirmatoryTestResult.n_failed_perms; None unless raw_perm / split_exact
 
 
 @dataclass(frozen=True)
@@ -175,6 +183,7 @@ class FindKeepOptimalResult:
     seed: int
     n_eff: float = float("nan")
     n_covariates: int | None = None  # rank([1, Z]) - 1; None without covariates
+    n_failed_folds: int = 0   # CV folds with a non-finite held-out R² at some keep or no validation spread
 
 
 @dataclass(frozen=True)
@@ -195,10 +204,11 @@ class PermNullResult:
     beta_ref: np.ndarray            # shape (D,); full-data β
     beta_perm_mean: np.ndarray      # shape (D,); ≈ 0 under H0
     beta_perm_sd: np.ndarray        # shape (D,); SD of β under permuted y
-    beta_perm_z: np.ndarray         # shape (D,); signed = β_ref / β_perm_sd
+    beta_perm_z: np.ndarray         # shape (D,); signed z = β_ref / β_perm_sd per coordinate; NaN where the SD is not above `√ε · max(|β_ref|, |β_perm_mean|)` (no spread, or spread at the rounding level of β), and for a column of X whose entries are all equal
     beta_perm_matrix: np.ndarray | None  # shape (n_perm, D) when return_perm_matrix=True
     n_eff: float = float("nan")
     n_covariates: int | None = None  # rank([1, Z]) - 1; None without covariates
+    n_failed_perms: int = 0   # permutation rows with at least one non-finite entry; such entries are left out of beta_perm_mean / beta_perm_sd
 
 
 @dataclass(frozen=True)
@@ -223,7 +233,7 @@ class GramMatrixResult:
     Pass it as ``gram=`` to `pls1_confirmatory_test`, `pls3_confirmatory_test`
     and `pls1_perm_alpha` in place of `X`.
     """
-    gram: np.ndarray        # shape (n, n); X̃ @ X̃.T, X̃ = X centred over all rows and divided by its column SDs (population), or only centred under pre_standardized (X past 2**±256 first divided by a power of two)
+    gram: np.ndarray        # shape (n, n); X̃ @ X̃.T, X̃ = X centred over all rows and divided by its column SDs (population), or only centred under pre_standardized (X past 2**±256 first divided by a power of two; the calls that take it rescale it by a power of four near their absolute floors and map back)
     n_features: int         # columns of X, constant columns included
     pre_standardized: bool  # whether X was read as given (only centred)
 
@@ -240,6 +250,18 @@ class GramMatrixResult:
         idx = np.asarray(rows)
         n = self.gram.shape[0]
         if idx.ndim != 1 or (idx.size and idx.dtype.kind not in "iu"):
+            # Python integers past int64 make an object array; they are row
+            # numbers out of range, not a wrong type, checked after the count.
+            if idx.ndim == 1 and all(type(v) is int for v in idx.tolist()):
+                if idx.size < 2:
+                    raise PlsKitError(
+                        f"rows must hold at least 2 rows, got {idx.size}",
+                        code="invalid_argument",
+                    )
+                raise PlsKitError(
+                    f"rows must index the {n} rows of the Gram matrix",
+                    code="invalid_argument",
+                )
             raise PlsKitError(
                 "rows must be a 1-D sequence of integer row indices",
                 code="invalid_argument",

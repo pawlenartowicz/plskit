@@ -5,10 +5,9 @@
 //!
 //! Input conversion runs in two passes. `collect` walks the Python value
 //! and keeps a read guard for every array; `convert` then borrows array
-//! data from those guards. `X` and `X_new` reach the engine without a copy
-//! when C- or Fortran-contiguous; any other matrix does so only when
-//! Fortran-contiguous, and a C-ordered one is copied column-major. The
-//! guards live until `call` returns.
+//! data from those guards. A matrix reaches the engine without a copy when
+//! Fortran-contiguous; any other layout is copied column-major. The guards
+//! live until `call` returns.
 
 // The pyo3::create_exception! macro generates a struct without doc comments;
 // the workspace `missing_docs = "warn"` lint can't be applied to macro output.
@@ -17,7 +16,6 @@
 use std::borrow::Cow;
 use std::panic::{self, AssertUnwindSafe};
 
-use faer::MatRef;
 use numpy::ndarray::Array2;
 use numpy::{
     IntoPyArray, PyArray1, PyArray2, PyArrayDescrMethods, PyArrayMethods, PyReadonlyArray1,
@@ -333,21 +331,13 @@ fn collect<'py>(obj: &Bound<'py, PyAny>, path: &str, depth: usize) -> PyResult<N
     Err(unsupported(obj, path))
 }
 
-/// A 2-D array as a `MatF64`. With `any_layout` (`X` and `X_new`, which
-/// every engine entry reads in either layout) a C-contiguous array is
-/// viewed row-major in place. Otherwise only a Fortran-contiguous array is
-/// read in place: column-major is the layout of the copy, so a view and a
-/// copy of the same values give the same bits, which a row-major view of a
-/// C-ordered `Y` does not.
-fn matrix<'a>(
-    arr: &'a PyReadonlyArray2<'_, f64>,
-    any_layout: bool,
-) -> Result<MatF64<'a>, BindError> {
+/// A 2-D array as a `MatF64`. An F-contiguous array (aligned, as `array`
+/// requires) is read in place; every other layout is copied column-major.
+/// So every layout of the same values reaches the engine as the same
+/// column-major matrix and gives the same bits.
+fn matrix<'a>(arr: &'a PyReadonlyArray2<'_, f64>) -> Result<MatF64<'a>, BindError> {
     let (nrows, ncols) = (arr.shape()[0], arr.shape()[1]);
     match arr.as_slice() {
-        Ok(s) if any_layout && arr.is_c_contiguous() => Ok(MatF64::Borrowed(
-            MatRef::from_row_major_slice(s, nrows, ncols),
-        )),
         Ok(s) if arr.is_fortran_contiguous() => MatF64::from_col_major(s, nrows, ncols),
         Ok(s) => Ok(MatF64::from_row_major(s, nrows, ncols)),
         // Not contiguous: the transposed view iterates column-major.
@@ -360,36 +350,30 @@ fn matrix<'a>(
 }
 
 /// Second pass: a [`Node`] as a `Value` that borrows from its guards.
-fn convert<'a>(node: &'a Node<'_>, any_layout: bool) -> Result<Value<'a>, BindError> {
+fn convert<'a>(node: &'a Node<'_>) -> Result<Value<'a>, BindError> {
     Ok(match node {
         Node::Leaf(v) => v.clone(),
         Node::Vec(arr) => Value::Vec(match arr.as_slice() {
             Ok(s) => VecF64::Borrowed(s),
             Err(_) => VecF64::Owned(arr.as_array().iter().copied().collect()),
         }),
-        Node::Mat(arr) => Value::Mat(matrix(arr, any_layout)?),
+        Node::Mat(arr) => Value::Mat(matrix(arr)?),
         Node::Record { type_name, fields } => {
             let mut rec = type_name.as_deref().map_or_else(Record::new, Record::typed);
             for (key, child) in fields {
-                rec.push(key, convert(child, false)?)?;
+                rec.push(key, convert(child)?)?;
             }
             Value::Record(rec)
         }
-        Node::List(items) => Value::List(
-            items
-                .iter()
-                .map(|item| convert(item, false))
-                .collect::<Result<_, _>>()?,
-        ),
+        Node::List(items) => Value::List(items.iter().map(convert).collect::<Result<_, _>>()?),
     })
 }
 
-/// The record `plskit_bind::call` takes. `X` and `X_new` are the only
-/// parameter names the seam knows: they select the matrix layout rule.
+/// The record `plskit_bind::call` takes.
 fn to_record<'a>(arguments: &'a [(String, Node<'_>)]) -> Result<Record<'a>, BindError> {
     let mut rec = Record::new();
     for (name, node) in arguments {
-        rec.push(name, convert(node, name == "X" || name == "X_new")?)?;
+        rec.push(name, convert(node)?)?;
     }
     Ok(rec)
 }

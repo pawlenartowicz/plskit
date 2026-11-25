@@ -9,8 +9,7 @@ use crate::inputs::Inputs;
 use crate::methods;
 use crate::value::{MatF64, Outcome, Value, VecF64};
 
-/// `pls3_fit` / `plssvd_fit(X, Y, k=1, *, pre_standardized_X=False,
-/// pre_standardized_Y=False, weights=None)`.
+/// `pls3_fit` and `plssvd_fit`.
 pub(crate) fn pls3_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = pls3_y(inp)?;
@@ -34,8 +33,6 @@ pub(crate) fn pls3_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     Ok(done(convert::pls3_model(&m, Value::Null)))
 }
 
-/// `spls3_fit(X, Y, k, keep_X, keep_Y, *, pre_standardized_X=False,
-/// pre_standardized_Y=False, max_iter=None, tol=None, weights=None)`.
 pub(crate) fn spls3_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = pls3_y(inp)?;
@@ -68,8 +65,7 @@ pub(crate) fn spls3_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     Ok(done(convert::pls3_model(&m, Value::Null)))
 }
 
-/// `pls3_transform` / `plssvd_transform(model, X_new=None, Y_new=None, *,
-/// which="both")`.
+/// `pls3_transform` and `plssvd_transform`.
 pub(crate) fn pls3_transform(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let model = inp.take("model");
     let x_new = inp.opt_mat("X_new")?;

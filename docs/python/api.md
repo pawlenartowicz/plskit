@@ -14,42 +14,14 @@ a function or read its result.
 
 - To cap the thread count, set `PLSKIT_NUM_THREADS`; see
   [Threads](../concepts/threads.md). To bound the memory of the resampling
-  loops (default 2 GiB), set `PLSKIT_MEMORY_BUDGET`; see
+  loops (default 4 GiB), set `PLSKIT_MEMORY_BUDGET`; see
   [Memory budget](../concepts/threads.md#memory-budget).
 - **Method-axis dispatch** uses `(method, args)`: a `method` string +
   an `args` dict for method-specific kwargs. Cross-cutting kwargs
   (`seed`, `weights`, `pre_standardized`) live at the top level.
 - Type hints use NumPy notation: `np.ndarray, shape (n, d)` is a 2-D
   array; `np.ndarray, shape (n,)` is a 1-D vector.
-- **Arrays** are read as `float64` in their own memory layout. A C- or
-  F-ordered `float64` `X` reaches the engine without a copy, and so does
-  an F-ordered `float64` `Y`, `Y_new`, `W`, `L` or `gram` (a C-ordered one is
-  copied column-major, which gives the same bits as F order); other
-  dtypes are converted, and a strided view is copied by the extension.
-  Results for two layouts of the same values agree to rounding (the
-  corpus tolerance, `1e-10 + 1e-14·|value|`), not bit for bit, and a
-  fit sitting on its truncation floor can stop at a different
-  `k_used`. The last bits move with the layout in `pls1_fit`,
-  `spls1_fit`, `pls1_predict`,
-  `pls1_confirmatory_test` with `ci`, `pls1_find_k_optimal` and
-  `spls1_find_k_optimal` with every selector, `spls1_find_keep_optimal`,
-  the `selection` of `pls1_fit(k="optimal")` and, without
-  `pre_standardized_X`, in `pls3_fit`, `plssvd_fit` and `spls3_fit`; the
-  others currently give C and F order the same bits. In the selections the
-  `cv_scores`, `cv_scores_se` and `bic_scores` move, and a near tie (two
-  BIC scores, two CV scores at the best, or for `r2_se` a CV score at the
-  one-SE threshold) or a fit at its truncation floor can select another
-  `k_star` or `keep_star`. Where the first component
-  sits at its truncation floor, the selections by cross-validation
-  (`selector="r2_se"` or `"r2_max"`, and `spls1_find_keep_optimal`) can
-  return `k_star` (or `keep_star`) 0 on one layout and not on the other.
-  The same array in the same layout gives byte-identical results on every
-  run and at every thread count. An array numpy cannot read as real
-  numbers (strings, numeric strings included, ragged nested lists,
-  complex values, non-numeric objects) raises
-  `PlsKitError(code="invalid_argument")`; booleans (read as `1`/`0`) and
-  integers are converted, and `None` or `pd.NA` in an object array reads
-  as NaN (`non_finite_input`).
+- **Arrays** are read as `float64` in their own memory layout. An aligned F-ordered (column-major) `float64` array reaches the engine without a copy. Every other 2-D input (C-ordered, strided, or of another dtype, which is converted first) is copied column-major, so every layout of the same values gives the same bits. A C-ordered `X` therefore costs one copy of `8·n·p` bytes during the call, outside `PLSKIT_MEMORY_BUDGET`; to avoid it on repeated calls, pass `np.asfortranarray(X)` once. The same array in the same layout gives byte-identical results on every run and at every thread count. An array numpy cannot read as real numbers (strings, numeric strings included, ragged nested lists, complex values, non-numeric objects) raises `PlsKitError(code="invalid_argument")`; booleans (read as `1`/`0`) and integers are converted, and `None` or `pd.NA` in an object array reads as NaN (`non_finite_input`).
 - Per-function entry format:
 
   ```
@@ -90,13 +62,7 @@ rows raises `code="invalid_argument"` (an empty column has no mean).
 **function:** `pls1_fit`
 **need:** the PLS1 (NIPALS) model: single continuous `y`, asymmetric X→y predictive.
 **arguments:** `X`, `y`, `k` (`int | "optimal" | "sequence"`, default `"optimal"`: choose `k` with `pls1_find_k_optimal`, selector `r2_se` unless `find_k_args` says otherwise, and fit at its `k_star`)
-**options:** `k_max` (default `None`; with `k` a string, `None` means `min(9, p)`, lowered until the weights' Kish effective sample size and the covariates' residual degrees of freedom both stay at least `k_max + 1`, never below 1; an explicit `k_max` is not lowered by the effective sample size or the residual degrees of freedom; must be `None` when `k` is an int); `find_k_args`
-(dict of method-specific kwargs forwarded to `pls1_find_k_optimal` /
-`pls1_find_k_sequence`; allowed keys are the public params of the
-target function except `seed` / `pre_standardized` / `weights` / `covariates`,
-which live on `pls1_fit` itself, and `verbose`, which the selection
-run does not take;
-unknown keys raise `PlsKitError(code="invalid_args")`);
+**options:** `k_max` (default `None`; with `k` a string, `None` means `min(9, p)`, lowered until the weights' Kish effective sample size and the covariates' residual degrees of freedom both stay at least `k_max + 1`, never below 1; an explicit `k_max` is not lowered by the effective sample size or the residual degrees of freedom; must be `None` when `k` is an int); `find_k_args` (dict of method-specific kwargs forwarded to `pls1_find_k_optimal` / `pls1_find_k_sequence`; allowed keys: `selector`, `diagnostic` and `args` for `k="optimal"`; `test_method`, `alpha` and `args` for `k="sequence"`; unknown keys raise `PlsKitError(code="invalid_args")` listing the allowed set);
 `pre_standardized` (bool, default `False`); `seed` (`int | None`, forwarded to the k-selection call when `k` is a string; without it, the default call included, the CV folds are drawn at random, so the chosen `k` can differ between runs, and `seed=model.selection_result.seed` repeats a run);
 `weights` (length-`n` vector; default `None` = uniform);
 `covariates` (`(n, p_Z)` matrix or length-`n` vector; default `None`; see
@@ -148,11 +114,11 @@ data; optionally a per-component same-sample diagnostic.
 **options:** `selector` (`"r2_se"` | `"r2_max"` | `"bic"`; default
 `"r2_se"`); `diagnostic` (`"raw_perm"` | `"split_nb"` | `"split_exact"`
 | `"e"` | `None`; default `None` — `None` disables the diagnostic;
-`"score"` is rejected, has no sequential variant); `args` (dict —
+`"score"`, `"sv_perm"` and `"auto"` are rejected); `args` (dict —
 selector key `n_folds`; diagnostic keys `n_perm` for `raw_perm` /
 `split_exact`, `n_splits` for `split_nb` / `split_exact`, `force` for
 `split_nb`. Diagnostic keys require `diagnostic` to be set.);
-`pre_standardized`; `weights`; `covariates` (see [Covariates](../concepts/PLS1/covariates.md); the selection runs on the adjusted data, and a `diagnostic` follows the `pls1_confirmatory_test` rules for covariates); `seed`; `verbose`.
+`pre_standardized`; `weights`; `covariates` (see [Covariates](../concepts/PLS1/covariates.md); the selection runs on the adjusted data, and a `diagnostic` follows the `pls1_confirmatory_test` rules for covariates); `seed`.
 The CV folds of `"r2_se"` / `"r2_max"` read `X` divided once by its column scales over all rows (as given under `pre_standardized`) and only centre each part; `y` is standardized in each fold.
 `diagnostic="raw_perm"` uses a fixed 5-fold CV at every step and needs
 `n > 5`; below that it raises `invalid_argument` (leave-one-out would
@@ -161,19 +127,7 @@ otherwise make every validation fold a single row). For `selector`
 is capped at `n - 2` and floored at 2; at very small `n` (`n <= 2`) that
 floor pushes the effective fold count back up to `n`, which is the same
 leave-one-out degeneracy and also raises `invalid_argument`.
-**returns:** `FindKOptimalResult`. A `"split_nb"` diagnostic the
-auto-gate flags reroutes to `"split_exact"`; `result.diagnostic` says
-so and Python warns. Pass `args={'force': True}` to run `"split_nb"`
-anyway. When `diagnostic` is set, the `pvalues` and `diagnostic`
-fields are populated; selection and the diagnostic reuse the same
-data, so the pvalues are a robustness check, not honest inference. The `diagnostic=` parameter name (vs.
-`test_method=` on `pls1_find_k_sequence`) is the structural signal —
-same enum, different inferential weight. When the full-data fit
-cannot extract a first component (`y` constant, or orthogonal to `X` up
-to rounding), every selector returns `k_star=0` with an empty score
-dict, matching `pls1_find_k_sequence` (for `r2_se` / `r2_max` only at
-`n >= 3`, since those CV selectors reject `n <= 2` first; `bic` is
-unaffected).
+**returns:** `FindKOptimalResult`. A `"split_nb"` diagnostic the auto-gate flags reroutes to `"split_exact"`; `result.diagnostic` says so and Python warns with `PlsKitRerouted`. Pass `args={'force': True}` to run `"split_nb"` anyway. When `diagnostic` is set, the `pvalues` and `diagnostic` fields are populated; selection and the diagnostic reuse the same data, so the pvalues are a robustness check, not honest inference. The `diagnostic=` parameter name (vs. `test_method=` on `pls1_find_k_sequence`) is the structural signal — same enum, different inferential weight. When the full-data fit cannot extract a first component (`y` constant, or orthogonal to `X` up to rounding), every selector returns `k_star=0` with an empty score dict, matching `pls1_find_k_sequence` (for `r2_se` / `r2_max` only at `n >= 3`, since those CV selectors reject `n <= 2` first; `bic` is unaffected).
 **BIC caveat:** `selector="bic"` counts each component as one degree
 of freedom. On wide `X` (p much larger than n) the effective degrees of
 freedom of a PLS fit are much larger, so BIC tends to select `k_max`;
@@ -187,9 +141,8 @@ components carry signal at α?" with exact FWER control.
 `"split_exact"` | `"e"` | `"auto"`; default `"auto"`, see
 [`test_method="auto"`](../concepts/PLS1/inference.md#test_methodauto)); `args` (dict of
 method-specific kwargs: `n_perm`, `n_splits`, and `force` for
-`split_nb`; `"auto"` takes `n_perm` and `n_splits`, not `force`); `alpha` (default `None`: the engine default,
-`0.05`); `pre_standardized`; `weights`; `covariates` (see [Covariates](../concepts/PLS1/covariates.md)); `seed`;
-`verbose`.
+`split_nb`; `"auto"` takes `n_perm` and `n_splits`, not `force`); `alpha` (in `(0, 1)`; default `None`: the engine default,
+`0.05`); `pre_standardized`; `weights`; `covariates` (see [Covariates](../concepts/PLS1/covariates.md)); `seed`.
 `X` and `y` are standardized once over all rows (used as given under `pre_standardized`) and each test only centres its parts; steps from 2 on test the deflated residual on the scale step 1 used.
 `test_method="raw_perm"` uses a
 fixed 5-fold CV at every step and needs `n > 5`; below that it raises
@@ -246,7 +199,7 @@ axis.
 **arguments:** `X`, `y`, `k` (fixed component count for every fit in the
 sweep)
 **options:** `args` (`{'n_folds': int}`, default 5); `seed`;
-`verbose`; `weights`; `covariates` (see [Covariates](../concepts/PLS1/covariates.md)). `n_folds` is capped at
+`weights`; `covariates` (see [Covariates](../concepts/PLS1/covariates.md)). `n_folds` is capped at
 `n - 2` and floored at 2; at very small `n` (`n <= 2`) that floor pushes
 the effective fold count back up to `n`, leave-one-out (every validation
 fold a single row), which raises `invalid_argument`.
@@ -271,11 +224,10 @@ dense function bit-exactly.
 **options:** `selector` (`"r2_se"` | `"r2_max"` | `"bic"`; default
 `"r2_se"`); `diagnostic` (`"raw_perm"` | `"split_nb"` | `"split_exact"`
 | `"e"` | `None`; default `None`); `args`; `pre_standardized`; `seed`;
-`verbose`; `weights`; `covariates` (see [Covariates](../concepts/PLS1/covariates.md)).
+`weights`; `covariates` (see [Covariates](../concepts/PLS1/covariates.md)).
 **Dense-BIC caveat:** `selector='bic'` reuses the dense complexity
 penalty — it does not account for `keep`; under sparsity this
 under-penalizes added components and biases the selected k upward.
-Deliberate v1 simplification.
 **returns:** `FindKOptimalResult` (same type as `pls1_find_k_optimal`).
 
 **function:** `spls1_find_k_sequence`
@@ -287,8 +239,8 @@ test. `keep = n_features` reproduces the dense function bit-exactly.
 **options:** `test_method` (`"raw_perm"` | `"split_nb"` | `"split_exact"`
 | `"e"` | `"auto"`; default `"auto"`; `"raw_perm"` uses a fixed 5-fold CV at
 every step and needs `n > 5`, else `invalid_argument`); `alpha`
-(default `None`: the engine default, `0.05`); `args`;
-`pre_standardized`; `seed`; `verbose`; `weights`; `covariates` (see [Covariates](../concepts/PLS1/covariates.md)).
+(in `(0, 1)`; default `None`: the engine default, `0.05`); `args`;
+`pre_standardized`; `seed`; `weights`; `covariates` (see [Covariates](../concepts/PLS1/covariates.md)).
 **returns:** `FindKSequenceResult` (same type as `pls1_find_k_sequence`).
 
 ---
@@ -376,7 +328,7 @@ rather than replace each other — `score` wins on diffuse signal across
 many directions, `split_exact` wins on signal concentrated in a few
 directions; reporting both side-by-side is the canonical pattern.
 
-**`split_nb` auto-gate.** `split_nb`'s Fisher-z correction is exact at ρ = ½ and drifts off level when `n_eff < 25` or the stable rank of `X` as the tests read it (standardized once over all rows, or only centred under `pre_standardized`) is `< 3`. Since stable rank can never exceed the column count, `X` with 4 columns or fewer is rerouted outright, without consulting the computed rank. An explicit `split_nb` request on a design that trips any of these reroutes to `split_exact` at `n_perm=1000`; `result.test_method` reports `"split_exact"` and Python raises a `UserWarning`. Pass `args={'force': True}` to run `split_nb` anyway. Call `split_nb_gate` (§3.2) to ask the same question in advance.
+**`split_nb` auto-gate.** `split_nb`'s Fisher-z correction is exact at ρ = ½ and drifts off level when `n_eff < 25` or the stable rank of `X` as the tests read it (standardized once over all rows, or only centred under `pre_standardized`) is `< 3`. Since stable rank can never exceed the column count, `X` with 4 columns or fewer is rerouted outright, without consulting the computed rank. An explicit `split_nb` request on a design that trips any of these reroutes to `split_exact` at `n_perm=1000`; `result.test_method` reports `"split_exact"` and Python raises `PlsKitRerouted` (a `UserWarning`). Pass `args={'force': True}` to run `split_nb` anyway. Call `split_nb_gate` (§3.2) to ask the same question in advance.
 
 **function:** `pls1_confirmatory_test`
 **need:** omnibus null test over a set of `k` fixed before the test sees `y` ("is there signal at some `k` in the set?"), or at one `k`. Optionally runs an independent resampling pass for rotation-invariant CIs.
@@ -394,21 +346,21 @@ directions; reporting both side-by-side is the canonical pattern.
   β), on an n-out-of-n bootstrap resample (for leverage) and on a
   random half of the rows (for `holdout_corr`, scored on the other
   half). Refused (`invalid_argument`) when `m` or `⌊n/2⌋` is below `k + 2`, or below `k + 1 + rank([1, Z])` with covariates.
-  `ci` is beta, not to be trusted yet. It scales X and y once over all rows, as the held-out tests do (not under `pre_standardized`). Its `holdout_corr` half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do. The β and leverage resamples are centred with their own means too, except under `pre_standardized`, where they use X and y as given, as the reference fit does.
+  `ci` is beta, not to be trusted yet. Its β subsamples and `holdout_corr` half splits scale X and y once over all rows, as the held-out tests do (not under `pre_standardized`). The half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do, and each β subsample is centred with its own means. Each leverage resample is standardized on its own (weighted) means and SDs, as the full-data fit is. Under `pre_standardized` the β and leverage resamples use X and y as given, as the reference fit does.
 - `n_boot` (int, default `None`: the engine default, `1000`; must be
   `≥ 100`); `m_rate` (float, default `None`: the engine default, `0.7`;
   `0.5 < m_rate < 0.95`); `level` (float, default `None`: the engine
   default, `0.95`; `0.5 ≤ level ≤ 0.99`); `max_skip_rate` (float,
   default `None`: the engine default, `0.01`); `max_failure_rate`
-  (float, default `None`: the engine default, `0.01`). Every one of
-  these five is inert when `ci=False`. When `ci=True`, `n_boot`,
+  (float, default `None`: the engine default, `0.01`). With `ci=False`,
+  passing any of these five raises `invalid_argument`. When `ci=True`, `n_boot`,
   `m_rate` and `level` are recorded on `result.ci` as the resolved
   value, not `None`; `max_skip_rate` and `max_failure_rate` are not
   carried on any result field (they only gate the resampling loop).
-- `pre_standardized`; `weights`; `seed`; `verbose`.
+- `pre_standardized`; `weights`; `seed`.
 - `covariates` (`(n, p_Z)` matrix or length-`n` vector; see [Covariates](../concepts/PLS1/covariates.md)): `split_exact` and `raw_perm` take it, with Freedman–Lane null columns (approximately exact, not exact). `"auto"` runs `split_exact`. `split_nb`, `score` without `n_perm` and `e` raise `invalid_argument`; `score` with `n_perm` and `sv_perm` take it, with Freedman–Lane null columns. With `gram`, the call adjusts the Gram matrix itself and Z has one row per row of `gram`. The result records `n_covariates`.
 - `null_y` (`(n, B)` matrix): your own null outcomes, on the scale of `y`, for `split_exact` only (the default `"auto"` is refused: pass `test_method="split_exact"`). The statistic of each column, on the same splits as `y`, makes the null distribution, and `p = (#{null ≥ observed} + 1) / (B + 1)` at one `k`; over a set the reported p is the min-p p over the set (per-k p in `pvalues_by_k`). An `n_perm` in `args` raises `invalid_args`; `covariates` and any other method raise `invalid_argument`. It works with `gram`.
-- `gram` (keyword-only, in place of `X`; passing both raises `invalid_argument`): a `GramMatrixResult` from `gram_matrix` (§3.6), or an `(n, n)` array `X̃ @ X̃.T` with `n_features` (required with an array, refused with the result, which records it). Every method runs from it: the call centres it over its rows, so `result.subset(rows)` is accepted, and checks its entries (a non-negative diagonal, symmetry and the Cauchy-Schwarz bound; `invalid_input` otherwise). On `gram_matrix(X, pre_standardized=flag)` the result equals the call on `X` with `pre_standardized=flag` at the same seed, to rounding (except as §3.6 says for a pre-standardized `X` beyond `2**±256`); `"score"` reads the centred matrix, so it equals the call on `X` centred over all rows. `pre_standardized` is read from the result (`True` with it raises `invalid_argument`) and says how `X̃` was scaled with an array. `weights`, `ci=True` and `k` above 10 raise `invalid_argument` with `gram`.
+- `gram` (keyword-only, in place of `X`; passing both raises `invalid_argument`): a `GramMatrixResult` from `gram_matrix` (§3.6), or an `(n, n)` array `X̃ @ X̃.T` with `n_features` (required with an array, refused with the result, which records it). Every method runs from it: the call centres it over its rows, so `result.subset(rows)` is accepted, and checks its entries (a non-negative diagonal, symmetry and the Cauchy-Schwarz bound; `invalid_input` otherwise). On `gram_matrix(X, pre_standardized=flag)` the result equals the call on `X` with `pre_standardized=flag` at the same seed, to rounding (except as §3.6 says for a pre-standardized `X` beyond `2**±256`). With `pre_standardized=True` this holds when `X` meets the flag's contract (columns centred and scaled): on an `X` whose columns are not centred the two forms can take different floor decisions, so the number of components the inner fits keep and the p-value can differ. `"score"` reads the centred matrix, so it equals the call on `X` centred over all rows. `pre_standardized` is read from the result (`True` with it raises `invalid_argument`) and says how `X̃` was scaled with an array. Under it (and with `covariates`), the call divides the matrix by a power of four internally when its largest diagonal entry (after centring) is outside `2**-40 .. 2**40`, where the absolute floors would cut real components, and maps its outputs back to the scale of the matrix given. `weights`, `ci=True` and `k` above 10 raise `invalid_argument` with `gram`.
 
 **args by method:**
 
@@ -444,7 +396,7 @@ bootstrap leverage CI (`leverage_ci_lower` / `leverage_ci_upper` /
 `leverage_se`, bounds clamped to `[0, 1]`), and per-coordinate β CIs
 (`beta_ci_lower` / `beta_ci_upper` / `beta_se`). The per-coordinate
 `beta_ci_*` arrays are a regression-style diagnostic. `holdout_corr` is
-the composite readout (beta, see `ci` above). `beta_sign_z` is `|β_ref[j]| / beta_se[j]`
+the composite readout (beta, see `ci` above). Its interval covers a little above its level (about 1.1 to 1.2 times the needed width in the coverage grid) when the noise of the held-out rows dominates, and is conservative, up to about twice as wide as needed, when the noise of the training fit dominates (typically at high signal). `beta_sign_z` is `|β_ref[j]| / beta_se[j]`
 with a subsampling SE corrected for sampling without replacement and
 for the shrinkage of subsample fits, and `beta_ci_*` is built from the
 same corrected replicates; at `k=1` it is roughly half-normal
@@ -488,7 +440,7 @@ fMRI / NIRS scale.
 `1000`; must be `≥ 100`, recorded on `result.n_perm` as the resolved
 value, not `None`); `return_perm_matrix`
 (bool, default `False`); `pre_standardized`; `seed`;
-`verbose`; `weights`; `covariates` (null columns are Freedman–Lane residuals and the β maps are computed on the adjusted X; see [Covariates](../concepts/PLS1/covariates.md)).
+`weights`; `covariates` (null columns are Freedman–Lane residuals and the β maps are computed on the adjusted X; see [Covariates](../concepts/PLS1/covariates.md)).
 At `k = 1` the per-variable null is that of `X_jᵀy` (see
 [results](results.md), `PermNullResult`); at `k ≥ 2` it is a refit on
 permuted `y`, which keeps its level but loses power on collinear `X`.
@@ -512,7 +464,7 @@ design and never `"sv_perm"`, see
 `"split_nb"`: `{"n_splits": int, "force": bool}`, defaults `32` / `False`;
 `"sv_perm"`: `{"n_perm": int, "rotate": bool}`, defaults `1000` / `False`;
 `"auto"`: `{"n_perm": int, "n_splits": int}`, defaults `1000` / `32`);
-`pre_standardized_X`; `pre_standardized_Y`; `seed`; `verbose`. Each block is
+`pre_standardized_X`; `pre_standardized_Y`; `seed`. Each block is
 standardized once over all rows and each split only centres its halves with
 the training means; `pre_standardized_X` / `pre_standardized_Y` skip that one
 standardization for their block, which is then used as given.
@@ -521,7 +473,7 @@ standardization for their block, which is then used as given.
 `pls1_confirmatory_test` returns. `ci` is always `None` here and `n_eff`
 equals `n`. `rho_hat` is populated for `split_nb` only (and only when the
 test half has at least 4 rows); `stable_rank` is set on an explicit `split_nb`
-request and `None` otherwise. `n_perm` is `None` for `split_nb`.
+request without `force` and `None` otherwise. `n_perm` is `None` for `split_nb`.
 
 Concepts: [PLS3 inference](../concepts/PLS3/inference.md).
 
@@ -550,20 +502,14 @@ exact. The between-split correction behind the p-value is
 PLS1's Nadeau-Bengio heuristic, not derived for two blocks, so its transfer
 is supported empirically only. Measured on Gaussian, heavy-tailed,
 low-stable-rank and real two-block designs, `split_nb` came out
-conservative, never anti-conservative.
+conservative except on X of low effective rank (up to 6.2% at α = 0.05).
 
 **Clustered rows.** Neither method is valid when rows are clustered (e.g.
 repeated scans per subject): random splits leak subjects across the halves,
 and permuting Y rows individually breaks within-subject exchangeability.
 Blocked splits and blocked permutation are not implemented.
 
-**The `split_nb` auto-gate.** Identical to `pls1_confirmatory_test`'s and
-applied to X only: a flagged design on an explicit `split_nb` request runs
-`split_exact` instead (`result.test_method` says so, and Python warns), and `args={"force": True}`
-overrides it. Y never enters the gate — `q` is small by construction in
-PLSC, so a stable-rank floor on Y would flag almost every design. The gate
-thresholds are the PLS1 ones and have not been re-derived for a two-block
-design.
+**The `split_nb` auto-gate.** Identical to `pls1_confirmatory_test`'s and applied to X only: a flagged design on an explicit `split_nb` request runs `split_exact` instead (`result.test_method` says so, and Python warns with `PlsKitRerouted`), and `args={"force": True}` overrides it. Y never enters the gate — `q` is small by construction in PLSC, so a stable-rank floor on Y would flag almost every design. The gate thresholds are the PLS1 ones and have not been re-derived for a two-block design.
 
 **`sv_perm`.** A permutation test on `d₁`, the largest singular value of `X̃ᵀỸ`, in-sample, at `k=1` only. The rows of Y are shuffled against X `n_perm` times and `p = (1 + #{null ≥ observed}) / (n_perm + 1)`. `rotate=True` Procrustes-rotates each permuted singular vector set to the observed one before its singular value is taken (McIntosh and Lobaugh 2004); `rotate` is a PLS3 option, and `result.rotate` records which one ran. On the same permutations, rotation can only lower the LV1 p-value, so a rotated p is not exact. `covariates` and `keep_x` / `keep_y` below full are refused. plskit's `d₁` is `n` times the first singular value pyls reports. See [PLS3 inference](../concepts/PLS3/inference.md#sv_perm).
 
@@ -641,10 +587,10 @@ not bit for bit.
 ### 3.6 The held-out Gram matrix
 
 **function:** `gram_matrix`
-**need:** the all-row Gram matrix of `X` that the held-out tests compute, once, to reuse it across calls on the same `X` (several outcomes, or row subsamples).
+**need:** the all-row Gram matrix of `X` that the held-out tests compute (under `pre_standardized`, outside `2**-20 .. 2**20`, the tests' matrix differs from this one by a power of four), once, to reuse it across calls on the same `X` (several outcomes, or row subsamples).
 **arguments:** `X` (at least 2 rows)
 **options:** `pre_standardized` (default `False`: `X` is centred over all rows and divided by its column standard deviations, population, as `preprocess` scales them; with it, `X` is read as given and only centred, as the tests read it under the same flag).
-**returns:** `GramMatrixResult`: `gram` `(n, n)` (`X̃ @ X̃.T` for that `X̃`, the bits the held-out tests compute from `X` without weights), `n_features` (the column count of `X`) and `pre_standardized`. `result.subset(rows)` returns a `GramMatrixResult` holding `gram[rows][:, rows]` with the same `n_features` and `pre_standardized`: the Gram matrix of those rows of `X̃`, which keep the all-row centring and scale. Either is passed as `gram=` to `pls1_confirmatory_test` (§3.1), `pls3_confirmatory_test` (§3.4) and `pls1_perm_alpha` (§3.5) in place of `X`. `rows` are row indices in the order given (0-based in Python; R and Julia take 1-based row numbers), and a repeated row is repeated.
+**returns:** `GramMatrixResult`: `gram` `(n, n)` (`X̃ @ X̃.T` for that `X̃`, the bits the held-out tests compute from `X` without weights, except under `pre_standardized` when the largest entry of `X` is outside `2**-20 .. 2**20`: the tests then divide `X` by a power of two near that entry, and their matrix differs from this one by a power of four), `n_features` (the column count of `X`) and `pre_standardized`. `result.subset(rows)` returns a `GramMatrixResult` holding `gram[rows][:, rows]` with the same `n_features` and `pre_standardized`: the Gram matrix of those rows of `X̃`, which keep the all-row centring and scale. Either is passed as `gram=` to `pls1_confirmatory_test` (§3.1), `pls3_confirmatory_test` (§3.4) and `pls1_perm_alpha` (§3.5) in place of `X`. `rows` are row indices in the order given (0-based in Python; R and Julia take 1-based row numbers), and a repeated row is repeated.
 Compute it once and pass it to every call on the same `X`, or take a row subsample from it:
 
 ```python
@@ -678,7 +624,7 @@ half = pls1_confirmatory_test(; gram=PLSKit.subset(g, rows), y=y[rows])
 
 Fewer than 2 rows of `X` raise `invalid_argument`; NaN or infinity in `X` raises `non_finite_input`; `X` with no columns raises `invalid_input`. `subset` raises `invalid_argument` when `rows` is not a 1-D sequence of integer row indices of `gram`, or holds fewer than 2 entries. There is no `weights`.
 
-Under `pre_standardized`, an `X` whose largest entry is outside `2**-256 .. 2**256` gives the Gram matrix of `X` divided by a power of two `c` near that entry, and the result does not keep `c`: p-values computed from it are those of `X`, but the `"score"` statistic of `pls1_confirmatory_test` and the `alpha` of `pls1_perm_alpha` are those of `X / c`.
+Under `pre_standardized`, an `X` whose largest entry is outside `2**-256 .. 2**256` gives the Gram matrix of `X` divided by a power of two `c` near that entry, and the result does not keep `c`: p-values computed from it are those of `X`, but the `"score"` and `"sv_perm"` statistics of `pls1_confirmatory_test`, the `"sv_perm"` statistic of `pls3_confirmatory_test` and the `alpha` of `pls1_perm_alpha` are those of `X / c`. The tests and `pls1_perm_alpha` that take the result divide it by a power of four internally when its largest diagonal entry (after centring) is outside `2**-40 .. 2**40`, where their absolute floors would cut real components, and map their outputs back to the scale of the matrix given.
 
 **function:** `gram_matrix_blocks`
 **need:** the `gram_matrix` of an `X` too wide to hold at once, given as column blocks (for example read from disk one block at a time).
@@ -693,7 +639,7 @@ blocks = (X[:, a:b] for a, b in zip(cuts, cuts[1:]))        # a generator: one b
 g = plskit.gram_matrix_blocks(blocks)
 ```
 
-No blocks raises `invalid_input`; a block with a different row count from the first raises `shape_mismatch`; any other problem in a block is raised as `gram_matrix` raises it. The result equals `gram_matrix` on the joined `X` to rounding, not bit for bit. Under `pre_standardized` each block is scaled on its own, so an `X` beyond `2**-256 .. 2**256` must use `gram_matrix` on the whole `X`.
+No blocks raises `invalid_input`; a block with a different row count from the first raises `shape_mismatch`; any other problem in a block is raised as `gram_matrix` raises it. The result equals `gram_matrix` on the joined `X` to rounding, not bit for bit. Under `pre_standardized` each block is scaled on its own, so an `X` beyond `2**-256 .. 2**256` must use `gram_matrix` on the whole `X`. The calls that take the result rescale it themselves, by a power of four, when its scale would reach their absolute floors, and map their outputs back.
 
 ---
 
@@ -710,7 +656,7 @@ No blocks raises `invalid_input`; a block with a different row count from the fi
 | `X` | matrix, optional | the data that gives the target `L = Xs W`. For a `FactorsResult` it must be the rows the factors came from. For a `PLS3Result` it selects the fit's stored `x_scores` as the target |
 | `covariates` | matrix or vector, optional | removed from the target: `M_Z Xs W`. Required with `X` for a `FactorsResult` made with covariates, refused for one made without them and for a `PLS3Result`, optional for a matrix. Refused without `X` |
 | `method` | `"varimax"` | the only method; default `"varimax"` |
-| `args` | dict | varimax settings: `max_iter` (default `50`), `tol` (default `1e-8`), `kaiser_normalize` (default `True`) |
+| `args` | dict | varimax settings: `max_iter` (default `50`), `tol` (default `1e-8`, relative: the sweeps stop when the varimax criterion rises by at most `tol` times its value), `kaiser_normalize` (default `True`) |
 | `L` | matrix, optional | a target of your own |
 | `pre_standardized` | bool or `None` | how `X` is standardized. `None` follows the `FactorsResult`, or is `False` for a matrix. Refused for a `PLS3Result` |
 
@@ -718,7 +664,7 @@ With neither `X` nor `L`, the target is the weights themselves (`W`, or `U` of a
 
 **returns:** `RotateResult` for a matrix. For a `FactorsResult` or a `PLS3Result`, a new result of the same type with `rotation_spec` set. See [results](results.md).
 
-**refused:** `X` together with `L`, `pre_standardized` without `X`, and `pre_standardized` with a `PLS3Result` raise `invalid_argument`. A result that already has a `rotation_spec` raises `already_rotated`. A `PLS1Result` raises `invalid_argument`: use `profiles`, or `rotate(m.W, ...)` for the weights alone. `X` whose column count is not the row count of `W` raises `shape_mismatch`, and `X` with other rows than a `PLS3Result` was fit on raises `invalid_input`. A sparse `PLS3Result` raises a `UserWarning`.
+**refused:** `X` together with `L`, `pre_standardized` without `X`, and `pre_standardized` with a `PLS3Result` raise `invalid_argument`. A result that already has a `rotation_spec` raises `already_rotated`. A `PLS1Result` raises `invalid_argument`: use `profiles`, or `rotate(m.W, ...)` for the weights alone. `X` whose column count is not the row count of `W` raises `shape_mismatch`, and `X` with other rows than a `PLS3Result` was fit on raises `invalid_input`. A sparse `PLS3Result` raises `PlsKitRotatedSparse` (a `UserWarning`).
 
 ### 4.2 PCA basis
 
@@ -727,7 +673,7 @@ With neither `X` nor `L`, the target is the weights themselves (`W`, or `U` of a
 **arguments:** `X`
 **options:** `pre_standardized` (default `False`; if `True`, `X` is used as given).
 
-It keeps the components with singular value `s > 1e-10 · s[0]`, so `V` has one column per unit of rank of `X`. Column signs are arbitrary, and `factors` does not depend on them. Non-finite values in `X`, every column of `X` constant (unless `pre_standardized`), or all singular values zero raise `invalid_input`.
+It keeps the components with singular value `s > 1e-10 · s[0]`, so `V` has one column per unit of rank of `X`. Column signs are arbitrary, and `factors` does not depend on them. Non-finite values in `X` raise `non_finite_input`. Every column of `X` constant (unless `pre_standardized`), or all singular values zero, raise `invalid_input`.
 
 **returns:** `PCABasisResult`. See [results](results.md).
 
@@ -755,7 +701,7 @@ When `coef` has a part outside the row space of the standardized kept columns of
 
 **returns:** `FactorsResult`, not rotated, in block order. See [results](results.md).
 
-**refused:** these raise `invalid_input`: non-finite values in `X` or `coef`; every kept column of `X` constant (unless `pre_standardized`); `n` outside `[1, K]`; a `coef` that is all zero; a `PLS1Result` with `weights`, with no component, or fitted on a different number of rows than `X` has; a block with no signal, where the message names the block's components. A `PLS3Result` raises `invalid_argument`. A `coef` whose length differs from the columns of `X` raises `shape_mismatch`.
+**refused:** non-finite values in `X` or `coef` raise `non_finite_input`. `n` outside `[1, K]` raises `invalid_argument`. These raise `invalid_input`: every kept column of `X` constant (unless `pre_standardized`); a `coef` that is all zero; a `PLS1Result` with `weights`, with no component, or fitted on a different number of rows than `X` has; a block with no signal, where the message names the block's components. A `PLS3Result` raises `invalid_argument`. A `coef` whose length differs from the columns of `X` raises `shape_mismatch`.
 
 ### 4.4 Choosing n
 
@@ -775,7 +721,7 @@ Parallel analysis on standardized `X` gives `K_star`, the number of leading eige
 
 **returns:** `ProfilesFindNResult`. See [results](results.md).
 
-**refused:** fewer than two usable folds, or `n_max` below 1, raises `invalid_input`. Folds with a constant training column, or with no finite held-out R², are not used and are counted in `n_failed_folds`.
+**refused:** fewer than two usable folds raises `invalid_input`; `n_max` below 1 raises `invalid_argument`. Folds with a constant training column, or with no finite held-out R², are not used and are counted in `n_failed_folds`.
 
 ### 4.5 Profiles
 
@@ -852,8 +798,9 @@ See [results](results.md) for full field shapes:
   differs from the row count of `X` or `y` / `Y`). A NaN or infinite
   weight raises `code="non_finite_input"` instead.
 - `PlsKitResamplingDegenerate` (`code="resampling_degenerate"`): the
-  resampling loop skipped more than `max_skip_rate` of its draws. Carries
-  `skipped`, `total`, `skip_rate`, `threshold`.
+  resampling loop skipped more than `max_skip_rate` of its draws, or no draw was left after skips and failures, or every draw left has a NaN holdout correlation. Carries `skipped`, `total`, `skip_rate`, `threshold`.
+- `PlsKitRerouted` (a `UserWarning`): an explicit `split_nb` request (or `split_nb` diagnostic or sequence test) that the auto-gate rerouted; carries `requested`, `actual`, `n_perm`, `stable_rank` and `n_eff` (the last three can be `None`).
+- `PlsKitRotatedSparse` (a `UserWarning`): `rotate` got a sparse `PLS3Result`.
 
 **`invalid_args` vs. `invalid_argument`.** Two different codes, easy to
 confuse:
@@ -866,14 +813,16 @@ confuse:
   `force`). Raised when the extension parses the dict for the chosen
   `method`. A key set to `None` takes the engine default, like an absent
   key.
-- `invalid_argument`: a top-level argument has a bad value (for example
-  `k="optimal"` without `k_max`, a count such as `k`, `n_boot` or
+- `invalid_argument`: an argument or an `args` value has a bad value that the engine checks (for example
+  a count such as `k`, `n_boot` or
   `n_perm` that is negative or not a whole number, `k = 0` or
   `k_max = 0` at every function that takes one ("k must be >= 1",
   "k_max must be >= 1"), a keep-count of `0`, an array argument numpy
   cannot read as real numbers (strings, ragged nested lists, complex
   values), a `seed` outside
-  `[0, 2^64)`, a non-number `level`, a flag such as `ci` or `verbose`
+  `[0, 2^64)`, a non-number `level`, an `alpha` outside `(0, 1)`, an
+  `args` value the bind accepts but the engine refuses (varimax
+  `max_iter = 0`, `tol` negative or not finite), a flag such as `ci`
   that is not a bool, a method name that is not a string, an `args` /
   `find_k_args` / `find_n_args` that is not a dict, an array with the
   wrong number of dimensions, a `model` that is not the result type the
@@ -888,18 +837,18 @@ confuse:
 | `dimension_mismatch` | `X` and `y` have different row counts |
 | `k_exceeds_max` | requested `k` (or `k_max`) is above the maximum for this data; `k = 0` is `invalid_argument` |
 | `non_finite_input` | an input contains NaN or infinity |
-| `convergence_failure` | reserved; no current code path raises it |
-| `invalid_argument` | bad value for a top-level argument (see above) |
+| `invalid_argument` | an argument or an `args` value has a bad value that the engine checks (see above) |
 | `invalid_args` | bad method-specific args dict (see above) |
-| `invalid_input` | invalid input content (shape, finiteness, a `rotate` loadings matrix with no columns, ...) |
+| `invalid_input` | invalid input content (shape, a `rotate` loadings matrix with no columns, a permutation test whose observed statistic is not finite, ...) |
 | `shape_mismatch` | two arrays have incompatible shapes |
 | `rotation_method_not_implemented` | the requested rotation method does not exist in this version |
 | `already_rotated` | `rotate` was called on a `PLS3Result` or `FactorsResult` that already has a `rotation_spec` |
-| `invalid_weights` | raised as `PlsKitInvalidWeights` |
+| `invalid_weights` | raised as `PlsKitInvalidWeights`; reason `insufficient_effective_n` also comes from the cross-validated selection and from weighted `raw_perm` when all the positive weight sits in one fold, from weighted `split_exact` and `split_nb` when fewer than 2 splits have weight on both halves, and from weighted `e` when a half of its one split has zero total weight |
 | `resampling_degenerate` | raised as `PlsKitResamplingDegenerate` |
 | `resample_failure_rate_exceeded` | the `ci=True` resampling pass had more failed replicates than `max_failure_rate` allows |
-| `perm_null_degenerate` | more than half the permutation null fits failed |
+| `perm_null_degenerate` | more than half the permutation null statistics are not finite |
 | `insufficient_residual_df` | with `covariates`, `n - rank([1, Z])` is below `k + 1`, with `n` the rows with positive weight: too few rows are left after the covariates are removed |
+| `memory_budget` | the call does not fit `PLSKIT_MEMORY_BUDGET`; the message names a budget to try (at least that much is needed) |
 | `internal` | a plskit bug; please report it |
 | `sequence_no_rejection` | `pls1_fit(k="sequence")` found no component at `alpha` (raised by the engine: `FindKSequenceOutput::k_to_fit`) |
 | `optimal_no_component` | `pls1_fit(k="optimal")` got `k_star=0`, no first component can be extracted (raised by the engine: `FindKOptimalOutput::k_to_fit`) |

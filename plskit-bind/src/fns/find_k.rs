@@ -119,7 +119,6 @@ fn common(inp: &mut Inputs<'_>) -> Result<Common, BindError> {
     Ok(Common {
         pre_standardized: inp.bool("pre_standardized")?,
         seed: inp.seed()?,
-        verbose: inp.bool("verbose")?,
     })
 }
 
@@ -193,43 +192,34 @@ fn sequence_entry(inp: &mut Inputs<'_>, sparse: bool) -> Result<Outcome, BindErr
     Ok(with_warning(convert::find_k_sequence(&r), warning))
 }
 
-/// `pls1_find_k_optimal(X, y, k_max, *, selector="r2_se", diagnostic=None,
-/// args=None, pre_standardized=False, seed=None,
-/// verbose=False, weights=None, covariates=None)`.
 pub(crate) fn pls1_find_k_optimal(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     optimal_entry(inp, false)
 }
 
-/// `spls1_find_k_optimal(X, y, k_max, keep, *, ...)`: as above at a fixed keep.
+/// `pls1_find_k_optimal` at a fixed `keep`.
 pub(crate) fn spls1_find_k_optimal(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     optimal_entry(inp, true)
 }
 
-/// `pls1_find_k_sequence(X, y, k_max, *, test_method="auto", alpha=None,
-/// args=None, pre_standardized=False, seed=None,
-/// verbose=False, weights=None, covariates=None)`.
 pub(crate) fn pls1_find_k_sequence(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     sequence_entry(inp, false)
 }
 
-/// `spls1_find_k_sequence(X, y, k_max, keep, *, ...)`.
+/// `pls1_find_k_sequence` at a fixed `keep`.
 pub(crate) fn spls1_find_k_sequence(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     sequence_entry(inp, true)
 }
 
-/// `spls1_find_keep_optimal(X, y, k, *, args=None, seed=None,
-/// verbose=False, weights=None, covariates=None)`.
 pub(crate) fn spls1_find_keep_optimal(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = inp.vec("y")?;
     let k = inp.usize("k")?;
     let args = inp.opt_record("args")?;
     let seed = inp.seed()?;
-    let verbose = inp.bool("verbose")?;
     let w = inp.opt_vec("weights")?;
     let z = inp.opt_covariates()?;
     inp.finish()?;
-    let opts = methods::keep_optimal_opts(args.as_ref(), seed, verbose)?;
+    let opts = methods::keep_optimal_opts(args.as_ref(), seed)?;
     let r = engine(plskit::spls1_find_keep_optimal(
         x.as_mat(),
         y.as_col(),
@@ -308,12 +298,12 @@ pub(crate) fn select_k(
     let c = Common {
         pre_standardized,
         seed,
-        verbose: false,
     };
     match mode {
         "optimal" => {
             check_find_k_args(&fk, &["selector", "diagnostic", "args"])?;
-            let selector = fk_str(&fk, "selector")?.unwrap_or_else(|| "r2_se".to_owned());
+            let selector = fk_str(&fk, "selector")?
+                .unwrap_or_else(|| crate::registry::OPTIMAL_SELECTOR.to_owned());
             let diagnostic = fk_str(&fk, "diagnostic")?;
             let (r, w) = optimal_core(
                 d,
@@ -333,7 +323,8 @@ pub(crate) fn select_k(
         }
         "sequence" => {
             check_find_k_args(&fk, &["test_method", "alpha", "args"])?;
-            let test_method = fk_str(&fk, "test_method")?.unwrap_or_else(|| "auto".to_owned());
+            let test_method = fk_str(&fk, "test_method")?
+                .unwrap_or_else(|| crate::registry::SEQUENCE_TEST_METHOD.to_owned());
             let alpha = fk_f64(&fk, "alpha")?;
             let (r, w) =
                 sequence_core(d, k_max, None, &test_method, alpha, fk_args(&fk)?, &c, true)?;

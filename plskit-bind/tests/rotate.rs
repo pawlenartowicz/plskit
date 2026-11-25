@@ -383,7 +383,7 @@ fn a_zero_component_pls3_is_invalid_input() {
 }
 
 #[test]
-fn a_pls3_result_with_non_finite_values_is_invalid_input() {
+fn a_pls3_result_with_non_finite_values_is_non_finite_input() {
     let (_, m3) = pls3_fit(2);
     let bad = with_field(
         &m3,
@@ -391,7 +391,7 @@ fn a_pls3_result_with_non_finite_values_is_invalid_input() {
         Value::Vec(VecF64::Owned(vec![f64::NAN, 1.0])),
     );
     let e = rotate_err(&bad, vec![]);
-    assert_eq!(e.code, "invalid_input");
+    assert_eq!(e.code, "non_finite_input");
     for key in ["V", "x_scores"] {
         let Value::Mat(m) = field(rec_of(&m3), key) else {
             panic!()
@@ -399,7 +399,7 @@ fn a_pls3_result_with_non_finite_values_is_invalid_input() {
         let mut d = floats(field(rec_of(&m3), key));
         d[0] = f64::NAN;
         let bad = with_field(&m3, key, mat_of(d, m.nrows(), m.ncols()));
-        assert_eq!(rotate_err(&bad, vec![]).code, "invalid_input", "{key}");
+        assert_eq!(rotate_err(&bad, vec![]).code, "non_finite_input", "{key}");
     }
 }
 
@@ -481,16 +481,20 @@ fn the_matrix_form_takes_pre_standardized() {
 }
 
 #[test]
-fn non_finite_x_is_invalid_input_with_either_setting() {
-    let w = field(rec_of(&fit(3)), "W").clone();
+fn non_finite_x_is_non_finite_input_with_either_setting() {
+    let m = fit(3);
+    let w = field(rec_of(&m), "W").clone();
     let (x, _) = data(60, 6, 1);
+    let f = factors_of(&m, &x, 3);
     let mut d = floats(&x);
     d[0] = f64::NAN;
     let bad = mat_of(d, 60, 6);
-    for extra in [vec![], vec![("pre_standardized", Value::Bool(true))]] {
-        let mut f = vec![("X", bad.clone())];
-        f.extend(extra);
-        assert_eq!(rotate_err(&w, f).code, "invalid_input");
+    for first in [&w, &f] {
+        for extra in [vec![], vec![("pre_standardized", Value::Bool(true))]] {
+            let mut fields = vec![("X", bad.clone())];
+            fields.extend(extra);
+            assert_eq!(rotate_err(first, fields).code, "non_finite_input");
+        }
     }
 }
 

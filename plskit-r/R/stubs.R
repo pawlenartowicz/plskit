@@ -10,6 +10,11 @@
 #'
 #' @param X,Y,weights See the canonical reference.
 #' @return A list of class `c("preprocess_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' preprocess(X, y)
 #' @export
 preprocess <- function(
   X = NULL,
@@ -31,6 +36,12 @@ preprocess <- function(
 #'
 #' @param X,y,k,k_max,find_k_args,pre_standardized,seed,weights,covariates See the canonical reference.
 #' @return A list of class `c("pls1_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' fit <- pls1_fit(X, y, k = 3, seed = 1)
+#' fit
 #' @export
 pls1_fit <- function(
   X,
@@ -64,6 +75,12 @@ pls1_fit <- function(
 #'
 #' @param model,X_new,covariates See the canonical reference.
 #' @return A numeric vector.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' fit <- pls1_fit(X, y, k = 3)
+#' pls1_predict(fit, X[1:5, ])
 #' @export
 pls1_predict <- function(
   model,
@@ -83,8 +100,13 @@ pls1_predict <- function(
 #' documented once, in the canonical reference: section
 #' "2.3 K-selection" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k_max,selector,diagnostic,args,pre_standardized,seed,verbose,weights,covariates See the canonical reference.
+#' @param X,y,k_max,selector,diagnostic,args,pre_standardized,seed,weights,covariates See the canonical reference.
 #' @return A list of class `c("find_k_optimal_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' pls1_find_k_optimal(X, y, k_max = 5, seed = 1)
 #' @export
 pls1_find_k_optimal <- function(
   X,
@@ -95,7 +117,6 @@ pls1_find_k_optimal <- function(
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  verbose = FALSE,
   weights = NULL,
   covariates = NULL
 ) {
@@ -108,7 +129,6 @@ pls1_find_k_optimal <- function(
     args = args,
     pre_standardized = pre_standardized,
     seed = seed,
-    verbose = verbose,
     weights = weights,
     covariates = covariates
   ))
@@ -120,8 +140,13 @@ pls1_find_k_optimal <- function(
 #' documented once, in the canonical reference: section
 #' "2.3 K-selection" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k_max,test_method,alpha,args,pre_standardized,seed,verbose,weights,covariates See the canonical reference.
+#' @param X,y,k_max,test_method,alpha,args,pre_standardized,seed,weights,covariates See the canonical reference.
 #' @return A list of class `c("find_k_sequence_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' pls1_find_k_sequence(X, y, k_max = 4, test_method = "split_exact", args = list(n_perm = 19, n_splits = 5), seed = 1)
 #' @export
 pls1_find_k_sequence <- function(
   X,
@@ -132,7 +157,6 @@ pls1_find_k_sequence <- function(
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  verbose = FALSE,
   weights = NULL,
   covariates = NULL
 ) {
@@ -145,7 +169,6 @@ pls1_find_k_sequence <- function(
     args = args,
     pre_standardized = pre_standardized,
     seed = seed,
-    verbose = verbose,
     weights = weights,
     covariates = covariates
   ))
@@ -159,6 +182,11 @@ pls1_find_k_sequence <- function(
 #'
 #' @param X,y,k,keep,pre_standardized,weights,covariates See the canonical reference.
 #' @return A list of class `c("pls1_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' spls1_fit(X, y, k = 2, keep = 5)
 #' @export
 spls1_fit <- function(
   X,
@@ -186,8 +214,13 @@ spls1_fit <- function(
 #' documented once, in the canonical reference: section
 #' "2b.2 Keep-count tuning" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k,args,seed,verbose,weights,covariates See the canonical reference.
+#' @param X,y,k,args,seed,weights,covariates See the canonical reference.
 #' @return A list of class `c("find_keep_optimal_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' spls1_find_keep_optimal(X, y, k = 2, seed = 1)
 #' @export
 spls1_find_keep_optimal <- function(
   X,
@@ -195,7 +228,6 @@ spls1_find_keep_optimal <- function(
   k,
   args = NULL,
   seed = NULL,
-  verbose = FALSE,
   weights = NULL,
   covariates = NULL
 ) {
@@ -205,7 +237,6 @@ spls1_find_keep_optimal <- function(
     k = k,
     args = args,
     seed = seed,
-    verbose = verbose,
     weights = weights,
     covariates = covariates
   ))
@@ -217,8 +248,13 @@ spls1_find_keep_optimal <- function(
 #' documented once, in the canonical reference: section
 #' "2b.3 K-selection at fixed keep" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k_max,keep,selector,diagnostic,args,pre_standardized,seed,verbose,weights,covariates See the canonical reference.
+#' @param X,y,k_max,keep,selector,diagnostic,args,pre_standardized,seed,weights,covariates See the canonical reference.
 #' @return A list of class `c("find_k_optimal_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' spls1_find_k_optimal(X, y, k_max = 4, keep = 5, seed = 1)
 #' @export
 spls1_find_k_optimal <- function(
   X,
@@ -230,7 +266,6 @@ spls1_find_k_optimal <- function(
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  verbose = FALSE,
   weights = NULL,
   covariates = NULL
 ) {
@@ -244,7 +279,6 @@ spls1_find_k_optimal <- function(
     args = args,
     pre_standardized = pre_standardized,
     seed = seed,
-    verbose = verbose,
     weights = weights,
     covariates = covariates
   ))
@@ -256,8 +290,13 @@ spls1_find_k_optimal <- function(
 #' documented once, in the canonical reference: section
 #' "2b.3 K-selection at fixed keep" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k_max,keep,test_method,alpha,args,pre_standardized,seed,verbose,weights,covariates See the canonical reference.
+#' @param X,y,k_max,keep,test_method,alpha,args,pre_standardized,seed,weights,covariates See the canonical reference.
 #' @return A list of class `c("find_k_sequence_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' spls1_find_k_sequence(X, y, k_max = 4, keep = 5, test_method = "split_exact", args = list(n_perm = 19, n_splits = 5), seed = 1)
 #' @export
 spls1_find_k_sequence <- function(
   X,
@@ -269,7 +308,6 @@ spls1_find_k_sequence <- function(
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  verbose = FALSE,
   weights = NULL,
   covariates = NULL
 ) {
@@ -283,7 +321,6 @@ spls1_find_k_sequence <- function(
     args = args,
     pre_standardized = pre_standardized,
     seed = seed,
-    verbose = verbose,
     weights = weights,
     covariates = covariates
   ))
@@ -297,6 +334,12 @@ spls1_find_k_sequence <- function(
 #'
 #' @param X,Y,k,pre_standardized_X,pre_standardized_Y,weights See the canonical reference.
 #' @return A list of class `c("pls3_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' Y <- cbind(y, y + rnorm(40))
+#' pls3_fit(X, Y, k = 2)
 #' @export
 pls3_fit <- function(
   X,
@@ -324,6 +367,12 @@ pls3_fit <- function(
 #'
 #' @param X,Y,k,pre_standardized_X,pre_standardized_Y,weights See the canonical reference.
 #' @return A list of class `c("pls3_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' Y <- cbind(y, y + rnorm(40))
+#' plssvd_fit(X, Y, k = 2)
 #' @export
 plssvd_fit <- function(
   X,
@@ -351,6 +400,13 @@ plssvd_fit <- function(
 #'
 #' @param model,X_new,Y_new,which See the canonical reference.
 #' @return A list of class `c("pls3_scores", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' Y <- cbind(y, y + rnorm(40))
+#' model <- pls3_fit(X, Y, k = 2)
+#' pls3_transform(model, X_new = X[1:5, ], which = "x_scores")
 #' @export
 pls3_transform <- function(
   model,
@@ -374,6 +430,13 @@ pls3_transform <- function(
 #'
 #' @param model,X_new,Y_new,which See the canonical reference.
 #' @return A list of class `c("pls3_scores", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' Y <- cbind(y, y + rnorm(40))
+#' model <- plssvd_fit(X, Y, k = 2)
+#' plssvd_transform(model, X_new = X[1:5, ], which = "x_scores")
 #' @export
 plssvd_transform <- function(
   model,
@@ -397,6 +460,12 @@ plssvd_transform <- function(
 #'
 #' @param X,Y,k,keep_X,keep_Y,pre_standardized_X,pre_standardized_Y,max_iter,tol,weights See the canonical reference.
 #' @return A list of class `c("pls3_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' Y <- cbind(y, y + rnorm(40))
+#' spls3_fit(X, Y, k = 2, keep_X = 5, keep_Y = 1)
 #' @export
 spls3_fit <- function(
   X,
@@ -430,8 +499,14 @@ spls3_fit <- function(
 #' documented once, in the canonical reference: section
 #' "3.1 Confirmatory omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k,test_method,args,ci,n_boot,m_rate,level,max_failure_rate,pre_standardized,seed,verbose,weights,max_skip_rate,covariates,null_y,gram,n_features See the canonical reference.
+#' @param X,y,k,test_method,args,ci,n_boot,m_rate,level,max_failure_rate,pre_standardized,seed,weights,max_skip_rate,covariates,null_y,gram,n_features See the canonical reference.
 #' @return A list of class `c("confirmatory_test_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' test <- pls1_confirmatory_test(X, y, args = list(n_perm = 19, n_splits = 5), seed = 1)
+#' test$pvalue
 #' @export
 pls1_confirmatory_test <- function(
   X = NULL,
@@ -446,7 +521,6 @@ pls1_confirmatory_test <- function(
   max_failure_rate = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  verbose = FALSE,
   weights = NULL,
   max_skip_rate = NULL,
   covariates = NULL,
@@ -467,7 +541,6 @@ pls1_confirmatory_test <- function(
     max_failure_rate = max_failure_rate,
     pre_standardized = pre_standardized,
     seed = seed,
-    verbose = verbose,
     weights = weights,
     max_skip_rate = max_skip_rate,
     covariates = covariates,
@@ -485,6 +558,11 @@ pls1_confirmatory_test <- function(
 #'
 #' @param X,weights,pre_standardized See the canonical reference.
 #' @return A list of class `c("split_nb_gate_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' split_nb_gate(X)
 #' @export
 split_nb_gate <- function(
   X,
@@ -504,8 +582,13 @@ split_nb_gate <- function(
 #' documented once, in the canonical reference: section
 #' "3.3 Permutation-null engine" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,y,k,n_perm,return_perm_matrix,pre_standardized,seed,verbose,weights,covariates See the canonical reference.
+#' @param X,y,k,n_perm,return_perm_matrix,pre_standardized,seed,weights,covariates See the canonical reference.
 #' @return A list of class `c("perm_null_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' pls1_perm_null(X, y, k = 1, n_perm = 100, seed = 1)
 #' @export
 pls1_perm_null <- function(
   X,
@@ -515,7 +598,6 @@ pls1_perm_null <- function(
   return_perm_matrix = FALSE,
   pre_standardized = FALSE,
   seed = NULL,
-  verbose = FALSE,
   weights = NULL,
   covariates = NULL
 ) {
@@ -527,7 +609,6 @@ pls1_perm_null <- function(
     return_perm_matrix = return_perm_matrix,
     pre_standardized = pre_standardized,
     seed = seed,
-    verbose = verbose,
     weights = weights,
     covariates = covariates
   ))
@@ -539,8 +620,14 @@ pls1_perm_null <- function(
 #' documented once, in the canonical reference: section
 #' "3.4 Confirmatory PLS3 omnibus test" of <https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md>.
 #'
-#' @param X,Y,k,test_method,args,pre_standardized_X,pre_standardized_Y,seed,verbose,gram,n_features See the canonical reference.
+#' @param X,Y,k,test_method,args,pre_standardized_X,pre_standardized_Y,seed,gram,n_features See the canonical reference.
 #' @return A list of class `c("confirmatory_test_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' Y <- cbind(y, y + rnorm(40))
+#' pls3_confirmatory_test(X, Y, k = 1, test_method = "split_exact", args = list(n_perm = 19, n_splits = 5), seed = 1)
 #' @export
 pls3_confirmatory_test <- function(
   X = NULL,
@@ -551,7 +638,6 @@ pls3_confirmatory_test <- function(
   pre_standardized_X = FALSE,
   pre_standardized_Y = FALSE,
   seed = NULL,
-  verbose = FALSE,
   gram = NULL,
   n_features = NULL
 ) {
@@ -564,7 +650,6 @@ pls3_confirmatory_test <- function(
     pre_standardized_X = pre_standardized_X,
     pre_standardized_Y = pre_standardized_Y,
     seed = seed,
-    verbose = verbose,
     gram = gram,
     n_features = n_features
   ))
@@ -578,6 +663,12 @@ pls3_confirmatory_test <- function(
 #'
 #' @param gram,Y,k,n_features See the canonical reference.
 #' @return A list of class `c("perm_alpha_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' g <- gram_matrix(X)
+#' pls1_perm_alpha(g, matrix(y, ncol = 1), k = 2)
 #' @export
 pls1_perm_alpha <- function(
   gram,
@@ -601,6 +692,12 @@ pls1_perm_alpha <- function(
 #'
 #' @param X,pre_standardized See the canonical reference.
 #' @return A list of class `c("gram_matrix_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' g <- gram_matrix(X)
+#' subset(g, 1:25)
 #' @export
 gram_matrix <- function(
   X,
@@ -620,6 +717,12 @@ gram_matrix <- function(
 #'
 #' @param model_or_W,X,method,L,args,pre_standardized,covariates See the canonical reference.
 #' @return A list of class `c("rotate_result", "plskit_result")`, or `c("pls3_result", "plskit_result")`, or `c("factors_result", "plskit_result")`, depending on the input.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' fit <- pls1_fit(X, y, k = 2)
+#' rotate(factors(fit, X, 2L), X)
 #' @export
 rotate <- function(
   model_or_W,
@@ -649,6 +752,12 @@ rotate <- function(
 #'
 #' @param model_or_coef,X,n,pre_standardized,covariates See the canonical reference.
 #' @return A list of class `c("factors_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' fit <- pls1_fit(X, y, k = 2)
+#' factors(fit, X, 2L)
 #' @export
 factors <- function(
   model_or_coef,
@@ -674,6 +783,11 @@ factors <- function(
 #'
 #' @param X,pre_standardized See the canonical reference.
 #' @return A list of class `c("pca_basis_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' pca_basis(X)
 #' @export
 pca_basis <- function(
   X,
@@ -693,6 +807,11 @@ pca_basis <- function(
 #'
 #' @param X,y,k,n_max,args,pre_standardized,seed See the canonical reference.
 #' @return A list of class `c("profiles_find_n_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' profiles_find_n(X, y, k = 2, n_max = 3, seed = 1)
 #' @export
 profiles_find_n <- function(
   X,
@@ -722,6 +841,12 @@ profiles_find_n <- function(
 #'
 #' @param model_or_coef,X,n,rotation,args,pre_standardized See the canonical reference.
 #' @return A list of class `c("profiles_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' fit <- pls1_fit(X, y, k = 2)
+#' profiles(fit, X, 2L)
 #' @export
 profiles <- function(
   model_or_coef,
@@ -749,6 +874,12 @@ profiles <- function(
 #'
 #' @param model,X,y,n_max,rotation,args,find_n_args,seed See the canonical reference.
 #' @return A list of class `c("profiles_search_result", "plskit_result")`.
+#' @examples
+#' set.seed(1)
+#' X <- matrix(rnorm(40 * 20), 40, 20)
+#' y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+#' fit <- pls1_fit(X, y, k = 2)
+#' profiles_search(fit, X, y, n_max = 3, seed = 1)
 #' @export
 profiles_search <- function(
   model,

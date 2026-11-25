@@ -17,7 +17,6 @@ pls1_confirmatory_test(
   max_failure_rate = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  verbose = FALSE,
   weights = NULL,
   max_skip_rate = NULL,
   covariates = NULL,
@@ -27,7 +26,7 @@ pls1_confirmatory_test(
 )
 }
 \arguments{
-\item{X, y, k, test_method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, verbose, weights, max_skip_rate, covariates, null_y, gram, n_features}{See the canonical reference.}
+\item{X, y, k, test_method, args, ci, n_boot, m_rate, level, max_failure_rate, pre_standardized, seed, weights, max_skip_rate, covariates, null_y, gram, n_features}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("confirmatory_test_result", "plskit_result")}.
@@ -36,4 +35,11 @@ A list of class \code{c("confirmatory_test_result", "plskit_result")}.
 R binding of \code{pls1_confirmatory_test}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
 "3.1 Confirmatory omnibus test" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
+}
+\examples{
+set.seed(1)
+X <- matrix(rnorm(40 * 20), 40, 20)
+y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+test <- pls1_confirmatory_test(X, y, args = list(n_perm = 19, n_splits = 5), seed = 1)
+test$pvalue
 }

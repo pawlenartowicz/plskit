@@ -48,8 +48,8 @@ def test_rotate_array_max_iter_reaches_the_engine(max_iter):
 
 
 def test_rotate_array_tol_reaches_the_engine():
-    # With the default tol the second pass leaves R ~3e-5 from I; atol 1e-6
-    # holds only with tol=1e-12.
+    # With the default tol the second pass leaves R ~5e-6 from I; atol 1e-6
+    # holds only with tol=1e-12 (~1e-7).
     W = np.random.default_rng(6).normal(size=(40, 3))
     r1 = plskit.rotate(W, method="varimax", args={"tol": 1e-12})
     r2 = plskit.rotate(r1.W_rot, method="varimax", args={"tol": 1e-12})
@@ -180,7 +180,7 @@ def test_sparse_pls3_warns():
     X, _ = _data()
     Y = X[:, :3] + np.random.default_rng(2).normal(size=(80, 3))
     m3 = plskit.spls3_fit(X, Y, k=2, keep_X=3, keep_Y=2)
-    with pytest.warns(UserWarning, match="spreads its zeros"):
+    with pytest.warns(plskit.PlsKitRotatedSparse, match="spreads its zeros"):
         plskit.rotate(m3, X)
 
 

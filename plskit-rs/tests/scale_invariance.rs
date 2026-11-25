@@ -13,7 +13,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use faer::{Col, Mat};
-use plskit::fit::{FitOpts, KSpec, pls1_fit};
+use plskit::fit::{FitOpts, pls1_fit};
 use plskit::{
     ConfirmatoryArgs, Pls3ConfirmatoryTestOpts, Pls3FitOpts, pls3_confirmatory_test, pls3_fit,
 };
@@ -70,15 +70,7 @@ fn pls1_fit_is_invariant_to_the_scale_of_x_and_y() {
     for weighted in [false, true] {
         let wref = weighted.then_some(w.as_ref());
         let fit = |x: &Mat<f64>, y: &Col<f64>| {
-            pls1_fit(
-                x.as_ref(),
-                y.as_ref(),
-                KSpec::Fixed(3),
-                wref,
-                None,
-                FitOpts::default(),
-            )
-            .unwrap()
+            pls1_fit(x.as_ref(), y.as_ref(), 3, wref, None, FitOpts::default()).unwrap()
         };
         let base = fit(&x, &y);
         assert_eq!(base.k_used, 3);
@@ -256,15 +248,7 @@ fn pls1_fit_ignores_a_column_without_information_at_any_magnitude() {
     for weighted in [false, true] {
         let wref = weighted.then_some(w.as_ref());
         let fit = |x: &Mat<f64>| {
-            pls1_fit(
-                x.as_ref(),
-                y.as_ref(),
-                KSpec::Fixed(2),
-                wref,
-                None,
-                FitOpts::default(),
-            )
-            .unwrap()
+            pls1_fit(x.as_ref(), y.as_ref(), 2, wref, None, FitOpts::default()).unwrap()
         };
         let base = fit(&x0);
         assert_eq!(base.k_used, 2);

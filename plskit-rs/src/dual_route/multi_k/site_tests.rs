@@ -15,17 +15,26 @@ use super::*;
 use crate::held_out_gram::{HeldOutGram, grams_built};
 use crate::linalg::fold_split;
 use crate::resample::Columns;
-use crate::rng::{child_seeds, resolve_seed};
 use crate::signal_test::{
     ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput,
-    ReplicateRoute, SplitIdx, draw_splits, first_row, fold_block, fold_columns_nspace, fold_unit,
-    pls1_confirmatory_test, pooled_cv_r2_columns, prepare_cv_fold, prepare_split, raw_perm_route,
-    split_block, split_columns_nspace, split_exact_refit_route, split_unit, split_zbars_columns,
-    with_gram_routes_disabled,
+    PrimalSource, ReplicateRoute, SplitIdx, TestArm, draw_splits, first_row, fold_columns_nspace,
+    fold_single_fit, pls1_confirmatory_test, pooled_cv_r2_columns, prepare_cv_fold, prepare_split,
+    raw_perm_route, split_column_r, split_columns_nspace, split_exact_refit_route,
+    split_zbars_columns, with_gram_routes_disabled,
 };
 use crate::test_support::{orthonormal_basis, project_off};
 use faer::{Col, Mat, MatRef, Par};
 use rand::{RngExt, SeedableRng};
+
+/// Run `f` on a one-thread pool, so every unit of a public call runs on the
+/// thread that reads the block counters.
+fn on_one_thread<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap()
+        .install(f)
+}
 
 fn wide(n: usize, p: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
@@ -35,17 +44,8 @@ fn wide(n: usize, p: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {
     (x, y)
 }
 
-fn seeds_for(n_perm: usize, seed: u64) -> Vec<u64> {
-    let (_, mut rng) = resolve_seed(Some(seed)).expect("seed");
-    child_seeds(&mut rng, n_perm)
-}
-
 fn folds_of(n: usize, n_folds: usize, seed: u64) -> Vec<Vec<usize>> {
-    use rand::seq::SliceRandom;
-    let (_, mut rng) = resolve_seed(Some(seed)).expect("seed");
-    let mut idx: Vec<usize> = (0..n).collect();
-    idx.shuffle(&mut rng);
-    fold_split(&idx, n_folds)
+    crate::resample::shuffled_folds(n, n_folds, seed, 0)
 }
 
 /// One fold's `(ss_res, ss_tot)` on both routes: `ss_tot` bit for bit (it
@@ -100,33 +100,36 @@ fn assert_public_raw_perm_invisible(
     n_folds: usize,
     seed: u64,
 ) {
-    let (n, p) = (x.nrows(), x.ncols());
-    assert_eq!(
-        raw_perm_route(n, n_folds, p, 50, k, None, false),
-        ReplicateRoute::Nspace,
-        "k={k}"
-    );
-    // Budget 0 runs the folds one at a time on this thread, where the block
-    // counter lives; the bits do not depend on the budget.
-    let before = nspace_blocks_built();
-    let gram = crate::fit::with_budget(0, || raw_perm(x, y, k, n_folds, seed));
-    assert_eq!(
-        nspace_blocks_built(),
-        before + n_folds,
-        "k={k}: the n-space route must run"
-    );
-    let primal = with_gram_routes_disabled(|| raw_perm(x, y, k, n_folds, seed));
-    assert!(
-        (gram.statistic.unwrap() - primal.statistic.unwrap()).abs() <= 1e-10,
-        "k={k}: {:e} vs {:e}",
-        gram.statistic.unwrap(),
-        primal.statistic.unwrap()
-    );
-    assert_eq!(
-        gram.pvalue.to_bits(),
-        primal.pvalue.to_bits(),
-        "k={k}: p-value"
-    );
+    on_one_thread(|| {
+        let (n, p) = (x.nrows(), x.ncols());
+        assert_eq!(
+            raw_perm_route(n, n_folds, p, 50, &[k], None, false)
+                .unwrap()
+                .route,
+            ReplicateRoute::Nspace,
+            "k={k}"
+        );
+        // One thread, so the block counter sees every fold.
+        let before = nspace_blocks_built();
+        let gram = raw_perm(x, y, k, n_folds, seed);
+        assert_eq!(
+            nspace_blocks_built(),
+            before + n_folds,
+            "k={k}: the n-space route must run"
+        );
+        let primal = with_gram_routes_disabled(|| raw_perm(x, y, k, n_folds, seed));
+        assert!(
+            (gram.statistic.unwrap() - primal.statistic.unwrap()).abs() <= 1e-10,
+            "k={k}: {:e} vs {:e}",
+            gram.statistic.unwrap(),
+            primal.statistic.unwrap()
+        );
+        assert_eq!(
+            gram.pvalue.to_bits(),
+            primal.pvalue.to_bits(),
+            "k={k}: p-value"
+        );
+    });
 }
 
 /// Fold `fi`'s `(ss_res, ss_tot)` for the outcome `y` on the n-space route,
@@ -148,11 +151,12 @@ fn nspace_fold(
 fn raw_perm_fold_units_match_the_primal_arm() {
     let (x, y) = wide(40, 2000, 0.5, 1);
     let folds = folds_of(40, 5, 2);
-    let seeds = seeds_for(20, 3);
     let cols = Columns {
         y: y.as_ref().as_mat(),
-        seeds: &seeds,
+        seed: 3,
+        n_perm: 20,
         null_map: None,
+        w: None,
     };
     // Closeness alone would pass if the n-space route returned the primal
     // arm's answer, so this also counts units whose ss_res differs in bits
@@ -161,15 +165,23 @@ fn raw_perm_fold_units_match_the_primal_arm() {
     let scale = crate::linalg::held_out_scale(x.as_ref(), None, false);
     let g = HeldOutGram::from_x(x.as_ref(), None, scale.as_ref());
     for fi in 0..folds.len() {
-        let fold = prepare_cv_fold(x.as_ref(), &folds, fi, None, scale.as_ref()).expect("fold");
-        let primal = fold_block(ReplicateRoute::Primal, &fold, Par::Seq);
         for k in 2..=K_DUAL_MAX {
             let nspace = fold_columns_nspace(&folds, fi, &g, &[k], cols.len(), &|c| cols.column(c));
             for (c, unit) in nspace.iter().enumerate() {
                 let yc = cols.column(c);
                 let y_of = |i: usize| yc[i];
                 let a = unit.as_ref().expect("nspace unit")[0];
-                let b = fold_unit(&primal, &fold, &y_of, &[k], None).expect("primal unit")[0];
+                let b = fold_single_fit(
+                    x.as_ref(),
+                    &folds,
+                    fi,
+                    None,
+                    scale.as_ref(),
+                    &y_of,
+                    &[k],
+                    None,
+                )
+                .expect("primal unit")[0];
                 assert_fold_contribution_close(a, b, &format!("fold {fi}, k={k}, column {c}"));
                 if a.0.to_bits() != b.0.to_bits() {
                     differing += 1;
@@ -186,7 +198,7 @@ fn raw_perm_fold_units_match_the_primal_arm() {
 
 #[test]
 fn raw_perm_is_route_invisible_on_the_public_surface() {
-    for k in 2..=K_DUAL_MAX {
+    for k in 1..=K_DUAL_MAX {
         let seed = 20 + k as u64;
         let (x, y) = wide(40, 2000, 0.3, seed);
         assert_public_raw_perm_invisible(&x, &y, k, 5, seed);
@@ -195,32 +207,31 @@ fn raw_perm_is_route_invisible_on_the_public_surface() {
 
 #[test]
 fn raw_perm_keeps_its_other_routes() {
-    // k = 1: the closed form; past K_DUAL_MAX, sparse or weighted: primal.
+    // Past K_DUAL_MAX, sparse or weighted: primal.
     assert_eq!(
-        raw_perm_route(40, 5, 2000, 50, 1, None, false),
-        ReplicateRoute::Special
+        raw_perm_route(40, 5, 2000, 50, &[K_DUAL_MAX + 1], None, false)
+            .unwrap()
+            .route,
+        ReplicateRoute::Primal(PrimalSource::Copy)
     );
     assert_eq!(
-        raw_perm_route(40, 5, 2000, 50, K_DUAL_MAX + 1, None, false),
-        ReplicateRoute::Primal
+        raw_perm_route(40, 5, 2000, 50, &[2], Some(3), false)
+            .unwrap()
+            .route,
+        ReplicateRoute::Primal(PrimalSource::Copy)
     );
     assert_eq!(
-        raw_perm_route(40, 5, 2000, 50, 2, Some(3), false),
-        ReplicateRoute::Primal
+        raw_perm_route(40, 5, 2000, 50, &[2], None, true)
+            .unwrap()
+            .route,
+        ReplicateRoute::Primal(PrimalSource::Copy)
     );
     assert_eq!(
-        raw_perm_route(40, 5, 2000, 50, 2, None, true),
-        ReplicateRoute::Primal
+        with_gram_routes_disabled(|| raw_perm_route(40, 5, 2000, 50, &[2], None, false)
+            .unwrap()
+            .route),
+        ReplicateRoute::Primal(PrimalSource::Copy)
     );
-    assert_eq!(
-        with_gram_routes_disabled(|| raw_perm_route(40, 5, 2000, 50, 2, None, false)),
-        ReplicateRoute::Primal
-    );
-    let (x, y) = wide(40, 2000, 0.3, 24);
-    let (grams, before) = (grams_built(), nspace_blocks_built());
-    let _ = raw_perm(&x, &y, 1, 5, 24);
-    assert_eq!(nspace_blocks_built(), before, "k = 1 keeps the closed form");
-    assert_eq!(grams_built(), grams + 1, "k = 1: one G per call");
 }
 
 #[test]
@@ -245,19 +256,20 @@ fn a_constant_training_outcome_is_the_zero_model_to_the_bit() {
     let (x, _) = wide(40, 2000, 0.0, 51);
     let folds = fold_split(&(0..40).collect::<Vec<_>>(), 5);
     let y = Col::<f64>::from_fn(40, |i| if i < 8 { i as f64 - 3.5 } else { 0.0 });
-    let fold = prepare_cv_fold(
+    let scale = crate::linalg::held_out_scale(x.as_ref(), None, false);
+    let y_of = |i: usize| y[i];
+    let (res_g, tot_g) = nspace_fold(&x, &folds, 0, &y, K_DUAL_MAX);
+    let (res_p, tot_p) = fold_single_fit(
         x.as_ref(),
         &folds,
         0,
         None,
-        crate::linalg::held_out_scale(x.as_ref(), None, false).as_ref(),
+        scale.as_ref(),
+        &y_of,
+        &[K_DUAL_MAX],
+        None,
     )
-    .expect("fold");
-    let primal = fold_block(ReplicateRoute::Primal, &fold, Par::Seq);
-    let y_of = |i: usize| y[i];
-    let (res_g, tot_g) = nspace_fold(&x, &folds, 0, &y, K_DUAL_MAX);
-    let (res_p, tot_p) =
-        fold_unit(&primal, &fold, &y_of, &[K_DUAL_MAX], None).expect("primal unit")[0];
+    .expect("primal unit")[0];
     assert_eq!(
         (res_g.to_bits(), tot_g.to_bits()),
         (res_p.to_bits(), tot_p.to_bits())
@@ -274,14 +286,8 @@ fn a_training_outcome_orthogonal_to_x_is_decided_from_g() {
     let b = Mat::<f64>::from_fn(5, 800, |_, _| rng.random_range(-1.0..1.0));
     let x = a.as_ref() * b.as_ref();
     let folds = fold_split(&(0..40).collect::<Vec<_>>(), 5);
-    let fold = prepare_cv_fold(
-        x.as_ref(),
-        &folds,
-        0,
-        None,
-        crate::linalg::held_out_scale(x.as_ref(), None, false).as_ref(),
-    )
-    .expect("fold");
+    let scale = crate::linalg::held_out_scale(x.as_ref(), None, false);
+    let fold = prepare_cv_fold(x.as_ref(), &folds, 0, None, scale.as_ref()).expect("fold");
     let n_tr = fold.train_idx.len();
     let ones = Col::<f64>::from_fn(n_tr, |_| 1.0);
     let basis = orthonormal_basis(ones.as_ref(), fold.xs_tr.as_ref(), 1e-8);
@@ -294,10 +300,19 @@ fn a_training_outcome_orthogonal_to_x_is_decided_from_g() {
     for &row in &fold.val_idx {
         y[row] = rng.random_range(-1.0..1.0);
     }
-    let primal = fold_block(ReplicateRoute::Primal, &fold, Par::Seq);
     let y_of = |i: usize| y[i];
     let (res_g, tot_g) = nspace_fold(&x, &folds, 0, &y, 2);
-    let (res_p, tot_p) = fold_unit(&primal, &fold, &y_of, &[2], None).expect("primal unit")[0];
+    let (res_p, tot_p) = fold_single_fit(
+        x.as_ref(),
+        &folds,
+        0,
+        None,
+        scale.as_ref(),
+        &y_of,
+        &[2],
+        None,
+    )
+    .expect("primal unit")[0];
     assert!(
         res_g.is_finite() && res_p.is_finite(),
         "{res_g:e}, {res_p:e}"
@@ -335,29 +350,28 @@ fn halves() -> SplitIdx {
 }
 
 /// One outcome's `r` on the n-space route (from the all-row Gram matrix)
-/// and on the primal one (`split_unit`).
+/// and on the primal one (`split_column_r`).
 fn both_r(x: &Mat<f64>, sp: &SplitIdx, y_of: &dyn Fn(usize) -> f64, k: usize) -> (f64, f64) {
     let scale = crate::linalg::held_out_scale(x.as_ref(), None, false);
     let prep = prepare_split(x.as_ref(), sp, None, scale.as_ref());
-    let primal = split_block(ReplicateRoute::Primal, &prep, Par::Seq);
     let g = HeldOutGram::from_x(x.as_ref(), None, scale.as_ref());
     let y = Col::<f64>::from_fn(x.nrows(), y_of);
     (
         split_columns_nspace(&g, sp, 1, &[k], &|_| y.clone())[0][0],
-        split_unit(&primal, &prep, sp, y_of, &[k], None)[0],
+        split_column_r(&prep, sp, y_of, &[k], None)[0],
     )
 }
 
 #[test]
 fn split_exact_units_match_the_primal_arm() {
     let (x, y) = wide(40, 2000, 0.5, 71);
-    let (_, mut rng) = resolve_seed(Some(72)).expect("seed");
-    let splits = draw_splits(40, 2, 5, &mut rng).expect("splits");
-    let seeds = seeds_for(20, 73);
+    let splits = draw_splits(40, 2, 5, 72).expect("splits");
     let cols = Columns {
         y: y.as_ref().as_mat(),
-        seeds: &seeds,
+        seed: 73,
+        n_perm: 20,
         null_map: None,
+        w: None,
     };
     // Closeness alone would pass if the n-space route returned the primal
     // arm's answer, so this also counts units whose r differs in bits from
@@ -387,35 +401,39 @@ fn split_exact_units_match_the_primal_arm() {
 
 #[test]
 fn split_exact_is_route_invisible_on_the_public_surface() {
-    for k in 2..=K_DUAL_MAX {
-        let seed = 90 + k as u64;
-        let (x, y) = wide(40, 2000, 0.3, seed);
-        assert_eq!(
-            split_exact_refit_route(40, 2000, 50, 10, k, None, false, false),
-            ReplicateRoute::Nspace
-        );
-        // Budget 0 runs the splits one at a time on this thread, where the
-        // block counter lives; the bits do not depend on the budget.
-        let before = nspace_blocks_built();
-        let gram = crate::fit::with_budget(0, || split_exact(&x, &y, k, seed));
-        assert_eq!(
-            nspace_blocks_built(),
-            before + 10,
-            "k={k}: one block per split"
-        );
-        let primal = with_gram_routes_disabled(|| split_exact(&x, &y, k, seed));
-        assert!(
-            (gram.statistic.unwrap() - primal.statistic.unwrap()).abs() <= 1e-10,
-            "k={k}: {:e} vs {:e}",
-            gram.statistic.unwrap(),
-            primal.statistic.unwrap()
-        );
-        assert_eq!(
-            gram.pvalue.to_bits(),
-            primal.pvalue.to_bits(),
-            "k={k}: p-value"
-        );
-    }
+    on_one_thread(|| {
+        for k in 2..=K_DUAL_MAX {
+            let seed = 90 + k as u64;
+            let (x, y) = wide(40, 2000, 0.3, seed);
+            assert_eq!(
+                split_exact_refit_route(40, 2000, 50, 10, &[k], None, false, false)
+                    .unwrap()
+                    .route
+                    .route,
+                ReplicateRoute::Nspace
+            );
+            // One thread, so the block counter sees every split.
+            let before = nspace_blocks_built();
+            let gram = split_exact(&x, &y, k, seed);
+            assert_eq!(
+                nspace_blocks_built(),
+                before + 10,
+                "k={k}: one block per split"
+            );
+            let primal = with_gram_routes_disabled(|| split_exact(&x, &y, k, seed));
+            assert!(
+                (gram.statistic.unwrap() - primal.statistic.unwrap()).abs() <= 1e-10,
+                "k={k}: {:e} vs {:e}",
+                gram.statistic.unwrap(),
+                primal.statistic.unwrap()
+            );
+            assert_eq!(
+                gram.pvalue.to_bits(),
+                primal.pvalue.to_bits(),
+                "k={k}: p-value"
+            );
+        }
+    });
 }
 
 /// `|a − b| ≤ 1e-12·max(|a|, |b|)`.
@@ -426,15 +444,16 @@ fn assert_rel_close_1e12(a: f64, b: f64, what: &str) {
     );
 }
 
-/// Shapes the per-unit rule kept primal and the one-G rules send to the
-/// n-space route: the public statistic is within a relative 1e-12 of the
+/// Wide shapes the one-G rules send to the n-space route: the public
+/// statistic is within a relative 1e-12 of the
 /// call with the Gram routes taken out, the p-value the same bits.
 #[test]
 fn nspace_shapes_the_one_gram_rules_add_match_the_primal() {
     // raw_perm 130 x 2000, 5 folds (n_tr 104), n_perm 50, k = 2.
-    assert!(!use_dual_route(104, 2000, 51, 2), "premise: per-fold rule");
     assert_eq!(
-        raw_perm_route(130, 5, 2000, 50, 2, None, false),
+        raw_perm_route(130, 5, 2000, 50, &[2], None, false)
+            .unwrap()
+            .route,
         ReplicateRoute::Nspace
     );
     let (x, y) = wide(130, 2000, 0.3, 151);
@@ -447,13 +466,11 @@ fn nspace_shapes_the_one_gram_rules_add_match_the_primal() {
     );
     assert_eq!(gram.pvalue.to_bits(), primal.pvalue.to_bits(), "raw_perm p");
     // split_exact 240 x 2000 (halves of 120), n_perm 50, J = 10, k = 2.
-    let (n_train, _) = crate::resample::split_sizes(240, 2);
-    assert!(
-        !use_dual_route(n_train, 2000, 51, 2),
-        "premise: per-split rule"
-    );
     assert_eq!(
-        split_exact_refit_route(240, 2000, 50, 10, 2, None, false, false),
+        split_exact_refit_route(240, 2000, 50, 10, &[2], None, false, false)
+            .unwrap()
+            .route
+            .route,
         ReplicateRoute::Nspace
     );
     let (x, y) = wide(240, 2000, 0.3, 153);
@@ -474,26 +491,48 @@ fn nspace_shapes_the_one_gram_rules_add_match_the_primal() {
 #[test]
 fn split_exact_keeps_its_other_routes() {
     assert_eq!(
-        split_exact_refit_route(40, 2000, 50, 10, 1, None, false, false),
+        split_exact_refit_route(40, 2000, 50, 10, &[1], None, false, false)
+            .unwrap()
+            .route
+            .route,
         ReplicateRoute::Special
     );
     assert_eq!(
-        split_exact_refit_route(40, 2000, 50, 10, K_DUAL_MAX + 1, None, false, false),
-        ReplicateRoute::Primal
+        split_exact_refit_route(40, 2000, 50, 10, &[K_DUAL_MAX + 1], None, false, false)
+            .unwrap()
+            .route
+            .route,
+        ReplicateRoute::Primal(PrimalSource::Copy)
     );
     assert_eq!(
-        split_exact_refit_route(40, 2000, 50, 10, 2, Some(3), false, false),
-        ReplicateRoute::Primal
+        split_exact_refit_route(40, 2000, 50, 10, &[2], Some(3), false, false)
+            .unwrap()
+            .route
+            .route,
+        ReplicateRoute::Primal(PrimalSource::Copy)
     );
     assert_eq!(
-        split_exact_refit_route(40, 2000, 50, 10, 2, None, true, false),
-        ReplicateRoute::Primal
+        split_exact_refit_route(40, 2000, 50, 10, &[2], None, true, false)
+            .unwrap()
+            .route
+            .route,
+        ReplicateRoute::Primal(PrimalSource::Copy)
     );
     assert_eq!(
         with_gram_routes_disabled(|| split_exact_refit_route(
-            40, 2000, 50, 10, 2, None, false, false
-        )),
-        ReplicateRoute::Primal
+            40,
+            2000,
+            50,
+            10,
+            &[2],
+            None,
+            false,
+            false
+        )
+        .unwrap()
+        .route
+        .route),
+        ReplicateRoute::Primal(PrimalSource::Copy)
     );
 }
 
@@ -594,11 +633,12 @@ fn the_drivers_give_the_same_bits_at_every_budget() {
     let bits = |v: &[f64]| v.iter().map(|z| z.to_bits()).collect::<Vec<_>>();
     let (x, y) = wide(40, 2000, 0.5, 1);
     let folds = folds_of(40, 5, 2);
-    let seeds = seeds_for(20, 3);
     let cols = Columns {
         y: y.as_ref().as_mat(),
-        seeds: &seeds,
+        seed: 3,
+        n_perm: 20,
         null_map: None,
+        w: None,
     };
     for k in 2..=K_DUAL_MAX {
         let run = |budget| {
@@ -607,6 +647,7 @@ fn the_drivers_give_the_same_bits_at_every_budget() {
                     ReplicateRoute::Nspace,
                     x.as_ref(),
                     &folds,
+                    &(0..folds.len()).collect::<Vec<_>>(),
                     None,
                     crate::linalg::held_out_scale(x.as_ref(), None, false).as_ref(),
                     &[k],
@@ -629,19 +670,20 @@ fn the_drivers_give_the_same_bits_at_every_budget() {
     }
 
     let (x, y) = wide(40, 2000, 0.5, 71);
-    let (_, mut rng) = resolve_seed(Some(72)).expect("seed");
-    let splits = draw_splits(40, 2, 5, &mut rng).expect("splits");
-    let seeds = seeds_for(20, 73);
+    let splits = draw_splits(40, 2, 5, 72).expect("splits");
     let cols = Columns {
         y: y.as_ref().as_mat(),
-        seeds: &seeds,
+        seed: 73,
+        n_perm: 20,
         null_map: None,
+        w: None,
     };
     for k in 2..=K_DUAL_MAX {
         let run = |budget| {
             crate::fit::with_budget(budget, || {
                 let z = split_zbars_columns(
                     ReplicateRoute::Nspace,
+                    TestArm::Rows,
                     x.as_ref(),
                     &splits,
                     None,
@@ -652,7 +694,9 @@ fn the_drivers_give_the_same_bits_at_every_budget() {
                     &|c| cols.column(c),
                     None,
                     None,
-                );
+                )
+                .unwrap()
+                .0;
                 first_row(&z)
             })
         };
@@ -709,8 +753,7 @@ fn nspace_blocks_from_gram_match_blocks_from_halves() {
     let x = uncentred(&x0);
     let scale = crate::linalg::held_out_scale(x.as_ref(), None, false);
     let g = HeldOutGram::from_x(x.as_ref(), None, scale.as_ref());
-    let (_, mut rng) = resolve_seed(Some(132)).expect("seed");
-    for (si, sp) in draw_splits(40, 2, 5, &mut rng)
+    for (si, sp) in draw_splits(40, 2, 5, 132)
         .expect("splits")
         .iter()
         .enumerate()
@@ -770,17 +813,21 @@ fn nspace_blocks_from_gram_match_blocks_from_halves() {
 
 #[test]
 fn split_exact_k2_builds_one_gram_per_call() {
-    let (x, y) = wide(40, 2000, 0.3, 141);
-    assert_eq!(
-        split_exact_refit_route(40, 2000, 50, 10, 2, None, false, false),
-        ReplicateRoute::Nspace
-    );
-    // Budget 0 runs the splits one at a time on this thread, where both
-    // counters live.
-    let (grams, blocks) = (grams_built(), nspace_blocks_built());
-    let _ = crate::fit::with_budget(0, || split_exact(&x, &y, 2, 141));
-    assert_eq!(grams_built(), grams + 1, "one G per call");
-    assert_eq!(nspace_blocks_built(), blocks + 10, "one block per split");
+    on_one_thread(|| {
+        let (x, y) = wide(40, 2000, 0.3, 141);
+        assert_eq!(
+            split_exact_refit_route(40, 2000, 50, 10, &[2], None, false, false)
+                .unwrap()
+                .route
+                .route,
+            ReplicateRoute::Nspace
+        );
+        // One thread, so both counters see every split.
+        let (grams, blocks) = (grams_built(), nspace_blocks_built());
+        let _ = split_exact(&x, &y, 2, 141);
+        assert_eq!(grams_built(), grams + 1, "one G per call");
+        assert_eq!(nspace_blocks_built(), blocks + 10, "one block per split");
+    });
 }
 
 /// `split_nb` at `k` on the public surface, the gate on.
@@ -808,44 +855,91 @@ fn split_nb(x: &Mat<f64>, y: &Col<f64>, k: usize, seed: u64) -> ConfirmatoryTest
 
 #[test]
 fn raw_perm_k2_and_split_nb_k2_from_gram_match_primal() {
-    for (seed, snr) in [(151_u64, 2.0), (152, 0.3)] {
-        let (x0, y) = wide(40, 2000, snr, seed);
-        let x = uncentred(&x0);
-        // `raw_perm` at k = 2: one G, one block per fold.
-        let (grams, blocks) = (grams_built(), nspace_blocks_built());
-        let gram = crate::fit::with_budget(0, || raw_perm(&x, &y, 2, 5, seed));
-        assert_eq!(grams_built(), grams + 1, "raw_perm: one G");
-        assert_eq!(
-            nspace_blocks_built(),
-            blocks + 5,
-            "raw_perm: one block per fold"
-        );
-        let primal = with_gram_routes_disabled(|| raw_perm(&x, &y, 2, 5, seed));
-        rel_close(
-            gram.statistic.unwrap(),
-            primal.statistic.unwrap(),
-            1e-12,
-            "raw_perm statistic",
-        );
-        rel_close(gram.pvalue, primal.pvalue, 1e-12, "raw_perm p");
-        // `split_nb` at k = 2: the gate's G, one block per split.
-        let (grams, blocks) = (grams_built(), nspace_blocks_built());
-        let gram = crate::fit::with_budget(0, || split_nb(&x, &y, 2, seed));
-        assert_eq!(gram.test_method, "split_nb", "the gate must pass");
-        assert_eq!(grams_built(), grams + 1, "split_nb: the gate's G only");
-        assert_eq!(
-            nspace_blocks_built(),
-            blocks + 10,
-            "split_nb: one block per split"
-        );
-        let primal = with_gram_routes_disabled(|| split_nb(&x, &y, 2, seed));
-        assert_eq!(primal.test_method, "split_nb");
-        rel_close(
-            gram.statistic.unwrap(),
-            primal.statistic.unwrap(),
-            1e-12,
-            "split_nb statistic",
-        );
-        rel_close(gram.pvalue, primal.pvalue, 1e-12, "split_nb p");
-    }
+    on_one_thread(|| {
+        for (seed, snr) in [(151_u64, 2.0), (152, 0.3)] {
+            let (x0, y) = wide(40, 2000, snr, seed);
+            let x = uncentred(&x0);
+            // `raw_perm` at k = 2: one G, one block per fold.
+            let (grams, blocks) = (grams_built(), nspace_blocks_built());
+            let gram = raw_perm(&x, &y, 2, 5, seed);
+            assert_eq!(grams_built(), grams + 1, "raw_perm: one G");
+            assert_eq!(
+                nspace_blocks_built(),
+                blocks + 5,
+                "raw_perm: one block per fold"
+            );
+            let primal = with_gram_routes_disabled(|| raw_perm(&x, &y, 2, 5, seed));
+            rel_close(
+                gram.statistic.unwrap(),
+                primal.statistic.unwrap(),
+                1e-12,
+                "raw_perm statistic",
+            );
+            rel_close(gram.pvalue, primal.pvalue, 1e-12, "raw_perm p");
+            // `split_nb` at k = 2: the gate's G, one block per split.
+            let (grams, blocks) = (grams_built(), nspace_blocks_built());
+            let gram = split_nb(&x, &y, 2, seed);
+            assert_eq!(gram.test_method, "split_nb", "the gate must pass");
+            assert_eq!(grams_built(), grams + 1, "split_nb: the gate's G only");
+            assert_eq!(
+                nspace_blocks_built(),
+                blocks + 10,
+                "split_nb: one block per split"
+            );
+            let primal = with_gram_routes_disabled(|| split_nb(&x, &y, 2, seed));
+            assert_eq!(primal.test_method, "split_nb");
+            rel_close(
+                gram.statistic.unwrap(),
+                primal.statistic.unwrap(),
+                1e-12,
+                "split_nb statistic",
+            );
+            rel_close(gram.pvalue, primal.pvalue, 1e-12, "split_nb p");
+        }
+    });
+}
+
+#[test]
+fn wide_call_routes_by_budget() {
+    let route = || {
+        split_exact_refit_route(10_000, 20_000, 50, 32, &[8], None, false, false)
+            .unwrap()
+            .route
+            .route
+    };
+    assert_eq!(
+        crate::fit::with_budget(2 << 30, route),
+        ReplicateRoute::Nspace
+    );
+    // At 256 MB no route fits one split (the n-space route's 1.2 GB
+    // included): the call fails, while budget 0 reads X in strips.
+    let at = |budget| {
+        crate::fit::with_budget(budget, || {
+            split_exact_refit_route(10_000, 20_000, 50, 32, &[8], None, false, false)
+        })
+    };
+    assert!(matches!(
+        at(256 << 20),
+        Err(crate::error::PlsKitError::MemoryBudget { .. })
+    ));
+    assert_eq!(
+        at(0).unwrap().route.route,
+        ReplicateRoute::Primal(PrimalSource::Gather)
+    );
+    let narrower = || {
+        split_exact_refit_route(10_000, 12_000, 50, 32, &[8], None, false, false)
+            .unwrap()
+            .route
+            .route
+    };
+    assert_eq!(
+        crate::fit::with_budget(2 << 30, narrower),
+        ReplicateRoute::Nspace
+    );
+    assert!(matches!(
+        crate::fit::with_budget(256 << 20, || {
+            split_exact_refit_route(10_000, 12_000, 50, 32, &[8], None, false, false)
+        }),
+        Err(crate::error::PlsKitError::MemoryBudget { .. })
+    ));
 }

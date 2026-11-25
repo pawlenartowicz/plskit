@@ -49,7 +49,7 @@ dev profile.
 ```rust
 use plskit::{
     pls1_confirmatory_test, pls1_fit, pls1_predict, Col, ConfirmatoryArgs,
-    ConfirmatoryTestInput, ConfirmatoryTestOpts, FitOpts, KSpec, Mat, PlsKitError,
+    ConfirmatoryTestInput, ConfirmatoryTestOpts, FitOpts, Mat, PlsKitError,
 };
 
 fn main() -> Result<(), PlsKitError> {
@@ -59,7 +59,7 @@ fn main() -> Result<(), PlsKitError> {
     let y = Col::<f64>::from_fn(200, |i| x[(i, 0)] + x[(i, 1)] + 0.5 * noise(i, 99));
 
     // Fit at a fixed number of components and predict.
-    let model = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(3), None, None, FitOpts::default())?;
+    let model = pls1_fit(x.as_ref(), y.as_ref(), 3, None, None, FitOpts::default())?;
     let y_hat = pls1_predict(&model, x.as_ref(), None)?;
     println!("beta[0] = {:.3}, y_hat[0] = {:.3}", model.beta[0], y_hat[0]);
 
@@ -109,14 +109,14 @@ variant. PLS2 and multi-block PLS are planned.
 - **Interpretive:** `rotate`, `factors`, `pca_basis`, `profiles_find_n`.
 
 Each function exports its own options and output types alongside it
-(`FitOpts`, `KSpec`, `Pls1Model`, `Pls3Model`, `ConfirmatoryArgs`,
+(`FitOpts`, `Pls1Model`, `Pls3Model`, `ConfirmatoryArgs`,
 `RotateOutput`, ...).
 
 Every error is a `PlsKitError`. Its `.code()` is a stable string, the
 same one the other languages report:
 
 ```rust
-match pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(500), None, None, FitOpts::default()) {
+match pls1_fit(x.as_ref(), y.as_ref(), 500, None, None, FitOpts::default()) {
     Err(e) if e.code() == "k_exceeds_max" => eprintln!("{e}"), // k=500 exceeds maximum 20
     Err(e) => return Err(e),
     Ok(model) => { /* ... */ }
@@ -132,14 +132,14 @@ re-exports `Mat`, `MatRef`, `Col`, and `ColRef`, so downstream code can
 
 ## Threads and memory
 
-plskit runs its parallel work on the caller's current Rayon pool, so a call made inside `rayon::ThreadPool::install` uses that pool's threads. The environment variable `PLSKIT_NUM_THREADS` caps the thread count, and `PLSKIT_MEMORY_BUDGET` sets the memory budget of the resampling loops (default 2 GiB). Results do not depend on the thread count, and agree across budgets to the last bits. See [Threads and memory](../docs/concepts/threads.md).
+plskit runs its parallel work on the caller's current Rayon pool, so a call made inside `rayon::ThreadPool::install` uses that pool's threads. The environment variable `PLSKIT_NUM_THREADS` caps the thread count, and `PLSKIT_MEMORY_BUDGET` sets the memory budget of the resampling loops (default 4 GiB). Results do not depend on the thread count. A call gives the same bits at every budget while it keeps its route; a budget that moves it to another route changes its results to rounding on most inputs. See [Threads and memory](../docs/concepts/threads.md).
 
 ## Versioning
 
 Function names, argument
 names and output fields are stable across versions, but defaults,
 algorithms and implementation details may shift numbers between
-releases: pin the version (`plskit = "=0.10.0"`) if you need numerical
+releases: pin the version (`plskit = "=0.11.0"`) if you need numerical
 reproducibility. The [root README](../README.md#versioning) explains how
 the engine and wrapper versions relate.
 

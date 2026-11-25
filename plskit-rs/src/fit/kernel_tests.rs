@@ -118,17 +118,6 @@ fn s_sequence(inp: &KernelInputs, parts: &Parts) -> Vec<Col<f64>> {
     out
 }
 
-/// `‖s‖` after keep-selection, the quantity the floor tests.
-fn selected_norm(s: &Col<f64>, keep: Option<usize>) -> f64 {
-    let mut v = s.clone();
-    if let Some(kp) = keep {
-        if kp < v.nrows() {
-            hard_select_keep(&mut v, kp);
-        }
-    }
-    v.norm_l2()
-}
-
 /// `C` in the per-component factor tolerance
 /// `max(base, C·w_rel_floor / ‖s_a‖)` (see `factor_tolerances`).
 const FACTOR_TOL_C: f64 = 10.0;
@@ -356,15 +345,7 @@ fn zero_component_fit_returns_empty_factor_matrices() {
     // A constant y standardizes to zero, so s_1 = 0 and no component exists.
     let x = uniform_mat(40, 5, 71);
     let y = Col::<f64>::from_fn(40, |_| 3.0);
-    let m = pls1_fit(
-        x.as_ref(),
-        y.as_ref(),
-        KSpec::Fixed(2),
-        None,
-        None,
-        FitOpts::default(),
-    )
-    .unwrap();
+    let m = pls1_fit(x.as_ref(), y.as_ref(), 2, None, None, FitOpts::default()).unwrap();
     assert_eq!(m.k_used, 0);
     assert_eq!((m.t_scores.nrows(), m.t_scores.ncols()), (40, 0), "T");
     assert_eq!((m.p_loadings.nrows(), m.p_loadings.ncols()), (5, 0), "P");
@@ -379,8 +360,7 @@ fn zero_component_fit_returns_empty_factor_matrices() {
         None,
         Par::Seq,
         inp.xs.norm_l2(),
-    )
-    .unwrap();
+    );
     let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 2, None, Par::Seq).unwrap();
     assert_factors_close(&new, &old, &[], "zero-component");
 }
@@ -396,8 +376,7 @@ fn truncated_fit_matches_reference_on_the_exhausted_design() {
         None,
         Par::Seq,
         inp.xs.norm_l2(),
-    )
-    .unwrap();
+    );
     let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 40, None, Par::Seq).unwrap();
     let k_used = new.2.ncols();
     assert!((5..=20).contains(&k_used), "k_used = {k_used}");
@@ -582,8 +561,7 @@ fn compare_with_reference(ds: &Design) -> Option<[f64; 3]> {
         ds.keep,
         Par::Seq,
         inp.xs.norm_l2(),
-    )
-    .expect("kernel");
+    );
     let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), ds.k, ds.keep, Par::Seq)
         .expect("reference");
     if let Some(keep) = ds.keep {
@@ -606,26 +584,28 @@ fn compare_with_reference(ds: &Design) -> Option<[f64; 3]> {
     let beta = coef_drift(&beta_of(&cn, &inp), &beta_of(&co, &inp));
     assert!(coef <= 1e-10, "{}: coef drift {coef:e}", ds.label);
     assert!(beta <= 1e-10, "{}: beta drift {beta:e}", ds.label);
-    // The public route on the raw design. Every design here has column
+    // The fit route on the raw design. Every design here has column
     // means at most of the order of the column scales, far inside
-    // `IMPLICIT_MAX_MEAN_RATIO`, so `pls1_fit` forms the standardized
+    // `IMPLICIT_MAX_MEAN_RATIO`, so `pls1_fit_impl` forms the standardized
     // products from the raw X. `check_n_eff` is off
     // because a weighted design guarantees only `k + 2` positive rows, and
     // `Seq` matches the kernel call above when the fit falls back to a copy.
-    let m = pls1_fit(
+    let m = pls1_fit_impl(
         ds.x.as_ref(),
         ds.y.as_ref(),
-        KSpec::Fixed(ds.k),
+        ds.k,
         ds.w.as_ref().map(Col::as_ref),
         None,
         FitOpts {
-            keep: ds.keep,
-            check_n_eff: false,
             par: ParChoice::Seq,
             ..FitOpts::default()
         },
+        InternalFitOpts {
+            keep: ds.keep,
+            check_n_eff: false,
+        },
     )
-    .unwrap_or_else(|e| panic!("{}: pls1_fit: {e}", ds.label));
+    .unwrap_or_else(|e| panic!("{}: pls1_fit_impl: {e}", ds.label));
     let public: Parts = (
         m.t_scores.clone(),
         m.p_loadings.clone(),
@@ -714,11 +694,13 @@ fn k1_public_fit_is_bit_identical_to_reference() {
                     );
                     let opts = FitOpts {
                         par: choice,
-                        keep,
                         ..FitOpts::default()
                     };
-                    let m = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(1), weights, None, opts)
-                        .unwrap();
+                    let m = match keep {
+                        Some(kp) => spls1_fit(x.as_ref(), y.as_ref(), 1, kp, weights, None, opts),
+                        None => pls1_fit(x.as_ref(), y.as_ref(), 1, weights, None, opts),
+                    }
+                    .unwrap();
                     let par = resolve_par(choice, n, d, 1);
                     let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 1, keep, par)
                         .unwrap();
@@ -783,11 +765,13 @@ fn non_column_major_views_agree_with_reference() {
             let what = format!("{label}, k={k}");
             let opts = FitOpts {
                 pre_standardized: true,
-                check_n_eff: false,
                 par: ParChoice::Seq,
-                keep: None,
             };
-            let m = pls1_fit(xv, yv, KSpec::Fixed(k), None, None, opts).expect("fit");
+            let inner = InternalFitOpts {
+                check_n_eff: false,
+                ..InternalFitOpts::default()
+            };
+            let m = pls1_fit_impl(xv, yv, k, None, None, opts, inner).expect("fit");
             let old = nipals_pls1_reference(xv, yv, k, None, Par::Seq).expect("reference");
             let new: Parts = (
                 m.t_scores.clone(),
@@ -837,8 +821,7 @@ fn sparse_exact_ties_pick_the_reference_support_at_every_component() {
             Some(keep),
             Par::Seq,
             inp.xs.norm_l2(),
-        )
-        .unwrap();
+        );
         let old = nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 3, Some(keep), Par::Seq)
             .unwrap();
         assert_eq!(new.2.ncols(), old.2.ncols(), "keep={keep}: k_used");
@@ -873,8 +856,7 @@ fn half_zero_weights_match_reference_dense_and_sparse() {
             keep,
             Par::Seq,
             inp.xs.norm_l2(),
-        )
-        .unwrap();
+        );
         let old =
             nipals_pls1_reference(inp.xs.as_ref(), inp.ys.as_ref(), 6, keep, Par::Seq).unwrap();
         let tols = factor_tolerances(&inp, &old, keep, 1e-10);
@@ -888,17 +870,11 @@ fn half_zero_weights_match_reference_dense_and_sparse() {
         // The public path forms the same products from the raw X (the
         // implicit backend), so it agrees to rounding.
         // n·d·k = 36000 < 1e6, so ParChoice::Auto resolves to Par::Seq.
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(6),
-            Some(w.as_ref()),
-            None,
-            FitOpts {
-                keep,
-                ..FitOpts::default()
-            },
-        )
+        let opts = FitOpts::default();
+        let m = match keep {
+            Some(kp) => spls1_fit(x.as_ref(), y.as_ref(), 6, kp, Some(w.as_ref()), None, opts),
+            None => pls1_fit(x.as_ref(), y.as_ref(), 6, Some(w.as_ref()), None, opts),
+        }
         .unwrap();
         assert!(coef_drift(&m.coef, &cn) <= 1e-10, "{what}: pls1_fit coef");
         // The factors the model returns, not only `coef`: T, P and Q of the
@@ -1030,7 +1006,6 @@ impl Margins {
                 Par::Seq,
                 inp.xs.norm_l2(),
             )
-            .expect("kernel")
             .3
             .nrows();
             if k_floored < real_end {

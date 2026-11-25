@@ -58,20 +58,15 @@ to the page that explains it.
 - **Signs of PLS3 saliences** can flip across machines when the two
   largest entries of a salience vector are nearly equal
   ([Signs are pinned](PLS3/fit-and-transform.md#signs-are-pinned)).
-- **Mis-scaled `pre_standardized` blocks.** A PLS3 block passed as
-  standardized but on a much smaller scale can lose real components
-  without an error ([PLS3 truncation](PLS3/fit-and-transform.md#truncation)).
-- **Platforms agree within a tolerance, not bit for bit.** The same holds
-  for C- and Fortran-ordered copies of one array
-  ([Python API, Conventions](../python/api.md#conventions)).
+- **Platforms agree within a tolerance, not bit for bit.**
+- **Results can depend on the memory budget.** `PLSKIT_MEMORY_BUDGET` can move a resampling loop to another route, and so can `n_perm` and the shape of the data, which enter the route choice. A call that keeps its route gives the same bits at every budget. Two routes agree to rounding on most inputs, and by up to O(1) on an outcome at the truncation floor (orthogonal to `X` up to rounding), a fit past the rank of `X`, nearly coinciding columns of `X`, and a `pre_standardized` `X` whose columns are on very different scales ([Memory budget](threads.md#memory-budget)).
 - **Results can change between versions.** Pin the version to reproduce
   numbers ([Citation & reproducibility](citation.md)).
 
 ## Cost
 
-- `split_exact` refits for every permutation at `k ≥ 2`, with a sparse `keep`, and in `pls3_confirmatory_test`: about `n_perm × n_splits` fits. On tall `X` with at least 64 rows (at the default `n_splits`), `pls3_confirmatory_test` forms each fit from per-split sums when they fit the memory budget, so it reads the rows once per permutation rather than once per fit.
-- A copy of `X` larger than half the memory budget makes the units that
-  copy `X` run one at a time ([when to change it](threads.md#when-to-change-it)).
+- `split_exact` refits for every permutation at `k ≥ 2`, with a sparse `keep`, and in `pls3_confirmatory_test`: about `n_perm × n_splits` fits. In `pls1_confirmatory_test`, `split_exact` and `raw_perm` fit up to 32 outcome columns (the observed `y` and its permutations) together, so one pass over `X` serves all of them. On tall `X` with at least 64 rows (at the default `n_splits`), `pls3_confirmatory_test` forms each fit from per-split sums where they fit the memory budget and are faster, so it reads the rows once per permutation rather than once per fit.
+- A copy of `X` larger than half the memory budget lets only one unit copy `X` at a time, so those units run one at a time or read `X` in strips, which costs about 1.5 times as much per unit ([when to change it](threads.md#when-to-change-it)).
 
 ## Sparse fits
 
@@ -98,7 +93,7 @@ to the page that explains it.
   be per-component or subspace-level when singular values are close
   ([PLS3 inference](PLS3/inference.md)).
 - **`split_nb` for two blocks.** Its between-split correction is the PLS1
-  heuristic, and its thresholds were not re-derived for two blocks
-  ([PLS3 inference](PLS3/inference.md)).
+  heuristic, and its thresholds were not re-derived for two blocks. It is
+  conservative there and loses power ([PLS3 inference](PLS3/inference.md)).
 - **Per-variable z for β at `k ≥ 2`.** `beta_sign_z` is not calibrated
   there ([Python API](../python/api.md)).

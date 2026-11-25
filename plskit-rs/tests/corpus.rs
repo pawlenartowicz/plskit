@@ -1,7 +1,8 @@
 //! Integration test: load every fixture in `testdata/` and assert the Rust
 //! core reproduces the frozen output, at the corpus tolerances
 //! (`|a − e| ≤ atol + rtol·|e|` with scalars `atol=1e-12`, arrays
-//! `atol=1e-10`, `rtol=1e-14`; integer and string fields exactly).
+//! `atol=1e-10`, `rtol=1e-14`, and p-values also within `1e-10` relative;
+//! integer and string fields exactly).
 //!
 //! One test per function family, each walking every manifest case of that
 //! family. The call each arm makes is the one `plskit-testdata-gen` made to
@@ -24,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use plskit::{
     CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
-    FindKOptimalOpts, FindKSequenceOpts, FindKeepOptimalOpts, FitOpts, KSpec, PermNullOpts,
+    FindKOptimalOpts, FindKSequenceOpts, FindKeepOptimalOpts, FitOpts, PermNullOpts,
     Pls3ConfirmatoryTestOpts, Pls3FitOpts, PreprocessInput, RotationMethod, Selector,
     TransformWhich, VarimaxArgs,
 };
@@ -39,6 +40,11 @@ const ATOL_ARRAY: f64 = 1e-10;
 /// of the score statistic ≈ 6126 is 9.1e-13) stays inside. Part of the rule
 /// `plskit-testdata-gen/src/settle.rs::close` owns: change together.
 const RTOL: f64 = 1e-14;
+/// The p-value fields, which also need `|a − e| ≤ P_RTOL·|e|` (the p rule).
+/// Owned by `plskit-testdata-gen/src/settle.rs` (`P_FIELDS`, `P_RTOL`):
+/// change together.
+const P_FIELDS: [&str; 3] = ["pvalue", "pvalues", "pvalues_by_k__values"];
+const P_RTOL: f64 = 1e-10;
 
 /// Function families with an arm in this file. Kept in step with the
 /// `#[test]` functions below by [`all_manifest_functions_are_covered`].
@@ -55,6 +61,8 @@ const COVERED_FUNCTIONS: &[&str] = &[
     "pls1_perm_null",
     "pls1_perm_alpha",
     "gram_matrix",
+    "pca_basis",
+    "split_nb_gate",
     "spls1_fit",
     "spls1_find_keep_optimal",
     "spls1_find_k_optimal",
@@ -127,6 +135,22 @@ fn all_manifest_functions_are_covered() {
         missing.is_empty(),
         "manifest functions with no Rust corpus arm: {missing:?}"
     );
+}
+
+/// `m` with each column flipped so its largest-magnitude entry is positive.
+/// Same rule as `_column_sign_up` in `test_corpus.py` and `column_sign_up` in
+/// `test-corpus.R` and `corpus.jl`: change together.
+fn column_sign_up(m: &faer::Mat<f64>) -> faer::Mat<f64> {
+    let sign: Vec<f64> = (0..m.ncols())
+        .map(|j| {
+            let top = (0..m.nrows())
+                .map(|i| m[(i, j)])
+                .reduce(|a, b| if b.abs() > a.abs() { b } else { a })
+                .unwrap_or(1.0);
+            if top < 0.0 { -1.0 } else { 1.0 }
+        })
+        .collect();
+    faer::Mat::<f64>::from_fn(m.nrows(), m.ncols(), |i, j| sign[j] * m[(i, j)])
 }
 
 // ── Inputs ────────────────────────────────────────────────────────────────
@@ -276,7 +300,7 @@ impl Fixture {
             .unwrap_or_else(|| panic!("{}: integer field {field} missing from fixture", self.name))
     }
 
-    /// 0-D `f64` field, `atol = 1e-12`, `rtol = 1e-14`.
+    /// 0-D `f64` field, `atol = 1e-12`, `rtol = 1e-14`, plus the p rule.
     fn scalar(&self, field: &str, actual: f64) {
         let e = self.f64_field(field);
         assert_eq!(
@@ -286,16 +310,16 @@ impl Fixture {
             self.name
         );
         let e = *e.iter().next().unwrap();
+        let bound = allowed(field, ATOL_SCALAR, e);
         assert!(
-            close(actual, e, ATOL_SCALAR),
-            "{}.{field}: |{actual} - {e}| = {:e} > {:e}",
+            close(actual, e, bound),
+            "{}.{field}: |{actual} - {e}| = {:e} > {bound:e}",
             self.name,
             (actual - e).abs(),
-            ATOL_SCALAR + RTOL * e.abs()
         );
     }
 
-    /// 1-D `f64` field, `atol = 1e-10`, `rtol = 1e-14`.
+    /// 1-D `f64` field, `atol = 1e-10`, `rtol = 1e-14`, plus the p rule.
     fn array(&self, field: &str, actual: &[f64]) {
         let e = self.f64_field(field);
         assert_eq!(
@@ -311,12 +335,12 @@ impl Fixture {
             self.name
         );
         for (i, (&a, &ev)) in actual.iter().zip(e.iter()).enumerate() {
+            let bound = allowed(field, ATOL_ARRAY, ev);
             assert!(
-                close(a, ev, ATOL_ARRAY),
-                "{}.{field}[{i}]: |{a} - {ev}| = {:e} > {:e}",
+                close(a, ev, bound),
+                "{}.{field}[{i}]: |{a} - {ev}| = {:e} > {bound:e}",
                 self.name,
                 (a - ev).abs(),
-                ATOL_ARRAY + RTOL * ev.abs()
             );
         }
     }
@@ -328,6 +352,20 @@ impl Fixture {
 
     /// 2-D `f64` field, `atol = 1e-10`, `rtol = 1e-14`.
     fn mat(&self, field: &str, actual: &faer::Mat<f64>) {
+        let e = self.mat_field(field);
+        self.mat_close(field, actual, &e);
+    }
+
+    /// 2-D `f64` field whose column signs are arbitrary: each column of the
+    /// fixture and of `actual` is flipped so its largest-magnitude entry is
+    /// positive, then compared as [`Self::mat`] compares.
+    fn mat_up_to_column_sign(&self, field: &str, actual: &faer::Mat<f64>) {
+        let e = self.mat_field(field);
+        self.mat_close(field, &column_sign_up(actual), &column_sign_up(&e));
+    }
+
+    /// The 2-D `f64` field `field` as a matrix.
+    fn mat_field(&self, field: &str) -> faer::Mat<f64> {
         let e = self.f64_field(field);
         assert_eq!(
             e.ndim(),
@@ -335,21 +373,25 @@ impl Fixture {
             "{}.{field}: fixture value is not 2-D",
             self.name
         );
+        faer::Mat::<f64>::from_fn(e.shape()[0], e.shape()[1], |i, j| e[[i, j]])
+    }
+
+    fn mat_close(&self, field: &str, actual: &faer::Mat<f64>, e: &faer::Mat<f64>) {
         assert_eq!(
             (actual.nrows(), actual.ncols()),
-            (e.shape()[0], e.shape()[1]),
+            (e.nrows(), e.ncols()),
             "{}.{field}: shape mismatch",
             self.name
         );
         for i in 0..actual.nrows() {
             for j in 0..actual.ncols() {
-                let (a, ev) = (actual[(i, j)], e[[i, j]]);
+                let (a, ev) = (actual[(i, j)], e[(i, j)]);
+                let bound = allowed(field, ATOL_ARRAY, ev);
                 assert!(
-                    close(a, ev, ATOL_ARRAY),
-                    "{}.{field}[{i},{j}]: |{a} - {ev}| = {:e} > {:e}",
+                    close(a, ev, bound),
+                    "{}.{field}[{i},{j}]: |{a} - {ev}| = {:e} > {bound:e}",
                     self.name,
                     (a - ev).abs(),
-                    ATOL_ARRAY + RTOL * ev.abs()
                 );
             }
         }
@@ -424,6 +466,15 @@ impl Fixture {
         }
     }
 
+    /// A per-step count list the generator writes only when it is `Some`,
+    /// as an i64 array, exact.
+    fn opt_counts(&self, field: &str, actual: Option<&[usize]>) {
+        self.optional(field, actual, |fx, v| {
+            let v: Vec<i64> = v.iter().map(|&c| i64::try_from(c).unwrap()).collect();
+            fx.ints(field, &v);
+        });
+    }
+
     /// Fail unless every field in the fixture was compared.
     fn finish(self) {
         let checked = self.checked.into_inner();
@@ -442,21 +493,31 @@ impl Fixture {
     }
 }
 
-/// `|a − e| ≤ atol + RTOL·|e|` for a finite `e`, with NaN equal to NaN and
-/// an infinity equal only to itself: numpy's `assert_allclose`, which the
-/// Python side uses. The exact `==` is what makes `inf` match `inf`, where
-/// the difference is NaN; the finiteness guard keeps `RTOL·|inf|` from
-/// accepting any `a` against an infinite `e`.
-/// Mirrors `plskit-testdata-gen/src/settle.rs::close`, which owns the rule:
-/// change together.
-#[allow(clippy::float_cmp)]
-fn close(a: f64, e: f64, atol: f64) -> bool {
-    a == e
-        || (a.is_nan() && e.is_nan())
-        || (e.is_finite() && (a - e).abs() <= atol + RTOL * e.abs())
+/// The largest `|a − e|` the field `field` accepts: `atol + RTOL·|e|`, and
+/// for a p-value field also at most `P_RTOL·|e|`, so an expected 0 needs an
+/// exact 0.
+fn allowed(field: &str, atol: f64, e: f64) -> f64 {
+    let bound = atol + RTOL * e.abs();
+    if P_FIELDS.contains(&field) {
+        bound.min(P_RTOL * e.abs())
+    } else {
+        bound
+    }
 }
 
-/// [`close`] is numpy's `assert_allclose(a, e, rtol=RTOL, atol=atol)`,
+/// `|a − e| ≤ bound` for a finite `e`, with NaN equal to NaN and an infinity
+/// equal only to itself. With `bound` from [`allowed`] this is numpy's
+/// `assert_allclose`, which the Python side uses. The exact `==` is what
+/// makes `inf` match `inf`, where the difference is NaN; the finiteness
+/// guard keeps `RTOL·|inf|` from accepting any `a` against an infinite `e`.
+/// Mirrors the rule and the p rule owned by
+/// `plskit-testdata-gen/src/settle.rs`: change together.
+#[allow(clippy::float_cmp)]
+fn close(a: f64, e: f64, bound: f64) -> bool {
+    a == e || (a.is_nan() && e.is_nan()) || (e.is_finite() && (a - e).abs() <= bound)
+}
+
+/// [`close`] with the default bound is numpy's `assert_allclose(a, e, rtol=RTOL, atol=atol)`,
 /// `equal_nan=True`, on the edges every corpus comparison relies on.
 #[test]
 fn close_follows_numpy_allclose() {
@@ -475,8 +536,64 @@ fn close_follows_numpy_allclose() {
         (inf, 1.0, false),
     ];
     for (a, e, want) in rows {
-        assert_eq!(close(a, e, ATOL_SCALAR), want, "close({a}, {e})");
+        assert_eq!(
+            close(a, e, allowed("statistic", ATOL_SCALAR, e)),
+            want,
+            "close({a}, {e})"
+        );
     }
+}
+
+/// A p-value field also needs `|a − e| ≤ P_RTOL·|e|`: a tiny expected p
+/// rejects 0 and a value 1e-9 relative off, an expected 0 accepts only an
+/// exact 0, and NaN still equals NaN. Under the default rule alone, 0 passes
+/// against any p below `ATOL_SCALAR`.
+#[test]
+fn p_values_match_relative_to_their_size() {
+    let tiny = 4.7e-25_f64;
+    let rows = [
+        (0.0, tiny, false),
+        (4.7e-27, tiny, false),
+        (tiny * (1.0 + 1e-9), tiny, false),
+        (tiny * (1.0 + 1e-11), tiny, true),
+        (0.3 + 2e-12, 0.3, false),
+        (0.0, 0.0, true),
+        (f64::from_bits(1), 0.0, false),
+        (f64::NAN, f64::NAN, true),
+    ];
+    for (a, e, want) in rows {
+        assert_eq!(
+            close(a, e, allowed("pvalue", ATOL_SCALAR, e)),
+            want,
+            "close({a}, {e})"
+        );
+    }
+    for field in ["pvalues", "pvalues_by_k__values"] {
+        assert!(
+            !close(0.0, tiny, allowed(field, ATOL_ARRAY, tiny)),
+            "{field}"
+        );
+    }
+    assert!(close(0.0, tiny, allowed("statistic", ATOL_SCALAR, tiny)));
+}
+
+/// Every `f64` output entry named like a p-value is in [`P_FIELDS`], so a
+/// p-value written under a new name cannot escape the p rule.
+#[test]
+fn p_fields_are_the_p_rule_fields() {
+    let mut stray = BTreeSet::new();
+    for case in manifest_cases() {
+        let path = corpus_dir().join(case["outputs"].as_str().unwrap());
+        for name in read_npz::<f64>(&path).into_keys() {
+            if name.starts_with("pvalue") && !P_FIELDS.contains(&name.as_str()) {
+                stray.insert(name);
+            }
+        }
+    }
+    assert!(
+        stray.is_empty(),
+        "p-value fields outside P_FIELDS: {stray:?}"
+    );
 }
 
 // ── kwargs ────────────────────────────────────────────────────────────────
@@ -604,7 +721,7 @@ fn confirmatory_args(method: ConfirmatoryMethod, args: &Value) -> ConfirmatoryAr
             n_perm: kw_opt_usize(args, "n_perm").unwrap_or(n_perm),
             rotate: args.get("rotate").map_or(rotate, |v| v.as_bool().unwrap()),
         },
-        a @ ConfirmatoryArgs::E => a,
+        other => other,
     }
 }
 
@@ -683,6 +800,11 @@ fn check_find_k_optimal(fx: &Fixture, r: &plskit::FindKOptimalOutput) {
         fx.string("diagnostic", s);
     });
     fx.int("seed", r.seed);
+    fx.optional("n_failed_folds", r.n_failed_folds, |fx, v| {
+        fx.int("n_failed_folds", v);
+    });
+    fx.opt_counts("n_failed_splits", r.n_failed_splits.as_deref());
+    fx.opt_counts("n_failed_perms", r.n_failed_perms.as_deref());
 }
 
 /// The fields every `pls1_find_k_sequence` / `spls1_find_k_sequence` fixture records.
@@ -695,6 +817,8 @@ fn check_find_k_sequence(fx: &Fixture, r: &plskit::FindKSequenceOutput) {
     fx.optional("n_covariates", r.n_covariates, |fx, v| {
         fx.int("n_covariates", v);
     });
+    fx.opt_counts("n_failed_splits", r.n_failed_splits.as_deref());
+    fx.opt_counts("n_failed_perms", r.n_failed_perms.as_deref());
 }
 
 /// A `CIScalar` stored as four 0-D fields `{prefix}_{point,lower,upper,sd}`.
@@ -753,6 +877,8 @@ fn pls1_fit_cases_match_corpus() {
                     "{}: sequence rejected no component",
                     fx.name
                 );
+                fx.opt_counts("n_failed_splits", seq.n_failed_splits.as_deref());
+                fx.opt_counts("n_failed_perms", seq.n_failed_perms.as_deref());
                 seq.k_star
             }
             Value::String(mode) => panic!("{}: unknown k mode {mode}", fx.name),
@@ -761,7 +887,7 @@ fn pls1_fit_cases_match_corpus() {
         let m = plskit::pls1_fit(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(k),
+            k,
             wref,
             zref,
             FitOpts {
@@ -919,6 +1045,15 @@ fn pls1_confirmatory_test_cases_match_corpus() {
         check_k_set(fx, &r);
         fx.optional("n_perm", r.n_perm, |fx, v| fx.int("n_perm", v));
         fx.optional("n_splits", r.n_splits, |fx, v| fx.int("n_splits", v));
+        fx.optional("n_failed_splits", r.n_failed_splits, |fx, v| {
+            fx.int("n_failed_splits", v);
+        });
+        fx.optional("n_failed_perms", r.n_failed_perms, |fx, v| {
+            fx.int("n_failed_perms", v);
+        });
+        fx.optional("n_failed_folds", r.n_failed_folds, |fx, v| {
+            fx.int("n_failed_folds", v);
+        });
         fx.optional("stable_rank", r.stable_rank, |fx, v| {
             fx.scalar("stable_rank", v);
         });
@@ -967,7 +1102,7 @@ fn pls1_predict_cases_match_corpus() {
         let m = plskit::pls1_fit(
             inputs.mat("X_train").as_ref(),
             inputs.col("y_train").as_ref(),
-            KSpec::Fixed(kw_usize(&case["kwargs"], "k")),
+            kw_usize(&case["kwargs"], "k"),
             None,
             z.as_ref().map(faer::Mat::as_ref),
             FitOpts::default(),
@@ -995,7 +1130,7 @@ fn rotate_cases_match_corpus() {
         let m = plskit::pls1_fit(
             inputs.mat("X").as_ref(),
             inputs.col("y").as_ref(),
-            KSpec::Fixed(kw_usize(kw, "k")),
+            kw_usize(kw, "k"),
             None,
             None,
             FitOpts::default(),
@@ -1027,13 +1162,20 @@ fn factors_cases_match_corpus() {
         let m = plskit::pls1_fit(
             x.as_ref(),
             inputs.col("y").as_ref(),
-            KSpec::Fixed(kw_usize(kw, "k")),
+            kw_usize(kw, "k"),
             None,
             None,
             FitOpts::default(),
         )
         .expect("fit");
-        let (xs, _, _) = plskit::linalg::standardize(x.as_ref());
+        let (xs, _, _) = plskit::preprocess(PreprocessInput {
+            x: Some(x.as_ref()),
+            y: None,
+            weights: None,
+        })
+        .unwrap()
+        .x_std
+        .unwrap();
         let f = plskit::factors(m.coef.as_ref(), x.as_ref(), n, false, None).expect("factors");
         let l = faer::Mat::<f64>::from_fn(xs.nrows(), f.w.ncols(), |i, j| {
             (0..xs.ncols()).map(|t| xs[(i, t)] * f.w[(t, j)]).sum()
@@ -1143,7 +1285,6 @@ fn pls1_perm_null_cases_match_corpus() {
                 n_perm: kw_usize(kw, "n_perm"),
                 return_perm_matrix: kw_bool(kw, "return_perm_matrix"),
                 pre_standardized: kw_bool(kw, "pre_standardized"),
-                verbose: false,
             },
             kw_seed(kw),
         )
@@ -1156,6 +1297,7 @@ fn pls1_perm_null_cases_match_corpus() {
         fx.int("k", r.k);
         fx.int("seed", r.seed);
         fx.scalar("n_eff", r.n_eff);
+        fx.int("n_failed_perms", r.n_failed_perms);
         fx.optional("n_covariates", r.n_covariates, |fx, v| {
             fx.int("n_covariates", v);
         });
@@ -1214,6 +1356,37 @@ fn gram_matrix_cases_match_corpus() {
     });
 }
 
+#[test]
+fn pca_basis_cases_match_corpus() {
+    let kwargs = Kwargs::top(&["pre_standardized"]);
+    for_each_case("pca_basis", kwargs, |case, inputs, fx| {
+        let r = plskit::pca_basis(
+            inputs.mat("X").as_ref(),
+            kw_bool(&case["kwargs"], "pre_standardized"),
+        )
+        .expect("pca_basis");
+        fx.mat_up_to_column_sign("v", &r.v);
+        fx.col("s", &r.s);
+    });
+}
+
+#[test]
+fn split_nb_gate_cases_match_corpus() {
+    let kwargs = Kwargs::top(&["pre_standardized"]);
+    for_each_case("split_nb_gate", kwargs, |case, inputs, fx| {
+        let r = plskit::split_nb_gate(
+            inputs.mat("X").as_ref(),
+            None,
+            kw_bool(&case["kwargs"], "pre_standardized"),
+        )
+        .expect("split_nb_gate");
+        // `fires` is written as 0/1: the npz writer has no bool dtype.
+        fx.int("fires", i64::from(r.fires));
+        fx.scalar("stable_rank", r.stable_rank);
+        fx.scalar("n_eff", r.n_eff);
+    });
+}
+
 // ── sPLS1 ─────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1226,7 +1399,7 @@ fn spls1_fit_cases_match_corpus() {
         let m = plskit::spls1_fit(
             inputs.mat("X").as_ref(),
             inputs.col("y").as_ref(),
-            KSpec::Fixed(kw_usize(kw, "k")),
+            kw_usize(kw, "k"),
             kw_usize(kw, "keep"),
             weights.as_ref().map(faer::Col::as_ref),
             None,
@@ -1267,6 +1440,7 @@ fn spls1_find_keep_optimal_cases_match_corpus() {
             .collect();
         fx.ints("keep_grid", &grid);
         fx.int("seed", r.seed);
+        fx.int("n_failed_folds", r.n_failed_folds);
     });
 }
 
@@ -1429,6 +1603,15 @@ fn pls3_confirmatory_test_cases_match_corpus() {
         check_k_set(fx, &r);
         fx.optional("n_perm", r.n_perm, |fx, v| fx.int("n_perm", v));
         fx.optional("n_splits", r.n_splits, |fx, v| fx.int("n_splits", v));
+        fx.optional("n_failed_splits", r.n_failed_splits, |fx, v| {
+            fx.int("n_failed_splits", v);
+        });
+        fx.optional("n_failed_perms", r.n_failed_perms, |fx, v| {
+            fx.int("n_failed_perms", v);
+        });
+        fx.optional("n_failed_folds", r.n_failed_folds, |fx, v| {
+            fx.int("n_failed_folds", v);
+        });
         fx.optional("stable_rank", r.stable_rank, |fx, v| {
             fx.scalar("stable_rank", v);
         });

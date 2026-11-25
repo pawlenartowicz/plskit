@@ -105,7 +105,6 @@ fn missing(fn_name: &str, name: &str) -> BindError {
     BindError::invalid_argument(format!("{fn_name}() missing required argument '{name}'"))
 }
 
-/// `split_nb_gate(X, *, weights=None, pre_standardized=False)`.
 pub(crate) fn split_nb_gate(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let w = inp.opt_vec("weights")?;
@@ -124,7 +123,6 @@ pub(crate) fn split_nb_gate(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> 
     ))
 }
 
-/// `gram_matrix(X, *, pre_standardized=False)`.
 pub(crate) fn gram_matrix(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let pre_standardized = inp.bool("pre_standardized")?;
@@ -133,11 +131,28 @@ pub(crate) fn gram_matrix(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     Ok(done(convert::gram_matrix(&out)))
 }
 
-/// `pls1_confirmatory_test(X=None, y=None, k=None, *, test_method="auto", args=None,
-/// ci=False, n_boot=None, m_rate=None, level=None, max_failure_rate=None,
-/// pre_standardized=False, seed=None, verbose=False, weights=None,
-/// covariates=None, null_y=None, max_skip_rate=None, gram=None,
-/// n_features=None)`. `y` is required, and exactly one of `X` and `gram`.
+/// Refuses the CI knobs passed without `ci`, naming each one passed.
+fn refuse_ci_knobs(knobs: &[(&str, bool)]) -> Result<(), BindError> {
+    let passed: Vec<&str> = knobs
+        .iter()
+        .filter(|(_, set)| *set)
+        .map(|(name, _)| *name)
+        .collect();
+    if passed.is_empty() {
+        return Ok(());
+    }
+    let verb = if passed.len() == 1 {
+        "applies"
+    } else {
+        "apply"
+    };
+    Err(BindError::invalid_argument(format!(
+        "{} {verb} only with ci",
+        passed.join(", ")
+    )))
+}
+
+/// `y` is required, and exactly one of `X` and `gram`.
 /// `k` is one count or a set of them; `None` is the engine's default set.
 /// With `null_y`, `args` takes no `n_perm`: the columns of `null_y` set it.
 pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
@@ -153,7 +168,6 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     let max_failure_rate = inp.opt_f64("max_failure_rate")?;
     let pre_standardized = inp.bool("pre_standardized")?;
     let seed = inp.seed()?;
-    let verbose = inp.bool("verbose")?;
     let w = inp.opt_vec("weights")?;
     let z = inp.opt_covariates()?;
     let null_y = inp.opt_mat("null_y")?;
@@ -161,6 +175,15 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     let gram = inp.take("gram");
     let n_features = inp.opt_usize("n_features")?;
     inp.finish()?;
+    if !ci {
+        refuse_ci_knobs(&[
+            ("n_boot", n_boot.is_some()),
+            ("m_rate", m_rate.is_some()),
+            ("level", level.is_some()),
+            ("max_failure_rate", max_failure_rate.is_some()),
+            ("max_skip_rate", max_skip_rate.is_some()),
+        ])?;
+    }
     let y = y.ok_or_else(|| missing("pls1_confirmatory_test", "y"))?;
     check_x_or_gram(x.is_some(), &gram, n_features, w.is_some())?;
     if null_y.is_some() && methods::arg(args.as_ref(), "n_perm").is_some() {
@@ -170,7 +193,6 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     }
     let z = z.as_ref().map(MatF64::as_mat);
     let null_y = null_y.as_ref().map(MatF64::as_mat);
-    // With ci = FALSE the four CI knobs are accepted and ignored.
     let cd = CIOpts::default();
     let ci_opts = ci.then(|| CIOpts {
         n_boot: n_boot.unwrap_or(cd.n_boot),
@@ -183,7 +205,6 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
         args: methods::confirmatory_args(&test_method, args.as_ref())?,
         pre_standardized,
         seed,
-        verbose,
         ci: ci_opts,
         max_skip_rate: max_skip_rate.unwrap_or(od.max_skip_rate),
         keep: None,
@@ -227,10 +248,7 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     Ok(with_warning(convert::confirmatory_test(r), warning))
 }
 
-/// `pls3_confirmatory_test(X=None, Y=None, k=1, *, test_method="auto", args=None,
-/// pre_standardized_X=False, pre_standardized_Y=False, seed=None,
-/// verbose=False, gram=None, n_features=None)`. `Y` is required, and
-/// exactly one of `X` and `gram`.
+/// `Y` is required, and exactly one of `X` and `gram`.
 pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.opt_mat("X")?;
     let y = match inp.take("Y") {
@@ -243,7 +261,6 @@ pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
     let pre_standardized_x = inp.bool("pre_standardized_X")?;
     let pre_standardized_y = inp.bool("pre_standardized_Y")?;
     let seed = inp.seed()?;
-    let verbose = inp.bool("verbose")?;
     let gram = inp.take("gram");
     let n_features = inp.opt_usize("n_features")?;
     inp.finish()?;
@@ -254,7 +271,6 @@ pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
         pre_standardized_x,
         pre_standardized_y,
         seed,
-        verbose,
         ..Pls3ConfirmatoryTestOpts::default()
     };
     let r = if let Some(x) = &x {
@@ -284,14 +300,9 @@ pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
         r.stable_rank,
         Some(r.n_eff),
     );
-    let mut rec = convert::confirmatory_test(r);
-    rec.set("ci", Value::Null); // this family has no CI
-    Ok(with_warning(rec, warning))
+    Ok(with_warning(convert::confirmatory_test(r), warning))
 }
 
-/// `pls1_perm_null(X, y, k, *, n_perm=None, return_perm_matrix=False,
-/// pre_standardized=False, seed=None,
-/// verbose=False, weights=None, covariates=None)`.
 pub(crate) fn pls1_perm_null(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = inp.vec("y")?;
@@ -300,7 +311,6 @@ pub(crate) fn pls1_perm_null(inp: &mut Inputs<'_>) -> Result<Outcome, BindError>
     let return_perm_matrix = inp.bool("return_perm_matrix")?;
     let pre_standardized = inp.bool("pre_standardized")?;
     let seed = inp.seed()?;
-    let verbose = inp.bool("verbose")?;
     let w = inp.opt_vec("weights")?;
     let z = inp.opt_covariates()?;
     inp.finish()?;
@@ -309,7 +319,6 @@ pub(crate) fn pls1_perm_null(inp: &mut Inputs<'_>) -> Result<Outcome, BindError>
         n_perm: n_perm.unwrap_or(d.n_perm),
         return_perm_matrix,
         pre_standardized,
-        verbose,
     };
     let out = engine(plskit::pls1_perm_null(
         x.as_mat(),
@@ -323,8 +332,7 @@ pub(crate) fn pls1_perm_null(inp: &mut Inputs<'_>) -> Result<Outcome, BindError>
     Ok(done(convert::perm_null(out)))
 }
 
-/// `pls1_perm_alpha(gram, Y, k=1, *, n_features=None)`. `gram` is a
-/// `GramMatrixResult` or a matrix with `n_features`.
+/// `gram` is a `GramMatrixResult` or a matrix with `n_features`.
 pub(crate) fn pls1_perm_alpha(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let gram = inp.take("gram");
     let y = inp.mat("Y")?;

@@ -1,91 +1,139 @@
 group,routine,version,ref_lib,ref_version,ref_routine,n,p,k,compared,max_diff,ok
-pls1,pls1_fit,0.7.0,sklearn,1.9.1,PLSRegression,50,10,1,pred,8.88e-16,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg1,50,10,1,pred,1.55e-15,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg2,50,10,1,pred,1.55e-15,True
-pls1,pls1_fit_prestd,0.7.0,sklearn,1.9.1,PLSRegression,50,10,1,pred,6.66e-16,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg1,50,10,1,pred,1.55e-15,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg2,50,10,1,pred,1.55e-15,True
-pls1,spls1_fit_endpoint,0.7.0,sklearn,1.9.1,PLSRegression,50,10,1,pred,8.88e-16,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,50,10,1,pred,1.55e-15,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,50,10,1,pred,1.55e-15,True
-pls1,pls1_fit,0.7.0,sklearn,1.9.1,PLSRegression,50,10,3,pred,1.11e-15,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg1,50,10,3,pred,1.11e-15,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg2,50,10,3,pred,2.22e-15,True
-pls1,pls1_fit_prestd,0.7.0,sklearn,1.9.1,PLSRegression,50,10,3,pred,1.33e-15,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg1,50,10,3,pred,2.22e-15,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg2,50,10,3,pred,2.66e-15,True
-pls1,spls1_fit_endpoint,0.7.0,sklearn,1.9.1,PLSRegression,50,10,3,pred,1.11e-15,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,50,10,3,pred,1.11e-15,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,50,10,3,pred,2.22e-15,True
-pls1,pls1_fit,0.7.0,sklearn,1.9.1,PLSRegression,30,100,1,pred,8.88e-16,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg1,30,100,1,pred,6.66e-16,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg2,30,100,1,pred,6.66e-16,True
-pls1,pls1_fit_prestd,0.7.0,sklearn,1.9.1,PLSRegression,30,100,1,pred,8.88e-16,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg1,30,100,1,pred,5.55e-16,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg2,30,100,1,pred,5.55e-16,True
-pls1,spls1_fit_endpoint,0.7.0,sklearn,1.9.1,PLSRegression,30,100,1,pred,8.88e-16,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,30,100,1,pred,6.66e-16,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,30,100,1,pred,6.66e-16,True
-pls1,pls1_fit,0.7.0,sklearn,1.9.1,PLSRegression,30,100,3,pred,2.66e-15,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg1,30,100,3,pred,2.28e-15,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg2,30,100,3,pred,2.22e-15,True
-pls1,pls1_fit_prestd,0.7.0,sklearn,1.9.1,PLSRegression,30,100,3,pred,4e-15,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg1,30,100,3,pred,2.22e-15,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg2,30,100,3,pred,2.22e-15,True
-pls1,spls1_fit_endpoint,0.7.0,sklearn,1.9.1,PLSRegression,30,100,3,pred,2.66e-15,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,30,100,3,pred,2.28e-15,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,30,100,3,pred,2.22e-15,True
-pls1,pls1_fit,0.7.0,sklearn,1.9.1,PLSRegression,2000,20,1,pred,4.88e-15,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg1,2000,20,1,pred,4e-15,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg2,2000,20,1,pred,4.44e-15,True
-pls1,pls1_fit_prestd,0.7.0,sklearn,1.9.1,PLSRegression,2000,20,1,pred,3.55e-15,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg1,2000,20,1,pred,3.11e-15,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg2,2000,20,1,pred,3.55e-15,True
-pls1,spls1_fit_endpoint,0.7.0,sklearn,1.9.1,PLSRegression,2000,20,1,pred,4.88e-15,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,2000,20,1,pred,4e-15,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,2000,20,1,pred,4.44e-15,True
-pls1,pls1_fit,0.7.0,sklearn,1.9.1,PLSRegression,2000,20,3,pred,6.22e-15,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg1,2000,20,3,pred,3.55e-15,True
-pls1,pls1_fit,0.7.0,ikpls,6.1.2,alg2,2000,20,3,pred,3.11e-15,True
-pls1,pls1_fit_prestd,0.7.0,sklearn,1.9.1,PLSRegression,2000,20,3,pred,7.99e-15,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg1,2000,20,3,pred,5.33e-15,True
-pls1,pls1_fit_prestd,0.7.0,ikpls,6.1.2,alg2,2000,20,3,pred,4.88e-15,True
-pls1,spls1_fit_endpoint,0.7.0,sklearn,1.9.1,PLSRegression,2000,20,3,pred,6.22e-15,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,2000,20,3,pred,3.55e-15,True
-pls1,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,2000,20,3,pred,3.11e-15,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg1,50,10,1,pred,3e-15,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg2,50,10,1,pred,2.78e-15,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,50,10,1,pred,3e-15,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,50,10,1,pred,2.78e-15,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg1,50,10,3,pred,4.44e-15,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg2,50,10,3,pred,4.44e-15,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,50,10,3,pred,4.44e-15,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,50,10,3,pred,4.44e-15,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg1,30,100,1,pred,1.78e-15,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg2,30,100,1,pred,8.88e-16,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,30,100,1,pred,1.78e-15,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,30,100,1,pred,8.88e-16,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg1,30,100,3,pred,4.44e-15,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg2,30,100,3,pred,2.66e-15,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,30,100,3,pred,4.44e-15,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,30,100,3,pred,2.66e-15,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg1,2000,20,1,pred,8.44e-15,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg2,2000,20,1,pred,8.44e-15,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,2000,20,1,pred,8.44e-15,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,2000,20,1,pred,8.44e-15,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg1,2000,20,3,pred,5.11e-15,True
-pls1_weighted,pls1_fit,0.7.0,ikpls,6.1.2,alg2,2000,20,3,pred,6.44e-15,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg1,2000,20,3,pred,5.11e-15,True
-pls1_weighted,spls1_fit_endpoint,0.7.0,ikpls,6.1.2,alg2,2000,20,3,pred,6.44e-15,True
-pls3,pls3_fit,0.7.0,sklearn,1.9.1,PLSSVD,50,10,1,U V x_scores y_scores,3.11e-15,True
-pls3,spls3_fit_endpoint,0.7.0,sklearn,1.9.1,PLSSVD,50,10,1,U V x_scores y_scores,3.11e-15,True
-pls3,pls3_fit,0.7.0,sklearn,1.9.1,PLSSVD,50,10,3,U V x_scores y_scores,3.33e-15,True
-pls3,spls3_fit_endpoint,0.7.0,sklearn,1.9.1,PLSSVD,50,10,3,U V x_scores y_scores,3.33e-15,True
-pls3,pls3_fit,0.7.0,sklearn,1.9.1,PLSSVD,30,100,1,U V x_scores y_scores,4.66e-15,True
-pls3,spls3_fit_endpoint,0.7.0,sklearn,1.9.1,PLSSVD,30,100,1,U V x_scores y_scores,4.66e-15,True
-pls3,pls3_fit,0.7.0,sklearn,1.9.1,PLSSVD,30,100,3,U V x_scores y_scores,7.99e-15,True
-pls3,spls3_fit_endpoint,0.7.0,sklearn,1.9.1,PLSSVD,30,100,3,U V x_scores y_scores,7.99e-15,True
-pls3,pls3_fit,0.7.0,sklearn,1.9.1,PLSSVD,2000,20,1,U V x_scores y_scores,2.66e-15,True
-pls3,spls3_fit_endpoint,0.7.0,sklearn,1.9.1,PLSSVD,2000,20,1,U V x_scores y_scores,2.66e-15,True
-pls3,pls3_fit,0.7.0,sklearn,1.9.1,PLSSVD,2000,20,3,U V x_scores y_scores,3.55e-15,True
-pls3,spls3_fit_endpoint,0.7.0,sklearn,1.9.1,PLSSVD,2000,20,3,U V x_scores y_scores,3.55e-15,True
+pls1,pls1_fit,0.11.0,sklearn,1.9.1,PLSRegression,50,10,1,pred,1.11e-15,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg1,50,10,1,pred,1.78e-15,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg2,50,10,1,pred,1.78e-15,True
+pls1,pls1_fit_prestd,0.11.0,sklearn,1.9.1,PLSRegression,50,10,1,pred,6.66e-16,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg1,50,10,1,pred,1.55e-15,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg2,50,10,1,pred,1.55e-15,True
+pls1,spls1_fit_endpoint,0.11.0,sklearn,1.9.1,PLSRegression,50,10,1,pred,1.11e-15,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,50,10,1,pred,1.78e-15,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,50,10,1,pred,1.78e-15,True
+pls1,pls1_fit,0.11.0,sklearn,1.9.1,PLSRegression,50,10,3,pred,2.89e-15,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg1,50,10,3,pred,2e-15,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg2,50,10,3,pred,1.78e-15,True
+pls1,pls1_fit_prestd,0.11.0,sklearn,1.9.1,PLSRegression,50,10,3,pred,1.33e-15,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg1,50,10,3,pred,2.22e-15,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg2,50,10,3,pred,2.44e-15,True
+pls1,spls1_fit_endpoint,0.11.0,sklearn,1.9.1,PLSRegression,50,10,3,pred,2.89e-15,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,50,10,3,pred,2e-15,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,50,10,3,pred,1.78e-15,True
+pls1,pls1_fit,0.11.0,sklearn,1.9.1,PLSRegression,30,100,1,pred,8.88e-16,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg1,30,100,1,pred,6.66e-16,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg2,30,100,1,pred,6.66e-16,True
+pls1,pls1_fit_prestd,0.11.0,sklearn,1.9.1,PLSRegression,30,100,1,pred,1.33e-15,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg1,30,100,1,pred,6.66e-16,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg2,30,100,1,pred,6.66e-16,True
+pls1,spls1_fit_endpoint,0.11.0,sklearn,1.9.1,PLSRegression,30,100,1,pred,8.88e-16,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,30,100,1,pred,6.66e-16,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,30,100,1,pred,6.66e-16,True
+pls1,pls1_fit,0.11.0,sklearn,1.9.1,PLSRegression,30,100,3,pred,2.66e-15,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg1,30,100,3,pred,2.5e-15,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg2,30,100,3,pred,1.78e-15,True
+pls1,pls1_fit_prestd,0.11.0,sklearn,1.9.1,PLSRegression,30,100,3,pred,3.11e-15,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg1,30,100,3,pred,2.33e-15,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg2,30,100,3,pred,2e-15,True
+pls1,spls1_fit_endpoint,0.11.0,sklearn,1.9.1,PLSRegression,30,100,3,pred,2.66e-15,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,30,100,3,pred,2.5e-15,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,30,100,3,pred,1.78e-15,True
+pls1,pls1_fit,0.11.0,sklearn,1.9.1,PLSRegression,2000,20,1,pred,4.88e-15,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg1,2000,20,1,pred,4e-15,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg2,2000,20,1,pred,4.44e-15,True
+pls1,pls1_fit_prestd,0.11.0,sklearn,1.9.1,PLSRegression,2000,20,1,pred,3.55e-15,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg1,2000,20,1,pred,3.11e-15,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg2,2000,20,1,pred,3.55e-15,True
+pls1,spls1_fit_endpoint,0.11.0,sklearn,1.9.1,PLSRegression,2000,20,1,pred,4.88e-15,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,2000,20,1,pred,4e-15,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,2000,20,1,pred,4.44e-15,True
+pls1,pls1_fit,0.11.0,sklearn,1.9.1,PLSRegression,2000,20,3,pred,6.22e-15,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg1,2000,20,3,pred,3.55e-15,True
+pls1,pls1_fit,0.11.0,ikpls,6.1.2,alg2,2000,20,3,pred,3.11e-15,True
+pls1,pls1_fit_prestd,0.11.0,sklearn,1.9.1,PLSRegression,2000,20,3,pred,7.99e-15,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg1,2000,20,3,pred,5.33e-15,True
+pls1,pls1_fit_prestd,0.11.0,ikpls,6.1.2,alg2,2000,20,3,pred,4.88e-15,True
+pls1,spls1_fit_endpoint,0.11.0,sklearn,1.9.1,PLSRegression,2000,20,3,pred,6.22e-15,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,2000,20,3,pred,3.55e-15,True
+pls1,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,2000,20,3,pred,3.11e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg1,50,10,1,pred,3e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg2,50,10,1,pred,2.78e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,50,10,1,pred,3e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,50,10,1,pred,2.78e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg1,50,10,3,pred,4.44e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg2,50,10,3,pred,4.44e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,50,10,3,pred,4.44e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,50,10,3,pred,4.44e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg1,30,100,1,pred,2.66e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg2,30,100,1,pred,1.78e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,30,100,1,pred,2.66e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,30,100,1,pred,1.78e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg1,30,100,3,pred,2.22e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg2,30,100,3,pred,2e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,30,100,3,pred,2.22e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,30,100,3,pred,2e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg1,2000,20,1,pred,9.33e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg2,2000,20,1,pred,9.33e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,2000,20,1,pred,9.33e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,2000,20,1,pred,9.33e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg1,2000,20,3,pred,6.66e-15,True
+pls1_weighted,pls1_fit,0.11.0,ikpls,6.1.2,alg2,2000,20,3,pred,6.66e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg1,2000,20,3,pred,6.66e-15,True
+pls1_weighted,spls1_fit_endpoint,0.11.0,ikpls,6.1.2,alg2,2000,20,3,pred,6.66e-15,True
+pls3,pls3_fit,0.11.0,sklearn,1.9.1,PLSSVD,50,10,1,U V x_scores y_scores,2.22e-15,True
+pls3,spls3_fit_endpoint,0.11.0,sklearn,1.9.1,PLSSVD,50,10,1,U V x_scores y_scores,2.22e-15,True
+pls3,pls3_fit,0.11.0,sklearn,1.9.1,PLSSVD,50,10,3,U V x_scores y_scores,3.11e-15,True
+pls3,spls3_fit_endpoint,0.11.0,sklearn,1.9.1,PLSSVD,50,10,3,U V x_scores y_scores,3.11e-15,True
+pls3,pls3_fit,0.11.0,sklearn,1.9.1,PLSSVD,30,100,1,U V x_scores y_scores,4.22e-15,True
+pls3,spls3_fit_endpoint,0.11.0,sklearn,1.9.1,PLSSVD,30,100,1,U V x_scores y_scores,4.22e-15,True
+pls3,pls3_fit,0.11.0,sklearn,1.9.1,PLSSVD,30,100,3,U V x_scores y_scores,4.88e-15,True
+pls3,spls3_fit_endpoint,0.11.0,sklearn,1.9.1,PLSSVD,30,100,3,U V x_scores y_scores,4.88e-15,True
+pls3,pls3_fit,0.11.0,sklearn,1.9.1,PLSSVD,2000,20,1,U V x_scores y_scores,4.44e-15,True
+pls3,spls3_fit_endpoint,0.11.0,sklearn,1.9.1,PLSSVD,2000,20,1,U V x_scores y_scores,4.44e-15,True
+pls3,pls3_fit,0.11.0,sklearn,1.9.1,PLSSVD,2000,20,3,U V x_scores y_scores,6.66e-15,True
+pls3,spls3_fit_endpoint,0.11.0,sklearn,1.9.1,PLSSVD,2000,20,3,U V x_scores y_scores,6.66e-15,True
+pls1_covariates,pls1_fit_covariates,0.11.0,sklearn,1.9.1,PLSRegression_residualized,50,10,1,pred,1.33e-15,True
+pls1_covariates,pls1_fit_covariates,0.11.0,sklearn,1.9.1,PLSRegression_residualized,50,10,3,pred,3.11e-15,True
+pls1_covariates,pls1_fit_covariates,0.11.0,sklearn,1.9.1,PLSRegression_residualized,30,100,1,pred,1.33e-15,True
+pls1_covariates,pls1_fit_covariates,0.11.0,sklearn,1.9.1,PLSRegression_residualized,30,100,3,pred,1.78e-15,True
+pls1_covariates,pls1_fit_covariates,0.11.0,sklearn,1.9.1,PLSRegression_residualized,2000,20,1,pred,2e-15,True
+pls1_covariates,pls1_fit_covariates,0.11.0,sklearn,1.9.1,PLSRegression_residualized,2000,20,3,pred,1.78e-15,True
+pls3_transform,pls3_transform,0.11.0,sklearn,1.9.1,PLSSVD.transform,50,10,1,U x_new y_new,1.78e-15,True
+pls3_transform,pls3_transform,0.11.0,sklearn,1.9.1,PLSSVD.transform,50,10,3,U x_new y_new,3.33e-15,True
+pls3_transform,pls3_transform,0.11.0,sklearn,1.9.1,PLSSVD.transform,30,100,1,U x_new y_new,2.78e-15,True
+pls3_transform,pls3_transform,0.11.0,sklearn,1.9.1,PLSSVD.transform,30,100,3,U x_new y_new,3.33e-15,True
+pls3_transform,pls3_transform,0.11.0,sklearn,1.9.1,PLSSVD.transform,2000,20,1,U x_new y_new,3e-15,True
+pls3_transform,pls3_transform,0.11.0,sklearn,1.9.1,PLSSVD.transform,2000,20,3,U x_new y_new,5.44e-15,True
+pls3_singular_values,pls3_fit,0.11.0,numpy,2.5.3,linalg.svd,50,10,1,sv,5.68e-14,True
+pls3_singular_values,pls3_fit,0.11.0,numpy,2.5.3,linalg.svd,50,10,3,sv,5.68e-14,True
+pls3_singular_values,pls3_fit,0.11.0,numpy,2.5.3,linalg.svd,30,100,1,sv,1.42e-13,True
+pls3_singular_values,pls3_fit,0.11.0,numpy,2.5.3,linalg.svd,30,100,3,sv,1.42e-13,True
+pls3_singular_values,pls3_fit,0.11.0,numpy,2.5.3,linalg.svd,2000,20,1,sv,0,True
+pls3_singular_values,pls3_fit,0.11.0,numpy,2.5.3,linalg.svd,2000,20,3,sv,1.82e-12,True
+pca_basis_V,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,50,10,1,V,1.78e-14,True
+pca_basis_V,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,50,10,3,V,1.78e-14,True
+pca_basis_V,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,30,100,1,V,2.7e-14,True
+pca_basis_V,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,30,100,3,V,2.7e-14,True
+pca_basis_V,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,2000,20,1,V,2.39e-13,True
+pca_basis_V,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,2000,20,3,V,2.39e-13,True
+pca_basis_s,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,50,10,1,s,1.42e-14,True
+pca_basis_s,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,50,10,3,s,1.42e-14,True
+pca_basis_s,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,30,100,1,s,3.2e-14,True
+pca_basis_s,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,30,100,3,s,3.2e-14,True
+pca_basis_s,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,2000,20,1,s,7.11e-14,True
+pca_basis_s,pca_basis,0.11.0,numpy,2.5.3,linalg.svd,2000,20,3,s,7.11e-14,True
+pls1_bic,pls1_find_k_optimal_bic,0.11.0,sklearn,1.9.1,PLSRegression,50,10,1,bic,2.84e-14,True
+pls1_bic,pls1_find_k_optimal_bic,0.11.0,sklearn,1.9.1,PLSRegression,50,10,3,bic,2.84e-14,True
+pls1_bic,pls1_find_k_optimal_bic,0.11.0,sklearn,1.9.1,PLSRegression,30,100,1,bic,0,True
+pls1_bic,pls1_find_k_optimal_bic,0.11.0,sklearn,1.9.1,PLSRegression,30,100,3,bic,4.26e-14,True
+pls1_bic,pls1_find_k_optimal_bic,0.11.0,sklearn,1.9.1,PLSRegression,2000,20,1,bic,1.36e-12,True
+pls1_bic,pls1_find_k_optimal_bic,0.11.0,sklearn,1.9.1,PLSRegression,2000,20,3,bic,4.55e-12,True
+pls1_perm_alpha,pls1_perm_alpha,0.11.0,sklearn,1.9.1,PLSRegression,50,10,1,coef,3.33e-16,True
+pls1_perm_alpha,pls1_perm_alpha,0.11.0,sklearn,1.9.1,PLSRegression,50,10,3,coef,3.33e-16,True
+pls1_perm_alpha,pls1_perm_alpha,0.11.0,sklearn,1.9.1,PLSRegression,30,100,1,coef,1.11e-16,True
+pls1_perm_alpha,pls1_perm_alpha,0.11.0,sklearn,1.9.1,PLSRegression,30,100,3,coef,2.22e-16,True
+pls1_perm_alpha,pls1_perm_alpha,0.11.0,sklearn,1.9.1,PLSRegression,2000,20,1,coef,2.55e-15,True
+pls1_perm_alpha,pls1_perm_alpha,0.11.0,sklearn,1.9.1,PLSRegression,2000,20,3,coef,2.11e-15,True
+varimax,rotate_varimax,0.11.0,factor_analyzer,0.5.1,Rotator_varimax,50,10,1,R,0,True
+varimax,rotate_varimax,0.11.0,factor_analyzer,0.5.1,Rotator_varimax,50,10,3,R,3.11e-10,True
+varimax,rotate_varimax,0.11.0,factor_analyzer,0.5.1,Rotator_varimax,30,100,1,R,0,True
+varimax,rotate_varimax,0.11.0,factor_analyzer,0.5.1,Rotator_varimax,30,100,3,R,6.66e-11,True
+varimax,rotate_varimax,0.11.0,factor_analyzer,0.5.1,Rotator_varimax,2000,20,1,R,0,True
+varimax,rotate_varimax,0.11.0,factor_analyzer,0.5.1,Rotator_varimax,2000,20,3,R,2.63e-10,True

@@ -134,6 +134,12 @@ def rust_reexported_items(rs_src: Path) -> dict[str, str]:
     return items
 
 
+def crate_modules(rs_src: Path) -> set[str]:
+    """Modules declared by `mod <name>;` in `lib.rs`, any visibility, any `#[cfg]`."""
+    text = (rs_src / "lib.rs").read_text(encoding="utf-8")
+    return set(re.findall(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;", text, re.MULTILINE))
+
+
 def _struct_body(text: str, name: str) -> str | None:
     m = re.search(rf"^pub struct {re.escape(name)}\b", text, re.MULTILINE)
     if not m:
@@ -192,7 +198,9 @@ def _fn_return_type(text: str, name: str) -> str | None:
     return bare.group(1) if bare else None
 
 
-def rust_functions_and_result_types(rs_src: Path) -> tuple[set[str], dict[str, set[str]]]:
+def rust_functions_and_result_types(
+    rs_src: Path,
+) -> tuple[set[str], dict[str, set[str]], set[str]]:
     """Exported functions, and the result-type surface reachable from them.
 
     Code side = the return types of re-exported `pub fn`s, plus any
@@ -201,13 +209,24 @@ def rust_functions_and_result_types(rs_src: Path) -> tuple[set[str], dict[str, s
     `ConfirmatoryTestOutput`'s `ci` field, and excludes every `*Opts` /
     `*Input` / `VarimaxArgs` input-side struct, since nothing reachable from
     a return type points at them.
+
+    The third value names the crate's own re-exported modules that have
+    neither `src/<module>.rs` nor `src/<module>/mod.rs`, so their items
+    would leave the check unseen. Modules of other crates (`faer`) have no
+    file here and are skipped.
     """
     items = rust_reexported_items(rs_src)
+    own_modules = crate_modules(rs_src)
     module_text: dict[str, str] = {}
+    unread: set[str] = set()
     for module in set(items.values()):
-        f = rs_src / f"{module}.rs"
-        if f.exists():
-            module_text[module] = f.read_text(encoding="utf-8")
+        for f in (rs_src / f"{module}.rs", rs_src / module / "mod.rs"):
+            if f.exists():
+                module_text[module] = f.read_text(encoding="utf-8")
+                break
+        else:
+            if module in own_modules:
+                unread.add(module)
 
     functions: set[str] = set()
     struct_text: dict[str, str] = {}  # struct name -> its module's full text
@@ -241,7 +260,7 @@ def rust_functions_and_result_types(rs_src: Path) -> tuple[set[str], dict[str, s
         t: {m[0] for m in RE_PUB_FIELD.findall(_struct_body(struct_text[t], t) or "")}
         for t in reachable
     }
-    return functions, result_types
+    return functions, result_types, unread
 
 
 def python_all_names(init_path: Path) -> list[str]:
@@ -337,10 +356,10 @@ def _report_type_drift(
 
 def check_rust(root: Path, docs_dir: Path) -> list[str]:
     rs_src = root / "plskit-rs" / "src"
-    functions, result_types = rust_functions_and_result_types(rs_src)
+    functions, result_types, unread = rust_functions_and_result_types(rs_src)
     documented, planned = parse_rust_doc_sections(docs_dir / "rust" / "api.md")
 
-    issues = []
+    issues = [f"  re-exported module has no source file: {m}" for m in sorted(unread)]
     undocumented = sorted(functions - documented)
     if undocumented:
         issues.append(f"  exported but not documented: {', '.join(undocumented)}")
@@ -418,8 +437,8 @@ def main() -> int:
 
     docs_dir = args.root / DOCS_DIRNAME
     if not docs_dir.is_dir():
-        print(f"{docs_dir} not found, skipping (docs dir not yet tracked)")
-        return 0
+        print(f"{docs_dir} not found")
+        return 1
 
     checks = {
         "rust": check_rust,

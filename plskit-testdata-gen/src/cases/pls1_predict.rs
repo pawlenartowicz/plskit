@@ -7,7 +7,7 @@ use crate::cases::{
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
 use anyhow::Result;
-use plskit::{FitOpts, KSpec, pls1_fit, pls1_predict};
+use plskit::{FitOpts, pls1_fit, pls1_predict};
 use std::path::Path;
 
 /// Case: basic `pls1_predict` — fit on `(60, 6)` train data, predict on `(20, 6)` holdout.
@@ -40,7 +40,7 @@ pub fn basic_n80_d6_k2(root: &Path) -> Result<Case> {
     let model = pls1_fit(
         x_train_faer.as_ref(),
         y_train_faer.as_ref(),
-        KSpec::Fixed(2),
+        2,
         None,
         None,
         FitOpts::default(),
@@ -107,7 +107,7 @@ pub fn covariates_n80_d6_k2(root: &Path) -> Result<Case> {
     let model = pls1_fit(
         x_train_faer.as_ref(),
         y_train_faer.as_ref(),
-        KSpec::Fixed(2),
+        2,
         None,
         Some(z_train_faer.as_ref()),
         FitOpts::default(),
@@ -120,7 +120,7 @@ pub fn covariates_n80_d6_k2(root: &Path) -> Result<Case> {
         &pls1_fit(
             x_train_faer.as_ref(),
             y_train_faer.as_ref(),
-            KSpec::Fixed(2),
+            2,
             None,
             None,
             FitOpts::default(),

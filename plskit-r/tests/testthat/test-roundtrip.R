@@ -111,7 +111,7 @@ test_that("factors and profiles results round-trip through rotate", {
   expect_equal(unname(rowSums(f$F)), unname(f$coef), tolerance = 1e-10)
   # a named numeric vector is a vector, not an integer-keyed map
   expect_identical(factors(setNames(coef, seq_along(coef)), d$X, 3L)$F, f$F)
-  expect_identical(catch_plskit(factors(rep(NA, ncol(d$X)), d$X, 3L))$code, "invalid_input")
+  expect_identical(catch_plskit(factors(rep(NA, ncol(d$X)), d$X, 3L))$code, "non_finite_input")
   r <- rotate(f, d$X)
   expect_s3_class(r, c("factors_result", "plskit_result"), exact = TRUE)
   expect_equal(unname(rowSums(r$F)), unname(r$coef), tolerance = 1e-10)
@@ -176,6 +176,16 @@ test_that("subset() on a gram_matrix_result takes 1-based rows and checks them",
     expect_identical(catch_plskit(subset(g, bad))$code, "invalid_argument")
   }
   expect_identical(catch_plskit(subset(g, 1:2, drop = TRUE))$code, "invalid_argument")
+  for (bad in list(c(1, 61), c(1, Inf))) {
+    e <- catch_plskit(subset(g, bad))
+    expect_identical(e$code, "invalid_argument")
+    expect_identical(conditionMessage(e), "rows must index the 60 rows of the Gram matrix")
+  }
+  for (bad in list(c(0, 2), c(1.5, 2))) {
+    e <- catch_plskit(subset(g, bad))
+    expect_identical(e$code, "invalid_argument")
+    expect_identical(conditionMessage(e), "rows must be whole row numbers, at least 1")
+  }
 })
 
 test_that("gram_matrix_blocks matches gram_matrix on the joined X and checks its blocks", {
@@ -207,7 +217,17 @@ test_that("gram_matrix_blocks matches gram_matrix on the joined X and checks its
   p1 <- pls1_confirmatory_test(gram = gram_matrix_blocks(half), y = ys, seed = 1)
   p2 <- pls1_confirmatory_test(Xs, ys, seed = 1)
   expect_equal(p1$pvalue, p2$pvalue, tolerance = 1e-12)
-  expect_identical(catch_plskit(gram_matrix_blocks(function() NULL))$code, "invalid_input")
+  e <- catch_plskit(gram_matrix_blocks(function() NULL))
+  expect_identical(e$code, "invalid_input")
+  expect_identical(conditionMessage(e), "blocks holds no block")
+  m <- 5L
+  short <- function() {
+    m <<- m - 1L
+    if (m < 3L) NULL else X[seq_len(m), 1:3]
+  }
+  e <- catch_plskit(gram_matrix_blocks(short))
+  expect_identical(e$code, "shape_mismatch")
+  expect_identical(conditionMessage(e), "block has 3 rows, the first block has 4")
   k <- 0L
   uneven <- function() {
     k <<- k + 1L
@@ -245,4 +265,14 @@ test_that("k takes a set: the tested k and the per-k p-values come back", {
   expect_identical(names(a$statistics_by_k), c("1", "2", "3"))
   expect_null(a$statistic)
   expect_identical(run(c(1, 2, 3)), a)
+})
+
+test_that("failed split counts reach the result", {
+  # One nonzero row leaves one half of every split with a constant outcome.
+  X <- matrix(stats::rnorm(120), 30, 4)
+  y <- c(1, rep(0, 29))
+  r <- pls1_confirmatory_test(X, y, 1, test_method = "split_exact", args = list(n_perm = 19, n_splits = 8), seed = 1)
+  expect_identical(r$n_failed_splits, 8L)
+  expect_identical(r$n_failed_perms, 0L)
+  expect_null(r$n_failed_folds)
 })

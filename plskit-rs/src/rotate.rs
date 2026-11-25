@@ -1,6 +1,5 @@
 //! Simple-structure rotation of PLS weights. Varimax is implemented via
-//! pairwise Kaiser sweeps; the `RotationMethod` enum is parameterized so
-//! promax / oblimin / geomin can land later without changing the surface.
+//! pairwise Kaiser sweeps.
 //!
 //! Algorithm reference: Kaiser (1958), "The varimax criterion for analytic
 //! rotation in factor analysis", Psychometrika 23(3):187-200 (closed-form
@@ -16,10 +15,10 @@ use crate::error::{PlsKitError, PlsKitResult};
 /// args; wrappers translate `(method: str, args: dict)` to the
 /// matching variant at the FFI seam.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum RotationMethod {
     /// Varimax via pairwise Kaiser sweeps.
     Varimax(VarimaxArgs),
-    // Planned: Promax(PromaxArgs), Oblimin(ObliminArgs), Geomin(GeominArgs).
 }
 
 /// Resolved varimax parameters. Defaults: `max_iter` 50, `tol` 1e-8,
@@ -28,7 +27,7 @@ pub enum RotationMethod {
 pub struct VarimaxArgs {
     /// Maximum Kaiser sweeps (default 50).
     pub max_iter: usize,
-    /// Convergence tolerance on the varimax criterion `V` (default 1e-8).
+    /// Relative convergence tolerance: the sweeps stop when `V` rises by at most `tol · |V|` (default 1e-8).
     pub tol: f64,
     /// Row-normalize the simple-structure target before sweeping (default true).
     pub kaiser_normalize: bool,
@@ -53,9 +52,13 @@ pub struct RotateOutput {
     pub w_rot: Mat<f64>,
     /// Orthogonal rotation, shape `(K, K)`. `w_rot = w @ r`.
     pub r: Mat<f64>,
-    /// Number of Kaiser sweeps actually run (≤ `args.max_iter`).
+    /// The sweeps run, the one that met `tol` included; equal to `max_iter`
+    /// both when the cap was reached and when the last allowed sweep met
+    /// `tol`; 0 at K = 1.
     pub sweeps: usize,
-    /// Final value of the varimax criterion `V = Σ_j Var(target[:, j]²)`.
+    /// The varimax criterion `V = Σ_j Var(target[:, j]²)` before the last
+    /// sweep when the loop stopped on `tol`, after it when it reached
+    /// `max_iter`; at K = 1, the criterion of the unrotated target.
     pub v_converged: f64,
 }
 
@@ -64,11 +67,14 @@ pub struct RotateOutput {
 ///
 /// # Errors
 ///
-/// - [`PlsKitError::InvalidInput`] — K=0, or non-finite values in `w` / `l`.
+/// - [`PlsKitError::InvalidInput`] — K=0.
+/// - [`PlsKitError::NonFiniteInput`] — `w` or `l` holds a NaN or an infinity.
 /// - [`PlsKitError::ShapeMismatch`] — `l.ncols() != w.ncols()`.
+/// - [`PlsKitError::InvalidArgument`] — varimax `max_iter` is 0, or `tol`
+///   is negative or not finite.
 ///
-/// `RotationMethodNotImplemented` and `InvalidArgs` are produced at the
-/// wrapper layer (when parsing `(method, args)` strings/dicts) and never
+/// The `rotation_method_not_implemented` and `invalid_args` codes are produced
+/// at the wrapper layer (when parsing `(method, args)` strings/dicts) and never
 /// here — by the time the core sees a `RotationMethod`, the method is
 /// known and the args are typed.
 // The public signature takes `method` by value; the enum is small
@@ -81,14 +87,12 @@ pub fn rotate(
     l: Option<MatRef<'_, f64>>,
 ) -> PlsKitResult<RotateOutput> {
     // Shape / finiteness gates.
-    let (d_rows, k) = (w.nrows(), w.ncols());
+    let k = w.ncols();
     if k == 0 {
         return Err(PlsKitError::InvalidInput("W has K=0".into()));
     }
-    if !mat_is_finite(w) {
-        return Err(PlsKitError::InvalidInput(
-            "W contains non-finite values".into(),
-        ));
+    if !w.is_all_finite() {
+        return Err(PlsKitError::NonFiniteInput);
     }
     if let Some(ll) = l.as_ref() {
         if ll.ncols() != k {
@@ -98,22 +102,16 @@ pub fn rotate(
                 k
             )));
         }
-        if !mat_is_finite(*ll) {
-            return Err(PlsKitError::InvalidInput(
-                "L contains non-finite values".into(),
-            ));
+        if !ll.is_all_finite() {
+            return Err(PlsKitError::NonFiniteInput);
         }
     }
 
-    let _ = d_rows; // shape sanity reserved for future variants
     match method {
         RotationMethod::Varimax(args) => varimax_rotate(w, l, args, k),
     }
 }
 
-// varimax_rotate always returns Ok today; the Result return is forward-
-// compatibility for future variants (promax, oblimin) that may error.
-#[allow(clippy::unnecessary_wraps)]
 // Single-letter math vars (w, l, k, r, c, s, p, q) are domain-correct.
 // Clippy allow is localized here, not global.
 #[allow(clippy::many_single_char_names)]
@@ -123,6 +121,18 @@ fn varimax_rotate(
     args: VarimaxArgs,
     k: usize,
 ) -> PlsKitResult<RotateOutput> {
+    if args.max_iter == 0 {
+        return Err(PlsKitError::InvalidArgument(
+            "varimax max_iter must be >= 1 (got max_iter=0)".into(),
+        ));
+    }
+    if !(args.tol.is_finite() && args.tol >= 0.0) {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "varimax tol must be finite and >= 0 (got tol={})",
+            args.tol
+        )));
+    }
+
     // Step 1: build T_simp (the simple-structure target): L if provided,
     // else W, row-normalized under `kaiser_normalize`.
     let basis = l.unwrap_or(w);
@@ -166,7 +176,7 @@ fn varimax_rotate(
             }
         }
         let v_new = sum_var_squared_columns(t_simp.as_ref());
-        if v_new - v_prev < args.tol {
+        if v_new - v_prev <= args.tol * v_prev.abs() {
             // Break BEFORE updating v_prev, so v_converged reports the V
             // from the sweep before the converging one (the old value at
             // break time). Reassigning v_prev = v_new here would shift
@@ -199,18 +209,6 @@ fn varimax_rotate(
 }
 
 // ── small helpers ────────────────────────────────────────────────
-
-// Column-major traversal; mirrors `fit::check_finite_mat` (Result variant).
-fn mat_is_finite(m: MatRef<'_, f64>) -> bool {
-    for j in 0..m.ncols() {
-        for i in 0..m.nrows() {
-            if !m[(i, j)].is_finite() {
-                return false;
-            }
-        }
-    }
-    true
-}
 
 #[allow(clippy::many_single_char_names)]
 fn row_normalize(m: MatRef<'_, f64>) -> Mat<f64> {
@@ -454,7 +452,7 @@ mod tests {
             RotationMethod::Varimax(VarimaxArgs::default()),
             None,
         );
-        assert!(matches!(res, Err(PlsKitError::InvalidInput(_))));
+        assert!(matches!(res, Err(PlsKitError::NonFiniteInput)), "{res:?}");
     }
 
     #[test]
@@ -467,7 +465,7 @@ mod tests {
             RotationMethod::Varimax(VarimaxArgs::default()),
             Some(l.as_ref()),
         );
-        assert!(matches!(res, Err(PlsKitError::InvalidInput(_))));
+        assert!(matches!(res, Err(PlsKitError::NonFiniteInput)), "{res:?}");
     }
 
     #[test]
@@ -487,10 +485,9 @@ mod tests {
 
     #[test]
     fn rotate_idempotent_on_converged_solution() {
-        // R-precision tracks V-precision quadratically near the optimum:
-        // V-tol=1e-8 (default) → R within ~5e-5 of I on a second pass;
-        // V-tol=1e-12 → R within ~3e-7. We tighten V-tol here so the
-        // idempotency property can be asserted at 1e-6.
+        // On this W a second pass leaves R about 1.7e-5 from I at the
+        // default tol 1e-8 and about 1.2e-7 at tol 1e-12, so the test
+        // uses 1e-12 to assert idempotency at 1e-6.
         let tight = VarimaxArgs {
             tol: 1e-12,
             ..VarimaxArgs::default()
@@ -566,5 +563,65 @@ mod tests {
             !approx_eq_mat(on.r.as_ref(), off.r.as_ref(), 1e-6),
             "R should differ when kaiser_normalize is toggled"
         );
+    }
+
+    /// A power of two scales `V` exactly, so a relative stop rule runs the
+    /// same sweeps and gives the same `R` to the bit.
+    #[test]
+    fn varimax_stop_does_not_depend_on_the_scale_of_w() {
+        let args = VarimaxArgs {
+            kaiser_normalize: false,
+            ..VarimaxArgs::default()
+        };
+        let w = random_w(11, 200, 3);
+        let ws = Mat::<f64>::from_fn(200, 3, |i, j| w[(i, j)] * 2f64.powi(-10));
+        let a = rotate(w.as_ref(), RotationMethod::Varimax(args), None).unwrap();
+        let b = rotate(ws.as_ref(), RotationMethod::Varimax(args), None).unwrap();
+        assert_eq!(a.sweeps, b.sweeps);
+        for j in 0..3 {
+            for i in 0..3 {
+                assert_eq!(
+                    a.r[(i, j)].to_bits(),
+                    b.r[(i, j)].to_bits(),
+                    "R[({i}, {j})]"
+                );
+            }
+        }
+    }
+
+    /// Constant columns give `V = 0`; the sweeps still stop after one.
+    #[test]
+    fn varimax_stops_after_one_sweep_on_a_zero_criterion() {
+        let w = Mat::<f64>::from_fn(10, 2, |_, _| 1.0);
+        let args = VarimaxArgs {
+            kaiser_normalize: false,
+            ..VarimaxArgs::default()
+        };
+        let out = rotate(w.as_ref(), RotationMethod::Varimax(args), None).unwrap();
+        assert_eq!(out.sweeps, 1);
+    }
+
+    /// A non-finite or negative `tol`, or `max_iter = 0`, is refused, also
+    /// on a single column, where the rotation is the identity.
+    #[test]
+    fn rotate_rejects_bad_varimax_args() {
+        let w = random_w(3, 20, 3);
+        let w1 = w.subcols(0, 1).to_owned();
+        let d = VarimaxArgs::default();
+        let mut bad: Vec<VarimaxArgs> = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1e-8]
+            .into_iter()
+            .map(|tol| VarimaxArgs { tol, ..d })
+            .collect();
+        bad.push(VarimaxArgs { max_iter: 0, ..d });
+        for args in bad {
+            for m in [&w, &w1] {
+                let r = rotate(m.as_ref(), RotationMethod::Varimax(args), None);
+                assert!(
+                    matches!(r, Err(PlsKitError::InvalidArgument(_))),
+                    "K={} {args:?}: {r:?}",
+                    m.ncols()
+                );
+            }
+        }
     }
 }

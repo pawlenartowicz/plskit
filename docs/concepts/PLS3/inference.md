@@ -22,8 +22,9 @@ reported `statistic` is `tanh(z̄)`. This is the same held-out statistic
 `split_exact` and `split_nb` use for PLS1, with the fixed outcome `y`
 replaced by an estimated Y-side direction `v₁`. A split whose training
 half has no first component (a constant block, or a Y half orthogonal to
-the X half up to rounding, which the fit returns as `k_used = 0`)
-contributes `r = 0`, not `NaN`.
+the X half up to rounding, which the fit returns as `k_used = 0`), or
+whose fit fails, contributes `r = 0`, not `NaN`, and is counted in
+`result.n_failed_splits`.
 
 **Sign indeterminacy costs nothing.** An SVD fixes `(u₁, v₁)` only up to a
 simultaneous sign flip, and a flip negates both held-out score vectors at
@@ -39,7 +40,7 @@ intervals on the saliences, which is one reason the family offers none
 [`test_method="auto"`](../PLS1/inference.md#test_methodauto)).
 `result.test_method` reports the method that ran.
 
-`"auto"` runs `split_exact` here. The standard error of `split_nb` is too large where the correlation between its splits is below 1/2, which holds on every `pls3_confirmatory_test` design measured. Under the null its rejection rate at α = 0.05 is 0 to 2.5% at `n ≥ 100` with `p ≥ n/2`, and 4.0% to 6.2% on `X` of low effective rank. On `pls1_confirmatory_test` with one `k`, `"auto"` takes `split_nb` above its sample-size floor, trading a little power for about a tenth (`k = 1`) to a fortieth (`k ≥ 2`) of the time; see [`test_method="auto"`](../PLS1/inference.md#test_methodauto).
+`"auto"` runs `split_exact` here. The standard error of `split_nb` is too large where the correlation between its splits is below 1/2, which holds on every `pls3_confirmatory_test` design measured. Under the null at α = 0.05 it rejects 0.1% to 6.2% at `n = 1000` and 0 to 2.5% at `n ≥ 100` with `p ≥ n/2`, less with more outcomes, and up to 6.2% only on `X` of low effective rank. It loses power: at `n = 1000`, `p = 500` and 3 outcomes it rejected in 42% of replicates with a signal where `split_exact` rejected in 72%. Numbers by design: [`test_method="auto"`](../PLS1/inference.md#test_methodauto). On `pls1_confirmatory_test` with one `k`, `"auto"` takes `split_nb` above its sample-size floor, trading a little power for about a tenth (`k = 1`) to a fortieth (`k ≥ 2`) of the time; see [`test_method="auto"`](../PLS1/inference.md#test_methodauto).
 
 | | `split_exact` (recommended) | `split_nb` |
 |---|---|---|
@@ -71,7 +72,7 @@ is exact. The
 between-split correction does not follow from that argument; it is PLS1's
 heuristic, and its use here rests on the developers' simulations
 (Gaussian, heavy-tailed, low-stable-rank and real two-block designs), in
-which `split_nb` came out conservative, never anti-conservative. Use it
+which `split_nb` came out conservative except on `X` of low effective rank (up to 6.2% at α = 0.05). Use it
 when `split_exact` is too slow; prefer `split_exact` otherwise.
 
 ## `sv_perm`
@@ -79,7 +80,7 @@ when `split_exact` is too slow; prefer `split_exact` otherwise.
 `test_method="sv_perm"` is the classic PLSC permutation test (McIntosh and Lobaugh 2004). It asks whether the first latent variable (LV1) of the whole sample is larger than the rows of Y shuffled against X would give. It is in-sample: it does not hold out rows, so it does not check that the LV1 pattern predicts new rows.
 
 - **Statistic.** `d₁`, the largest singular value of `X̃ᵀỸ`, with both blocks standardized once over all rows as in `pls3_fit` (`pre_standardized_X` / `pre_standardized_Y` apply). Only LV1 is tested, so `k` must be `1`.
-- **Null and p-value.** The rows of Y are shuffled as whole units `n_perm` times (default 1000), and `p = (1 + #{null d₁ ≥ observed d₁}) / (n_perm + 1)`. A non-finite null value counts as an exceedance.
+- **Null and p-value.** The rows of Y are shuffled as whole units `n_perm` times (default 1000), and `p = (1 + #{null d₁ ≥ observed d₁}) / (n_perm + 1)`. A non-finite null value counts as an exceedance, and a non-finite observed value is an error (`invalid_input`).
 - **`args`.** `{"n_perm": 1000, "rotate": False}`.
 - **`rotate`.** With `rotate=True`, each permuted decomposition is Procrustes-rotated onto the observed one before its singular value is read, as pyls does. For LV1 the rotated null value is never larger than the unrotated one on the same permutation, so rotation can only lower the p-value. A rotated test is not exact, and pyls's own docstring warns that rotation can inflate false positives. `rotate` is a PLS3 option: `pls1_confirmatory_test` refuses `rotate=True`. `result.rotate` records which `rotate` ran.
 - **Relation to pyls.** plskit's `d₁` is `n` times the first singular value pyls reports. With no groups in pyls, the permutation scheme is the same.
@@ -94,7 +95,7 @@ An explicit `split_nb` request first goes through the same auto-gate as `pls1_co
 - the stable rank of X is below 3,
 - X has 4 columns or fewer.
 
-A flagged design runs `split_exact` instead, with `n_perm = 1000` and your `n_splits`. `result.test_method` then reports `"split_exact"`, and Python emits a `UserWarning`. `args={"force": True}` skips the reroute and runs `split_nb` anyway. `result.stable_rank` is set on an explicit `split_nb` request and `None` otherwise. It is what the gate saw. It is NaN when the Gram matrix of `X` so read is not finite. The gate then fires.
+A flagged design runs `split_exact` instead, with `n_perm = 1000` and your `n_splits`. `result.test_method` then reports `"split_exact"`, and Python emits `PlsKitRerouted` (a `UserWarning`). `args={"force": True}` skips the reroute and runs `split_nb` anyway. `result.stable_rank` is set on an explicit `split_nb` request without `force` and `None` otherwise (under `force` the gate decides nothing and does not compute it). It is what the gate saw. It is NaN when the Gram matrix of `X` so read is not finite. The gate then fires.
 
 Y is deliberately never gated. In ordinary PLSC `q` is small (a handful of
 behavioural measures), so a stable-rank floor of 3 on Y would flag nearly

@@ -13,19 +13,25 @@ categories = ["science", "mathematics"]
 
 [dependencies]
 faer = { workspace = true }
-rand = { workspace = true }
-rand_chacha = { workspace = true }
+commonstats = { workspace = true }
 getrandom = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+# Records the route every loop takes (`route_select::take_routes`), for
+# `tests/memory_bound.rs`. Off by default; the dev-dependency on this crate
+# below turns it on for the tests only.
+route-log = []
+
 [dev-dependencies]
+plskit = { path = ".", features = ["route-log"] }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
 approx = "0.5"
-proptest = "1"                  # property tests
 serde_json = "1"                # corpus test reader
 ndarray = "0.17"                # test-only: corpus reader feeds ndarray-npy
 ndarray-npy = "0.10"            # test-only: load .npz fixtures
-zip = "6"                       # test-only: match ZipError::FileNotFound in corpus reader
 
 [lints]
 workspace = true

@@ -27,16 +27,7 @@ lists what looks different from Julia.
 - **String options** (`test_method`, `selector`, `which`, ...) take a `String`
   or a `Symbol`: `test_method=:split_exact`.
 - `nothing` is Python's `None`.
-- **Arrays**: any `AbstractArray` of numbers. A dense `Array` reaches
-  Python as a NumPy view; other arrays (`X'`, `view(...)`, `BitVector`)
-  are collected first. Element types and memory layout follow the Python
-  rules: integers and `Float32` are promoted to `Float64`, `Bool` data
-  (`BitMatrix`, `BitVector`, `Matrix{Bool}`) reads as `1`/`0`, and a
-  column-major `Float64` `X` (or `Y`, `Y_new`, `W`, `L`) is read in
-  place, with no copy. On the same machine,
-  results then match the Rust core bit for bit, and agree only to
-  rounding with a Python call on a C-ordered copy of the same `X`. `missing` is passed as `NaN`, so it raises
-  `:non_finite_input`, as `NaN` does.
+- **Arrays**: any `AbstractArray` of numbers. A dense `Array` reaches Python as a NumPy view; other arrays (`X'`, `view(...)`, `BitVector`) are collected first. Element types and memory layout follow the Python rules: integers and `Float32` are promoted to `Float64`, `Bool` data (`BitMatrix`, `BitVector`, `Matrix{Bool}`) reads as `1`/`0`, and a column-major `Float64` `X` (or `Y`, `Y_new`, `W`, `L`) is read in place, with no copy. On the same machine, results then match the Rust core bit for bit. `missing` is passed as `NaN`, so it raises `:non_finite_input`, as `NaN` does.
 - **`seed`** takes an `Int` or a `UInt64`. `result.seed` is a `UInt64`,
   shown in hex (`0x076988841aab76b2`), and spans the full 64-bit range;
   `seed=result.seed` reproduces the run exactly.
@@ -73,7 +64,6 @@ lists what looks different from Julia.
   | `RotationSpec.args` | `NamedTuple` |
   | `list[int]` (`keep_grid`, `k`) | `Vector{Int}` (empty: `Int[]`) |
   | `list[bool]` | `Vector{Bool}` |
-  | `list[CIScalar]` | `Vector{PlsKitResult}` |
   | result dataclass | `PlsKitResult{T}` |
 - `pls1_predict` returns a plain `Vector{Float64}`.
 - Display is a compact summary: the type, then each field with its value (scalars, strings) or a short description (arrays, dicts). Results have no methods (`coef`, `predict`, ...) beyond display, with one exception: Python's `result.subset(rows)` on a `GramMatrixResult` is `PLSKit.subset(g, rows)`, with 1-based `rows`; it is not exported, because DataFrames exports a `subset` of its own.
@@ -109,13 +99,7 @@ lists what looks different from Julia.
 
 ## Warnings
 
-Python warnings raised during a call (the explicit `split_nb` reroute notice, and
-the `rotated_sparse` notice when `rotate` gets a sparse `PLS3Result`) are
-re-emitted with `@warn`, message verbatim, `_group=:plskit`, once per call.
-Silence them with Julia's logging (for example
-`Logging.with_logger(Logging.NullLogger()) do ... end`) or match them in
-tests with `@test_logs (:warn, r"rerouted", PLSKit, :plskit) ...`. Neither
-notice has structured fields: each is a plain `UserWarning` in Python.
+Python warnings raised during a call (the explicit `split_nb` reroute notice, and the `rotated_sparse` notice when `rotate` gets a sparse `PLS3Result`) are re-emitted with `@warn`, message verbatim, `_group=:plskit`, once per call. Silence them with Julia's logging (for example `Logging.with_logger(Logging.NullLogger()) do ... end`) or match them in tests with `@test_logs (:warn, r"rerouted", PLSKit, :plskit) ...`. Python raises them as `PlsKitRerouted`, with the fields `requested`, `actual`, `n_perm`, `stable_rank` and `n_eff`, and `PlsKitRotatedSparse`; Julia receives the message only.
 
 ## The Python underneath
 
@@ -142,7 +126,5 @@ notice has structured fields: each is a plain `UserWarning` in Python.
   each call. Under `julia -t N`, a garbage collection started on another
   thread waits until a long plskit call returns.
 - A long call cannot be interrupted with Ctrl-C.
-- `verbose=true` writes progress to the process's stderr: the terminal REPL
-  shows it, some notebook front ends do not.
 - The first `using PLSKit` downloads a private Python environment unless
   PythonCall points at your own Python.

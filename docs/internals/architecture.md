@@ -54,8 +54,8 @@ A Rust caller uses the functions of `plskit` directly.
 | `rotate` | `rotate` |
 | `factors`, `pca` | `factors`, `FactorsOutput::rotated`, `profiles_find_n`; `pca_basis` |
 | `error` | `PlsKitError`, with a stable `code()` string per variant |
-| `linalg`, `resample`, `rng` | shared helpers: products and decompositions, split and permutation indices, seeded generators |
-| `dual_route`, `gram_p`, `sequential`, `subsample` | crate-internal: Gram-matrix routes for the resampling loops, the sequential tests, the subsampling engine |
+| `resample` | shared helpers: split and permutation indices |
+| `dual_route`, `gram_p`, `linalg`, `rng`, `sequential`, `subsample` | crate-internal: Gram-matrix routes for the resampling loops, products and decompositions, seeded generators, the sequential tests, the subsampling engine |
 
 Rules that hold across the crate:
 
@@ -69,8 +69,7 @@ Rules that hold across the crate:
   never read them again ([Threads](../concepts/threads.md)).
 - **Results do not depend on the thread count**
   ([Dependencies](dependencies.md) has the two rules behind this).
-- **The route is not part of the API.** The engine picks the primal or
-  the Gram route from the shape of the problem.
+- **The route is not part of the API.** The engine picks the primal or the Gram route from the shape of the problem and the memory budget.
 
 ## The binding layer (`plskit-bind`)
 
@@ -91,7 +90,7 @@ function name, and converts the `Outcome` or the `BindError` back.
 
 | Script | What it does |
 |---|---|
-| `scripts/check-bind-registry.py` | checks the registry against the Python signatures in `_api.py` |
+| `scripts/check-bind-registry.py` | checks the registry against the Python signatures in `_api.py`, and that every registry parameter has a row in `docs/internals/naming.md` |
 | `scripts/render-r-stubs.py` | writes `plskit-r/R/stubs.R` |
 | `scripts/render-jl-stubs.py` | writes `plskit-jl/src/generated.jl` |
 

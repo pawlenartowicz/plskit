@@ -61,8 +61,9 @@ pub struct PermAlphaOutput {
 /// `gram` is `X̃X̃'` for an `X̃` (`n × n_features`) that the caller holds
 /// and multiplies `alpha` by. The caller guarantees: `gram` is the Gram
 /// matrix of that `X̃`; its columns are centred and scaled as
-/// [`crate::linalg::standardize`] scales them (`ddof = 0`, sum of squares
-/// `n`, a constant column zero to rounding); each entry is computed in f64
+/// [`preprocess`](crate::preprocess::preprocess) standardizes X without
+/// weights (`ddof = 0`, sum of squares `n`, a constant column zero to
+/// rounding); each entry is computed in f64
 /// within the rounding of one length-`n_features` dot product (sums over
 /// column blocks and one final scaling stay within it); `n_features`
 /// counts every column summed into `gram`, constant and zeroed ones
@@ -72,8 +73,9 @@ pub struct PermAlphaOutput {
 /// store `D` of unit-norm columns passed as `n·DD'`, `X̃ = √n·D`, so
 /// `coef = √n·D'·alpha[:, j]`.
 ///
-/// Column `j` of `y` is one raw outcome, standardized here by
-/// [`crate::linalg::standardize1`]. An outcome that standardizes to exact
+/// Column `j` of `y` is one raw outcome, standardized here as
+/// [`preprocess`](crate::preprocess::preprocess) standardizes y without
+/// weights. An outcome that standardizes to exact
 /// zeros is the zero model (`alpha` zero, `k_used = 0`), and so is every
 /// outcome when every entry of `gram` is exactly zero. The fit stops at the
 /// first component whose `‖X̃_a'y_a‖`, computed from `gram`, falls under
@@ -106,6 +108,8 @@ pub struct PermAlphaOutput {
 ///   `√(gram[i, i]·gram[j, j])`, has a trace above `n · n_features`, or has
 ///   a row sum away from zero, the last four beyond the rounding the
 ///   contract allows
+/// - `PlsKitError::MemoryBudget` when a copy of `gram` and `alpha` do not
+///   fit `PLSKIT_MEMORY_BUDGET`, after the checks above
 ///
 /// # Panics
 /// Never.
@@ -118,8 +122,21 @@ pub fn pls1_perm_alpha(
     crate::fit::with_thread_limit(|| {
         check_args(gram, y, k, n_features)?;
         check_gram(gram, n_features)?;
+        check_budget(gram.nrows(), y.ncols(), 1)?;
         Ok(alpha_columns(gram, y, k, n_features))
     })
+}
+
+/// The budget check of both forms on `n` rows and `m` outcomes:
+/// `gram_copies` copies of the `n × n` Gram matrix (the [`NspaceGram`]
+/// block, and the centred copy of the `gram` form) and `alpha` (`n × m`).
+/// shortcut: each column's kernel buffers (`n × k` per thread) are not counted, count them if a capped run is killed there.
+fn check_budget(n: usize, m: usize, gram_copies: usize) -> PlsKitResult<()> {
+    use crate::resample::copy_bytes;
+    let need = copy_bytes(n, n)
+        .saturating_mul(gram_copies)
+        .saturating_add(copy_bytes(n, m));
+    crate::resample::units_at_once(1, need, 0).map(drop)
 }
 
 /// [`pls1_perm_alpha`] on the Gram matrix [`crate::gram_matrix`] returns,
@@ -132,13 +149,18 @@ pub fn pls1_perm_alpha(
 /// `X̃` behind `gram`, centred by their own means, and `coef = X̃'·alpha`.
 /// Under `pre_standardized`, on X whose largest entry is outside
 /// `[2^-256, 2^256]`, that `X̃` is `X/c` (`c` a power of two the Gram matrix
-/// does not store), so `alpha` is `c²` times the one of X itself.
+/// does not store), so `alpha` is `c²` times the one of X itself. Under
+/// `pre_standardized`, the call divides the centred matrix by a power of
+/// four when its largest diagonal entry is outside `[2^-40, 2^40]` and maps
+/// `alpha` back, so the matrix's scale does not cut components.
 ///
 /// # Errors
 /// What [`pls1_perm_alpha`] returns, without the trace and row-sum checks,
 /// except that a `y` with another row count than `gram.gram` is
 /// `InvalidArgument`, as in the confirmatory tests' `gram` form (the raw
-/// form returns `ShapeMismatch`).
+/// form returns `ShapeMismatch`). `MemoryBudget` counts two copies of
+/// `gram`, the centred one and the block, and is checked before the entry
+/// checks, which read the centred copy.
 ///
 /// # Panics
 /// Never.
@@ -157,9 +179,24 @@ pub fn pls1_perm_alpha_gram(
     }
     crate::fit::with_thread_limit(|| {
         check_args(gram.gram.as_ref(), y, k, gram.n_features)?;
-        let g =
-            crate::held_out_gram::HeldOutGram::from_gram(gram.gram.to_owned(), gram.n_features)?;
-        Ok(alpha_columns(g.g(), y, k, gram.n_features))
+        check_budget(n, y.ncols(), 2)?;
+        // The entry checks read the centred copy, so they follow the budget check.
+        let g = crate::held_out_gram::HeldOutGram::from_gram(
+            gram.gram.to_owned(),
+            gram.n_features,
+            gram.pre_standardized,
+        )?;
+        let mut out = alpha_columns(g.g(), y, k, gram.n_features);
+        // `g` is the Gram matrix of `X̃/div`, whose `alpha` is `div²` times
+        // that of `X̃`.
+        let div = g.div();
+        for j in 0..out.alpha.ncols() {
+            for i in 0..n {
+                out.alpha[(i, j)] /= div;
+                out.alpha[(i, j)] /= div;
+            }
+        }
+        Ok(out)
     })
 }
 
@@ -396,7 +433,7 @@ fn check_gram(g: MatRef<'_, f64>, n_features: usize) -> PlsKitResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fit::{FitOpts, KSpec, par_fixed, pls1_fit};
+    use crate::fit::{FitOpts, par_fixed, pls1_fit};
     use crate::linalg::{mat_mul, standardize, standardize1};
     use crate::test_support::{
         Layouts, assert_bits_eq, assert_rows_close, bits, col_vals, mat_vals, orthogonal_y, synth,
@@ -443,6 +480,28 @@ mod tests {
         r.expect_err("the call must fail")
     }
 
+    /// Both forms check their buffers at the entry: budget 1 is
+    /// `MemoryBudget` and the `needed` it names runs. A bad argument is its
+    /// own error at budget 1.
+    #[test]
+    fn perm_alpha_checks_its_buffers() {
+        let (x, y) = synth(30, 200, 2, 1.0, 4);
+        let (_, g) = standardized_gram(&x);
+        let yy = outcomes(&y);
+        let gm = crate::gram_matrix(x.as_ref(), false).unwrap();
+        crate::test_support::assert_needed_runs(|b| {
+            crate::fit::with_budget(b, || pls1_perm_alpha(g.as_ref(), yy.as_ref(), 2, 200))
+        });
+        crate::test_support::assert_needed_runs(|b| {
+            crate::fit::with_budget(b, || pls1_perm_alpha_gram(&gm, yy.as_ref(), 2))
+        });
+        let bad = crate::fit::with_budget(1, || pls1_perm_alpha(g.as_ref(), yy.as_ref(), 0, 200));
+        assert!(
+            matches!(bad, Err(PlsKitError::InvalidArgument(_))),
+            "{bad:?}"
+        );
+    }
+
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn x_tilde_times_alpha_matches_pls1_fit_coef() {
@@ -455,15 +514,8 @@ mod tests {
         assert_eq!((out.k, out.n_features), (1, p));
         for j in 0..4 {
             let yj = Col::<f64>::from_fn(n, |i| yy[(i, j)]);
-            let fit = pls1_fit(
-                x.as_ref(),
-                yj.as_ref(),
-                KSpec::Fixed(1),
-                None,
-                None,
-                FitOpts::default(),
-            )
-            .expect("pls1_fit");
+            let fit = pls1_fit(x.as_ref(), yj.as_ref(), 1, None, None, FitOpts::default())
+                .expect("pls1_fit");
             assert_rows_close(
                 &coef_of(xs.as_ref(), out.alpha.col(j)),
                 &col_vals(fit.coef.as_ref()),
@@ -523,15 +575,8 @@ mod tests {
             );
         }
         let zero = Col::<f64>::zeros(n);
-        let fit = pls1_fit(
-            x.as_ref(),
-            zero.as_ref(),
-            KSpec::Fixed(1),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .expect("pls1_fit");
+        let fit = pls1_fit(x.as_ref(), zero.as_ref(), 1, None, None, FitOpts::default())
+            .expect("pls1_fit");
         assert_eq!(fit.k_used, 0);
     }
 
@@ -557,15 +602,8 @@ mod tests {
         assert_eq!(out.k_used[0], 1);
         assert!(out.k_used[1] <= 1);
         assert!((0..n).all(|i| out.alpha[(i, 1)].is_finite()));
-        let fit = pls1_fit(
-            x.as_ref(),
-            orth.as_ref(),
-            KSpec::Fixed(1),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .expect("pls1_fit");
+        let fit = pls1_fit(x.as_ref(), orth.as_ref(), 1, None, None, FitOpts::default())
+            .expect("pls1_fit");
         assert_eq!(fit.k_used, 0, "the primal kernel stops at its floor");
     }
 
@@ -681,15 +719,8 @@ mod tests {
         let out = pls1_perm_alpha(gram.as_ref(), yy.as_ref(), 1, p).expect("the checks pass");
         for j in 0..4 {
             let yj = Col::<f64>::from_fn(n, |i| yy[(i, j)]);
-            let fit = pls1_fit(
-                xc.as_ref(),
-                yj.as_ref(),
-                KSpec::Fixed(1),
-                None,
-                None,
-                FitOpts::default(),
-            )
-            .expect("pls1_fit");
+            let fit = pls1_fit(xc.as_ref(), yj.as_ref(), 1, None, None, FitOpts::default())
+                .expect("pls1_fit");
             // The consumer's map: its store times √n·alpha.
             let scaled = Col::<f64>::from_fn(n, |i| root_n * out.alpha[(i, j)]);
             assert_rows_close(
@@ -877,6 +908,31 @@ mod tests {
             ),
             other => panic!("expected InvalidInput, got {other:?}"),
         }
+    }
+
+    /// Under `pre_standardized`, the Gram matrix of a standardized X times
+    /// `2^-30` is divided by a power of four before the kernel, so its
+    /// absolute floors do not cut components: `k_used` is the unscaled X's
+    /// and `alpha` the unscaled X's times `2^60`, bit for bit.
+    #[test]
+    fn gram_form_alpha_is_scale_free_under_pre_standardized() {
+        let xs = standardize(unif(30, 8, 31).as_ref()).0;
+        let y = unif(30, 2, 32);
+        let s = 2f64.powi(-30);
+        let small = Mat::<f64>::from_fn(30, 8, |i, j| xs[(i, j)] * s);
+        let alpha_of = |x: &Mat<f64>| {
+            pls1_perm_alpha_gram(
+                &crate::gram_matrix(x.as_ref(), true).unwrap(),
+                y.as_ref(),
+                2,
+            )
+            .unwrap()
+        };
+        let want = alpha_of(&xs);
+        let got = alpha_of(&small);
+        assert_eq!(got.k_used, want.k_used);
+        let scaled = Mat::<f64>::from_fn(30, 2, |i, j| want.alpha[(i, j)] * 2f64.powi(60));
+        crate::test_support::assert_mat_bits_eq(got.alpha.as_ref(), scaled.as_ref(), "alpha");
     }
 
     #[test]

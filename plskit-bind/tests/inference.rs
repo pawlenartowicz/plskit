@@ -107,16 +107,42 @@ fn bad_methods_and_args_are_invalid_args() {
 }
 
 #[test]
-fn ci_knobs_are_inert_without_ci_and_fill_the_bundle_with_it() {
-    let off = ok(
-        "pls1_confirmatory_test",
-        confirm(vec![
+fn ci_knobs_without_ci_are_refused() {
+    let without_ci = |knobs: Vec<(&'static str, Value<'static>)>| {
+        let mut v = vec![
             ("test_method", Value::text("split_nb")),
-            ("n_boot", Value::I64(50)),
             ("seed", Value::U64(1)),
+        ];
+        v.extend(knobs);
+        confirm(v)
+    };
+    for (name, value) in [
+        ("n_boot", Value::I64(100)),
+        ("m_rate", Value::F64(0.7)),
+        ("level", Value::F64(0.9)),
+        ("max_failure_rate", Value::F64(0.05)),
+        ("max_skip_rate", Value::F64(0.05)),
+    ] {
+        let e = err("pls1_confirmatory_test", without_ci(vec![(name, value)]));
+        assert_eq!(e.code, "invalid_argument", "{name}");
+        assert_eq!(e.message, format!("{name} applies only with ci"));
+    }
+    let e = err(
+        "pls1_confirmatory_test",
+        without_ci(vec![
+            ("n_boot", Value::I64(100)),
+            ("level", Value::F64(0.9)),
         ]),
     );
+    assert_eq!(e.code, "invalid_argument");
+    assert_eq!(e.message, "n_boot, level apply only with ci");
+    // No knob: the wrappers' defaults are all null, so a plain call runs.
+    let off = ok("pls1_confirmatory_test", without_ci(vec![]));
     assert!(field(record(&off), "ci").is_null());
+}
+
+#[test]
+fn ci_knobs_fill_the_bundle_with_ci() {
     let on = ok(
         "pls1_confirmatory_test",
         confirm(vec![

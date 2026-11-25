@@ -57,11 +57,18 @@ const CORPUS_CASES = [
     "rotate_varimax_d6_k2",
     "factors_pls1_n50_d10_k2_n3",
     "profiles_find_n_n100_d12_k2",
+    "pca_basis_n50_d10",
+    "split_nb_gate_n80_d6",
 ]
 
 const ATOL_SCALAR = 1e-12
 const ATOL_ARRAY = 1e-10
 const RTOL = 1e-14
+# The p rule: a p-value field also needs abs(a - e) <= P_RTOL * abs(e).
+# Owned by plskit-testdata-gen/src/settle.rs (P_FIELDS, P_RTOL): change
+# together.
+const P_FIELDS = ("pvalue", "pvalues", "pvalues_by_k__values")
+const P_RTOL = 1e-10
 
 # JSON value -> Julia (objects become Dict{String,Any}, so `args` exercises
 # the Dict path of the argument conversion).
@@ -145,6 +152,11 @@ function call_by_name(fname::AbstractString, named::Dict{Symbol,Any})
     return f(args...; kws...)
 end
 
+# `m` with each column flipped so its largest-magnitude entry is positive.
+# Same rule as column_sign_up in corpus.rs, test_corpus.py and
+# test-corpus.R: change together.
+column_sign_up(m) = m .* [m[argmax(abs.(m[:, j])), j] < 0 ? -1.0 : 1.0 for j in axes(m, 2)]'
+
 # (name, value) pairs of a result, the unit key resolution walks.
 record(r::PlsKitResult) = [(String(k), getproperty(r, k)) for k in propertynames(r)]
 
@@ -173,6 +185,12 @@ function run_case(case, inputs)
     elseif fn == "pls1_perm_alpha"
         return record(pls1_perm_alpha(inputs["gram"], inputs["Y"]; k=kw["k"],
                                       n_features=kw["n_features"]))
+    elseif fn == "pca_basis"
+        # Column signs of V are arbitrary; the testset flips the fixture's `v` too.
+        r = pca_basis(inputs["X"]; pre_standardized=kw["pre_standardized"])
+        return [(k, k == "V" ? column_sign_up(v) : v) for (k, v) in record(r)]
+    elseif fn == "split_nb_gate"
+        return record(split_nb_gate(inputs["X"]; pre_standardized=kw["pre_standardized"]))
     end
     # `"gram": true`: the call takes gram_matrix(X, pre_standardized) in place of X.
     gram = get(kw, "gram", false) === true
@@ -244,24 +262,26 @@ function resolve(rec, key, expected)
 end
 
 # Mirrors plskit-testdata-gen/src/settle.rs::close, which owns the rule:
-# change together.
+# change together. `matches` adds the p rule on a p-value field.
 # NaN on exactly one side is a mismatch, never a crash or a silent pass:
 # `a == e` is false, `isnan(a) && isnan(e)` is false, and `abs(a - e)` is
 # itself NaN so the `<=` comparison is false too. Named in the enclosing
 # `@testset "$(name)"` and by `key` in the `@info` line below.
-close_enough(a, e, atol) =
-    a == e || (isnan(a) && isnan(e)) || (isfinite(e) && abs(a - e) <= atol + RTOL * abs(e))
+close_enough(a, e, atol, rtol = RTOL) =
+    a == e || (isnan(a) && isnan(e)) || (isfinite(e) && abs(a - e) <= atol + rtol * abs(e))
 
-function matches(found, want)
+function matches(found, want, key)
+    p = key in P_FIELDS
+    near(a, e, atol) = close_enough(a, e, atol) && (!p || close_enough(a, e, 0.0, P_RTOL))
     if want isa String
         return found == want
     elseif want isa Float64
-        return found isa Real && close_enough(Float64(found), want, ATOL_SCALAR)
+        return found isa Real && near(Float64(found), want, ATOL_SCALAR)
     elseif want isa Int
         return (found isa Integer || found isa Bool) && Int(found) == want
     elseif want isa Array{Float64}
         return found isa AbstractArray{<:Real} && size(found) == size(want) &&
-               all(close_enough.(Float64.(found), want, ATOL_ARRAY))
+               all(near.(Float64.(found), want, ATOL_ARRAY))
     elseif want isa Array{Int}
         return found isa AbstractArray && size(found) == size(want) && Int.(found) == want
     end
@@ -285,10 +305,11 @@ end
     case = cases[name]
     inputs = load_npz(case["inputs"])
     expected = load_npz(case["outputs"])
+    case["function"] == "pca_basis" && (expected["v"] = column_sign_up(expected["v"]))
     rec = run_case(case, inputs)
     for key in sort(collect(keys(expected)))
         found = resolve(rec, key, expected)
-        ok = found !== nothing && matches(found, expected[key])
+        ok = found !== nothing && matches(found, expected[key], key)
         ok || @info "corpus mismatch" name key found expected[key]
         @test ok
     end

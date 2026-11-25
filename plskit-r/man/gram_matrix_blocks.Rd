@@ -20,4 +20,17 @@ A list of class \code{c("gram_matrix_result", "plskit_result")}.
 Builds the \code{gram_matrix} of an X too wide to hold at once, one column block
 at a time. Equal to \code{gram_matrix} of the joined X to rounding. Under
 \code{pre_standardized}, data beyond 2^+-256 must use \code{gram_matrix} on the whole X.
+The calls that take the result rescale it themselves, by a power of four,
+when its scale would reach their absolute floors, and map their outputs back.
+}
+\examples{
+set.seed(1)
+X <- matrix(rnorm(40 * 20), 40, 20)
+parts <- list(X[, 1:10], X[, 11:20])
+i <- 0
+g <- gram_matrix_blocks(function() {
+  i <<- i + 1
+  if (i <= length(parts)) parts[[i]]
+})
+all.equal(g$gram, gram_matrix(X)$gram)
 }

@@ -88,7 +88,7 @@ observation weights are not implemented for this family.
 `pls1_confirmatory_test` does. For PLS3 `ci` is always `None` and `n_eff`
 equals `n`. `rho_hat` is populated for `split_nb` only, and only when the
 test half has at least 4 rows; `stable_rank` is `Some` on an explicit `split_nb`
-request and `None` otherwise (`Auto` runs `split_exact` on every PLS3 design).
+request without `force` and `None` otherwise (`Auto` runs `split_exact` on every PLS3 design).
 
 ## `FindKOptimalOutput`, what `pls1_find_k_optimal` returns
 
@@ -104,7 +104,10 @@ request and `None` otherwise (`Auto` runs `split_exact` on every PLS3 design).
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | always; equals `n_samples` for uniform/absent weights |
 | `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
-| `stable_rank` | `Option<f64>` | `Some` when `diagnostic == Some(SplitNb)` — fired or not, including under `force` |
+| `stable_rank` | `Option<f64>` | `Some` when `diagnostic == Some(SplitNb)`, fired or not; `None` under `force` |
+| `n_failed_folds` | `Option<usize>` | of the CV folds, the number that are degenerate or failed: the held-out R² is not finite at one or more candidates (that value is left out of the candidate's `cv_scores` and `cv_scores_se`), or the fold's validation outcome has no spread (`ss_tot ≤ 0`, scored R² = 0 at every candidate and kept in the means); `Some` whenever `cv_scores` is `Some` (`r2_se`, `r2_max`), `0` when no fold ran (`k_star = 0` from the full-data check); `None` for `bic` |
+| `n_failed_splits` | `Option<Vec<usize>>` | one entry per step of the diagnostic that ran, in step order, each with the meaning of `ConfirmatoryTestOutput::n_failed_splits` on that step; `Some` for `split_exact` and `split_nb` (empty at `k_star = 0`), `None` for other methods and when no diagnostic ran |
+| `n_failed_perms` | `Option<Vec<usize>>` | one entry per step of the diagnostic that ran, in step order, each with the meaning of `ConfirmatoryTestOutput::n_failed_perms` on that step; `Some` for `raw_perm` and `split_exact` (empty at `k_star = 0`), `None` for other methods and when no diagnostic ran |
 
 When `diagnostic` is set, `pvalues` carries the per-component p-values
 of a same-sample sequential test up to `k_star`, and `diagnostic`
@@ -132,7 +135,9 @@ diagnostic runs no step: `pvalues` is `Some` of a length-0 column and
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | always; equals `n_samples` for uniform/absent weights |
 | `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
-| `stable_rank` | `Option<f64>` | `Some` on an explicit `split_nb` request, and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n without `keep`); `None` otherwise |
+| `stable_rank` | `Option<f64>` | `Some` on an explicit `split_nb` request without `force`, and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n without `keep`); `None` otherwise |
+| `n_failed_splits` | `Option<Vec<usize>>` | one entry per step that ran, in step order (the length is the number of steps run; `pvalues` has `k_max` entries, NaN past the stop), each with the meaning of `ConfirmatoryTestOutput::n_failed_splits` on that step; `Some` for `split_exact` and `split_nb`, `None` otherwise |
+| `n_failed_perms` | `Option<Vec<usize>>` | one entry per step that ran, in step order, each with the meaning of `ConfirmatoryTestOutput::n_failed_perms` on that step; `Some` for `raw_perm` and `split_exact`, `None` otherwise |
 
 Closed testing on nested H is exact, so `pvalues[..k_star]` is an
 honest FWER-controlled sequence. The path-max p-value is
@@ -155,6 +160,7 @@ explain why. `split_nb_gate` returns them without running a test.
 | `seed` | `u64` | always |
 | `n_eff` | `f64` | effective sample size; `f64::NAN` if unavailable |
 | `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
+| `n_failed_folds` | `usize` | as on `FindKOptimalOutput`, over the keep grid |
 
 Selection criterion: the 1-SE rule on mean CV R² — `keep_star` is the
 sparsest keep whose mean CV R² is within 1 SE of the maximum. The full
@@ -165,7 +171,7 @@ field semantics are identical to the Python counterpart; see
 
 | Field | Rust type | Notes |
 |---|---|---|
-| `pvalue` | `f64` | always; for a set of more than one `k`, the min-p p for the whole set |
+| `pvalue` | `f64` | always; for a set of more than one `k`, the min-p p for the whole set; one-sided: for `split_exact`, `split_nb` and `raw_perm` only a held-out correlation or CV R² above the null counts; for `e` a negative log-e gives p = 1; `score` and `sv_perm` have no sign |
 | `statistic` | `Option<f64>` | `Some` for one `k` (for `sv_perm`, `d₁`, the largest singular value of `X̃ᵀỸ`); `None` for a set of more than one `k` |
 | `test_method` | `String` | the method that ran: one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"sv_perm"` / `"score"` / `"e"`, never `"auto"`; `"split_exact"` when an explicit `"split_nb"` request was rerouted by the auto-gate |
 | `k` | `Vec<usize>` | the tested set, sorted ascending; one `k` gives a one-element vector (`pls3_confirmatory_test` gives `vec![k]`) |
@@ -180,8 +186,11 @@ field semantics are identical to the Python counterpart; see
 | `n_eff` | `f64` | always; Kish effective sample size, equals `n_samples` for uniform/absent weights |
 | `n_covariates` | `Option<usize>` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
 | `rho_hat` | `Option<f64>` | `Some` for `split_nb` only, and only when unweighted (no weights, or all-equal weights) with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
-| `stable_rank` | `Option<f64>` | stable rank of `X` as the `split_nb` auto-gate read it (standardized once over all rows, or only centred under `pre_standardized`, with rows scaled by √w under weights); `Some` on an explicit `split_nb` request (fired or not, including under `force`), and on a PLS1 `"auto"` request with one `k` that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise, and on every `pls3_confirmatory_test` `"auto"` request |
+| `stable_rank` | `Option<f64>` | stable rank of `X` as the `split_nb` auto-gate read it (standardized once over all rows, or only centred under `pre_standardized`, with rows scaled by √w under weights); `Some` on an explicit `split_nb` request (fired or not; `None` under `force`), and on a PLS1 `"auto"` request with one `k` that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise, and on every `pls3_confirmatory_test` `"auto"` request |
 | `ci` | `Option<ConfirmatoryCI>` | `Some` when called with `ci=true`; carries the rotation-invariant subsample CIs |
+| `n_failed_splits` | `Option<usize>` | of the `n_splits` splits drawn, the number left out under weights for a half of zero total weight, plus the number on which the observed outcome's held-out correlation `r` is exactly 0 at the largest tested `k` (a degenerate or failed split); the observed column only; two routes can differ by one at a rounding boundary; `n_splits` stays the number drawn; `Some` for `split_exact` / `split_nb`, `None` for every other method |
+| `n_failed_perms` | `Option<usize>` | of the `n_perm` null statistics, the number that are not finite; each counts as an exceedance; over a set of `k`, a permutation counts once when its null is not finite at one or more `k`; `Some` whenever `n_perm` is `Some` (`raw_perm`, `split_exact`, `sv_perm`, `score` with `n_perm`), `None` otherwise |
+| `n_failed_folds` | `Option<usize>` | of the `n_folds` CV folds, the number left out under weights for a side (validation rows, or training rows: every other fold) of zero total weight; `Some` for `raw_perm` only, `None` for every other method |
 
 ## `SplitNbGateOutput`, what `split_nb_gate` returns
 
@@ -207,8 +216,9 @@ costs one SVD and no resampling.
 | `beta_ref` | `Vec<f64>` | full-data β reference, length D |
 | `beta_perm_mean` | `Vec<f64>` | mean of β under permuted y, length D; ≈ 0 under H0 (calibration diagnostic) |
 | `beta_perm_sd` | `Vec<f64>` | SD of β under permuted y, length D |
-| `beta_perm_z` | `Vec<f64>` | signed per-voxel z = β_ref / β_perm_sd; NaN where SD ≈ 0, length D |
+| `beta_perm_z` | `Vec<f64>` | signed z = β_ref / β_perm_sd per coordinate; NaN where the SD is not above `√ε · max(|β_ref|, |β_perm_mean|)` (no spread, or spread at the rounding level of β), and for a column of X whose entries are all equal; length D |
 | `beta_perm_matrix` | `Option<Vec<f64>>` | optional `(n_perm, D)` β matrix, row-major; `Some` when `opts.return_perm_matrix == true` |
+| `n_failed_perms` | `usize` | of the `n_perm` permutation rows, the number with at least one entry that is not finite; each such entry is left out of its coordinate's `beta_perm_mean` and `beta_perm_sd`, and the rest of the row is used |
 
 At `k = 1` a row is `c_ref·X̃ᵀỹ_p`, the permuted fit with its scalar `c` held at the observed fit's value, so the per-variable null is that of `X_jᵀy`; at `k ≥ 2` it is a refit on permuted `y`. See the [Python results page](../python/results.md) (`PermNullResult`) for why and for the simulated level and power.
 
@@ -225,7 +235,7 @@ At `k = 1` a row is `c_ref·X̃ᵀỹ_p`, the permuted fit with its scalar `c` h
 
 | Field | Rust type | Notes |
 |---|---|---|
-| `gram` | `Mat<f64>` | `(n, n)`; `X̃X̃'`, with `X̃` = `X` centred over all rows and divided by its column standard deviations (population), or only centred under `pre_standardized` (first divided by one power of two near its largest entry when that entry is outside `2^-256 .. 2^256`) |
+| `gram` | `Mat<f64>` | `(n, n)`; `X̃X̃'`, with `X̃` = `X` centred over all rows and divided by its column standard deviations (population), or only centred under `pre_standardized` (first divided by one power of two near its largest entry when that entry is outside `2^-256 .. 2^256`); under `pre_standardized`, the calls that take it divide it by a power of four internally when its largest diagonal entry (after centring) is outside `2^-40 .. 2^40`, and map their outputs back |
 | `n_features` | `usize` | the column count of `X`, constant columns included |
 | `pre_standardized` | `bool` | as passed |
 
@@ -246,7 +256,7 @@ A CI for a scalar, plus its SD. Its one use is `ConfirmatoryCI::holdout_corr`, w
 
 Rotation-invariant readouts only.
 
-`ConfirmatoryCI` is beta, not to be trusted yet. It scales X and y once over all rows, as the held-out tests do (not under `pre_standardized`). Its `holdout_corr` half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do. The β and leverage resamples are centred with their own means too, except under `pre_standardized`, where they use X and y as given, as the reference fit does.
+`ConfirmatoryCI` is beta, not to be trusted yet. Its β subsamples and `holdout_corr` half splits scale X and y once over all rows, as the held-out tests do (not under `pre_standardized`). The half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do, and each β subsample is centred with its own means. Each leverage resample is standardized on its own (weighted) means and SDs, as the full-data fit is. Under `pre_standardized` the β and leverage resamples use X and y as given, as the reference fit does.
 
 | Field | Rust type | Shape |
 |---|---|---|
@@ -264,7 +274,9 @@ Rotation-invariant readouts only.
 | `beta_se` | `Vec<f64>` | `(D,)` `= √(m/(n − m)) · sd(β_b[j]) / κ̂`, the SE `beta_sign_z` divides by |
 | `holdout_corr` | `CIScalar` | scalar (Fisher z-transformed NB-Wald CI on the held-out correlation of a fit trained on `⌊n/2⌋` rows, beta (see above); does not depend on `m_rate`) |
 | `n_boot_finite` | `usize` | scalar; resamples whose worker fit succeeded (≤ `n_boot`) |
-| `n_boot_finite_holdout_corr` | `usize` | scalar; subset whose holdout_corr is finite |
+| `n_boot_finite_holdout_corr` | `usize` | scalar; subset whose holdout_corr is finite; a half split whose fit fails on the weights counts as a skip, not a failure |
+
+The `holdout_corr` interval covers a little above its level (about 1.1 to 1.2 times the needed width in the coverage grid) when the noise of the held-out rows dominates. When the noise of the training fit dominates (typically at high signal), it is conservative, up to about twice as wide as needed.
 
 The full caveats on `beta_ci_*` (PLS shrinkage and its `κ̂` correction, no
 multiple-comparison correction, K=1-only theoretical asymptotic
@@ -289,8 +301,8 @@ at nominal 5%), does not grow with `n_boot`, and is not calibrated at
 |---|---|---|
 | `w_rot` | `Mat<f64>` | rotated weights `W @ R`, shape `(D, K)` |
 | `r` | `Mat<f64>` | orthogonal rotation, shape `(K, K)`; `w_rot = w @ r` |
-| `sweeps` | `usize` | number of Kaiser sweeps actually run (≤ `args.max_iter`) |
-| `v_converged` | `f64` | final value of the varimax criterion `V = Σ_j Var(target[:, j]²)` |
+| `sweeps` | `usize` | the sweeps run, the one that met `tol` included; equal to `max_iter` both when the cap was reached and when the last allowed sweep met `tol`; 0 at K = 1 |
+| `v_converged` | `f64` | the varimax criterion `V = Σ_j Var(target[:, j]²)` before the last sweep when the loop stopped on `tol`, after it when it reached `max_iter`; at K = 1, the criterion of the unrotated target |
 
 ## `FactorsOutput`, what `factors` and `FactorsOutput::rotated` return
 

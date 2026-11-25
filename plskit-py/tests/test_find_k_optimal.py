@@ -38,7 +38,6 @@ def test_optimal_seam_rejects_args_the_selection_cannot_use(kwargs, message):
         ({"selector": 1}, "selector must be a string, got 1"),
         ({"diagnostic": 2}, "diagnostic must be a string"),
         ({"args": [1]}, "args must be a record of named values"),
-        ({"verbose": 1}, "verbose must be a bool"),
     ],
 )
 def test_optimal_rejects_unusable_top_level_values(kwargs, message):

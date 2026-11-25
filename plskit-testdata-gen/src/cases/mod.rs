@@ -184,6 +184,36 @@ pub(crate) fn weighted_n80_d6() -> Xyw {
     }
 }
 
+/// `x` standardized as `preprocess` standardizes X without weights; the same
+/// bits as the engine's unweighted standardization. Returns `(x_std, mean,
+/// scale)`.
+pub(crate) fn standardize(
+    x: faer::MatRef<'_, f64>,
+) -> (faer::Mat<f64>, faer::Col<f64>, faer::Col<f64>) {
+    plskit::preprocess(plskit::PreprocessInput {
+        x: Some(x),
+        y: None,
+        weights: None,
+    })
+    .expect("preprocess X")
+    .x_std
+    .expect("x_std")
+}
+
+/// `y` standardized as `preprocess` standardizes y without weights; the same
+/// bits as the engine's unweighted standardization. Returns `(y_std, mean,
+/// scale)`.
+pub(crate) fn standardize1(y: faer::ColRef<'_, f64>) -> (faer::Col<f64>, f64, f64) {
+    plskit::preprocess(plskit::PreprocessInput {
+        x: None,
+        y: Some(y),
+        weights: None,
+    })
+    .expect("preprocess y")
+    .y_std
+    .expect("y_std")
+}
+
 /// Inputs stem of [`weighted_prestd_n80_d6`].
 pub(crate) const WEIGHTED_PRESTD_N80_D6_INPUTS: &str = "pls1_weighted_prestd_n80_d6_inputs";
 
@@ -194,8 +224,8 @@ pub(crate) const WEIGHTED_PRESTD_N80_D6_INPUTS: &str = "pls1_weighted_prestd_n80
 /// when the `pre_standardized` flag is dropped.
 pub(crate) fn weighted_prestd_n80_d6() -> Xyw {
     let raw = weighted_n80_d6();
-    let (xs, _, _) = plskit::linalg::standardize(raw.x_faer().as_ref());
-    let (ys, _, _) = plskit::linalg::standardize1(raw.y_faer().as_ref());
+    let (xs, _, _) = standardize(raw.x_faer().as_ref());
+    let (ys, _, _) = standardize1(raw.y_faer().as_ref());
     Xyw {
         x: ndarray::Array2::from_shape_fn((xs.nrows(), xs.ncols()), |(i, j)| xs[(i, j)]),
         y: ndarray::Array1::from_shape_fn(ys.nrows(), |i| ys[i]),
@@ -238,6 +268,59 @@ pub(crate) fn ensure_moved(case: &str, field: &str, with: &[f64], without: &[f64
         moved,
         "{case}: {field} does not move with the option ({with:?} vs {without:?}); the fixture would not discriminate it"
     );
+    Ok(())
+}
+
+/// Generator guard for a permutation p-value: fail when `pvalue` sits at the
+/// floor `1/(n_perm + 1)`. There every null below the observed statistic
+/// gives the same bits, so the fixture pins nothing about the null columns.
+/// `n_perm` is the result's, `None` when p is not a permutation p.
+///
+/// # Errors
+/// Returns an error when `n_perm` is `Some(b)` and `pvalue <= 1/(b + 1)`.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn ensure_off_floor(case: &str, pvalue: f64, n_perm: Option<usize>) -> Result<()> {
+    if let Some(b) = n_perm {
+        let floor = 1.0 / (b as f64 + 1.0);
+        anyhow::ensure!(
+            pvalue > floor,
+            "{case}: pvalue {pvalue} is at or below the permutation floor 1/(n_perm + 1) = {floor}; give the case inputs with a weaker signal"
+        );
+    }
+    Ok(())
+}
+
+/// Write a count as an `i64` scalar under `name` when it is `Some`.
+///
+/// # Errors
+/// Returns an error if the count does not fit in `i64` or the write fails.
+pub(crate) fn add_count(
+    w: &mut crate::npz::NpzWriter,
+    name: &str,
+    count: Option<usize>,
+) -> Result<()> {
+    if let Some(c) = count {
+        w.add_i64(name, &scalar_i64(i64::try_from(c)?))?;
+    }
+    Ok(())
+}
+
+/// Write a per-step count list as an `i64` array under `name` when it is `Some`.
+///
+/// # Errors
+/// Returns an error if a count does not fit in `i64` or the write fails.
+pub(crate) fn add_counts(
+    w: &mut crate::npz::NpzWriter,
+    name: &str,
+    counts: Option<&[usize]>,
+) -> Result<()> {
+    if let Some(cs) = counts {
+        let v = cs
+            .iter()
+            .map(|&c| i64::try_from(c))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        w.add_i64(name, &i64_vec(v))?;
+    }
     Ok(())
 }
 
@@ -451,6 +534,7 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_confirmatory_test::raw_perm_wide(root)?);
     cases.push(pls1_confirmatory_test::raw_perm_wide_k2(root)?);
     cases.push(pls1_confirmatory_test::split_exact_wide_k2(root)?);
+    cases.push(pls1_confirmatory_test::split_nb_wide_k2(root)?);
     cases.push(pls1_confirmatory_test::raw_perm_tall_k2(root)?);
     cases.push(pls1_confirmatory_test::score_wide_pre_standardized(root)?);
     cases.push(pls1_confirmatory_test::weighted_split_exact_k2(root)?);
@@ -483,12 +567,14 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(pls1_confirmatory_test::kset_weighted_split_exact(root)?);
     cases.push(pls1_confirmatory_test::gram_kset_split_exact(root)?);
     cases.push(pls1_confirmatory_test::kset_wide_split_exact(root)?);
+    cases.push(pls1_confirmatory_test::split_nb_gate_n80_d6(root)?);
 
     cases.push(pls1_predict::basic_n80_d6_k2(root)?);
     cases.push(pls1_predict::covariates_n80_d6_k2(root)?);
     cases.push(rotate::varimax_d6_k2(root)?);
     cases.push(factors::pls1_n50_d10_k2_n3(root)?);
     cases.push(factors::find_n_n100_d12_k2(root)?);
+    cases.push(factors::pca_basis_n50_d10(root)?);
     cases.push(preprocess::n50_d10_with_weights(root)?);
     cases.push(pls1_perm_null::basic_n80_d6_k2(root)?);
     cases.push(pls1_perm_null::weighted_n80_d6_k2(root)?);
@@ -538,4 +624,17 @@ pub fn all_cases(root: &Path) -> Result<Vec<Case>> {
     cases.push(spls3_fit::wide_n30_p100_q3_keep10_2_k2(root)?);
 
     Ok(cases)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_off_floor;
+
+    #[test]
+    fn ensure_off_floor_refuses_the_floor() {
+        assert!(ensure_off_floor("c", 1.0 / 201.0, Some(200)).is_err());
+        assert!(ensure_off_floor("c", 1e-3, Some(200)).is_err());
+        assert!(ensure_off_floor("c", 0.01, Some(200)).is_ok());
+        assert!(ensure_off_floor("c", 1e-20, None).is_ok());
+    }
 }

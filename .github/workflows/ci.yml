@@ -29,7 +29,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Verify testdata content hashes
         run: python3 scripts/check_corpus_hash.py
-      - name: plskit-bind registry matches the Python signatures
+      - name: plskit-bind registry matches the Python signatures and naming.md
         run: |
           cargo run -p plskit-bind --release --bin plskit-bind-dump > "$RUNNER_TEMP/plskit-registry.json"
           python3 scripts/check-bind-registry.py "$RUNNER_TEMP/plskit-registry.json"
@@ -110,6 +110,11 @@ jobs:
         run: |
           cd plskit-py
           pytest -v --tb=short
+      - name: Run examples (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          python examples/fit_and_ci.py
+          python examples/omnibus_and_ci.py
       - name: Smoke test (macOS, Windows)
         if: runner.os != 'Linux'
         run: >-

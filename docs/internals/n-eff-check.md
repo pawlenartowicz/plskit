@@ -10,15 +10,14 @@ covers the internal call sites.
 
 All in `plskit-rs/src/fit.rs`:
 
-- `validate_and_normalize_weights(weights, n, k_requested)` validates
+- `validate_and_normalize_weights(weights, n)` validates
   length, finiteness and sign, normalizes to mean 1, and computes `n_eff`
-  with `linalg::compute_n_eff` on the raw weights. All-equal weights
+  with `linalg::compute_n_eff` on the mean-one weights. All-equal weights
   (every normalized entry 1 within `1e-12`) come back as `None` with
   `n_eff = n` exactly, so every downstream `w_norm.is_some()` branch
   (standardization, route choice, `rho_hat`, the `split_nb` gate) takes the
   unweighted path and the call is bit-identical to one without weights. It
-  does **not** check `n_eff` against `k`; its `k_requested` argument is
-  unused (see the history note below).
+  does **not** check `n_eff` against `k` (see the history note below).
 - `validate_weights_for_k(weights, n, k)` is that validation followed by the
   check, and the one call a top-level entry makes. The private
   `check_n_eff_for_k(n_eff, k, weighted)` returns
@@ -27,16 +26,9 @@ All in `plskit-rs/src/fit.rs`:
   absent ones (no weights in play, so it is a data-size error, and callers
   branch on `code()`). `weighted` is read off the normalized vector, never
   off the caller's `Option`.
-- `FitOpts::check_n_eff: bool` (default `true`) controls whether
-  `pls1_fit` calls `validate_weights_for_k` or the bare validation. The same flag also gates the
-  truncation guard for `pre_standardized: true` fits: with both flags set,
-  a NIPALS short-circuit below the requested `k` returns `InvalidInput`;
-  with `check_n_eff: false` the truncated model is returned and callers
-  read `k_used`.
+- `check_n_eff: bool` (default `true`) is a field of the crate-internal `InternalFitOpts`, the second options argument of `pls1_fit_impl`, not of the public `FitOpts`. It controls whether the fit calls `validate_weights_for_k` or the bare validation. The same flag also gates the truncation guard for `pre_standardized: true` fits: with both flags set, a NIPALS short-circuit below the requested `k` returns `InvalidInput`; with `check_n_eff: false` the truncated model is returned and callers read `k_used`.
 
-`check_n_eff` is the only Rust-only knob here that is public; the wrappers
-never set it. The Rust bypass is documented in
-[`rust/api.md`](../rust/api.md#bypassing-the-n_eff-check-rust-only).
+`pls1_fit` and `spls1_fit` pass `check_n_eff: true`, so the public API and the wrappers always run the check; only the crate's internal call sites turn it off.
 
 ## Top-level entries
 
@@ -45,31 +37,25 @@ Every public entry that takes weights and a component count calls
 
 | Entry | File | Checked against |
 |---|---|---|
-| `pls1_fit` (and `spls1_fit`, which delegates) | `fit.rs` | `k`, only when `opts.check_n_eff` |
-| `pls1_confirmatory_test` | `signal_test.rs` (`confirmatory_test_impl`) | resolved `k` |
+| `pls1_fit` (and `spls1_fit`, which delegates) | `fit.rs` | `k` |
+| `pls1_confirmatory_test` | `signal_test.rs` (`confirmatory_test_run`) | the largest `k` of the set |
 | `pls1_perm_null` | `perm_null.rs` | `k` |
 | `pls1_find_k_optimal`, `spls1_find_k_optimal` | `find_k.rs` (`find_k_optimal_impl`) | `k_max` |
 | `pls1_find_k_sequence`, `spls1_find_k_sequence` | `find_k.rs` (`find_k_sequence_impl`) | `k_max` |
 | `spls1_find_keep_optimal` | `find_k.rs` | `k` |
 
-`split_nb_gate` calls `validate_and_normalize_weights` with
-`k_requested = 0` and runs no check; it has no `k`.
+`split_nb_gate` calls `validate_and_normalize_weights` and runs no check;
+it has no `k`.
 `preprocess` computes `n_eff` without a check for the same reason. The
 PLS3 family refuses weights, so `n_eff = n` and there is no check.
 
 ## Internal call sites that turn the check off
 
-These call `pls1_fit` with `check_n_eff: false`. The full-data check has
+These call `pls1_fit_impl` with `check_n_eff: false`. The full-data check has
 already run at the entry, and each site tolerates a low-`n_eff` or
 truncated fit by design (the comment at each call site says why):
 
-- `signal_test.rs`: the `e`-value train-half refit in `run_e`. The
-  `raw_perm` CV folds (`cv_fold_contribution`) and the per-half fits of the
-  split tests (`split_column_r`: the `split_exact` refit route, and
-  `split_nb` at `k ≥ 2` or with `keep` set) do not call
-  `pls1_fit`: they run its kernel tail, `fit::pls1_fit_prepared_fro`, which
-  has no check and takes no weights (the weights are already in the
-  row-scaled data).
+- `signal_test.rs`: the `e`-value train-half refit in `run_e`. The per-half fits of `split_nb` (`split_column_r`, at `k ≥ 2` or with `keep` set) do not call `pls1_fit`: they run its kernel tail, `fit::pls1_fit_prepared_fro`. The `raw_perm` CV folds (`fold_columns_lanes`) and the `split_exact` refit route (`split_columns_lanes`) fit their columns in batches through `fit::lanes::pls1_fit_lanes`. Neither has the check, and neither takes weights (the weights are already in the row-scaled data).
 - `find_k.rs`: `select_cv` fold fits; the `select_bic` full-`k_max` fit
   (the BIC sweep is truncation-tolerant); the `first_component_exhausted`
   full-data `k = 1` fit ahead of the CV selectors (a truncation is the
@@ -78,12 +64,7 @@ truncated fit by design (the comment at each call site says why):
 - `perm_null.rs`: the reference fit and every per-permutation refit.
 - `sequential.rs`: the deflation refit in the step-down sequence.
 
-The dual (Gram) routes in `dual_route.rs` (`pls1_cv_r2_columns`,
-`pls3_split_zbars_columns`, and the n-space PLS1 kernel
-`pls1_nspace_kernel`, whose unit bodies `nspace_perm_row`,
-`fold_column_nspace` and `split_columns_r_nspace` serve `pls1_perm_null`,
-raw_perm at `k ≥ 2` and the split_exact refit route at `k ≥ 2`) do not
-call `pls1_fit` and run no check, matching the primal sites they replace.
+The dual (Gram) routes in `dual_route.rs` (`pls3_split_zbars_columns`, and the n-space PLS1 kernel `pls1_nspace_kernel`, whose unit bodies `nspace_perm_row`, `fold_column_nspace` and `split_columns_r_nspace` serve `pls1_perm_null`, raw_perm at every `k` and the split_exact refit route at `k ≥ 2`) do not call `pls1_fit` and run no check, matching the primal sites they replace.
 
 The p-space Gram backend in `gram_p.rs` (`GramPBlock::fit`, behind
 `pls1_perm_null`, raw_perm and the split_exact refit route on tall data,
@@ -99,12 +80,7 @@ off. It decides every replicate itself; nothing is refitted on X.
 - **CI subsamples** (`subsample.rs`, `run_one_confirmatory`): the
   per-subsample fit leaves `check_n_eff` at its default, so the check fires on the
   subsample's own `n_eff`. The driver
-  (`pls1_subsample_inference_confirmatory`) maps
-  `InvalidWeights { reason: "insufficient_effective_n" }` to
-  `WorkerOutcome::Skipped` and every other error to `Failed`. Skips are
-  compared with `max_skip_rate` (`ResamplingDegenerate`), failures with
-  `max_failure_rate` (`ResampleFailureRateExceeded`). Without weights the
-  check cannot fire here, because the engine rejects `m < k + 2` up front.
+  (`pls1_subsample_inference_confirmatory`) maps `InvalidWeights` with reason `"insufficient_effective_n"` or `"all_zero"` (a subsample whose weights are all zero) to `WorkerOutcome::Skipped` and every other error to `Failed`. `run_one_confirmatory` marks a half split whose fit fails with those reasons as `holdout_skipped`: the replicate keeps its β and leverage rows, and its NaN `holdout_corr` counts as a skip. Skips are compared with `max_skip_rate` (`ResamplingDegenerate`) and dropped; failures alone are compared with `max_failure_rate` (`ResampleFailureRateExceeded`). When no draw is left after skips and failures, or every draw left has a NaN holdout correlation, the call returns `ResamplingDegenerate` whatever the two rates. Without weights the check cannot fire here, because the engine rejects `m < k + 2` up front.
 
 ## History note
 
@@ -115,4 +91,4 @@ request infeasible on the full dataset" and "one unlucky fold has low
 `n_eff` by construction." The current contract separates them:
 `validate_and_normalize_weights` no longer checks `n_eff`, and
 `validate_weights_for_k` is called explicitly at the top-level entries (and
-from `pls1_fit` via the `FitOpts::check_n_eff` flag).
+from `pls1_fit_impl` via the internal `check_n_eff` flag).

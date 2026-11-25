@@ -14,10 +14,10 @@ subset.gram_matrix_result <- function(x, rows, ...) {
   }
   n <- nrow(x$gram)
   if (!is.numeric(rows) || !is.null(dim(rows)) || anyNA(rows) ||
-    any(rows != trunc(rows)) || any(rows < 1) || any(rows > n)) {
+    any(rows != trunc(rows)) || any(rows < 1)) {
     .plskit_signal_error(
       "invalid_argument",
-      sprintf("rows must be whole row numbers in 1..%d", n),
+      "rows must be whole row numbers, at least 1",
       call = call
     )
   }
@@ -25,6 +25,13 @@ subset.gram_matrix_result <- function(x, rows, ...) {
     .plskit_signal_error(
       "invalid_argument",
       sprintf("rows must hold at least 2 rows, got %d", length(rows)),
+      call = call
+    )
+  }
+  if (any(rows > n)) {
+    .plskit_signal_error(
+      "invalid_argument",
+      sprintf("rows must index the %d rows of the Gram matrix", n),
       call = call
     )
   }

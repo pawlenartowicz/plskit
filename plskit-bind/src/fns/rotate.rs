@@ -142,7 +142,7 @@ fn row_target(
     }
     if !x.is_all_finite() {
         return Err(BindError::new(
-            "invalid_input",
+            "non_finite_input",
             "X contains non-finite values",
         ));
     }
@@ -166,9 +166,6 @@ pub(crate) fn carried(rec: &Record<'_>, key: &str) -> Value<'static> {
     rec.get(key).map_or(Value::Null, |v| v.clone().into_owned())
 }
 
-/// `rotate(model_or_W, X=None, *, covariates=None, method="varimax", L=None,
-/// args=None, pre_standardized=None)`.
-///
 /// `X` sets the target to `Xs W`, or to `M_Z·Xs·W` with `covariates`
 /// (see [`row_target`]). A `FactorsResult` made with covariates needs them
 /// with `X`, one made without refuses them; a `PLS3Result` refuses them. `pre_standardized` defaults to the

@@ -94,8 +94,11 @@ implemented for this family, so there is no `weights` and no `n_eff`.
 | `diagnostic` | `str \| None` | `diagnostic` set |
 | `seed` | `int` | always |
 | `n_eff` | `float` | always; equals `n` for uniform/absent weights |
-| `stable_rank` | `float \| None` | `diagnostic="split_nb"` requested — fired or not, including under `force` |
+| `stable_rank` | `float \| None` | `diagnostic="split_nb"` requested, fired or not; `None` under `force` |
 | `n_covariates` | `int \| None` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
+| `n_failed_folds` | `int \| None` | of the CV folds, the number that are degenerate or failed: the held-out R² is not finite at one or more candidates (that value is left out of the candidate's `cv_scores` and `cv_scores_se`), or the fold's validation outcome has no spread (`ss_tot ≤ 0`, scored R² = 0 at every candidate and kept in the means); not None whenever `cv_scores` is not None (`r2_se`, `r2_max`), `0` when no fold ran (`k_star = 0` from the full-data check); `None` for `bic` |
+| `n_failed_splits` | `list[int] \| None` | one entry per step of the diagnostic that ran, in step order, each with the meaning of `ConfirmatoryTestResult.n_failed_splits` on that step; not None for `split_exact` and `split_nb` (empty at `k_star = 0`), `None` for other methods and when no diagnostic ran |
+| `n_failed_perms` | `list[int] \| None` | one entry per step of the diagnostic that ran, in step order, each with the meaning of `ConfirmatoryTestResult.n_failed_perms` on that step; not None for `raw_perm` and `split_exact` (empty at `k_star = 0`), `None` for other methods and when no diagnostic ran |
 
 When `diagnostic=` is set, `pvalues` carries the per-component p-values
 of a same-sample sequential test up to `k_star`, and `diagnostic`
@@ -123,8 +126,10 @@ method the auto-gate resolved to.
 | `alpha` | `float` | always |
 | `seed` | `int` | always |
 | `n_eff` | `float` | always; equals `n` for uniform/absent weights |
-| `stable_rank` | `float \| None` | set on an explicit `test_method="split_nb"` request (fired or not, including under `force`), and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n without `keep`); `None` otherwise |
+| `stable_rank` | `float \| None` | set on an explicit `test_method="split_nb"` request (fired or not; `None` under `force`), and on an `"auto"` request that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n without `keep`); `None` otherwise |
 | `n_covariates` | `int \| None` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
+| `n_failed_splits` | `list[int] \| None` | one entry per step that ran, in step order (the length is the number of steps run; `pvalues` has `k_max` entries, `nan` past the stop), each with the meaning of `ConfirmatoryTestResult.n_failed_splits` on that step; not None for `split_exact` and `split_nb`, `None` otherwise |
+| `n_failed_perms` | `list[int] \| None` | one entry per step that ran, in step order, each with the meaning of `ConfirmatoryTestResult.n_failed_perms` on that step; not None for `raw_perm` and `split_exact`, `None` otherwise |
 
 Closed testing on nested H is exact, so `pvalues[:k_star]` is an
 honest FWER-controlled sequence. To get the path-max p-value
@@ -148,6 +153,7 @@ running a test.
 | `seed` | `int` | always |
 | `n_eff` | `float` | effective sample size (from weights; `nan` if unavailable) |
 | `n_covariates` | `int \| None` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
+| `n_failed_folds` | `int` | as on `FindKOptimalResult`, over the keep grid |
 
 Selection criterion: the 1-SE rule on mean CV R² — `keep_star` is the
 sparsest keep whose mean CV R² is within 1 SE of the maximum. Ties
@@ -165,7 +171,7 @@ input gives `k_star = 0` from `spls1_find_k_optimal`.
 
 | Field | Python type | Notes |
 |---|---|---|
-| `pvalue` | `float` | always; for a set of more than one `k`, the min-p p for the whole set |
+| `pvalue` | `float` | always; for a set of more than one `k`, the min-p p for the whole set; one-sided: for `split_exact`, `split_nb` and `raw_perm` only a held-out correlation or CV R² above the null counts; for `e` a negative log-e gives p = 1; `score` and `sv_perm` have no sign |
 | `statistic` | `float \| None` | the statistic for one `k` (for `sv_perm`, `d₁`, the largest singular value of `X̃ᵀỸ`); `None` for a set of more than one `k` |
 | `test_method` | `str` | the method that ran: one of `"raw_perm"` / `"split_nb"` / `"split_exact"` / `"sv_perm"` / `"score"` / `"e"`, never `"auto"`; `"split_exact"` when an explicit `"split_nb"` request was rerouted by the auto-gate |
 | `k` | `list[int]` | the tested set, sorted ascending; one `k` gives a one-element list (`pls3_confirmatory_test` gives `[k]`) |
@@ -179,9 +185,12 @@ input gives `k_star = 0` from `spls1_find_k_optimal`.
 | `seed` | `int` | always |
 | `n_eff` | `float` | always; Kish effective sample size, equals `n` for uniform/absent weights |
 | `rho_hat` | `float \| None` | `split_nb` only, and only when unweighted (no weights, or all-equal weights) with a test half of at least 4 rows; `None` for every other method, including `split_exact` |
-| `stable_rank` | `float \| None` | stable rank of `X` as the `split_nb` auto-gate read it (standardized once over all rows, or only centred under `pre_standardized`, with rows scaled by √w under weights); set on an explicit `"split_nb"` request (fired or not, including under `force`), and on a PLS1 `"auto"` request with one `k` that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise, and on every `pls3_confirmatory_test` `"auto"` request |
+| `stable_rank` | `float \| None` | stable rank of `X` as the `split_nb` auto-gate read it (standardized once over all rows, or only centred under `pre_standardized`, with rows scaled by √w under weights); set on an explicit `"split_nb"` request (fired or not; `None` under `force`), and on a PLS1 `"auto"` request with one `k` that reached the stable-rank check (p > 4, n_eff above 1000 at k = 1 without `keep`, at least 250 otherwise, and p ≤ 100·n at k = 1 without `keep`); `None` otherwise, and on every `pls3_confirmatory_test` `"auto"` request |
 | `ci` | `ConfirmatoryCI \| None` | not None when called with `ci=True`; carries the rotation-invariant resampling CIs (subsampling for β, half splits for `holdout_corr`, bootstrap for leverage) |
 | `n_covariates` | `int \| None` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
+| `n_failed_splits` | `int \| None` | of the `n_splits` splits drawn, the number left out under weights for a half of zero total weight, plus the number on which the observed outcome's held-out correlation `r` is exactly 0 at the largest tested `k` (a degenerate or failed split); the observed column only; two routes can differ by one at a rounding boundary; `n_splits` stays the number drawn; not None for `split_exact` / `split_nb`, `None` for every other method |
+| `n_failed_perms` | `int \| None` | of the `n_perm` null statistics, the number that are not finite; each counts as an exceedance; over a set of `k`, a permutation counts once when its null is not finite at one or more `k`; not None whenever `n_perm` is not None (`raw_perm`, `split_exact`, `sv_perm`, `score` with `n_perm`), `None` otherwise |
+| `n_failed_folds` | `int \| None` | of the `n_folds` CV folds, the number left out under weights for a side (validation rows, or training rows: every other fold) of zero total weight; not None for `raw_perm` only, `None` for every other method |
 
 The result names no `k` to fit at: fit the model with `pls1_fit(X, y)`, which chooses its own `k`.
 
@@ -212,10 +221,11 @@ querying it costs one SVD and no resampling.
 | `beta_ref` | `np.ndarray` | shape `(D,)`; full-data β |
 | `beta_perm_mean` | `np.ndarray` | shape `(D,)`; ≈ 0 under H0 (calibration diagnostic) |
 | `beta_perm_sd` | `np.ndarray` | shape `(D,)`; SD of β under permuted y |
-| `beta_perm_z` | `np.ndarray` | shape `(D,)`; signed = β_ref / β_perm_sd |
+| `beta_perm_z` | `np.ndarray` | shape `(D,)`; signed z = β_ref / β_perm_sd per coordinate; NaN where the SD is not above `√ε · max(|β_ref|, |β_perm_mean|)` (no spread, or spread at the rounding level of β), and for a column of X whose entries are all equal |
 | `beta_perm_matrix` | `np.ndarray \| None` | shape `(n_perm, D)` when `return_perm_matrix=True` |
 | `n_eff` | `float` | effective sample size; `nan` if unavailable |
 | `n_covariates` | `int \| None` | rank of `[1, Z]` minus 1 when `covariates` was passed; `None` otherwise |
+| `n_failed_perms` | `int` | of the `n_perm` permutation rows, the number with at least one entry that is not finite; each such entry is left out of its coordinate's `beta_perm_mean` and `beta_perm_sd`, and the rest of the row is used |
 
 **What a permutation row is.** At `k = 1`, `β = c·X̃ᵀỹ` with one scalar
 `c = ỹᵀKỹ / ỹᵀK²ỹ` (`K = X̃X̃ᵀ`). A refit on permuted `y` changes `c`
@@ -258,7 +268,7 @@ conservative.
 
 | Field | Python type | Notes |
 |---|---|---|
-| `gram` | `np.ndarray` | shape `(n, n)`; `X̃ @ X̃.T`, with `X̃` = `X` centred over all rows and divided by its column standard deviations (population), or only centred under `pre_standardized` (first divided by one power of two near its largest entry when that entry is outside `2^-256 .. 2^256`) |
+| `gram` | `np.ndarray` | shape `(n, n)`; `X̃ @ X̃.T`, with `X̃` = `X` centred over all rows and divided by its column standard deviations (population), or only centred under `pre_standardized` (first divided by one power of two near its largest entry when that entry is outside `2^-256 .. 2^256`); under `pre_standardized`, the calls that take it divide it by a power of four internally when its largest diagonal entry (after centring) is outside `2^-40 .. 2^40`, and map their outputs back |
 | `n_features` | `int` | the column count of `X`, constant columns included |
 | `pre_standardized` | `bool` | as passed |
 
@@ -280,7 +290,7 @@ A CI for a scalar, plus its SD. Its one use is `ConfirmatoryCI.holdout_corr`.
 Rotation-invariant readouts only. Per-axis CIs are intentionally absent
 (see [api](api.md) §3.1).
 
-`ConfirmatoryCI` is beta, not to be trusted yet. It scales X and y once over all rows, as the held-out tests do (not under `pre_standardized`). Its `holdout_corr` half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do. The β and leverage resamples are centred with their own means too, except under `pre_standardized`, where they use X and y as given, as the reference fit does.
+`ConfirmatoryCI` is beta, not to be trusted yet. Its β subsamples and `holdout_corr` half splits scale X and y once over all rows, as the held-out tests do (not under `pre_standardized`). The half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do, and each β subsample is centred with its own means. Each leverage resample is standardized on its own (weighted) means and SDs, as the full-data fit is. Under `pre_standardized` the β and leverage resamples use X and y as given, as the reference fit does.
 
 | Field | Python type | Shape | Description |
 |---|---|---|---|
@@ -298,9 +308,9 @@ Rotation-invariant readouts only. Per-axis CIs are intentionally absent
 | `beta_se` | `np.ndarray` | `(D,)` | `= √(m/(n − m)) · sd(β_b[j]) / κ̂`, the SE `beta_sign_z` divides by (see below) |
 | `holdout_corr` | `CIScalar` | scalar | Fisher z-transformed NB-Wald CI on the held-out correlation of a fit trained on `⌊n/2⌋` rows (beta, see above); does not depend on `m_rate` (see below) |
 | `n_boot_finite` | `int` | scalar | resamples whose worker fit succeeded (≤ `n_boot`) |
-| `n_boot_finite_holdout_corr` | `int` | scalar | subset whose holdout_corr is finite (≤ `n_boot_finite`); resamples with `|r_b| ≥ 1` (degenerate) are also excluded from the Fisher pool |
+| `n_boot_finite_holdout_corr` | `int` | scalar | subset whose holdout_corr is finite (≤ `n_boot_finite`); a half split whose fit fails on the weights counts as a skip, not a failure; resamples with `|r_b| ≥ 1` (degenerate) are also excluded from the Fisher pool |
 
-Each replicate's `holdout_corr` comes from its own half split: a fit on `m_h = ⌊n/2⌋` random rows, correlated with `y` on the other `n − m_h`. The target is ρ(`m_h`), the expected held-out correlation of a model trained on `⌊n/2⌋` rows. The `split_exact` and `split_nb` statistics estimate the same kind of quantity, and read X the same way: scaled once over all rows, each half centred with the training means. It is not the predictive correlation of the full-data fit, which is trained on `n` rows and is usually higher. The CI is built on the variance-stabilized Fisher z-scale (`ζ = atanh(r)`), with the NB inflation factor `(1/B + (n−m_h)/m_h)` (about 1) applied to z-scale variance, then back-transformed via `tanh`. Bounds are guaranteed to lie strictly in `(−1, 1)` and are **asymmetric** on the r-scale. `point` is the mean over splits on the r-scale (plug-in estimate of ρ(`m_h`)); `sd` is on the z-scale, so `point ± Φ⁻¹(1−α/2) · sd` does **not** reconstruct the CI — read the bounds directly. To recover the z-scale interval: `ci_z = (atanh(point) − Φ⁻¹(1−α/2)·sd, atanh(point) + Φ⁻¹(1−α/2)·sd)`; the reported bounds equal `tanh(ci_z)`.
+Each replicate's `holdout_corr` comes from its own half split: a fit on `m_h = ⌊n/2⌋` random rows, correlated with `y` on the other `n − m_h`. The target is ρ(`m_h`), the expected held-out correlation of a model trained on `⌊n/2⌋` rows. The `split_exact` and `split_nb` statistics estimate the same kind of quantity, and read X the same way: scaled once over all rows, each half centred with the training means. It is not the predictive correlation of the full-data fit, which is trained on `n` rows and is usually higher. The CI is built on the variance-stabilized Fisher z-scale (`ζ = atanh(r)`), with the NB inflation factor `(1/B + (n−m_h)/m_h)` (about 1) applied to z-scale variance, then back-transformed via `tanh`. The factor assumes that two splits' correlations correlate at about 0.5. That holds when the noise of the held-out rows dominates, and the interval then covers a little above its level (about 1.1 to 1.2 times the needed width in the coverage grid). When the noise of the training fit dominates (typically at high signal), two splits correlate nearer 0.25, and the interval is conservative: in simulation it is up to about twice as wide as needed, and covers nearly always. Bounds are guaranteed to lie strictly in `(−1, 1)` and are **asymmetric** on the r-scale. `point` is the mean over splits on the r-scale (plug-in estimate of ρ(`m_h`)); `sd` is on the z-scale, so `point ± Φ⁻¹(1−α/2) · sd` does **not** reconstruct the CI — read the bounds directly. To recover the z-scale interval: `ci_z = (atanh(point) − Φ⁻¹(1−α/2)·sd, atanh(point) + Φ⁻¹(1−α/2)·sd)`; the reported bounds equal `tanh(ci_z)`.
 
 ### Per-variable readouts: leverage CIs and the subsampling z for β
 
@@ -487,17 +497,7 @@ Caveats — part of the contract, not optional commentary:
    worker matches that scale via the same back-projection using the
    subsample's own `y_scale / x_scale[j]`; subsample-vs-full-data
    stats differ slightly, but converge as `m` grows.
-5. **Three-way distinction (sign-z ↔ leverage_ci ↔ beta_ci).**
-   `beta_sign_z` and `beta_ci_*` read the same corrected replicates:
-   the z uses their standard deviation (`beta_se`), the CI their
-   quantiles. With a roughly normal subsampling distribution the CI is
-   close to `β_ref ± 1.96·beta_se`, and it excludes zero exactly when
-   `beta_sign_z[j] > 1.96`. With a skewed or heavy-tailed one they can
-   disagree near the threshold; neither is then the better reading. `leverage_ci_*[j]` measures subspace
-   contribution (leverage and its clamped CI lie in `[0, 1]`).
-   A coordinate can have a confidently nonzero `leverage_ci` with a
-   β CI through zero (the variable shapes the latent direction without
-   contributing a stable regression coefficient on its own).
+5. **Three-way distinction (sign-z ↔ `leverage_ci_*` ↔ `beta_ci_*`).** `beta_sign_z` and `beta_ci_*` read the same corrected replicates: the z uses their standard deviation (`beta_se`), the CI their quantiles. With a roughly normal subsampling distribution the CI is close to `β_ref ± 1.96·beta_se`, and it excludes zero exactly when `beta_sign_z[j] > 1.96`. With a skewed or heavy-tailed one they can disagree near the threshold; neither is then the better reading. `leverage_ci_*[j]` measures subspace contribution (leverage and its clamped CI lie in `[0, 1]`). A coordinate can have a `leverage_ci_lower` / `leverage_ci_upper` interval with a lower bound above zero and a β CI through zero (the variable shapes the latent direction without contributing a stable regression coefficient on its own).
 
 Memory: storing per-resample β adds `8 · D · n_boot_finite` bytes —
 ~8 MB at D=1000, B=1000 (trivial); ~400 MB at D=50_000, B=1000 (fMRI
@@ -571,8 +571,8 @@ From `factors` the columns are in block order, and a part of `coef` outside the 
 | `method` | `str` | `"varimax"` today; future `"promax"` / `"oblimin"` / `"geomin"` |
 | `args` | `Mapping` (frozen via `MappingProxyType`) | method-specific kwargs as the engine resolved them (defaults filled, counts as `int`) |
 | `R` | `np.ndarray` `(K, K)` | rotation matrix; `W_rot = W @ R`. On a `FactorsResult` or a `PLS3Result` it is stored after sign pinning and sorting, so `W_after = W_before @ R` holds exactly |
-| `sweeps` | `int` | varimax iterations to convergence |
-| `V_converged` | `float` | final varimax criterion value |
+| `sweeps` | `int` | the sweeps run, the one that met `tol` included; equal to `max_iter` both when the cap was reached and when the last allowed sweep met `tol`; 0 at K = 1 |
+| `V_converged` | `float` | the varimax criterion before the last sweep when the loop stopped on `tol`, after it when it reached `max_iter`; at K = 1, the criterion of the unrotated target |
 | `L_was_provided` | `bool` | whether the caller passed a loading basis `L` or `X`, in `rotate` and in `profiles` |
 
 `rotation_spec` is `None` until `rotate` stamps it on a copy of the result.

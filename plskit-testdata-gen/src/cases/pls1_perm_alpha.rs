@@ -2,7 +2,7 @@
 
 use crate::cases::{
     CasePaths, faer_mat_to_array, i64_vec, manifest_case, ndarray_to_faer_mat, scalar_i64,
-    synth_data,
+    standardize, synth_data,
 };
 use crate::manifest::Case;
 use crate::npz::NpzWriter;
@@ -32,7 +32,7 @@ pub fn n40_p60_m4_k1(root: &Path) -> Result<Case> {
     let paths = CasePaths::build(root, function, name)?;
     let (n, p) = (40_usize, 60_usize);
     let (x, y) = synth_data(n, p, 2, 4.0, 42);
-    let (xs, _, _) = plskit::linalg::standardize(ndarray_to_faer_mat(&x).as_ref());
+    let (xs, _, _) = standardize(ndarray_to_faer_mat(&x).as_ref());
     let mut gram = Mat::<f64>::zeros(n, n);
     matmul(
         gram.as_mut(),

@@ -1,6 +1,7 @@
 # Every testdata/ case through the R surface, compared with the frozen
 # outputs at the corpus tolerances (scalars 1e-12, arrays 1e-10, plus
-# rtol 1e-14 for finite expected values; integers and strings exact). Each case makes
+# rtol 1e-14 for finite expected values, and p-values also within 1e-10
+# relative; integers and strings exact). Each case makes
 # the call plskit-py/tests/test_corpus.py makes, and a fixture key maps
 # onto the result by name: exact, then ASCII case-insensitive, then into
 # nested named lists, recursively. `{field}__keys` / `{field}__values`
@@ -11,6 +12,11 @@
 ATOL_SCALAR <- 1e-12
 ATOL_ARRAY <- 1e-10
 RTOL <- 1e-14
+# The p rule: a p-value field also needs |got - want| <= P_RTOL * |want|.
+# Owned by plskit-testdata-gen/src/settle.rs (P_FIELDS, P_RTOL): change
+# together.
+P_FIELDS <- c("pvalue", "pvalues", "pvalues_by_k__values")
+P_RTOL <- 1e-10
 
 describes_data <- function(fn, key) {
   key %in% c("d", "n", "n_new", "n_train", "seed_new", "seed_train") ||
@@ -24,6 +30,14 @@ plain <- function(a) {
 }
 
 call_fn <- function(fn, args) do.call(getExportedValue("plskit", fn), args)
+
+# `m` with each column flipped so its largest-magnitude entry is positive.
+# Same rule as column_sign_up in corpus.rs, test_corpus.py and corpus.jl:
+# change together. Attributes of `m` are kept.
+column_sign_up <- function(m) {
+  top <- vapply(seq_len(ncol(m)), function(j) m[which.max(abs(m[, j])), j], numeric(1L))
+  m * rep(ifelse(top < 0, -1, 1), each = nrow(m))
+}
 
 run_case <- function(case, inputs) {
   fn <- case[["function"]]
@@ -65,6 +79,15 @@ run_case <- function(case, inputs) {
     },
     pls1_perm_alpha = {
       pls1_perm_alpha(arr("gram"), arr("Y"), k = kw[["k"]], n_features = kw[["n_features"]])
+    },
+    pca_basis = {
+      # Column signs of V are arbitrary; the test loop flips the fixture's `v` too.
+      r <- pca_basis(arr("X"), pre_standardized = kw[["pre_standardized"]])
+      r$V <- column_sign_up(r$V)
+      r
+    },
+    split_nb_gate = {
+      split_nb_gate(arr("X"), pre_standardized = kw[["pre_standardized"]])
     },
     {
       # `"gram": true`: the call takes gram_matrix(X, pre_standardized) in place of X.
@@ -138,7 +161,7 @@ resolve <- function(rec, key) {
   list(ci[[1L]][[part]])
 }
 
-compare <- function(got, want) {
+compare <- function(got, want, key) {
   kind <- attr(want, "npy_kind")
   shape <- attr(want, "npy_shape")
   want <- plain(want)
@@ -169,13 +192,15 @@ compare <- function(got, want) {
   } else if (is.matrix(got) || length(got) != length(want)) {
     return(sprintf("shape %s vs length %d", toString(dim(got)), length(want)))
   }
-  # Mirrors plskit-testdata-gen/src/settle.rs::close, which owns the rule:
-  # change together.
+  # Mirrors the rule and the p rule owned by
+  # plskit-testdata-gen/src/settle.rs: change together.
   atol <- if (length(shape) == 0L) ATOL_SCALAR else ATOL_ARRAY
   got <- as.vector(got)
   want <- as.vector(want)
+  bound <- atol + RTOL * abs(want)
+  if (key %in% P_FIELDS) bound <- pmin(bound, P_RTOL * abs(want))
   ok <- (is.nan(got) & is.nan(want)) | got == want |
-    (is.finite(want) & abs(got - want) <= atol + RTOL * abs(want))
+    (is.finite(want) & abs(got - want) <= bound)
   ok[is.na(ok)] <- FALSE
   if (all(ok)) return(NULL)
   bad <- which(!ok)[[1L]]
@@ -192,6 +217,7 @@ test_that("every testdata case matches through the R surface", {
   for (case in cases) {
     inputs <- read_npz(file.path(root, case[["inputs"]]))
     expected <- read_npz(file.path(root, case[["outputs"]]))
+    if (case[["function"]] == "pca_basis") expected[["v"]] <- column_sign_up(expected[["v"]])
     # Some split_nb cases reroute by design; the warning is tested elsewhere.
     actual <- suppressWarnings(run_case(case, inputs), classes = "plskit_rerouted")
     for (key in sort(names(expected))) {
@@ -201,7 +227,7 @@ test_that("every testdata case matches through the R surface", {
         next
       }
       n_compared <- n_compared + 1L
-      problem <- compare(found[[1L]], expected[[key]])
+      problem <- compare(found[[1L]], expected[[key]], key)
       if (!is.null(problem)) failures <- c(failures, sprintf("%s.%s: %s", case[["name"]], key, problem))
     }
   }

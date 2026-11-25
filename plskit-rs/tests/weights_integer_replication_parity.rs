@@ -6,7 +6,7 @@
 mod common;
 
 use faer::{Col, Mat};
-use plskit::fit::{FitOpts, KSpec, pls1_fit};
+use plskit::fit::{FitOpts, pls1_fit};
 
 #[test]
 fn integer_weights_match_row_duplication() {
@@ -22,7 +22,7 @@ fn integer_weights_match_row_duplication() {
     let m_w = pls1_fit(
         x.as_ref(),
         y.as_ref(),
-        KSpec::Fixed(2),
+        2,
         Some(w.as_ref()),
         None,
         FitOpts::default(),
@@ -33,7 +33,7 @@ fn integer_weights_match_row_duplication() {
     let m_d = pls1_fit(
         x_dup.as_ref(),
         y_dup.as_ref(),
-        KSpec::Fixed(2),
+        2,
         None,
         None,
         FitOpts::default(),

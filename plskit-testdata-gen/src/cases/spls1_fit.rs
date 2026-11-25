@@ -10,7 +10,7 @@ use crate::cases::{
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
-use plskit::{FitOpts, KSpec, spls1_fit};
+use plskit::{FitOpts, spls1_fit};
 
 struct Spls1FitCase<'a> {
     name: &'a str,
@@ -41,7 +41,7 @@ fn spls1_fit_case(root: &Path, c: &Spls1FitCase<'_>) -> Result<Case> {
     let model = spls1_fit(
         x_faer.as_ref(),
         y_faer.as_ref(),
-        KSpec::Fixed(c.k),
+        c.k,
         c.keep,
         None,
         None,

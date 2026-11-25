@@ -220,15 +220,13 @@ impl CovariateBasis {
     /// - `z_new`: `(m, p_z)`
     /// - `v_new`: `(m, q)`
     /// - `coef`: `(rank, q)`
-    ///
-    /// # Panics
-    /// When the shapes do not agree as above.
-    pub fn residualize_new(
+    pub(crate) fn residualize_new(
         &self,
         z_new: MatRef<'_, f64>,
         v_new: MatMut<'_, f64>,
         coef: MatRef<'_, f64>,
     ) {
+        // The callers build all three from one basis, so these asserts guard an internal invariant.
         assert_eq!(z_new.ncols(), self.p_z, "residualize_new: columns of z_new");
         assert_eq!(
             z_new.nrows(),
@@ -321,9 +319,7 @@ pub(crate) struct Adjusted {
 /// then replace both by their WLS residuals on `[1, Z]`.
 ///
 /// # Errors
-/// - `ShapeMismatch` when `z` does not have one row per row of `x`.
-/// - `NonFiniteInput` when `z` holds a NaN or an infinity.
-#[allow(clippy::many_single_char_names)]
+/// [`basis_for`]'s.
 pub(crate) fn adjust(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -331,14 +327,41 @@ pub(crate) fn adjust(
     w_norm: Option<ColRef<'_, f64>>,
     pre_standardized: bool,
 ) -> PlsKitResult<Adjusted> {
-    let (n, p) = (x.nrows(), x.ncols());
-    if z.nrows() != n {
+    let basis = basis_for(x, z, w_norm)?;
+    Ok(adjust_on(x, y, basis, w_norm, pre_standardized))
+}
+
+/// The basis of `[1, Z]` for X, under the normalized weights `w_norm`.
+///
+/// # Errors
+/// - `ShapeMismatch` when `z` does not have one row per row of `x`.
+/// - `NonFiniteInput` when `z` holds a NaN or an infinity.
+pub(crate) fn basis_for(
+    x: MatRef<'_, f64>,
+    z: MatRef<'_, f64>,
+    w_norm: Option<ColRef<'_, f64>>,
+) -> PlsKitResult<CovariateBasis> {
+    if z.nrows() != x.nrows() {
         return Err(PlsKitError::ShapeMismatch(format!(
-            "covariates have {} rows, X has {n}",
-            z.nrows()
+            "covariates have {} rows, X has {}",
+            z.nrows(),
+            x.nrows()
         )));
     }
-    let basis = CovariateBasis::new(z, w_norm)?;
+    CovariateBasis::new(z, w_norm)
+}
+
+/// [`adjust`] on the `basis` [`basis_for`] built for `x` under the same
+/// `w_norm`.
+#[allow(clippy::many_single_char_names)]
+pub(crate) fn adjust_on(
+    x: MatRef<'_, f64>,
+    y: ColRef<'_, f64>,
+    basis: CovariateBasis,
+    w_norm: Option<ColRef<'_, f64>>,
+    pre_standardized: bool,
+) -> Adjusted {
+    let p = x.ncols();
     // `standardize_weighted` gives the bits of `fit_x_moments` and of the
     // standardized matrix `pls1_fit` writes.
     let (mut xs, x_mean, x_scale, mut ys, y_scale) = if pre_standardized {
@@ -356,14 +379,14 @@ pub(crate) fn adjust(
     };
     basis.residualize(xs.as_mut());
     basis.residualize(ys.as_mut().as_mat_mut());
-    Ok(Adjusted {
+    Adjusted {
         x: xs,
         y: ys,
         x_mean,
         x_scale,
         y_scale,
         basis,
-    })
+    }
 }
 
 #[cfg(test)]

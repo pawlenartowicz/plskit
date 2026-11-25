@@ -1,6 +1,6 @@
 //! Splitting one coefficient vector into orthogonal factors that sum to it.
 //!
-//! [`factors`] leaves out the variables whose `coef` is exactly zero and
+//! [`factors()`] leaves out the variables whose `coef` is exactly zero and
 //! takes the PCA basis `V` of the columns left in, standardized (unless `X`
 //! is told to be already). When `coef` has a part outside the span of `V`
 //! (a sparse fit on wide `X` keeps more variables than `X` has rows), that
@@ -29,17 +29,15 @@ use faer::{Col, ColRef, Mat, MatRef, Par};
 use crate::covariates::CovariateBasis;
 use crate::error::{PlsKitError, PlsKitResult};
 use crate::fit::pls1_fit_bytes;
-use crate::fit::{FitOpts, KSpec, ParChoice, pls1_fit_impl};
+use crate::fit::{FitOpts, InternalFitOpts, ParChoice, pls1_fit_impl};
 use crate::linalg::{
-    center_rows_fro, col_row_subset, constant_to_rounding, empirical_quantile, fold_split,
-    held_out_scale, lu_solve_in_place, mat_mul, mat_vec, pow2_scale, scaled_moments,
-    self_adjoint_eigenvalues, standardize, standardize_apply_rows, standardize1,
+    center_rows_fro, col_row_subset, constant_to_rounding, empirical_quantile, held_out_scale,
+    lu_solve_in_place, mat_mul, mat_vec, pow2_scale, scaled_moments, self_adjoint_eigenvalues,
+    standardize, standardize_apply_rows, standardize1,
 };
 use crate::pca::pca_basis_impl;
-use crate::resample::{
-    copy_bytes, map_units, pair_blocks_bytes, permutation_from_seed, permute_indices,
-};
-use crate::rng::{child_rng, child_seeds, resolve_seed};
+use crate::resample::{copy_bytes, map_units, pair_blocks_bytes, shuffled_folds};
+use crate::rng::{TAG_FACTR, resolve_seed, shuffle};
 use crate::rotate::{RotationMethod, VarimaxArgs, rotate};
 
 /// Tolerance on `max|W'W − I|`, on `‖coef − W c‖ / ‖coef‖` and on
@@ -138,13 +136,18 @@ fn block_ends(c: &[f64], n: usize) -> Vec<usize> {
 ///
 /// - [`PlsKitError::ShapeMismatch`] — `coef.nrows() != x.ncols()`, or
 ///   `covariates` has a row count other than `x.nrows()`.
-/// - [`PlsKitError::NonFiniteInput`] — `covariates` holds a NaN or an
-///   infinity.
-/// - [`PlsKitError::InvalidInput`] — non-finite `coef` or `x`; zero `coef`;
-///   `n` outside `[1, K]`; a block with `size ≤ 1e-12 ‖coef‖` (the message
-///   names the block's component range); `‖coef‖` or `W' coef` overflowing
-///   to infinity; `x` with no rows, with every column left in constant
-///   (when standardized), or with all singular values zero.
+/// - [`PlsKitError::NonFiniteInput`] — `coef`, `x` or `covariates` holds a
+///   NaN or an infinity.
+/// - [`PlsKitError::InvalidArgument`] — `n` outside `[1, K]`.
+/// - [`PlsKitError::InvalidInput`] — zero `coef`; a block with
+///   `size ≤ 1e-12 ‖coef‖` (the message names the block's component range);
+///   `‖coef‖` or `W' coef` overflowing to infinity; `x` with no rows, with
+///   every column left in constant (when standardized), or with all singular
+///   values zero.
+/// - [`PlsKitError::MemoryBudget`] — the copy of the columns left in and
+///   the SVD's buffers do not fit `PLSKIT_MEMORY_BUDGET`, checked after the
+///   checks on the arguments and before the checks that read the copy
+///   (constant columns, singular values, `n`).
 /// - [`PlsKitError::Internal`] — the SVD failed.
 pub fn factors(
     coef: ColRef<'_, f64>,
@@ -172,22 +175,14 @@ fn factors_impl(
             coef.nrows()
         )));
     }
-    if !coef.is_all_finite() {
-        return Err(PlsKitError::InvalidInput(
-            "coef contains non-finite values".into(),
-        ));
-    }
-    if !x.is_all_finite() {
-        return Err(PlsKitError::InvalidInput(
-            "X contains non-finite values".into(),
-        ));
+    if !coef.is_all_finite() || !x.is_all_finite() {
+        return Err(PlsKitError::NonFiniteInput);
     }
     let kept: Vec<usize> = (0..d).filter(|&j| coef[j] != 0.0).collect();
     if kept.is_empty() {
         return Err(PlsKitError::InvalidInput("coef is zero".into()));
     }
-    let x_kept = Mat::<f64>::from_fn(x.nrows(), kept.len(), |i, j| x[(i, kept[j])]);
-    let mut v = if let Some(z) = covariates {
+    if let Some(z) = covariates {
         if z.nrows() != x.nrows() {
             return Err(PlsKitError::ShapeMismatch(format!(
                 "covariates have {} rows, X has {}",
@@ -195,6 +190,19 @@ fn factors_impl(
                 x.nrows()
             )));
         }
+        crate::fit::check_finite_mat(z)?;
+    }
+    // A zero-row X fails below with its own error, before it allocates.
+    if x.nrows() > 0 {
+        // The kept columns' copy, then `pca_basis`'s buffers on it.
+        // shortcut: the covariate basis (`n × (p_z + 1)`, twice) and the second copy of `pre_standardized_div` are not counted, count them if a capped run is killed there.
+        let (rows, cols) = (x.nrows(), kept.len());
+        let need = copy_bytes(rows, cols).saturating_add(fold_svd_bytes(rows, cols));
+        crate::resample::units_at_once(1, need, 0)?;
+    }
+    // The checks on constant kept columns, singular values and `n` read this copy, so they follow the budget check.
+    let x_kept = Mat::<f64>::from_fn(x.nrows(), kept.len(), |i, j| x[(i, kept[j])]);
+    let mut v = if let Some(z) = covariates {
         let basis = CovariateBasis::new(z, None)?;
         let mut xs = if pre_standardized {
             x_kept
@@ -253,10 +261,11 @@ fn factors_impl(
 ///
 /// # Errors
 ///
-/// - [`PlsKitError::InvalidInput`] — `n` outside `[1, K]`;
-///   `max|W'W − I| > 1e-10`; `‖coef − W c‖ > 1e-10 ‖coef‖`; a block with
-///   `size ≤ 1e-12 ‖coef‖` (the message names the block's component range);
-///   `‖coef‖` or `W' coef` overflowing to infinity.
+/// - [`PlsKitError::InvalidArgument`] — `n` outside `[1, K]`.
+/// - [`PlsKitError::InvalidInput`] — `max|W'W − I| > 1e-10`;
+///   `‖coef − W c‖ > 1e-10 ‖coef‖`; a block with `size ≤ 1e-12 ‖coef‖`
+///   (the message names the block's component range); `‖coef‖` or
+///   `W' coef` overflowing to infinity.
 #[allow(clippy::many_single_char_names)] // w, c, n, d, k, j are the math names
 fn split_on_basis(
     w: MatRef<'_, f64>,
@@ -267,7 +276,7 @@ fn split_on_basis(
 ) -> PlsKitResult<FactorsOutput> {
     let (d, k) = w.shape();
     if n < 1 || n > k {
-        return Err(PlsKitError::InvalidInput(format!(
+        return Err(PlsKitError::InvalidArgument(format!(
             "n={n} is outside [1, K] with K={k}"
         )));
     }
@@ -333,9 +342,10 @@ impl FactorsOutput {
     ///
     /// - [`PlsKitError::ShapeMismatch`] — `r` is not `n × n`, or
     ///   `self.coef` has a length other than `self.w.nrows()`.
-    /// - [`PlsKitError::InvalidInput`] — non-finite `self.w`, `self.coef`
-    ///   or `r`, `max|R'R − I| > 1e-10`, `max|W'W − I| > 1e-10`, or
-    ///   `‖coef − W W' coef‖ > 1e-10 ‖coef‖`.
+    /// - [`PlsKitError::NonFiniteInput`] — `self.w`, `self.coef` or `r`
+    ///   holds a NaN or an infinity.
+    /// - [`PlsKitError::InvalidInput`] — `max|R'R − I| > 1e-10`,
+    ///   `max|W'W − I| > 1e-10`, or `‖coef − W W' coef‖ > 1e-10 ‖coef‖`.
     #[allow(clippy::many_single_char_names)] // w, r, a, d, n are the math names
     pub fn rotated(&self, r: MatRef<'_, f64>) -> PlsKitResult<(FactorsOutput, Mat<f64>)> {
         let (d, n) = self.w.shape();
@@ -352,9 +362,7 @@ impl FactorsOutput {
             )));
         }
         if !self.w.is_all_finite() || !self.coef.is_all_finite() || !r.is_all_finite() {
-            return Err(PlsKitError::InvalidInput(
-                "W, coef or R contains non-finite values".into(),
-            ));
+            return Err(PlsKitError::NonFiniteInput);
         }
         let defect = orthonormality_defect(r);
         if defect > ORTHO_TOL {
@@ -525,9 +533,13 @@ pub struct ProfilesFindNOutput {
 ///
 /// - [`PlsKitError::DimensionMismatch`] — `y.nrows() != x.nrows()`.
 /// - [`PlsKitError::NonFiniteInput`] — non-finite values in `x` or `y`.
-/// - [`PlsKitError::InvalidInput`] — `x` has no columns; `n_max < 1`;
+/// - [`PlsKitError::InvalidArgument`] — `n_max < 1`.
+/// - [`PlsKitError::InvalidInput`] — `x` has no columns;
 ///   `n_folds` outside `[2, N]`; `n_repeats < 1`; `n_perm < 1`; fewer than
 ///   two usable folds.
+/// - [`PlsKitError::MemoryBudget`] — a loop's buffers do not fit
+///   `PLSKIT_MEMORY_BUDGET`: the parallel analysis is checked after the
+///   checks above, each fold pass when it starts.
 /// - Errors of the fold fits (for example `k` too large) are returned as
 ///   they are.
 /// - [`PlsKitError::Internal`] — an SVD or eigendecomposition failed.
@@ -566,7 +578,9 @@ fn profiles_find_n_impl(
         return Err(PlsKitError::InvalidInput("X has no columns".into()));
     }
     if n_max < 1 {
-        return Err(PlsKitError::InvalidInput("n_max must be at least 1".into()));
+        return Err(PlsKitError::InvalidArgument(
+            "n_max must be at least 1".into(),
+        ));
     }
     if opts.n_folds < 2 || opts.n_folds > n {
         return Err(PlsKitError::InvalidInput(format!(
@@ -582,18 +596,25 @@ fn profiles_find_n_impl(
     if !x.is_all_finite() || !y.is_all_finite() {
         return Err(PlsKitError::NonFiniteInput);
     }
-
-    let (seed, mut rng) = resolve_seed(opts.seed)?;
-    let perm_seeds = child_seeds(&mut rng, opts.n_perm);
-    let rep_seeds = child_seeds(&mut rng, opts.n_repeats);
+    let seed = resolve_seed(opts.seed, n)?;
+    // The parallel analysis holds the standardized copy of X beside its
+    // shuffles; checked before the copy is written.
+    // shortcut: a pre-standardized X inside the band is read as given but counted as copied, count it exactly if that call ever errors needlessly.
+    let x_copy = copy_bytes(n, d);
+    crate::resample::units_at_once(opts.n_perm, x_copy, corr_eigen_bytes(n, d))?;
 
     let k_raw = if opts.pre_standardized {
         // Far from unit scale, divided by a power of two (no eigenvalue
         // ratio moves).
         let xd = crate::linalg::pre_standardized_div(x, None);
-        parallel_k(xd.as_ref().map_or(x, |(m, _)| m.as_ref()), &perm_seeds)?
+        parallel_k(
+            xd.as_ref().map_or(x, |(m, _)| m.as_ref()),
+            seed,
+            opts.n_perm,
+            x_copy,
+        )?
     } else {
-        parallel_k(standardize(x).0.as_ref(), &perm_seeds)?
+        parallel_k(standardize(x).0.as_ref(), seed, opts.n_perm, x_copy)?
     };
     // The folds are read as the held-out tests read X: scaled once over all
     // rows (or used as given under the flag) and centred by the training
@@ -604,9 +625,10 @@ fn profiles_find_n_impl(
     // Pass 1: the fold's leading right singular vectors. Folds are kept for
     // pass 2 so that K* can be capped by the smallest rank before any
     // fold is scored.
+    // shortcut: the folds' index vectors (`n_repeats · n_folds · n` indices, 8 bytes each) are not counted; count them if a capped run is killed there.
     let mut splits: Vec<(Vec<usize>, Vec<usize>)> = Vec::new();
-    for &rep_seed in &rep_seeds {
-        let folds = fold_split(&permutation_from_seed(n, rep_seed), opts.n_folds);
+    for r in 0..opts.n_repeats {
+        let folds = shuffled_folds(n, opts.n_folds, seed, r as u64);
         for (fi, te) in folds.iter().enumerate() {
             let tr: Vec<usize> = folds
                 .iter()
@@ -618,7 +640,9 @@ fn profiles_find_n_impl(
         }
     }
     let n_tr = splits.iter().map(|(tr, _)| tr.len()).max().unwrap_or(0);
-    let bases = map_units(splits.len(), fold_svd_bytes(n_tr, d), |u| {
+    // The call holds every fold's kept vectors, at most `d × min(k_raw, n_tr, d)`.
+    let held = copy_bytes(d, k_raw.min(n_tr).min(d)).saturating_mul(splits.len());
+    let bases = map_units(splits.len(), held, fold_svd_bytes(n_tr, d), |u| {
         let tr = &splits[u].0;
         if constant_column(x, tr) {
             return Ok(None);
@@ -626,7 +650,7 @@ fn profiles_find_n_impl(
         let (xs_tr, _, _) = center_rows_fro(x, tr, None, None, scale.as_ref(), Par::Seq);
         let v = pca_basis_impl(xs_tr.as_ref(), true, Par::Seq)?.v;
         Ok(Some(v.as_ref().subcols(0, k_raw.min(v.ncols())).to_owned()))
-    });
+    })?;
     let mut n_failed_folds = 0;
     let mut kept: Vec<KeptFold> = Vec::new();
     for ((tr, te), v) in splits.into_iter().zip(bases) {
@@ -651,7 +675,10 @@ fn profiles_find_n_impl(
     // Pass 2: rotate, order, score.
     let unit = pair_blocks_bytes(kept.iter().map(|f| (f.tr.len(), f.te.len())), d)
         .saturating_add(pls1_fit_bytes(d, k));
-    let scored = map_units(kept.len(), unit, |u| -> PlsKitResult<Vec<f64>> {
+    let held = kept
+        .iter()
+        .fold(0_usize, |b, f| b.saturating_add(copy_bytes(d, f.v.ncols())));
+    let scored = map_units(kept.len(), held, unit, |u| -> PlsKitResult<Vec<f64>> {
         let fold = &kept[u];
         let y_tr = col_row_subset(y, &fold.tr);
         let (xs_tr, mean, _) = center_rows_fro(x, &fold.tr, None, None, scale.as_ref(), Par::Seq);
@@ -659,14 +686,16 @@ fn profiles_find_n_impl(
         let fit = pls1_fit_impl(
             xs_tr.as_ref(),
             standardize1(y_tr.as_ref()).0.as_ref(),
-            KSpec::Fixed(k),
+            k,
             None,
             None,
             FitOpts {
                 pre_standardized: true,
-                check_n_eff: false,
                 par: ParChoice::Seq,
-                ..Default::default()
+            },
+            InternalFitOpts {
+                check_n_eff: false,
+                ..InternalFitOpts::default()
             },
         )?;
         let rot = rotate(
@@ -687,7 +716,7 @@ fn profiles_find_n_impl(
             z_te.as_ref(),
             col_row_subset(y, &fold.te).as_ref(),
         ))
-    });
+    })?;
     let mut rows: Vec<Vec<f64>> = Vec::with_capacity(kept.len());
     for r2 in scored {
         let r2 = r2?;
@@ -744,24 +773,32 @@ fn corr_eigenvalues(xs: MatRef<'_, f64>) -> PlsKitResult<Vec<f64>> {
 
 /// Parallel analysis (Horn, 1965): the number of leading eigenvalues of the
 /// correlation matrix of `xs` that are strictly above the 95th percentile of
-/// the shuffled-column eigenvalue at the same rank, at least 1. Each seed in
-/// `perm_seeds` shuffles every column on its own; a shuffle keeps a column's
-/// mean and scale, so `xs` needs no re-standardizing.
-fn parallel_k(xs: MatRef<'_, f64>, perm_seeds: &[u64]) -> PlsKitResult<usize> {
+/// the shuffled-column eigenvalue at the same rank, at least 1. Shuffle `b`
+/// (`b < n_perm`) runs on stream `(seed, b)` of `TAG_FACTR` and shuffles
+/// every column on its own, in column order; a shuffle keeps a column's
+/// mean and scale, so `xs` needs no re-standardizing. The shuffles run in
+/// batches by the budget beside `call_bytes`, the caller's buffers.
+fn parallel_k(
+    xs: MatRef<'_, f64>,
+    seed: u64,
+    n_perm: usize,
+    call_bytes: usize,
+) -> PlsKitResult<usize> {
     let (n, d) = xs.shape();
     let observed = corr_eigenvalues(xs)?;
-    let mut null: Vec<Vec<f64>> = vec![Vec::with_capacity(perm_seeds.len()); observed.len()];
-    let shuffles = map_units(perm_seeds.len(), corr_eigen_bytes(n, d), |b| {
-        let mut rng = child_rng(perm_seeds[b]);
+    let mut null: Vec<Vec<f64>> = vec![Vec::with_capacity(n_perm); observed.len()];
+    let shuffles = map_units(n_perm, call_bytes, corr_eigen_bytes(n, d), |b| {
+        let mut rng = commonstats::CommonStatsRng::new_tagged(seed, b as u64, TAG_FACTR);
         let mut shuffled = Mat::<f64>::zeros(n, d);
         for j in 0..d {
-            let p = permute_indices(n, &mut rng);
+            let mut p: Vec<usize> = (0..n).collect();
+            shuffle(&mut rng, &mut p);
             for i in 0..n {
                 shuffled[(i, j)] = xs[(p[i], j)];
             }
         }
         corr_eigenvalues(shuffled.as_ref())
-    });
+    })?;
     for lambda in shuffles {
         for (r, v) in lambda?.into_iter().enumerate() {
             null[r].push(v);
@@ -798,14 +835,17 @@ fn corr_eigen_bytes(n: usize, d: usize) -> usize {
         .saturating_add(scratch)
 }
 
-/// Bytes of one fold of [`profiles_find_n`]'s first pass on `n_tr`
-/// training rows: the centred training copy of `X` (`n_tr × d`) plus the
+/// Bytes of `pca::pca_basis` on `n_tr × d` X, as in one fold of
+/// [`profiles_find_n`]'s first pass on `n_tr` training rows: the
+/// standardized or centred copy of `X` (`n_tr × d`) plus the
 /// larger of the two phases of `linalg::tall_svd_v`. The SVD phase holds
 /// `V` (`d × min(n_tr, d)`) and faer's SVD scratch; the Gram phase, run
 /// only when `d < n_tr`, holds `G` and its eigenvectors (`d × d` each) and
 /// faer's eigendecomposition scratch. `G` is dropped before the fallback
-/// SVD, so the phases do not add up.
-fn fold_svd_bytes(n_tr: usize, d: usize) -> usize {
+/// SVD, so the phases do not add up. The kept columns of `V` that
+/// `pca_basis` returns are written after the copy is dropped, and are no
+/// larger than it.
+pub(crate) fn fold_svd_bytes(n_tr: usize, d: usize) -> usize {
     use faer::linalg::evd::{ComputeEigenvectors, self_adjoint_evd_scratch};
     use faer::linalg::svd::{ComputeSvdVectors, svd_scratch};
     let svd = svd_scratch::<f64>(
@@ -1097,20 +1137,13 @@ mod tests {
         let invalid =
             |r: PlsKitResult<FactorsOutput>| matches!(r, Err(PlsKitError::InvalidInput(_)));
 
-        assert!(
-            invalid(split_on_basis(w.as_ref(), coef.as_ref(), 0, false, false)),
-            "n = 0"
-        );
-        assert!(
-            invalid(split_on_basis(
-                w.as_ref(),
-                coef.as_ref(),
-                K + 1,
-                false,
-                false
-            )),
-            "n = K + 1"
-        );
+        for n in [0, K + 1] {
+            let r = split_on_basis(w.as_ref(), coef.as_ref(), n, false, false);
+            assert!(
+                matches!(r, Err(PlsKitError::InvalidArgument(_))),
+                "n = {n}: {r:?}"
+            );
+        }
 
         let w_scaled = Mat::<f64>::from_fn(D, K, |i, j| w[(i, j)] * 1.001);
         assert!(
@@ -1170,7 +1203,7 @@ mod tests {
     #[test]
     fn factors_with_covariates_equals_adjusted_call() {
         use crate::covariates::adjust;
-        use crate::fit::{FitOpts, KSpec, pls1_fit};
+        use crate::fit::{FitOpts, pls1_fit};
         let n = 60;
         let z = unif(n, 2, 31);
         // X depends on Z, so removing Z changes it.
@@ -1180,7 +1213,7 @@ mod tests {
         let model = pls1_fit(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(3),
+            3,
             None,
             Some(z.as_ref()),
             FitOpts::default(),
@@ -1256,7 +1289,7 @@ mod tests {
         let coef = Col::<f64>::from_fn(10, |i| if i < 4 { full[i] } else { 0.0 });
         assert!(factors(coef.as_ref(), x.as_ref(), 4, false, None).is_ok());
         match factors(coef.as_ref(), x.as_ref(), 5, false, None) {
-            Err(PlsKitError::InvalidInput(m)) => assert!(m.contains("K=4"), "{m}"),
+            Err(PlsKitError::InvalidArgument(m)) => assert!(m.contains("K=4"), "{m}"),
             other => panic!("{other:?}"),
         }
     }
@@ -1281,7 +1314,7 @@ mod tests {
             unseen.norm_l2()
         );
         match factors(coef.as_ref(), x.as_ref(), 21, false, None) {
-            Err(PlsKitError::InvalidInput(m)) => assert!(m.contains("K=20"), "{m}"),
+            Err(PlsKitError::InvalidArgument(m)) => assert!(m.contains("K=20"), "{m}"),
             other => panic!("{other:?}"),
         }
     }
@@ -1321,14 +1354,20 @@ mod tests {
         let mut left_out = coef.clone();
         left_out[2] = 0.0;
         x[(5, 2)] = f64::NAN;
-        let m = message(factors(left_out.as_ref(), x.as_ref(), 3, false, None));
-        assert!(m.contains("X contains non-finite"), "NaN in x: {m}");
+        let r = factors(left_out.as_ref(), x.as_ref(), 3, false, None);
+        assert!(
+            matches!(r, Err(PlsKitError::NonFiniteInput)),
+            "NaN in x: {r:?}"
+        );
 
         let (x, coef) = x_and_coef();
         let mut coef_inf = coef.clone();
         coef_inf[1] = f64::INFINITY;
-        let m = message(factors(coef_inf.as_ref(), x.as_ref(), 3, false, None));
-        assert!(m.contains("coef contains non-finite"), "inf coef: {m}");
+        let r = factors(coef_inf.as_ref(), x.as_ref(), 3, false, None);
+        assert!(
+            matches!(r, Err(PlsKitError::NonFiniteInput)),
+            "inf coef: {r:?}"
+        );
 
         let zero = Col::<f64>::zeros(10);
         let m = message(factors(zero.as_ref(), x.as_ref(), 3, false, None));
@@ -1545,6 +1584,59 @@ mod tests {
         assert_eq!(out.k_star, 5);
     }
 
+    /// `profiles_find_n` checks its buffers before its first loop: budget 1
+    /// is `MemoryBudget` and the `needed` it names runs (a later loop can
+    /// name more). A bad argument is its own error at budget 1.
+    #[test]
+    fn profiles_find_n_checks_its_buffers() {
+        let (x, y) = traits(200, 3, 0.5, 1);
+        crate::test_support::assert_needed_runs(|b| {
+            crate::fit::with_budget(b, || profiles_find_n(x.as_ref(), y.as_ref(), 1, 9, opts(7)))
+        });
+        let bad =
+            crate::fit::with_budget(1, || profiles_find_n(x.as_ref(), y.as_ref(), 1, 0, opts(7)));
+        assert!(
+            matches!(bad, Err(PlsKitError::InvalidArgument(_))),
+            "{bad:?}"
+        );
+    }
+
+    /// `factors` checks its buffers at the entry, with and without
+    /// covariates: budget 1 is `MemoryBudget` and the `needed` it names
+    /// runs. Bad input is its own error at budget 1.
+    #[test]
+    fn factors_checks_its_buffers() {
+        let (x, coef) = x_and_coef();
+        let z = unif(x.nrows(), 2, 31);
+        for cov in [None, Some(z.as_ref())] {
+            crate::test_support::assert_needed_runs(|b| {
+                crate::fit::with_budget(b, || factors(coef.as_ref(), x.as_ref(), 3, false, cov))
+            });
+        }
+        let zero = Col::<f64>::zeros(coef.nrows());
+        let mut z_nan = z.clone();
+        z_nan[(0, 0)] = f64::NAN;
+        let no_rows = Mat::<f64>::zeros(0, coef.nrows());
+        let at_1 = |c: &Col<f64>, x: &Mat<f64>, cov: Option<MatRef<'_, f64>>| {
+            crate::fit::with_budget(1, || factors(c.as_ref(), x.as_ref(), 3, false, cov))
+        };
+        let r = at_1(&zero, &x, None);
+        assert!(
+            matches!(r, Err(PlsKitError::InvalidInput(_))),
+            "zero coef: {r:?}"
+        );
+        let r = at_1(&coef, &x, Some(z_nan.as_ref()));
+        assert!(
+            matches!(r, Err(PlsKitError::NonFiniteInput)),
+            "z nan: {r:?}"
+        );
+        let r = at_1(&coef, &no_rows, None);
+        assert!(
+            matches!(r, Err(PlsKitError::InvalidInput(_))),
+            "no rows: {r:?}"
+        );
+    }
+
     #[test]
     fn constant_training_column_counts_as_failed() {
         let (x, y) = traits(200, 3, 0.5, 3);
@@ -1574,22 +1666,23 @@ mod tests {
 
     #[test]
     fn seeded_stream_is_pinned() {
-        // Recorded from this crate's own output, not an outside reference.
+        // Recorded from this crate's own output on the Philox streams
+        // (`TAG_FACTR`, `TAG_FOLDS`), not an outside reference.
         let (x, y) = traits(300, 2, 0.5, 4);
         let out = profiles_find_n(x.as_ref(), y.as_ref(), 1, 9, opts(5)).unwrap();
         let mean = [
-            0.201_311_543_918_413_83,
-            0.450_660_859_082_905_3,
-            0.451_964_187_606_523_35,
-            0.446_874_877_667_746_6,
-            0.442_301_997_882_282_75,
+            0.196_985_384_891_663_45,
+            0.446_496_990_384_257_6,
+            0.448_079_391_549_974_45,
+            0.447_732_945_704_027_9,
+            0.444_326_782_388_734_63,
         ];
         let se = [
-            0.025_640_143_650_888_17,
-            0.018_376_587_648_754_446,
-            0.018_365_138_088_259_837,
-            0.017_613_410_191_815_806,
-            0.014_742_064_890_373_854,
+            0.028_255_682_451_611_51,
+            0.026_234_251_746_582_27,
+            0.026_680_594_442_578_677,
+            0.025_787_915_174_938_898,
+            0.025_919_659_422_289_194,
         ];
         assert_eq!(out.r2_mean.len(), mean.len());
         for (a, b) in out.r2_mean.iter().zip(mean).chain(out.r2_se.iter().zip(se)) {
@@ -1677,7 +1770,7 @@ mod tests {
             n_folds: 2,
             ..opts(7)
         };
-        let k_raw = parallel_k(standardize(x.as_ref()).0.as_ref(), &[1, 2, 3, 4, 5]).unwrap();
+        let k_raw = parallel_k(standardize(x.as_ref()).0.as_ref(), 0, 5, 0).unwrap();
         assert!(k_raw > 14, "parallel analysis passes {k_raw} ranks");
         let out = profiles_find_n(x.as_ref(), y.as_ref(), 1, 20, o).unwrap();
         assert_eq!(out.k_star, 14);
@@ -1738,7 +1831,11 @@ mod tests {
         };
         let invalid =
             |r: PlsKitResult<ProfilesFindNOutput>| matches!(r, Err(PlsKitError::InvalidInput(_)));
-        assert!(invalid(run(opts(1), 0)), "n_max = 0");
+        let r = run(opts(1), 0);
+        assert!(
+            matches!(r, Err(PlsKitError::InvalidArgument(_))),
+            "n_max = 0: {r:?}"
+        );
         for (name, o) in [
             (
                 "n_folds = 1",
@@ -1808,6 +1905,30 @@ mod tests {
         let mut scaled = out.clone();
         scaled.w = Mat::<f64>::from_fn(D, 3, |i, j| out.w[(i, j)] * 1.001);
         assert!(invalid(&scaled), "W not orthonormal");
+    }
+
+    #[test]
+    fn rotated_non_finite_inputs_are_non_finite_input() {
+        let (w, coef) = basis_and_coef();
+        let out = split_on_basis(w.as_ref(), coef.as_ref(), 3, false, false).unwrap();
+        let id = Mat::<f64>::identity(3, 3);
+        let mut w_nan = out.clone();
+        w_nan.w[(4, 1)] = f64::NAN;
+        let mut coef_nan = out.clone();
+        coef_nan.coef[4] = f64::NAN;
+        let mut r_nan = id.clone();
+        r_nan[(1, 2)] = f64::NAN;
+        for (name, o, r) in [
+            ("W", &w_nan, &id),
+            ("coef", &coef_nan, &id),
+            ("R", &out, &r_nan),
+        ] {
+            let got = o.rotated(r.as_ref());
+            assert!(
+                matches!(got, Err(PlsKitError::NonFiniteInput)),
+                "{name}: {got:?}"
+            );
+        }
     }
 
     #[test]

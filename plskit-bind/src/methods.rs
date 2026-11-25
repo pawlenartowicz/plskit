@@ -182,7 +182,6 @@ pub(crate) fn varimax_args(args: Option<&Record<'_>>) -> Result<VarimaxArgs, Bin
 pub(crate) struct Common {
     pub(crate) pre_standardized: bool,
     pub(crate) seed: Option<u64>,
-    pub(crate) verbose: bool,
 }
 
 /// A K-selection criterion name.
@@ -252,7 +251,6 @@ pub(crate) fn find_k_optimal_opts(
         force: arg_bool(args, "diagnostic='split_nb'", "force", d.force)?,
         pre_standardized: c.pre_standardized,
         seed: c.seed,
-        verbose: c.verbose,
     })
 }
 
@@ -277,6 +275,12 @@ pub(crate) fn find_k_sequence_opts(
                 tm.as_str()
             )));
         }
+        _ => {
+            return Err(BindError::internal(format!(
+                "test_method '{}' has no sequential arm in the bind",
+                tm.as_str()
+            )));
+        }
     };
     validate_keys("method='sequence'", args, allowed)?;
     let label = format!("test_method='{test_method}'");
@@ -288,7 +292,6 @@ pub(crate) fn find_k_sequence_opts(
         force: arg_bool(args, &label, "force", d.force)?,
         pre_standardized: c.pre_standardized,
         seed: c.seed,
-        verbose: c.verbose,
     })
 }
 
@@ -296,14 +299,12 @@ pub(crate) fn find_k_sequence_opts(
 pub(crate) fn keep_optimal_opts(
     args: Option<&Record<'_>>,
     seed: Option<u64>,
-    verbose: bool,
 ) -> Result<FindKeepOptimalOpts, BindError> {
     validate_keys("method='keep_optimal'", args, &["n_folds"])?;
     let d = FindKeepOptimalOpts::default();
     Ok(FindKeepOptimalOpts {
         n_folds: arg_usize(args, "method='keep_optimal'", "n_folds", d.n_folds)?,
         seed,
-        verbose,
     })
 }
 

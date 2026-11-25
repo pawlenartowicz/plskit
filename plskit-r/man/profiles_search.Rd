@@ -26,3 +26,10 @@ R binding of \code{profiles_search}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
 "4.5 Profiles" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }
+\examples{
+set.seed(1)
+X <- matrix(rnorm(40 * 20), 40, 20)
+y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+fit <- pls1_fit(X, y, k = 2)
+profiles_search(fit, X, y, n_max = 3, seed = 1)
+}

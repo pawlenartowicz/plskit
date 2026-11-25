@@ -5,7 +5,7 @@
 > [Python API → pls1_confirmatory_test(ci=True)](../../python/api.md)
 > and the [results](../../python/results.md) page for the implemented surface.
 >
-> `ci` is beta, not to be trusted yet. It scales X and y once over all rows, as the held-out tests do (not under `pre_standardized`). Its `holdout_corr` half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do. The β and leverage resamples are centred with their own means too, except under `pre_standardized`, where they use X and y as given, as the reference fit does.
+> `ci` is beta, not to be trusted yet. Its β subsamples and `holdout_corr` half splits scale X and y once over all rows, as the held-out tests do (not under `pre_standardized`). The half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do, and each β subsample is centred with its own means. Each leverage resample is standardized on its own (weighted) means and SDs, as the full-data fit is. Under `pre_standardized` the β and leverage resamples use X and y as given, as the reference fit does.
 
 Topics this page will cover:
 

@@ -49,11 +49,7 @@ original scale and absorbs the means into `intercept`.
 
 Two opt-outs:
 
-- `pre_standardized=True`: skip standardization; the caller asserts
-  that `X` and `y` are already
-  centered and scaled. The fit then reports `beta` equal to `coef` and
-  `intercept = 0`. Used when the same preprocessing is shared across
-  many fits and you want to avoid recomputing it.
+- `pre_standardized=True`: skip standardization; the caller asserts that `X` and `y` are already centered and scaled. The fit then reports `beta` equal to `coef` and, without covariates, `intercept = 0`. Used when the same preprocessing is shared across many fits and you want to avoid recomputing it.
 - `plskit.preprocess`: a cache helper that performs the canonical
   standardization once; pass its standardized arrays with
   `pre_standardized=True` to `pls1_fit`, `pls1_confirmatory_test`, and
@@ -138,17 +134,15 @@ algorithms. *Journal of Chemometrics* 11(1), 73-85.
 ŷ_new = intercept + X_new · beta
 ```
 
+A model fitted with covariates adds `Z_new · covariate_coef` and needs `covariates` at prediction (see [Covariates](covariates.md#prediction)).
+
 `pls1_predict` does not standardize `X_new` itself. It does not need
 to: the training-time column means and scales were folded into `beta`
 and `intercept` at fit time, so raw `X_new` on the training scale gives
 predictions on the original `y` scale. Re-standardizing `X_new` on its
 own moments would silently change the coefficient interpretation.
 
-If the model was fitted with `pre_standardized=True`, `intercept` is `0`
-and `beta` equals `coef`: standardize `X_new` yourself with the
-**training** means and scales (for example `X_mean` / `X_scale` from
-`plskit.preprocess`), and the predictions come out on the standardized
-`y` scale.
+If the model was fitted with `pre_standardized=True`, `beta` equals `coef` and, without covariates, `intercept` is `0`: standardize `X_new` yourself with the **training** means and scales (for example `X_mean` / `X_scale` from `plskit.preprocess`), and the predictions come out on the standardized `y` scale.
 
 What it does not re-apply:
 
@@ -172,7 +166,7 @@ After fitting, the natural next question is: **is this model statistically suppo
 |---|---|---|
 | `split_exact` | **Recommended.** Split-half test on Fisher-z of held-out correlation, calibrated by permutation, so it holds its level on any design. Takes a set of `k`. At K = 1 the engine uses a no-refit route: the fitted direction is a fixed linear map of `y`, so every permutation reuses it, which keeps this route cheap; K ≥ 2 and a set of `k` fall back to a per-permutation refit, where one fit up to the largest `k` gives every `k` of the set. | `O(n_splits)` GEMM pairs of width `n_perm` at K = 1; `O(n_splits × n_perm)` fits at K ≥ 2 or over a set |
 | `split_nb` | Same statistic as `split_exact`, calibrated by a Fisher-z t approximation instead of permutation: cheaper, but only appropriate for `n` large relative to `p` with a flat X spectrum. A design with `n_eff < 25`, 4 columns or fewer, or a stable rank `< 3` is auto-gated: an explicit `split_nb` request reroutes to `split_exact` (at `n_perm=1000`) unless you pass `args={"force": True}`. | `O(n_splits)` fits |
-| `score` | Fast pre-fit screening test on `‖X′ y‖²`. **Detects signal in `span(X)`; does not validate the PLS fit at your chosen `k`.** Faster and more powerful than the split tests when its assumptions hold, but sensitive to heavy tails / outliers in `y`. Use as a cheap omnibus check, not as a fit-validation test. With `args={"n_perm": N}` the same statistic `T` is calibrated by `N` permutations instead (`p = (1 + #{null ≥ observed}) / (N + 1)`), and `covariates`, and `weights` in the raw form (with `X`), are then accepted. `"auto"` never picks `score`. | One matvec + one eigendecomp; `O(n_perm)` matvecs with `n_perm` |
+| `score` | Fast pre-fit screening test on `‖X′ y‖²`. **Detects signal in `span(X)`; does not validate the PLS fit at your chosen `k`.** Faster and more powerful than the split tests when its assumptions hold, but sensitive to heavy tails / outliers in `y`. Use as a cheap omnibus check, not as a fit-validation test. With `args={"n_perm": N}` the same statistic `T` is calibrated by `N` permutations instead (`p = (1 + #{null ≥ observed}) / (N + 1)`), and `covariates`, and `weights` in the raw form (with `X`), are then accepted. `"auto"` never picks `score`. | One matvec + one Gram product; `O(n_perm)` matvecs with `n_perm` |
 | `sv_perm` | Permutation test on `d₁ = ‖X̃ᵀỹ‖`, the largest singular value of `X̃ᵀỹ`, at `k = 1` only. In-sample, so like `score` it detects signal in `span(X)` and does not validate the fit at your chosen `k`. Takes `covariates`, and `weights` in the raw form (with `X`); `rotate` is refused. `"auto"` never picks it. | `O(n_perm)` matvecs |
 | `e` | Universal-inference e-value. Run only when you specifically need an **e-value**: for anytime-valid sequential testing, optional-stopping inference, or composition with other e-processes. Substantially less powerful than `split_exact` for the omnibus K-fixed test. | One PLS fit |
 | `raw_perm` | **Legacy. Do not use for new analyses.** Implemented for compatibility with the chemometrics permutation-Q² convention; included so users porting workflows from older tools can reproduce historical numbers. Power and calibration are uniformly worse than `split_exact`. | `O(n_perm)` fits |

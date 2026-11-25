@@ -27,12 +27,12 @@ plskit = "=X.Y.Z"
 ## Check the install
 
 ```rust
-use plskit::{pls1_fit, Col, FitOpts, KSpec, Mat};
+use plskit::{pls1_fit, Col, FitOpts, Mat};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let x = Mat::<f64>::from_fn(30, 4, |i, j| ((i * 7919 + j * 104_729) as f64).sin());
     let y = Col::<f64>::from_fn(30, |i| x[(i, 0)] - 0.5 * x[(i, 1)]);
-    let model = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(1), None, None, FitOpts::default())?;
+    let model = pls1_fit(x.as_ref(), y.as_ref(), 1, None, None, FitOpts::default())?;
     println!("plskit {}, k_used = {}", plskit::version(), model.k_used);
     Ok(())
 }

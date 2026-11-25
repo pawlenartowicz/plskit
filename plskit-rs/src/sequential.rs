@@ -145,8 +145,6 @@ pub(crate) struct IncrementalSequenceOpts {
     pub(crate) pre_standardized: bool,
     /// RNG seed; `None` draws from OS entropy.
     pub(crate) seed: Option<u64>,
-    /// Print progress to stderr (reserved for future verbose mode).
-    pub(crate) verbose: bool,
     /// Sparse keep-count plumbing (spls1 family): threads into BOTH fit
     /// sites per step — the deflation `pls1_fit` and the per-component
     /// confirmatory test — so the test is coherent with the sparse residual.
@@ -171,9 +169,15 @@ pub(crate) struct IncrementalSequenceOutput {
     /// `Some` on an explicit `split_nb` request, and on an `"auto"` request
     /// that reached the stable-rank check (p > 4, `n_eff` above 1000 without `keep` (at least 250 with it), and
     /// p ≤ 100·n without `keep`); `None` otherwise. On a `split_nb` request it is set whether the gate
-    /// fired or not, and also under `force`, matching the same field on
+    /// fired or not, and `None` under `force`, matching the same field on
     /// `ConfirmatoryTestOutput`.
     pub(crate) stable_rank: Option<f64>,
+    /// Each step's `ConfirmatoryTestOutput::n_failed_splits`, one entry per
+    /// step that ran; `None` when the method has no splits.
+    pub(crate) n_failed_splits: Option<Vec<usize>>,
+    /// Each step's `ConfirmatoryTestOutput::n_failed_perms`, one entry per
+    /// step that ran; `None` when the method has no permutation null.
+    pub(crate) n_failed_perms: Option<Vec<usize>>,
 }
 
 /// Run the incremental sequence on raw data. Stops at the first
@@ -194,8 +198,9 @@ pub(crate) struct IncrementalSequenceOutput {
 ///
 /// # Errors
 /// `PlsKitError::InvalidArgument` when `k_max == 0`, `PlsKitError::KExceedsMax`
-/// when `k_max > n_features`.
-#[allow(clippy::needless_pass_by_value)]
+/// when `k_max > n_features`; the steps' argument and data errors; then
+/// `MemoryBudget` when the gate or the copies of X the steps hold do not fit.
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub(crate) fn run_incremental_sequence(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -227,6 +232,19 @@ pub(crate) fn run_incremental_sequence(
              n > {SEQUENTIAL_RAW_PERM_N_FOLDS} (got n={n}): with n_folds >= n every \
              validation fold is a single row, so the pooled CV R² is undefined"
         )));
+    }
+    // The argument and data checks of the steps (each tests at k = 1), before
+    // any memory check: the gate's below and the copies'.
+    crate::fit::check_finite_mat(x)?;
+    crate::fit::check_finite_col(y)?;
+    crate::signal_test::check_method_counts(opts.args.to_confirmatory_args(), n)?;
+    if matches!(
+        opts.args,
+        SequentialArgs::SplitNb { .. }
+            | SequentialArgs::SplitExact { .. }
+            | SequentialArgs::Auto { .. }
+    ) {
+        crate::signal_test::check_split_rows(n, 1)?;
     }
 
     // ── hoisted `split_nb` auto-gate ────────────────────────────────────────
@@ -262,7 +280,7 @@ pub(crate) fn run_incremental_sequence(
             cov.is_some(),
             false,
             scale.as_ref(),
-        );
+        )?;
         stable_rank_out = sr;
         gate_gram = gram;
         opts.args = if method == ConfirmatoryMethod::SplitNb {
@@ -274,15 +292,11 @@ pub(crate) fn run_incremental_sequence(
             SequentialArgs::SplitExact { n_perm, n_splits }
         };
     } else if let SequentialArgs::SplitNb { n_splits, force } = opts.args {
-        // Evaluated even under `force`, whose only effect is to skip the
-        // reroute below: `stable_rank` means the same thing on every result
-        // type that carries it (what the gate saw on a `split_nb` request),
-        // and `pls1_confirmatory_test` populates it under `force` too. The
-        // price on a forced run is one pass over X and the
-        // eigendecomposition of its short-side Gram matrix.
+        // Under `force` the gate builds only the wide Gram matrix step 1
+        // reads, and `stable_rank` stays `None`, as on every result type.
         let scale = crate::linalg::held_out_scale(x, weights, opts.pre_standardized);
-        let gate = crate::signal_test::resolve_split_nb(x, weights, n_eff, force, scale.as_ref());
-        stable_rank_out = Some(gate.stable_rank);
+        let gate = crate::signal_test::resolve_split_nb(x, weights, n_eff, force, scale.as_ref())?;
+        stable_rank_out = gate.stable_rank;
         if gate.reroute {
             opts.args = SequentialArgs::SplitExact {
                 n_perm: crate::signal_test::SPLIT_NB_REROUTE_N_PERM,
@@ -292,29 +306,49 @@ pub(crate) fn run_incremental_sequence(
         gate_gram = gate.gram;
     }
 
-    let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
+    let seed_used = crate::rng::resolve_seed(opts.seed, n)?;
     let mut pvalues_vec: Vec<f64> = vec![f64::NAN; k_max];
     let mut last_sig: Option<usize> = None;
+    let mut failed_splits: Vec<Option<usize>> = Vec::with_capacity(k_max);
+    let mut failed_perms: Vec<Option<usize>> = Vec::with_capacity(k_max);
 
+    // The copy of X the steps read lives beside the gate's matrix, which only
+    // step 1 reads, and from step 2 on beside the deflated residual and, while
+    // that is formed, `T·P'`: checked before it is written, then held.
+    // shortcut: X used as given under `pre_standardized` is counted as copied (it is copied only off column-major layout or far from unit scale), and the deflation fit's own buffers are not counted; count them exactly if a sequence runs too few lanes or a capped run is killed in `deflate`.
+    let copy = crate::resample::copy_bytes(n, x.ncols());
+    let gram = gate_gram
+        .as_ref()
+        .map_or(0, |_| crate::signal_test::block_gram_bytes(n));
+    let deflation = if k_max > 1 { copy.saturating_mul(2) } else { 0 };
+    crate::resample::units_at_once(1, copy.saturating_add(gram.max(deflation)), 0)?;
     // Every step starts from the same X and y, standardized once unless flagged.
     let (xs_owned, ys_full) = sequence_inputs(x, y, weights, opts.pre_standardized);
+    let _xs = crate::fit::hold_bytes(
+        crate::fit::held_bytes().saturating_add(xs_owned.as_ref().map_or(0, |_| copy)),
+    );
     let xs_full = xs_owned.as_ref().map_or(x, Mat::as_ref);
     for h in 1..=k_max {
-        let p = p_for_incremental(
+        let step = p_for_incremental(
             xs_full,
             ys_full.as_ref(),
             h,
             weights,
             &opts,
-            gate_gram.as_ref(),
-            &mut rng,
+            // Freed after step 1, the only step that reads it.
+            gate_gram.take().as_ref(),
+            // Step h's test seed, on its own stream.
+            crate::rng::child_seed(seed_used, h as u64, crate::rng::TAG_STEPS),
             cov,
         )?;
+        let p = step.pvalue;
         pvalues_vec[h - 1] = p;
+        failed_splits.push(step.n_failed_splits);
+        failed_perms.push(step.n_failed_perms);
         if p < opts.alpha {
             last_sig = Some(h);
         }
-        if !opts.stop_early_override && p >= opts.alpha {
+        if !opts.stop_early_override && (p.is_nan() || p >= opts.alpha) {
             break;
         }
     }
@@ -326,6 +360,9 @@ pub(crate) fn run_incremental_sequence(
         method: opts.args.method().as_str().to_owned(),
         seed: seed_used,
         stable_rank: stable_rank_out,
+        // The method is fixed for the run, so every step sets a count or none does.
+        n_failed_splits: failed_splits.into_iter().collect(),
+        n_failed_perms: failed_perms.into_iter().collect(),
     })
 }
 
@@ -337,37 +374,25 @@ fn p_for_confirmatory_at_k(
     weights: Option<ColRef<'_, f64>>,
     opts: &IncrementalSequenceOpts,
     gram: Option<&crate::held_out_gram::HeldOutGram>,
-    rng: &mut crate::rng::Rng,
+    seed: u64,
     cov: Option<&crate::covariates::CovariateBasis>,
-) -> PlsKitResult<f64> {
+) -> PlsKitResult<crate::signal_test::ConfirmatoryTestOutput> {
     use crate::signal_test::{
         ConfirmatoryTestInput, ConfirmatoryTestOpts, GateMode, confirmatory_test_core,
         confirmatory_test_impl,
     };
-    // One RNG draw is discarded per step: it is part of the fixed seed
-    // stream that the testdata/ fixtures pin. The
-    // test seed below is the next draw. Removing it changes every p-value;
-    // regenerate testdata/ if you do.
-    let _: u64 = {
-        use rand::Rng;
-        rng.next_u64()
-    };
     let test_opts = ConfirmatoryTestOpts {
         args: opts.args.to_confirmatory_args(),
         pre_standardized: opts.pre_standardized,
-        seed: Some({
-            use rand::Rng;
-            rng.next_u64()
-        }),
-        verbose: opts.verbose,
+        seed: Some(seed),
         ci: None,
         // `IncrementalSequenceOpts` has no `max_skip_rate`; with
         // `ci: None` this field is unread.
         max_skip_rate: 0.01,
         keep: opts.keep,
     };
-    let r = if cov.is_some() {
-        confirmatory_test_core(x, y, k, weights, test_opts, GateMode::Decided(gram), cov)?
+    if cov.is_some() {
+        confirmatory_test_core(x, y, k, weights, test_opts, GateMode::Decided(gram), cov)
     } else {
         confirmatory_test_impl(
             ConfirmatoryTestInput::Raw {
@@ -380,9 +405,8 @@ fn p_for_confirmatory_at_k(
             },
             test_opts,
             GateMode::Decided(gram),
-        )?
-    };
-    Ok(r.pvalue)
+        )
+    }
 }
 
 /// X and y as step 1 tests them and every later step deflates them, formed
@@ -419,12 +443,13 @@ fn sequence_inputs(
     }
 }
 
-/// The p-value of step `h`, the `k = 1` confirmatory test. At `h = 1` it
+/// Step `h`'s `k = 1` confirmatory test. At `h = 1` it
 /// reads X and y as [`sequence_inputs`] formed them. For `h > 1` both are
 /// first deflated by a fit to `h − 1` components, and the test reads the
 /// deflated residual on the scale step 1 used. Either way each part is only
 /// centred, never rescaled. `gram` is the hoisted gate's Gram matrix of X,
-/// which step 1 reads; later steps do not.
+/// which step 1 reads; later steps do not. The deflated residual is held
+/// (`fit::hold_bytes`) beside the step's test.
 #[allow(clippy::too_many_arguments)]
 fn p_for_incremental(
     xs_full: MatRef<'_, f64>,
@@ -433,15 +458,19 @@ fn p_for_incremental(
     weights: Option<ColRef<'_, f64>>,
     opts: &IncrementalSequenceOpts,
     gram: Option<&crate::held_out_gram::HeldOutGram>,
-    rng: &mut crate::rng::Rng,
+    seed: u64,
     cov: Option<&crate::covariates::CovariateBasis>,
-) -> PlsKitResult<f64> {
+) -> PlsKitResult<crate::signal_test::ConfirmatoryTestOutput> {
     let mut sub_opts = *opts;
     sub_opts.pre_standardized = true;
     if h == 1 {
-        return p_for_confirmatory_at_k(xs_full, ys_full, 1, weights, &sub_opts, gram, rng, cov);
+        return p_for_confirmatory_at_k(xs_full, ys_full, 1, weights, &sub_opts, gram, seed, cov);
     }
     let (xd, yd) = deflate(xs_full, ys_full, h - 1, weights, opts.keep)?;
+    let _xd = crate::fit::hold_bytes(
+        crate::fit::held_bytes()
+            .saturating_add(crate::resample::copy_bytes(xd.nrows(), xd.ncols())),
+    );
     p_for_confirmatory_at_k(
         xd.as_ref(),
         yd.as_ref(),
@@ -449,7 +478,7 @@ fn p_for_incremental(
         weights,
         &sub_opts,
         None,
-        rng,
+        seed,
         cov,
     )
 }
@@ -462,24 +491,26 @@ fn deflate(
     weights: Option<ColRef<'_, f64>>,
     keep: Option<usize>,
 ) -> PlsKitResult<(Mat<f64>, Col<f64>)> {
-    use crate::fit::{FitOpts, KSpec, pls1_fit_impl};
+    use crate::fit::{FitOpts, InternalFitOpts, pls1_fit_impl};
 
     // Deflation components are fit with the same weights as the per-step
     // test so that the deflated residual matches the weighted model.
     let prev = pls1_fit_impl(
         xs_full,
         ys_full,
-        KSpec::Fixed(n_comp),
+        n_comp,
         weights,
         None,
         FitOpts {
             pre_standardized: true,
+            ..FitOpts::default()
+        },
+        InternalFitOpts {
             // check_n_eff: false: internal deflation refit; n_eff was
             // already validated at the top-level entry, and truncation is
             // tolerated by design (deflate by whatever was extracted).
             check_n_eff: false,
             keep,
-            ..FitOpts::default()
         },
     )?;
     // Once per step, outside any replicate loop: the crate's fixed-degree
@@ -542,7 +573,6 @@ mod tests {
                     stop_early_override: true,
                     pre_standardized: false,
                     seed: Some(99),
-                    verbose: false,
                     keep: None,
                 },
                 None,
@@ -552,6 +582,51 @@ mod tests {
                     assert!(msg.contains("n > 5"), "n={n}: {msg}");
                 }
                 other => panic!("n={n}: expected InvalidArgument, got {other:?}"),
+            }
+        }
+    }
+
+    /// The steps' argument and data errors come before any memory check, and
+    /// the copies of X the steps hold are checked before the first is
+    /// written: at budget 1 a NaN in X gives `NonFiniteInput`, one step names
+    /// the copy of X and two steps also the deflated residual and `T·P'`.
+    #[test]
+    fn copies_are_checked_after_the_argument_checks() {
+        let (x, y) = synth(60, 5, 1, 4.0, 7);
+        let run = |x: MatRef<'_, f64>, k_max| {
+            crate::fit::with_budget(1, || {
+                run_incremental_sequence(
+                    x,
+                    y.as_ref(),
+                    k_max,
+                    None,
+                    60.0,
+                    IncrementalSequenceOpts {
+                        args: SequentialArgs::SplitExact {
+                            n_perm: 19,
+                            n_splits: 4,
+                        },
+                        alpha: 0.05,
+                        stop_early_override: true,
+                        pre_standardized: false,
+                        seed: Some(99),
+                        keep: None,
+                    },
+                    None,
+                )
+            })
+        };
+        let mut bad = x.clone();
+        bad[(3, 2)] = f64::NAN;
+        let r = run(bad.as_ref(), 2);
+        assert!(matches!(r, Err(PlsKitError::NonFiniteInput)), "{r:?}");
+        let copy = crate::resample::copy_bytes(60, 5) as u64;
+        for (k_max, want) in [(1, copy), (2, 3 * copy)] {
+            match run(x.as_ref(), k_max) {
+                Err(PlsKitError::MemoryBudget { needed, .. }) => {
+                    assert_eq!(needed, want, "k_max {k_max}");
+                }
+                other => panic!("k_max {k_max}: {other:?}"),
             }
         }
     }
@@ -583,7 +658,6 @@ mod tests {
                 stop_early_override: true,
                 pre_standardized: true,
                 seed: Some(99),
-                verbose: false,
                 keep: None,
             },
             None,
@@ -651,7 +725,6 @@ mod tests {
                     stop_early_override,
                     pre_standardized: false,
                     seed: Some(7),
-                    verbose: false,
                     keep: None,
                 },
                 None,
@@ -682,8 +755,7 @@ mod tests {
         crate::test_support::assert_families_layout_invariant(
             "incremental_sequence",
             |c| {
-                let (w_norm, n_eff) =
-                    crate::fit::validate_and_normalize_weights(c.w, c.x.nrows(), 3)?;
+                let (w_norm, n_eff) = crate::fit::validate_and_normalize_weights(c.w, c.x.nrows())?;
                 let wr = w_norm.as_ref().map(Col::as_ref);
                 let mut v = Vec::new();
                 for args in [
@@ -711,7 +783,6 @@ mod tests {
                                 stop_early_override: true,
                                 pre_standardized: c.pre,
                                 seed: Some(23),
-                                verbose: false,
                                 keep,
                             },
                             None,
@@ -729,6 +800,128 @@ mod tests {
             },
             Vec::clone,
         );
+    }
+
+    /// Each step's `n_failed_splits` and `n_failed_perms` are the counts of
+    /// the confirmatory test on the step's data at the step's seed: X and y
+    /// as `sequence_inputs` forms them at h = 1, deflated by `h - 1`
+    /// components after that, read under `pre_standardized`. y is the
+    /// indicator of two rows, so step 1 has splits with no positive row in a
+    /// half. A run that stops early has one entry per step run.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn sequence_reports_failed_splits_per_step() {
+        use crate::signal_test::{
+            ConfirmatoryTestInput, ConfirmatoryTestOpts, pls1_confirmatory_test,
+        };
+        const SEED: u64 = 23;
+        let n = 40;
+        let (x, y_cont) = synth(n, 6, 2, 1.0, 5);
+        let y = Col::<f64>::from_fn(n, |i| if i == 3 || i == 17 { 1.0 } else { 0.0 });
+        let opts = |args, stop_early_override| IncrementalSequenceOpts {
+            args,
+            alpha: 0.05,
+            stop_early_override,
+            pre_standardized: false,
+            seed: Some(SEED),
+            keep: None,
+        };
+        let exact = SequentialArgs::SplitExact {
+            n_perm: 19,
+            n_splits: 32,
+        };
+        let nb = SequentialArgs::SplitNb {
+            n_splits: 32,
+            force: true,
+        };
+        let (xs, ys) = sequence_inputs(x.as_ref(), y.as_ref(), None, false);
+        let xs = xs.unwrap();
+        for args in [exact, nb] {
+            let r = run_incremental_sequence(
+                x.as_ref(),
+                y.as_ref(),
+                3,
+                None,
+                n as f64,
+                opts(args, true),
+                None,
+            )
+            .unwrap();
+            let splits = r
+                .n_failed_splits
+                .expect("split methods set n_failed_splits");
+            assert_eq!(splits.len(), 3, "{args:?}");
+            assert_eq!(
+                r.n_failed_perms.as_ref().map(Vec::len),
+                matches!(args, SequentialArgs::SplitExact { .. }).then_some(3),
+                "{args:?}"
+            );
+            for h in 1..=3 {
+                let (xd, yd) = if h == 1 {
+                    (xs.clone(), ys.clone())
+                } else {
+                    deflate(xs.as_ref(), ys.as_ref(), h - 1, None, None).unwrap()
+                };
+                let direct = pls1_confirmatory_test(
+                    ConfirmatoryTestInput::Raw {
+                        x: xd.as_ref(),
+                        y: yd.as_ref(),
+                        k: Some(&[1]),
+                        weights: None,
+                        covariates: None,
+                        null_y: None,
+                    },
+                    ConfirmatoryTestOpts {
+                        args: args.to_confirmatory_args(),
+                        pre_standardized: true,
+                        seed: Some(crate::rng::child_seed(
+                            SEED,
+                            h as u64,
+                            crate::rng::TAG_STEPS,
+                        )),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                if h == 1 {
+                    assert!(
+                        direct.n_failed_splits.unwrap() > 0,
+                        "{args:?}: premise: step 1 has failed splits"
+                    );
+                }
+                assert_eq!(
+                    Some(splits[h - 1]),
+                    direct.n_failed_splits,
+                    "{args:?} step {h}"
+                );
+                assert_eq!(
+                    r.n_failed_perms.as_ref().map(|v| v[h - 1]),
+                    direct.n_failed_perms,
+                    "{args:?} step {h}"
+                );
+            }
+        }
+
+        // At `n_perm` 19 no p is below 0.05, so the run stops after step 1.
+        let y_noise = Col::<f64>::from_fn(n, |i| y_cont[(i * 7 + 3) % n]);
+        let r = run_incremental_sequence(
+            x.as_ref(),
+            y_noise.as_ref(),
+            3,
+            None,
+            n as f64,
+            opts(exact, false),
+            None,
+        )
+        .unwrap();
+        let ran = r.pvalues.iter().filter(|p| p.is_finite()).count();
+        assert!(
+            ran < 3,
+            "premise: the sequence stops early, {:?}",
+            r.pvalues
+        );
+        assert_eq!(r.n_failed_splits.map(|v| v.len()), Some(ran));
+        assert_eq!(r.n_failed_perms.map(|v| v.len()), Some(ran));
     }
 
     /// Relative closeness at `tol`, NaN matching NaN (steps past the stop).
@@ -812,8 +1005,7 @@ mod tests {
     fn step_two_tests_the_residual_as_deflated() {
         let (x, y) = synth(60, 5, 1, 4.0, 11);
         let w = Col::<f64>::from_fn(60, |i| if i % 2 == 0 { 2.0 } else { 0.25 });
-        let (w_norm, _) =
-            crate::fit::validate_and_normalize_weights(Some(w.as_ref()), 60, 2).unwrap();
+        let (w_norm, _) = crate::fit::validate_and_normalize_weights(Some(w.as_ref()), 60).unwrap();
         for wr in [None, w_norm.as_ref().map(Col::as_ref)] {
             let (xs, ys) = sequence_inputs(x.as_ref(), y.as_ref(), wr, false);
             let xs = xs.unwrap();
@@ -836,16 +1028,13 @@ mod tests {
                     stop_early_override: true,
                     pre_standardized: false,
                     seed: None,
-                    verbose: false,
                     keep: None,
                 };
-                let step = {
-                    let (_, mut rng) = crate::rng::resolve_seed(Some(17)).unwrap();
-                    p_for_incremental(xs.as_ref(), ys.as_ref(), 2, wr, &opts, None, &mut rng, None)
+                let step =
+                    p_for_incremental(xs.as_ref(), ys.as_ref(), 2, wr, &opts, None, 17, None)
                         .unwrap()
-                };
+                        .pvalue;
                 let direct = {
-                    let (_, mut rng) = crate::rng::resolve_seed(Some(17)).unwrap();
                     let mut flagged = opts;
                     flagged.pre_standardized = true;
                     p_for_confirmatory_at_k(
@@ -855,10 +1044,11 @@ mod tests {
                         wr,
                         &flagged,
                         None,
-                        &mut rng,
+                        17,
                         None,
                     )
                     .unwrap()
+                    .pvalue
                 };
                 let tag = format!("{:?} weighted={}", args.method(), wr.is_some());
                 assert_eq!(
@@ -874,6 +1064,9 @@ mod tests {
     /// `pre_standardized` a column rescale moves the step-2 p-value, and a
     /// flagged call on X and y standardized by hand matches the unflagged
     /// call at every step, for every sequential method, weighted and not.
+    /// A step-2 p at its cap of 1 cannot move, so seed 17, the first from 0
+    /// where every case's step-2 p is below 1, is used; the premise assert
+    /// checks it.
     #[test]
     fn sequence_keeps_user_scaling_at_every_step() {
         use crate::linalg::{standardize_weighted, standardize1_weighted};
@@ -882,7 +1075,7 @@ mod tests {
         let xd = Mat::<f64>::from_fn(x.nrows(), x.ncols(), |i, j| x[(i, j)] * d[j % 3]);
         let w = Col::<f64>::from_fn(60, |i| if i % 2 == 0 { 2.0 } else { 0.5 });
         let (w_norm, n_eff) =
-            crate::fit::validate_and_normalize_weights(Some(w.as_ref()), 60, 3).unwrap();
+            crate::fit::validate_and_normalize_weights(Some(w.as_ref()), 60).unwrap();
         for (wr, n_eff) in [(None, 60.0), (w_norm.as_ref().map(Col::as_ref), n_eff)] {
             let xs = standardize_weighted(x.as_ref(), wr).0;
             let ys = standardize1_weighted(y.as_ref(), wr).0;
@@ -910,8 +1103,7 @@ mod tests {
                             alpha: 0.05,
                             stop_early_override: true,
                             pre_standardized: pre,
-                            seed: Some(5),
-                            verbose: false,
+                            seed: Some(17),
                             keep: None,
                         },
                         None,
@@ -922,6 +1114,7 @@ mod tests {
                 let tag = format!("{:?} weighted={}", args.method(), wr.is_some());
                 let plain = run(x.as_ref(), y.as_ref(), true);
                 let scaled = run(xd.as_ref(), y.as_ref(), true);
+                assert!(plain[1] < 1.0, "{tag}: premise: step-2 p is below its cap");
                 assert!(
                     (plain[1] - scaled[1]).abs() > 1e-9,
                     "{tag}: step-2 p {} did not move with the column scale",

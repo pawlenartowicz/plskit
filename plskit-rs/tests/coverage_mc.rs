@@ -9,12 +9,22 @@
 //! The release-gate check covers two CI metrics on the
 //! `pls1_confirmatory_test` engine across the cell grid
 //! `n ∈ {100, 200, 500} × d ∈ {6, 20} × K ∈ {1, 2, 3} × SNR ∈ {1, 4}`.
-//! Both must have two-sided empirical coverage in `[0.90, 1.00]`
-//! (`level ± 0.05`) at level=0.95:
+//! The band at level=0.95 has lower edge `level − 0.05 = 0.90` and upper
+//! edge `level + 3·√(level·(1 − level)/N_DATASETS)`, which is 0.9962 at 200
+//! datasets. The upper edge sits three binomial standard errors above the
+//! level, so a calibrated interval passes and a cell fails high only when
+//! all 200 datasets cover. Leverage must lie inside both edges;
+//! `holdout_corr` must reach the lower edge.
 //!
-//!  * **`holdout_corr`**, every cell. Its NB-Wald interval is built on half
-//!    splits, where the Nadeau–Bengio 2003 factor `(n − m)/m` is about 1, so
-//!    coverage should sit near 0.95.
+//!  * **`holdout_corr`**, every cell, lower edge only. Its NB-Wald interval
+//!    is built on half splits, where the Nadeau–Bengio 2003 factor
+//!    `(n − m)/m` is about 1. The factor assumes two splits' correlations
+//!    correlate at about 0.5. That holds when the noise of the held-out rows
+//!    dominates, and the interval is then a little wide (1.1 to 1.2 times
+//!    the needed width at snr = 1, coverage about 0.97). When the noise
+//!    of the training fit dominates (snr = 4 here), two splits correlate
+//!    nearer 0.25, and the interval is conservative: up to about twice as
+//!    wide as needed, with coverage near 1.
 //!  * **`leverage_ci_*` on each signal coordinate (`j < 2`) at
 //!    `k ≤ SIGNAL_RANK`.** The interval is a normal-theory bootstrap
 //!    interval centered on the full-data leverage (n-out-of-n refits; see
@@ -23,7 +33,7 @@
 //!    coordinate's leverage is of order `1/n` and sits at the boundary (its
 //!    interval over-covers by construction), and at `k > SIGNAL_RANK` the
 //!    extra components fit noise, so the target is not identified across
-//!    datasets. Both read inside the band in practice.
+//!    datasets.
 //!
 //! ## Coverage target (the oracle)
 //!
@@ -48,7 +58,7 @@
 
 use faer::{Col, Mat};
 use plskit::{
-    CIOpts, ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, FitOpts, KSpec,
+    CIOpts, ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, FitOpts,
     pls1_confirmatory_test, pls1_fit,
 };
 use rand::{RngExt, SeedableRng};
@@ -57,11 +67,12 @@ use rand_chacha::ChaCha8Rng;
 const N_DATASETS: usize = 200;
 /// Monte-Carlo replicate count for the coverage target (see module doc). The
 /// target SE is `sd(estimand) / sqrt(N_ORACLE)`; with per-dataset SD ~0.05 this
-/// gives an oracle precise to ~0.004 — well inside the 0.05 band half-width.
+/// gives an oracle precise to ~0.004, well inside the band.
 const N_ORACLE: usize = 200;
 const N_BOOT: usize = 300;
 const LEVEL: f64 = 0.95;
-const BAND_HALF_WIDTH: f64 = 0.05;
+/// Distance of the band's lower edge below `LEVEL`.
+const LOWER_MARGIN: f64 = 0.05;
 /// True signal rank of the synthetic DGP: `y` depends on `X` only through the
 /// single linear combination `x0 + x1` (see `synth`), so exactly one PLS
 /// component carries signal. Leverage coverage is asserted only for
@@ -101,8 +112,8 @@ fn synth(rng: &mut ChaCha8Rng, n: usize, d: usize, snr: f64) -> (Mat<f64>, Col<f
 ///   `leverage[j] = W_star[j,:] · (W_starᵀ W_star)⁻¹ · W_star[j,:]ᵀ`
 #[allow(clippy::similar_names, clippy::many_single_char_names)]
 fn oracle_leverage(x: faer::MatRef<f64>, y: faer::ColRef<f64>, k: usize) -> Vec<f64> {
-    let fit = pls1_fit(x, y, KSpec::Fixed(k), None, None, FitOpts::default())
-        .expect("oracle pls1_fit must succeed");
+    let fit =
+        pls1_fit(x, y, k, None, None, FitOpts::default()).expect("oracle pls1_fit must succeed");
 
     let mut wtw = faer::Mat::<f64>::zeros(k, k);
     faer::linalg::matmul::matmul(
@@ -162,8 +173,10 @@ fn cell_base_seed(n: usize, d: usize, k: usize, snr_idx: usize) -> u64 {
 #[ignore = "slow MC coverage test; run before release with --ignored"]
 #[allow(clippy::too_many_lines, clippy::similar_names)]
 fn coverage_mc_two_sided_grid() {
-    let band_lo = LEVEL - BAND_HALF_WIDTH;
-    let band_hi = LEVEL + BAND_HALF_WIDTH;
+    let band_lo = LEVEL - LOWER_MARGIN;
+    // Three binomial standard errors of coverage over N_DATASETS above LEVEL.
+    #[allow(clippy::cast_precision_loss)]
+    let band_hi = LEVEL + 3.0 * (LEVEL * (1.0 - LEVEL) / N_DATASETS as f64).sqrt();
 
     println!(
         "coverage_mc grid: cells = {} × {} × {} × {} = {}, datasets/cell = {}",
@@ -175,10 +188,11 @@ fn coverage_mc_two_sided_grid() {
         N_DATASETS,
     );
     println!(
-        "level = {LEVEL:.2}, two-sided band = [{band_lo:.2}, {band_hi:.2}], n_boot = {N_BOOT}",
+        "level = {LEVEL:.2}, two-sided band = [{band_lo:.4}, {band_hi:.4}], n_boot = {N_BOOT}",
     );
 
     let mut failures: Vec<String> = Vec::new();
+    let (mut n_holdout_checks, mut n_leverage_checks) = (0_usize, 0_usize);
 
     for &n in CELL_NS {
         for &d in CELL_DS {
@@ -333,12 +347,13 @@ fn coverage_mc_two_sided_grid() {
                         noise_str.join(", "),
                     );
 
-                    // Assertions: holdout_corr two-sided band.
-                    if !(cov_holdout >= band_lo && cov_holdout <= band_hi) {
+                    // holdout_corr: lower edge only, the interval is
+                    // conservative at high signal (see module doc).
+                    n_holdout_checks += 1;
+                    if cov_holdout < band_lo {
                         failures.push(format!(
                             "cell (n={n}, d={d}, k={k}, snr={snr}): holdout_corr \
-                             coverage {cov_holdout:.3} outside band \
-                             [{band_lo:.2}, {band_hi:.2}]",
+                             coverage {cov_holdout:.3} below {band_lo:.4}",
                         ));
                     }
                     // Leverage: asserted on the signal coordinates at
@@ -357,11 +372,12 @@ fn coverage_mc_two_sided_grid() {
                     // printed only (see module doc).
                     if k <= SIGNAL_RANK {
                         for (j, &cov) in cov_lev.iter().enumerate().take(2) {
+                            n_leverage_checks += 1;
                             if !(band_lo..=band_hi).contains(&cov) {
                                 failures.push(format!(
                                     "cell (n={n}, d={d}, k={k}, snr={snr}): leverage \
                                      signal coord {j} coverage {cov:.3} outside band \
-                                     [{band_lo:.2}, {band_hi:.2}]",
+                                     [{band_lo:.4}, {band_hi:.4}]",
                                 ));
                             }
                         }
@@ -371,13 +387,21 @@ fn coverage_mc_two_sided_grid() {
         }
     }
 
+    let n_cells = CELL_NS.len() * CELL_DS.len() * CELL_KS.len() * CELL_SNRS.len();
+    let n_lev_cells =
+        n_cells / CELL_KS.len() * CELL_KS.iter().filter(|&&k| k <= SIGNAL_RANK).count();
+    assert_eq!(n_holdout_checks, n_cells, "holdout_corr checks run");
+    assert_eq!(n_leverage_checks, 2 * n_lev_cells, "leverage checks run");
     if !failures.is_empty() {
         let n_fail = failures.len();
         let joined = failures.join("\n  ");
         panic!(
-            "coverage_mc grid: {n_fail} cell-metric failures outside two-sided \
-             band [{band_lo:.2}, {band_hi:.2}]:\n  {joined}",
+            "coverage_mc grid: {n_fail} cell-metric failures (band \
+             [{band_lo:.4}, {band_hi:.4}], holdout_corr lower edge only):\n  {joined}",
         );
     }
-    println!("coverage_mc grid: all cells within band [{band_lo:.2}, {band_hi:.2}]");
+    println!(
+        "coverage_mc grid: {n_holdout_checks} holdout_corr checks at or above {band_lo:.4}, \
+         {n_leverage_checks} leverage checks within [{band_lo:.4}, {band_hi:.4}]"
+    );
 }

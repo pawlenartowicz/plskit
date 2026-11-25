@@ -288,7 +288,6 @@ fn nspace_matches_pspace_up_to_k_dual_max() {
         let z_h = std_y(&Col::<f64>::from_fn(n_tr, |i| d.z[i]));
         let primal = |xs: MatRef<'_, f64>, z: &Col<f64>, x_fro: f64, k: usize| {
             pls1_fit_prepared_fro(xs, z.as_ref(), k, None, ParChoice::Seq, x_fro)
-                .expect("p-space fit")
         };
         for k in 1..=K_SWEEP_MAX.min(n - 1) {
             let cell = cells.entry((k, d.family)).or_default();

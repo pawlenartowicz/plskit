@@ -6,9 +6,9 @@ read `f64` data through a reference to misaligned memory, so the extension
 refuses such an array and the Python wrapper copies it into an aligned one
 first. Every result must be bit-identical to the same values passed aligned.
 
-A C- or F-ordered float64 X is handed to the extension as it is, not copied.
-The block inputs (`Y`, `Y_new`, `W`, `L`, `gram`) are read in place when
-F-ordered and copied column-major otherwise; every layout gives the same bits.
+Every 2-D input, `X` and `X_new` included, is read in place when F-ordered
+and copied column-major otherwise, and every layout gives the same bits. The
+wrapper hands a C- or F-ordered float64 X to the extension uncopied.
 """
 import dataclasses
 
@@ -214,10 +214,11 @@ def _block_layouts(a):
 
 
 def _block_cases():
-    # A shape and seed on which a row-major read of a C-ordered Y moves the
-    # last bits of a pre-standardized k=1 PLS3 fit (seen on arm64 macOS),
-    # so there the "C" layout below discriminates between reading C order
-    # in place and copying it column-major.
+    # A shape and seed on which a row-major read of a C-ordered X moves the
+    # last bits of the X cases below, and one of a C-ordered Y those of a
+    # pre-standardized k=1 PLS3 fit (seen on arm64 macOS), so the "C"
+    # layout discriminates between reading C order in place and copying it
+    # column-major.
     rng = np.random.default_rng(5)
     n, p, q = 143, 46, 32
     X = rng.standard_normal((n, p))
@@ -244,13 +245,25 @@ def _block_cases():
         "rotate_L": (L, lambda Lv: plskit.rotate(W, method="varimax", L=Lv)),
         "pls1_perm_alpha_gram": (G, lambda Gv: plskit.pls1_perm_alpha(Gv, Y, n_features=p)),
         "pls1_perm_alpha_Y": (Y, lambda Yv: plskit.pls1_perm_alpha(G, Yv, n_features=p)),
+        "pls1_fit_X": (X, lambda Xv: plskit.pls1_fit(Xv, y, k=3)),
+        "pls1_find_k_optimal_X": (X, lambda Xv: plskit.pls1_find_k_optimal(
+            Xv, y, 8, selector="r2_se", seed=7)),
+        "spls1_find_keep_optimal_X": (X, lambda Xv: plskit.spls1_find_keep_optimal(
+            Xv, y, 1, seed=7)),
+        "pls1_confirmatory_test_ci_X": (X, lambda Xv: plskit.pls1_confirmatory_test(
+            Xv, y, k=1, ci=True, seed=7)),
+        "pls3_fit_X": (X, lambda Xv: plskit.pls3_fit(Xv, Y, k=1)),
+        "spls3_fit_X": (X, lambda Xv: plskit.spls3_fit(Xv, Y, 1, 20, 10)),
+        "pls1_predict_X_new": (X, lambda Xv: plskit.pls1_predict(m1, X_new=Xv)),
+        "pls3_transform_X_new": (Xs, lambda Xv: plskit.pls3_transform(
+            m3, X_new=Xv, which="x_scores")),
     }
 
 
 @pytest.mark.parametrize("name", list(_block_cases()))
 def test_block_inputs_give_the_same_bits_in_every_layout(name):
-    """`Y`, `Y_new`, `W`, `L` and `gram` in any layout give the bits of the
-    column-major copy the extension makes of a strided one."""
+    """`X`, `X_new`, `Y`, `Y_new`, `W`, `L` and `gram` in any layout give the
+    bits of the column-major copy the extension makes of a strided one."""
     value, call = _block_cases()[name]
     layouts = _block_layouts(value)
     ref = _bits(call(layouts.pop("strided")))

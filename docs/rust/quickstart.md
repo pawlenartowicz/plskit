@@ -12,7 +12,7 @@ far slower under the dev profile.
 ```rust
 use plskit::{
     pls1_confirmatory_test, pls1_fit, pls1_predict, pls3_fit, pls3_transform, Col,
-    ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, FitOpts, KSpec, Mat,
+    ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, FitOpts, Mat,
     Pls3FitOpts, TransformWhich,
 };
 
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let y = Col::<f64>::from_fn(n, |i| x[(i, 0)] - 0.5 * x[(i, 1)] + 0.5 * noise(i, 99));
 
     // 1. Fit PLS1 with two components and predict on the training rows.
-    let model = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(2), None, None, FitOpts::default())?;
+    let model = pls1_fit(x.as_ref(), y.as_ref(), 2, None, None, FitOpts::default())?;
     println!("k_used = {}", model.k_used);
     println!("beta[0..2] = [{:.3}, {:.3}]", model.beta[0], model.beta[1]);
     let y_hat = pls1_predict(&model, x.as_ref(), None)?;
@@ -86,8 +86,8 @@ x_scores: 60 x 2
 ## What each step does
 
 **1. Fit.** `pls1_fit(x, y, k, weights, covariates, opts)` takes borrowed views
-(`MatRef` / `ColRef`, obtained with `.as_ref()`), a component count as
-`KSpec::Fixed(k)`, optional observation weights (`None` for uniform),
+(`MatRef` / `ColRef`, obtained with `.as_ref()`), a component count
+`k: usize`, optional observation weights (`None` for uniform),
 optional covariates (`None` for none), and a
 `FitOpts` struct. The returned `Pls1Model` carries raw-scale coefficients
 (`beta`, `intercept`), the standardized-scale fit (`coef`, `w_star`,

@@ -545,6 +545,11 @@ pub(crate) enum Agree {
     /// still exact, and an integer (a count, `k_used`) that differs by one
     /// fails any `atol` below 1.
     Corpus(f64),
+    /// [`Agree::Corpus`] plus the corpus p rule `|u - v| <= 1e-10 · |v|`,
+    /// for p-values: under an absolute `atol` alone a tiny p passes against
+    /// 0. The p rule is owned by `plskit-testdata-gen/src/settle.rs`
+    /// (`P_RTOL`): change together.
+    CorpusP(f64),
 }
 
 /// `got` and `want` have the same length and agree entry by entry per
@@ -561,6 +566,9 @@ pub(crate) fn assert_agree(got: &[f64], want: &[f64], agree: Agree, what: &str) 
                 // `1e-14` is the corpus rtol; the rule is owned by
                 // `plskit-testdata-gen/src/settle.rs::close`: change together.
                 Agree::Corpus(atol) => u == v || (u - v).abs() <= atol + 1e-14 * v.abs(),
+                Agree::CorpusP(atol) => {
+                    u == v || (u - v).abs() <= (atol + 1e-14 * v.abs()).min(1e-10 * v.abs())
+                }
             }
         };
         assert!(ok, "{what}[{i}]: {u:e} vs {v:e} ({agree:?})");
@@ -657,6 +665,24 @@ pub(crate) fn assert_families_layout_invariant<T>(
     }
 }
 
+/// `run(budget)` at budget 1 is `MemoryBudget`; re-run at each `needed` it
+/// names (a later loop can name more), it is `Ok` within 8 rounds. Returns
+/// the final `needed`.
+#[track_caller]
+pub(crate) fn assert_needed_runs<T: Debug>(run: impl Fn(u64) -> PlsKitResult<T>) -> u64 {
+    let mut budget = 1;
+    for round in 0..8 {
+        match run(budget) {
+            Err(crate::error::PlsKitError::MemoryBudget { needed, .. }) if needed > budget => {
+                budget = needed;
+            }
+            Ok(_) if round > 0 => return budget,
+            other => panic!("budget {budget}: {other:?}"),
+        }
+    }
+    panic!("still MemoryBudget after 8 rounds, at {budget}");
+}
+
 /// Negative controls: every layout helper panics on a run whose output
 /// depends on the view's strides, so no helper edit can make the per-module
 /// layout tables pass vacuously.
@@ -698,5 +724,21 @@ mod helper_controls {
     #[should_panic(expected = "control")]
     fn agree_corpus_rejects_a_difference_above_its_tolerance() {
         assert_agree(&[1.0], &[1.0 + 1e-8], Agree::Corpus(1e-10), "control");
+    }
+
+    #[test]
+    fn agree_corpus_p_holds_a_tiny_p_relative_to_its_size() {
+        let tiny = 4.7e-25;
+        assert_agree(&[0.0], &[tiny], Agree::Corpus(1e-10), "absolute rule");
+        assert_agree(&[tiny * (1.0 + 1e-11)], &[tiny], Agree::CorpusP(1e-10), "p");
+        assert_agree(
+            &[0.0, f64::NAN],
+            &[0.0, f64::NAN],
+            Agree::CorpusP(1e-10),
+            "p",
+        );
+        let zero_vs_tiny =
+            std::panic::catch_unwind(|| assert_agree(&[0.0], &[tiny], Agree::CorpusP(1e-10), "p"));
+        assert!(zero_vs_tiny.is_err(), "0 passed against a tiny p");
     }
 }

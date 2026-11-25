@@ -28,3 +28,10 @@ R binding of \code{spls3_fit}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
 "2c.3 Sparse fit" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }
+\examples{
+set.seed(1)
+X <- matrix(rnorm(40 * 20), 40, 20)
+y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+Y <- cbind(y, y + rnorm(40))
+spls3_fit(X, Y, k = 2, keep_X = 5, keep_Y = 1)
+}

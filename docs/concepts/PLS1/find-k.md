@@ -13,6 +13,8 @@ largest `k` to consider, and both report their choice as `k_star`.
   freedom are much larger, so BIC tends to select `k_max`, and `r2_se` is
   recommended there.
 - The CV folds of `r2_se` and `r2_max` read `X` divided once by its column scales over all rows (weighted when `weights` are given; used as given under `pre_standardized`) and only centre: each fold centres its training rows with their own means and its held-out rows with those same means. `y` is standardized in each fold. `spls1_find_keep_optimal` scales its folds the same way.
+- A fold whose fit stops before `k` (it runs out of signal) scores its stopped model at every higher `k`. Among candidates with equal CV R², `r2_max` takes the smallest `k`. Under `weights`, a fold with no weight on its training rows or on its validation rows is left out at every `k`. When every fold is left out, the call raises `invalid_weights` with reason `insufficient_effective_n`, which here means all the positive weight is in one fold.
+- A fold whose held-out R² is not finite at a candidate, such as a fold left out for its weights, is left out of that candidate's `cv_scores` and `cv_scores_se`. A fold whose validation outcome has no spread scores R² = 0 at every candidate and stays in the means. `n_failed_folds` counts both kinds, and `spls1_find_keep_optimal` counts its folds the same way over the keep grid. With one fold left, `cv_scores_se` is 0, and `r2_se` then picks as `r2_max` does.
 - An optional same-sample diagnostic (`diagnostic="split_nb"` etc.) runs a
   sequential test up to the selected `k` and attaches `pvalues` to the
   result. It uses the same data, so it is a robustness check, not
@@ -41,7 +43,7 @@ Without a `seed`, the cross-validation folds are drawn at random, so the chosen 
 
 A `y` with no first component makes the default call raise `optimal_no_component` (see [below](#when-no-component-exists)).
 
-In Rust, `pls1_fit` takes an explicit `KSpec::Fixed(k)`: call the selection function and pass its `k_star` to `pls1_fit` ([Rust API](../../rust/api.md#side-by-side-example)).
+In Rust, `pls1_fit` takes an explicit `k`: call the selection function and pass its `k_star` to `pls1_fit` ([Rust API](../../rust/api.md#side-by-side-example)).
 
 ## When no component exists
 

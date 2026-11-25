@@ -558,48 +558,48 @@ fn profiles_find_n_returns_a_checked_record() {
 }
 
 #[test]
-fn negative_counts_are_invalid_input() {
+fn bad_counts_are_invalid_argument() {
     let (x, y) = data(40, 6, 3);
     let m = fit(&x, &y, 1);
-    for neg in [Value::I64(-1), Value::F64(-1.0)] {
+    for bad in [Value::I64(-1), Value::F64(-1.0), Value::I64(0)] {
         let e = err(
             "factors",
             vec![
                 ("model_or_coef", coef(12, 5, 3)),
                 ("X", data(30, 12, 3).0),
-                ("n", neg.clone()),
+                ("n", bad.clone()),
             ],
         );
-        assert_eq!(e.code, "invalid_input", "factors n={neg:?}");
+        assert_eq!(e.code, "invalid_argument", "factors n={bad:?}");
         let e = err(
             "profiles",
             vec![
                 ("model_or_coef", m.result.clone()),
                 ("X", x.clone()),
-                ("n", neg.clone()),
+                ("n", bad.clone()),
             ],
         );
-        assert_eq!(e.code, "invalid_input", "profiles n={neg:?}");
+        assert_eq!(e.code, "invalid_argument", "profiles n={bad:?}");
         let e = err(
             "profiles_search",
             vec![
                 ("model", m.result.clone()),
                 ("X", x.clone()),
                 ("y", y.clone()),
-                ("n_max", neg.clone()),
+                ("n_max", bad.clone()),
             ],
         );
-        assert_eq!(e.code, "invalid_input", "profiles_search n_max={neg:?}");
+        assert_eq!(e.code, "invalid_argument", "profiles_search n_max={bad:?}");
         let e = err(
             "profiles_find_n",
             vec![
                 ("X", x.clone()),
                 ("y", y.clone()),
                 ("k", Value::I64(1)),
-                ("n_max", neg.clone()),
+                ("n_max", bad.clone()),
             ],
         );
-        assert_eq!(e.code, "invalid_input", "profiles_find_n n_max={neg:?}");
+        assert_eq!(e.code, "invalid_argument", "profiles_find_n n_max={bad:?}");
     }
     let e = err(
         "factors",
@@ -971,20 +971,18 @@ fn factors_refuses() {
         let mut bad = floats(&c);
         bad[1] = f64::NAN;
         let e = call(name, vecv(bad), &x, 1);
-        assert_eq!(e.code, "invalid_input", "{name} coef not finite");
-        assert!(e.message.contains("non-finite"), "{}", e.message);
+        assert_eq!(e.code, "non_finite_input", "{name} coef not finite");
         let mut xb = floats(&x);
         xb[5] = f64::INFINITY;
         let e = call(name, c.clone(), &matv(xb, 40), 1);
-        assert_eq!(e.code, "invalid_input", "{name} X not finite");
-        assert!(e.message.contains("non-finite"), "{}", e.message);
+        assert_eq!(e.code, "non_finite_input", "{name} X not finite");
         let e = call(name, vals(&[1.0, 2.0]), &x, 1);
         assert_eq!(e.code, "shape_mismatch", "{name} coef length");
         let e = call(name, p3.result.clone(), &x, 1);
         assert_eq!(e.code, "invalid_argument", "{name} PLS3Result");
         for n in [0, 7] {
             let e = call(name, c.clone(), &x, n);
-            assert_eq!(e.code, "invalid_input", "{name} n={n}");
+            assert_eq!(e.code, "invalid_argument", "{name} n={n}");
         }
         let e = call(name, vals(&[1.0, 1.0, 1e-14]), &ab, 2);
         assert_eq!(e.code, "invalid_input", "{name} empty block");

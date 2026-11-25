@@ -5,16 +5,22 @@ name: MC calibration gate
 # regressions. Kept out of ci.yml so the schedule trigger does not fire
 # the full per-push CI suite.
 #
-# What runs: `cargo test -p plskit --release -- --ignored --nocapture`.
+# What runs: `cargo test -p plskit --release -- --ignored --nocapture
+# --skip cap_kills_an_over_budget_child --skip peak_within_cap
+# --skip batched_primal_precision_sweep`.
 # `--ignored` runs ONLY the #[ignore]d tests of every test target of the
-# package, and picks up future ones without editing this file. Today that is
-# the Monte-Carlo calibration gate (tests/coverage_mc.rs's CI-coverage grid),
-# the k-set level check under the null (tests/calibration_mc.rs's
-# k_set_level_under_null, about 10 min), plus two gram_p benchmarks, the work-floor benchmark
-# (gram_p_work_floor_benchmark) and the route boundary benchmark
-# (gram_p_route_boundary_benchmark, about 25 s), which print measurements
-# and assert nothing a running test does not. `--nocapture`
-# surfaces the per-cell numbers in the log even on a passing run.
+# package, and picks up future ones without editing this file. Today it runs:
+#   - coverage_mc_two_sided_grid (tests/coverage_mc.rs), the CI-coverage grid;
+#   - k_set_level_under_null (src/calibration_mc.rs), the k-set level check
+#     under the null, about 10 min;
+#   - gram_p_work_floor_benchmark and gram_p_route_boundary_benchmark
+#     (src/gram_p.rs), which print measurements and assert nothing a running
+#     test does not.
+# It skips:
+#   - cap_kills_an_over_budget_child and peak_within_cap
+#     (tests/memory_bound.rs), which need `systemd-run --user`;
+#   - batched_primal_precision_sweep (src/signal_test.rs), a by-hand sweep.
+# `--nocapture` surfaces the per-cell numbers in the log even on a passing run.
 #
 # Runtime is substantial (36-cell grid × 200 datasets × 300 boots).
 # ubuntu-only is sufficient for a statistical gate.
@@ -34,7 +40,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run ignored MC calibration tests
-        run: cargo test -p plskit --release -- --ignored --nocapture
+        run: cargo test -p plskit --release -- --ignored --nocapture --skip cap_kills_an_over_budget_child --skip peak_within_cap --skip batched_primal_precision_sweep
 
   # Informational: an upstream beta regression shows up here a release
   # cycle early, without blocking merges.

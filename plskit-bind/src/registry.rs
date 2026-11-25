@@ -118,6 +118,12 @@ impl Param {
     }
 }
 
+/// The default `selector` of `pls1_find_k_optimal` and `spls1_find_k_optimal`.
+pub(crate) const OPTIMAL_SELECTOR: &str = "r2_se";
+
+/// The default `test_method` of `pls1_find_k_sequence` and `spls1_find_k_sequence`.
+pub(crate) const SEQUENCE_TEST_METHOD: &str = "auto";
+
 type RunFn = fn(&mut Inputs<'_>) -> Result<Outcome, BindError>;
 
 /// One public function.
@@ -207,12 +213,11 @@ static REGISTRY: &[FnSpec] = &[
             pos("X", K::Mat),
             pos("y", K::Vec),
             pos("k_max", K::Int),
-            kw("selector", K::Str, S("r2_se")),
+            kw("selector", K::Str, S(OPTIMAL_SELECTOR)),
             kw("diagnostic", K::Str, N),
             kw("args", K::Args, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
             kw("covariates", K::VecOrMat, N),
         ],
@@ -225,12 +230,11 @@ static REGISTRY: &[FnSpec] = &[
             pos("X", K::Mat),
             pos("y", K::Vec),
             pos("k_max", K::Int),
-            kw("test_method", K::Str, S("auto")),
+            kw("test_method", K::Str, S(SEQUENCE_TEST_METHOD)),
             kw("alpha", K::Float, N),
             kw("args", K::Args, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
             kw("covariates", K::VecOrMat, N),
         ],
@@ -259,7 +263,6 @@ static REGISTRY: &[FnSpec] = &[
             pos("k", K::Int),
             kw("args", K::Args, N),
             kw("seed", K::Seed, N),
-            kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
             kw("covariates", K::VecOrMat, N),
         ],
@@ -273,12 +276,11 @@ static REGISTRY: &[FnSpec] = &[
             pos("y", K::Vec),
             pos("k_max", K::Int),
             pos("keep", K::Int),
-            kw("selector", K::Str, S("r2_se")),
+            kw("selector", K::Str, S(OPTIMAL_SELECTOR)),
             kw("diagnostic", K::Str, N),
             kw("args", K::Args, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
             kw("covariates", K::VecOrMat, N),
         ],
@@ -292,12 +294,11 @@ static REGISTRY: &[FnSpec] = &[
             pos("y", K::Vec),
             pos("k_max", K::Int),
             pos("keep", K::Int),
-            kw("test_method", K::Str, S("auto")),
+            kw("test_method", K::Str, S(SEQUENCE_TEST_METHOD)),
             kw("alpha", K::Float, N),
             kw("args", K::Args, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
             kw("covariates", K::VecOrMat, N),
         ],
@@ -384,7 +385,6 @@ static REGISTRY: &[FnSpec] = &[
             kw("max_failure_rate", K::Float, N),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
             kw("max_skip_rate", K::Float, N),
             kw("covariates", K::VecOrMat, N),
@@ -415,7 +415,6 @@ static REGISTRY: &[FnSpec] = &[
             kw("return_perm_matrix", K::Bool, B(false)),
             kw("pre_standardized", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("verbose", K::Bool, B(false)),
             kw("weights", K::Vec, N),
             kw("covariates", K::VecOrMat, N),
         ],
@@ -433,7 +432,6 @@ static REGISTRY: &[FnSpec] = &[
             kw("pre_standardized_X", K::Bool, B(false)),
             kw("pre_standardized_Y", K::Bool, B(false)),
             kw("seed", K::Seed, N),
-            kw("verbose", K::Bool, B(false)),
             kw("gram", K::ModelOrMat, N),
             kw("n_features", K::Int, N),
         ],

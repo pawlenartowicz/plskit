@@ -9,6 +9,8 @@ in the same order, with the same keyword-only boundary and defaults.
 Each public function must also forward every one of its parameters to
 `_call` under its own name: a keyword left out would take the registry
 default without an error.
+Every parameter name of every registry function must also have a row in
+`docs/internals/naming.md`.
 `_api.py` is read with `ast`, so no import (and no numpy) is needed.
 
 Usage:
@@ -18,11 +20,13 @@ Usage:
 
 import ast
 import json
+import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PKG = ROOT / "plskit-py" / "python" / "plskit"
+NAMING = ROOT / "docs" / "internals" / "naming.md"
 # Written in each wrapper, with no registry entry: a loop over `gram_matrix`.
 WRAPPER_ONLY = {"gram_matrix_blocks"}
 
@@ -64,6 +68,12 @@ def exported_names() -> set[str]:
     return set()
 
 
+def naming_rows() -> set[str]:
+    """Names of the table rows of `naming.md`, the first cell in backticks."""
+    text = NAMING.read_text(encoding="utf-8")
+    return set(re.findall(r"^\| `([^`]+)` \|", text, re.M))
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -94,12 +104,23 @@ def main() -> int:
                 f"{name}:\n    must return {forward}\n    returns     {returned}"
             )
 
+    rows = naming_rows()
+    checked = set()
+    for name, f in sorted(registry.items()):
+        for p in f["params"]:
+            checked.add(p["name"])
+            if p["name"] not in rows:
+                problems.append(f"{name}.{p['name']}: no row in docs/internals/naming.md")
+
     if problems:
         print("== plskit-bind registry drift ==")
         for p in problems:
             print("  " + p)
         return 1
-    print(f"== plskit-bind registry: {len(registry)} functions match Python ==")
+    print(
+        f"== plskit-bind registry: {len(registry)} functions match Python; "
+        f"{len(checked)} parameter names have a row in naming.md =="
+    )
     return 0
 
 

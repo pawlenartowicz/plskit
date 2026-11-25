@@ -1,14 +1,15 @@
 //! `pls1_fit` fixture cases.
 
 use crate::cases::{
-    CasePaths, Xyw, array_descriptors, ensure_moved, faer_col_to_array, manifest_case,
-    ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_covariates, synth_data,
+    CasePaths, Xyw, add_counts, array_descriptors, ensure_moved, faer_col_to_array, manifest_case,
+    ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, standardize, standardize1,
+    synth_covariates, synth_data,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
 use anyhow::{Result, bail};
 
-use plskit::{FindKSequenceOpts, FitOpts, KSpec, pls1_find_k_sequence, pls1_fit};
+use plskit::{FindKSequenceOpts, FitOpts, pls1_find_k_sequence, pls1_fit};
 use std::path::Path;
 
 /// Synth parameters for a fixed-k `pls1_fit` case.
@@ -19,7 +20,7 @@ struct FitFixedKCase<'a> {
     k_signal: usize,
     snr: f64,
     seed: u64,
-    kspec: KSpec,
+    k: usize,
     kwargs: serde_json::Value,
 }
 
@@ -41,7 +42,7 @@ fn fit_fixed_k(root: &Path, c: &FitFixedKCase<'_>) -> Result<Case> {
     let model = pls1_fit(
         x_faer.as_ref(),
         y_faer.as_ref(),
-        c.kspec,
+        c.k,
         None,
         None,
         FitOpts::default(),
@@ -85,7 +86,7 @@ pub fn small_n50_d10_k1(root: &Path) -> Result<Case> {
             k_signal: 2,
             snr: 4.0,
             seed: 42,
-            kspec: KSpec::Fixed(1),
+            k: 1,
             kwargs: serde_json::json!({"k": 1, "seed": 42}),
         },
     )
@@ -107,7 +108,7 @@ pub fn small_n50_d10_k3(root: &Path) -> Result<Case> {
             k_signal: 2,
             snr: 4.0,
             seed: 42,
-            kspec: KSpec::Fixed(3),
+            k: 3,
             kwargs: serde_json::json!({"k": 3, "seed": 42}),
         },
     )
@@ -129,7 +130,7 @@ pub fn wide_n30_d100_k1(root: &Path) -> Result<Case> {
             k_signal: 2,
             snr: 4.0,
             seed: 42,
-            kspec: KSpec::Fixed(1),
+            k: 1,
             kwargs: serde_json::json!({"k": 1, "seed": 42}),
         },
     )
@@ -151,7 +152,7 @@ pub fn wide_n30_d100_k3(root: &Path) -> Result<Case> {
             k_signal: 2,
             snr: 4.0,
             seed: 42,
-            kspec: KSpec::Fixed(3),
+            k: 3,
             kwargs: serde_json::json!({"k": 3, "seed": 42}),
         },
     )
@@ -205,7 +206,7 @@ pub fn small_n50_d10_sequence(root: &Path) -> Result<Case> {
     let model = pls1_fit(
         x_faer.as_ref(),
         y_faer.as_ref(),
-        KSpec::Fixed(seq.k_star),
+        seq.k_star,
         None,
         None,
         FitOpts::default(),
@@ -217,6 +218,8 @@ pub fn small_n50_d10_sequence(root: &Path) -> Result<Case> {
         w.add_f64("beta", &faer_col_to_array(&model.beta))?;
         w.add_f64("intercept", &scalar_f64(model.intercept))?;
         w.add_i64("k_used", &scalar_i64(i64::try_from(model.k_used)?))?;
+        add_counts(&mut w, "n_failed_splits", seq.n_failed_splits.as_deref())?;
+        add_counts(&mut w, "n_failed_perms", seq.n_failed_perms.as_deref())?;
         w.finish()?;
     }
 
@@ -250,7 +253,7 @@ pub fn skinny_n200_d5_k1(root: &Path) -> Result<Case> {
             k_signal: 2,
             snr: 4.0,
             seed: 42,
-            kspec: KSpec::Fixed(1),
+            k: 1,
             kwargs: serde_json::json!({"k": 1, "seed": 42}),
         },
     )
@@ -285,7 +288,7 @@ pub fn weighted_n50_d10_k2(root: &Path) -> Result<Case> {
     let model = pls1_fit(
         x_faer.as_ref(),
         y_faer.as_ref(),
-        KSpec::Fixed(2),
+        2,
         Some(weights_faer.as_ref()),
         None,
         FitOpts::default(),
@@ -355,7 +358,7 @@ fn fit_on(
         pls1_fit(
             data.x_faer().as_ref(),
             data.y_faer().as_ref(),
-            KSpec::Fixed(k),
+            k,
             w.as_ref().map(faer::Col::as_ref),
             covariates.map(faer::Mat::as_ref),
             FitOpts {
@@ -460,8 +463,8 @@ pub fn covariates_weighted_n50_d10_k2(root: &Path) -> Result<Case> {
 /// Returns an error if fixture files cannot be written or `pls1_fit` fails.
 pub fn pre_standardized_weighted_n50_d10_k3(root: &Path) -> Result<Case> {
     let (x, y) = synth_data(50, 10, 2, 4.0, 42);
-    let (xs, _, _) = plskit::linalg::standardize(ndarray_to_faer_mat(&x).as_ref());
-    let (ys, _, _) = plskit::linalg::standardize1(ndarray_to_faer_col(&y).as_ref());
+    let (xs, _, _) = standardize(ndarray_to_faer_mat(&x).as_ref());
+    let (ys, _, _) = standardize1(ndarray_to_faer_col(&y).as_ref());
     let data = Xyw {
         x: ndarray::Array2::from_shape_fn((xs.nrows(), xs.ncols()), |(i, j)| xs[(i, j)]),
         y: ndarray::Array1::from_shape_fn(ys.nrows(), |i| ys[i]),

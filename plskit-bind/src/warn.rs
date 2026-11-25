@@ -38,7 +38,7 @@ pub(crate) fn rerouted(
     let message = format!(
         "'{requested}' was rerouted to '{actual}': the {requested} auto-gate flagged this \
          design{seen}. The fallback runs n_perm={n_perm_text} permutations, so it costs more \
-         than {requested}. Pass args={{'force': True}} to run {requested} anyway."
+         than {requested}. Pass `force` = true in `args` to run {requested} anyway."
     );
     Some(
         Record::new()
@@ -114,7 +114,7 @@ mod tests {
             msg,
             "'split_nb' was rerouted to 'split_exact': the split_nb auto-gate flagged this design \
              (stable rank of X as the tests read it = 2.5; n_eff = 60). The fallback runs n_perm=1000 \
-             permutations, so it costs more than split_nb. Pass args={'force': True} to run \
+             permutations, so it costs more than split_nb. Pass `force` = true in `args` to run \
              split_nb anyway."
         );
         let keys: Vec<&str> = w.keys().collect();

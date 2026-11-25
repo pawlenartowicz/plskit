@@ -113,8 +113,12 @@ def test_gate_reroutes_split_nb_and_warns():
     assert isinstance(r.stable_rank, float)
     msg = str(rec[0].message)
     assert "n_perm=1000" in msg
-    assert "'force': True" in msg
+    assert "Pass `force` = true in `args`" in msg
     assert f"{r.stable_rank:.4g}" in msg
+    w = rec[0].message
+    assert isinstance(w, plskit.PlsKitRerouted)
+    assert (w.requested, w.actual, w.n_perm) == ("split_nb", "split_exact", 1000)
+    assert w.stable_rank == r.stable_rank
 
 
 _NB = _SMALL_ARGS_BY_METHOD["split_nb"]
@@ -154,8 +158,8 @@ def test_force_suppresses_the_reroute_and_the_warning():
             X, y, k=1, test_method="split_nb", args={"n_splits": 20, "force": True}, seed=7,
         )
     assert r.test_method == "split_nb"
-    # The gate still ran and still reports what it saw under force.
-    assert isinstance(r.stable_rank, float)
+    # Under force the gate decides nothing and does not compute the rank.
+    assert r.stable_rank is None
 
 
 def test_gate_does_not_fire_on_a_healthy_design():
@@ -209,7 +213,7 @@ def test_gate_reroutes_the_optimal_diagnostic_and_warns():
         )
     assert r.diagnostic == "split_exact"
     assert isinstance(r.stable_rank, float)
-    assert "'force': True" in str(rec[0].message)
+    assert "Pass `force` = true in `args`" in str(rec[0].message)
 
 
 def test_force_suppresses_the_optimal_diagnostic_reroute():
@@ -265,7 +269,7 @@ def test_sequence_results_carry_the_gate_rank():
     assert f"{seq.n_eff:.4g}" in msg
 
 
-def test_sequence_gate_rank_survives_force_and_is_absent_otherwise():
+def test_sequence_gate_rank_is_absent_under_force_and_otherwise():
     X, y = _flagged_data()
     with _no_warning():
         forced = plskit.pls1_find_k_sequence(
@@ -273,7 +277,7 @@ def test_sequence_gate_rank_survives_force_and_is_absent_otherwise():
             args={"n_splits": 20, "force": True}, seed=7,
         )
     assert forced.test_method == "split_nb"
-    assert isinstance(forced.stable_rank, float)
+    assert forced.stable_rank is None
 
     other = plskit.pls1_find_k_sequence(
         X, y, k_max=3, test_method="raw_perm", args={"n_perm": 100}, seed=7,
@@ -383,8 +387,6 @@ _X, _Y = _data()
          'ci must be a bool, got the string "yes"'),
         ({"test_method": "score", "pre_standardized": 1}, "invalid_argument",
          "pre_standardized must be a bool, got 1"),
-        ({"test_method": "score", "verbose": "no"}, "invalid_argument",
-         "verbose must be a bool"),
         ({"test_method": 1}, "invalid_argument", "test_method must be a string, got 1"),
         ({"test_method": "raw_perm", "args": [1]}, "invalid_argument",
          r"args must be a record of named values \(a dict / named list\), got"),
@@ -393,7 +395,7 @@ _X, _Y = _data()
         "args_negative", "args_fractional", "args_bool", "args_str",
         "n_boot", "k", "level_str", "level_overflow", "level_overflow_huge", "seed_negative",
         "seed_too_big", "ci_str", "pre_standardized_int",
-        "verbose_str", "method_int", "args_list",
+        "method_int", "args_list",
     ],
 )
 def test_unusable_values_raise_coded_errors(kwargs, code, message):
@@ -530,3 +532,17 @@ def test_sv_perm_rotate_is_refused_for_pls1():
         plskit.pls1_confirmatory_test(
             X, y, test_method="sv_perm", args={"rotate": True}, seed=1
         )
+
+
+def test_failed_split_counts_are_wired():
+    # One nonzero row leaves one half of every split with a constant outcome.
+    X = np.random.default_rng(0).normal(size=(30, 4))
+    y = np.zeros(30)
+    y[0] = 1.0
+    r = plskit.pls1_confirmatory_test(
+        X, y, k=1, test_method="split_exact",
+        args={"n_perm": 19, "n_splits": 8}, seed=1,
+    )
+    assert r.n_failed_splits == 8
+    assert r.n_failed_perms == 0
+    assert r.n_failed_folds is None

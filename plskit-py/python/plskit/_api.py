@@ -14,7 +14,13 @@ from typing import Literal
 import numpy as np
 
 from plskit import _plskit, _results
-from plskit._errors import PlsKitError, PlsKitInvalidWeights, PlsKitResamplingDegenerate
+from plskit._errors import (
+    PlsKitError,
+    PlsKitInvalidWeights,
+    PlsKitRerouted,
+    PlsKitResamplingDegenerate,
+    PlsKitRotatedSparse,
+)
 from plskit._results import (
     ConfirmatoryTestResult,
     FactorsResult,
@@ -68,11 +74,11 @@ def _aligned_f64(x, name: str, what: str = "array") -> np.ndarray:
     """`x` as an aligned float64 array, in its own memory layout.
 
     A C- or F-contiguous float64 array passes through uncopied, and so does
-    any other strided view (the extension copies that one itself); a copy
-    is made only to convert the dtype or to align a misaligned array (a
-    byte-offset view of a buffer, which Rust may not read in place), and it
-    keeps the input's order. Results for different layouts of the same
-    values agree to rounding, not bit for bit.
+    any strided view. The extension reads an F-ordered array in place and
+    copies any other layout column-major. A copy here is made only to
+    convert the dtype or to align a misaligned array (a byte-offset view of
+    a buffer, which Rust may not read in place), and it keeps the input's
+    order. Every layout of the same values gives the same bits.
 
     Anything numpy cannot read as real numbers (strings, numeric ones
     included, ragged nested lists, complex values, objects that are not
@@ -146,6 +152,9 @@ _ARRAY_KINDS = {
     "vec": ("vector", "1-D"),
     "vec_or_mat": ("array", "1-D or 2-D"),
 }
+
+# The warning class for each `kind` of plskit-bind's warning record.
+_WARNING_CLASSES = {"rerouted": PlsKitRerouted, "rotated_sparse": PlsKitRotatedSparse}
 
 
 def _array_argument(value, name: str, kind: str) -> np.ndarray:
@@ -247,7 +256,9 @@ def _call(name: str, **arguments):
             arguments[key] = _array_argument(value, key, kind)
     result, emitted = _plskit.call(name, arguments, _make_result)
     for warning in emitted:
-        warnings.warn(warning["message"], UserWarning, stacklevel=4)
+        cls = _WARNING_CLASSES[warning["kind"]]
+        fields = {k: v for k, v in warning.items() if k not in ("kind", "message")}
+        warnings.warn(cls(warning["message"], **fields), stacklevel=4)
     return result
 
 
@@ -302,11 +313,10 @@ def pls1_fit(
         int.
     find_k_args : dict | None
         Extra kwargs forwarded to `pls1_find_k_optimal` / `pls1_find_k_sequence`.
-        Allowed keys are the public params of the target function *except*
-        ``seed``, ``pre_standardized``, ``weights`` and ``covariates`` — pass those on
-        ``pls1_fit`` directly — and ``verbose``, which the selection run
-        does not take. Unknown keys
-        raise ``PlsKitError(code="invalid_args")`` listing the allowed set.
+        Allowed keys: ``selector``, ``diagnostic`` and ``args`` for
+        ``k='optimal'``; ``test_method``, ``alpha`` and ``args`` for
+        ``k='sequence'``. Unknown keys raise
+        ``PlsKitError(code="invalid_args")`` listing the allowed set.
         Must be ``None`` when ``k`` is an int.
     pre_standardized : bool, default False
         If True, skip standardization — X and y are assumed already zero-mean,
@@ -543,7 +553,6 @@ def pls3_confirmatory_test(
     pre_standardized_X: bool = False,
     pre_standardized_Y: bool = False,
     seed: int | None = None,
-    verbose: bool = False,
     gram: GramMatrixResult | np.ndarray | None = None,
     n_features: int | None = None,
 ) -> ConfirmatoryTestResult:
@@ -597,12 +606,13 @@ def pls3_confirmatory_test(
         p-value uses is PLS1's Nadeau-Bengio heuristic, which is not derived
         for two blocks; its transfer is supported empirically only. Measured
         on Gaussian, heavy-tailed, low-stable-rank and real two-block
-        designs, ``'split_nb'`` came out conservative, never
-        anti-conservative.
+        designs, ``'split_nb'`` came out conservative except on X of low
+        effective rank (up to 6.2% at α = 0.05).
 
         Explicit ``'split_nb'`` requests are auto-gated on X exactly as in
         ``pls1_confirmatory_test``: a flagged design runs ``'split_exact'``
-        instead (``result.test_method`` says so, and Python warns). Pass
+        instead (``result.test_method`` says so, and Python warns with
+        ``PlsKitRerouted``). Pass
         ``args={'force': True}`` to run ``'split_nb'`` anyway. Y never
         enters the gate — q is small by construction in PLSC, so a
         stable-rank floor on Y would flag almost every design. The gate
@@ -627,7 +637,7 @@ def pls3_confirmatory_test(
         ``'split_exact'``: ``{'n_perm': int, 'n_splits': int}``, defaults
         1000 and 32. ``'split_nb'``: ``{'n_splits': int, 'force': bool}``,
         defaults 32 and False. ``'auto'``: ``{'n_perm': int, 'n_splits': int}``,
-        defaults 1000 and 32; ``n_perm`` is ignored when ``'split_nb'`` runs.
+        defaults 1000 and 32.
         ``'sv_perm'``: ``{'n_perm': int, 'rotate': bool}``, defaults 1000 and
         False. ``rotate`` is a PLS3 option, recorded on ``result.rotate``;
         ``rotate=True`` is refused in ``pls1_confirmatory_test``.
@@ -663,12 +673,13 @@ def pls3_confirmatory_test(
         (weights are not implemented). ``rho_hat`` is populated for
         ``'split_nb'`` only, and only when the test half has at least 4 rows.
         ``stable_rank`` is not ``None`` on an explicit ``'split_nb'``
-        request and ``None`` on every ``"auto"`` request. ``n_perm``
+        request without ``force``, and ``None`` under ``force`` and on every
+        ``"auto"`` request. ``n_perm``
         is ``None`` for ``'split_nb'``, which runs no permutations.
     """
     return _call("pls3_confirmatory_test", X=X, Y=Y, k=k, test_method=test_method,
                  args=args, pre_standardized_X=pre_standardized_X,
-                 pre_standardized_Y=pre_standardized_Y, seed=seed, verbose=verbose,
+                 pre_standardized_Y=pre_standardized_Y, seed=seed,
                  gram=gram, n_features=n_features)
 
 
@@ -688,7 +699,6 @@ def pls1_confirmatory_test(
     max_failure_rate: float | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    verbose: bool = False,
     weights: np.ndarray | None = None,
     max_skip_rate: float | None = None,
     covariates: np.ndarray | None = None,
@@ -758,7 +768,7 @@ def pls1_confirmatory_test(
         ``pre_standardized``), has a stable rank below 3. A flagged explicit
         ``'split_nb'`` request runs
         ``'split_exact'`` (``n_perm=1000``) instead (``result.test_method`` says so, and Python
-        warns). A design that passes the gate is not thereby shown to be in
+        warns with ``PlsKitRerouted``). A design that passes the gate is not thereby shown to be in
         the regime above. Pass ``args={'force': True}`` to run
         ``'split_nb'`` anyway; ``split_nb_gate`` reports the decision
         without running a test.
@@ -768,7 +778,7 @@ def pls1_confirmatory_test(
         ``'split_nb'`` itself when the weights are non-uniform (all-equal
         weights count as none) or the test half is too small.
         ``stable_rank`` is not ``None`` on an explicit ``'split_nb'``
-        request, and on an ``"auto"`` request that reached the stable-rank
+        request without ``force``, and on an ``"auto"`` request that reached the stable-rank
         check (p > 4, ``n_eff`` above 1000 at ``k=1`` without ``keep``, at
         least 250 otherwise, and p ≤ 100·n at ``k=1`` without ``keep``);
         ``None`` otherwise.
@@ -808,32 +818,39 @@ def pls1_confirmatory_test(
     ci : bool, default False
         If True, run an independent resampling pass after the test and fill
         ``result.ci`` (a ``ConfirmatoryCI``). ``ci`` is beta, not to be
-        trusted yet. It scales X and y once over all rows, as the held-out
-        tests do (not under ``pre_standardized``). Its ``holdout_corr`` half
-        split centres the training half with its own means and the held-out
-        half with the training means, as the held-out tests do. The β and
-        leverage resamples are centred with their own means too, except
-        under ``pre_standardized``, where they use X and y as given, as the
-        reference fit does.
+        trusted yet. Its β subsamples and ``holdout_corr`` half splits scale
+        X and y once over all rows, as the held-out tests do (not under
+        ``pre_standardized``). The half split centres the training half with
+        its own means and the held-out half with the training means, as the
+        held-out tests do, and each β subsample is centred with its own
+        means. Each leverage resample is standardized on its own (weighted)
+        means and SDs, as the full-data fit is. Under ``pre_standardized``
+        the β and leverage resamples use X and y as given, as the reference
+        fit does.
     n_boot : int | None, default None
         Number of subsampling resamples for the ``ci`` branch. ``None`` uses
-        the engine default, 1000. Inert when ``ci=False``.
+        the engine default, 1000. With ``ci=False``, passing it raises
+        ``invalid_argument``.
     m_rate : float | None, default None
         Subsample-size exponent for β; ``m = ceil(n ** m_rate)``.
         ``holdout_corr`` uses half splits and does not depend on it. ``None``
-        uses the engine default, 0.7. Inert when ``ci=False``.
+        uses the engine default, 0.7. With ``ci=False``, passing it raises
+        ``invalid_argument``.
     level : float | None, default None
-        Nominal CI level. ``None`` uses the engine default, 0.95. Inert when
-        ``ci=False``.
+        Nominal CI level. ``None`` uses the engine default, 0.95. With
+        ``ci=False``, passing it raises ``invalid_argument``.
     max_failure_rate : float | None, default None
         Maximum tolerable combined per-resample failure rate for the ``ci``
-        branch. ``None`` uses the engine default, 0.01. Inert when
-        ``ci=False``.
+        branch. ``None`` uses the engine default, 0.01. With ``ci=False``,
+        passing it raises ``invalid_argument``.
     max_skip_rate : float | None, default None
         Subsample-loop skip threshold for the ``ci`` branch (see
         docs/concepts/effective-sample-size.md). ``None`` uses the engine
         default, 0.01. The CI loop fails with ``PlsKitResamplingDegenerate``
-        if ``skipped / total > max_skip_rate``.
+        if ``skipped / total > max_skip_rate``, and also when no draw is left
+        after skips and failures, or every draw left has a NaN holdout
+        correlation, whatever the rate. With ``ci=False``,
+        passing it raises ``invalid_argument``.
     pre_standardized : bool, default False
         If True, X and y are assumed already zero-mean, unit-variance:
         ``'score'``, the reference fit and the β and leverage resamples of
@@ -854,8 +871,12 @@ def pls1_confirmatory_test(
         its entries, and every method runs from it: on
         ``gram_matrix(X, pre_standardized=flag)`` the result equals the call
         on ``X`` with ``pre_standardized=flag`` at the same seed, to
-        rounding. ``'score'`` reads the centred matrix, so there it equals
-        the call on ``X`` centred over all rows. ``pre_standardized`` is read
+        rounding. With ``pre_standardized=True`` this holds when ``X`` meets
+        the flag's contract (columns centred and scaled): on an ``X`` whose
+        columns are not centred the two forms can take different floor
+        decisions, so the number of components the inner fits keep and the
+        p-value can differ. ``'score'`` reads the centred matrix, so there it
+        equals the call on ``X`` centred over all rows. ``pre_standardized`` is read
         from the result (passing ``True`` raises ``invalid_argument``); with
         an array it says how ``X̃`` was scaled. ``weights``, ``ci=True`` and
         ``k`` above 10 raise ``invalid_argument``.
@@ -868,7 +889,7 @@ def pls1_confirmatory_test(
     return _call("pls1_confirmatory_test", X=X, y=y, k=k, test_method=test_method,
                  args=args, ci=ci, n_boot=n_boot, m_rate=m_rate, level=level,
                  max_failure_rate=max_failure_rate, pre_standardized=pre_standardized,
-                 seed=seed, verbose=verbose, weights=weights,
+                 seed=seed, weights=weights,
                  max_skip_rate=max_skip_rate, covariates=covariates,
                  null_y=null_y, gram=gram, n_features=n_features)
 
@@ -916,7 +937,6 @@ def pls1_find_k_optimal(
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    verbose: bool = False,
     weights: np.ndarray | None = None,
     covariates: np.ndarray | None = None,
 ) -> FindKOptimalResult:
@@ -942,7 +962,8 @@ def pls1_find_k_optimal(
         ``None`` (no diagnostic); ``'auto'`` is not accepted. Selection and test share data, so the
         resulting ``pvalues`` are a robustness check, not honest inference.
         A ``'split_nb'`` diagnostic the auto-gate flags runs ``'split_exact'``
-        instead; ``result.diagnostic`` says so and Python warns. Pass
+        instead; ``result.diagnostic`` says so and Python warns with
+        ``PlsKitRerouted``. Pass
         ``args={'force': True}`` to run ``'split_nb'`` anyway.
     args : dict | None
         Method-specific kwargs. Selector keys: ``n_folds``. Diagnostic
@@ -962,8 +983,6 @@ def pls1_find_k_optimal(
         used, as in ``pls1_find_k_sequence``.
     seed : int | None
         RNG seed.
-    verbose : bool, default False
-        Print progress to stderr.
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
@@ -979,7 +998,7 @@ def pls1_find_k_optimal(
     """
     return _call("pls1_find_k_optimal", X=X, y=y, k_max=k_max, selector=selector,
                  diagnostic=diagnostic, args=args, pre_standardized=pre_standardized,
-                 seed=seed, verbose=verbose, weights=weights, covariates=covariates)
+                 seed=seed, weights=weights, covariates=covariates)
 
 
 @_convert_errors
@@ -991,7 +1010,6 @@ def pls1_find_k_sequence(
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    verbose: bool = False,
     weights: np.ndarray | None = None,
     covariates: np.ndarray | None = None,
 ) -> FindKSequenceResult:
@@ -1024,8 +1042,8 @@ def pls1_find_k_sequence(
         ``'split_nb'`` request runs ``'split_exact'`` for every step and
         ``result.test_method`` says so.
     alpha : float | None, default None
-        Significance threshold for rejection. ``None`` uses the engine
-        default, 0.05.
+        Significance threshold for rejection, in ``(0, 1)``. ``None`` uses
+        the engine default, 0.05.
     args : dict | None
         Method-specific kwargs (e.g. ``{'n_splits': 32}``, or
         ``{'force': True}`` to run ``split_nb`` past the auto-gate;
@@ -1040,8 +1058,6 @@ def pls1_find_k_sequence(
         residual on the scale step 1 used, each part only centred.
     seed : int | None
         RNG seed.
-    verbose : bool, default False
-        Print progress to stderr.
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are normalized to mean 1 before use. See
@@ -1057,7 +1073,7 @@ def pls1_find_k_sequence(
     """
     return _call("pls1_find_k_sequence", X=X, y=y, k_max=k_max, test_method=test_method,
                  alpha=alpha, args=args, pre_standardized=pre_standardized, seed=seed,
-                 verbose=verbose, weights=weights, covariates=covariates)
+                 weights=weights, covariates=covariates)
 
 
 @_convert_errors
@@ -1117,7 +1133,6 @@ def spls1_find_keep_optimal(
     *,
     args: dict | None = None,
     seed: int | None = None,
-    verbose: bool = False,
     weights: np.ndarray | None = None,
     covariates: np.ndarray | None = None,
 ) -> FindKeepOptimalResult:
@@ -1137,7 +1152,7 @@ def spls1_find_keep_optimal(
         Fixed component count for every fit in the sweep.
     args : dict | None
         ``{'n_folds': int}`` (default 5).
-    seed, verbose, weights, covariates
+    seed, weights, covariates
         As on ``pls1_find_k_optimal``.
 
     Returns
@@ -1145,7 +1160,7 @@ def spls1_find_keep_optimal(
     FindKeepOptimalResult
     """
     return _call("spls1_find_keep_optimal", X=X, y=y, k=k, args=args, seed=seed,
-                 verbose=verbose, weights=weights, covariates=covariates)
+                 weights=weights, covariates=covariates)
 
 
 @_convert_errors
@@ -1157,7 +1172,6 @@ def spls1_find_k_optimal(
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    verbose: bool = False,
     weights: np.ndarray | None = None,
     covariates: np.ndarray | None = None,
 ) -> FindKOptimalResult:
@@ -1167,14 +1181,14 @@ def spls1_find_k_optimal(
 
     Note: ``selector='bic'`` reuses the dense complexity penalty (not a
     keep-aware sparse BIC) — it under-penalizes added components and biases
-    the selected k upward under sparsity. Deliberate v1 simplification.
+    the selected k upward under sparsity.
     BIC also counts each component as one degree of freedom; on wide X
     (p much larger than n) the effective degrees of freedom are much larger,
     so BIC tends to select ``k_max``, and ``'r2_se'`` is recommended there.
     """
     return _call("spls1_find_k_optimal", X=X, y=y, k_max=k_max, keep=keep,
                  selector=selector, diagnostic=diagnostic, args=args,
-                 pre_standardized=pre_standardized, seed=seed, verbose=verbose,
+                 pre_standardized=pre_standardized, seed=seed,
                  weights=weights, covariates=covariates)
 
 
@@ -1187,7 +1201,6 @@ def spls1_find_k_sequence(
     args: dict | None = None,
     pre_standardized: bool = False,
     seed: int | None = None,
-    verbose: bool = False,
     weights: np.ndarray | None = None,
     covariates: np.ndarray | None = None,
 ) -> FindKSequenceResult:
@@ -1198,7 +1211,7 @@ def spls1_find_k_sequence(
     """
     return _call("spls1_find_k_sequence", X=X, y=y, k_max=k_max, keep=keep,
                  test_method=test_method, alpha=alpha, args=args,
-                 pre_standardized=pre_standardized, seed=seed, verbose=verbose,
+                 pre_standardized=pre_standardized, seed=seed,
                  weights=weights, covariates=covariates)
 
 
@@ -1247,7 +1260,7 @@ def rotate(
     -------
     FactorsResult | PLS3Result | RotateResult
         The type follows the first argument. A sparse `PLS3Result` warns
-        that rotation spreads its zeros.
+        with `PlsKitRotatedSparse` that rotation spreads its zeros.
     """
     return _call("rotate", model_or_W=model_or_W, X=X, method=method, L=L,
                  args=args, pre_standardized=pre_standardized, covariates=covariates)
@@ -1427,7 +1440,6 @@ def pls1_perm_null(
     return_perm_matrix: bool = False,
     pre_standardized: bool = False,
     seed: int | None = None,
-    verbose: bool = False,
     weights: np.ndarray | None = None,
     covariates: np.ndarray | None = None,
 ) -> PermNullResult:
@@ -1459,8 +1471,6 @@ def pls1_perm_null(
         unit-variance.
     seed : int | None
         RNG seed for reproducibility.
-    verbose : bool, default False
-        Reserved for future progress reporting.
     weights : np.ndarray | None, shape (n,), default None
         Non-negative observation weights. ``None`` means uniform weights.
         Weights are NOT permuted — `w[i]` stays tied to row `i` regardless
@@ -1472,7 +1482,7 @@ def pls1_perm_null(
     """
     return _call("pls1_perm_null", X=X, y=y, k=k, n_perm=n_perm,
                  return_perm_matrix=return_perm_matrix,
-                 pre_standardized=pre_standardized, seed=seed, verbose=verbose,
+                 pre_standardized=pre_standardized, seed=seed,
                  weights=weights, covariates=covariates)
 
 
@@ -1537,7 +1547,11 @@ def gram_matrix(X: np.ndarray, *, pre_standardized: bool = False) -> GramMatrixR
     divided by its column standard deviations (population, as
     `preprocess` scales them), or only centred when ``pre_standardized``.
     These are the bits the held-out tests compute from `X` without
-    weights, so the matrix can be computed once and reused across calls.
+    weights, except under ``pre_standardized`` when the largest entry of
+    `X` is outside ``2**-20 .. 2**20``: the tests then divide `X` by a
+    power of two near that entry, and their matrix differs from this one
+    by a power of four. The matrix can be computed once and reused across
+    calls.
 
     Parameters
     ----------
@@ -1548,7 +1562,12 @@ def gram_matrix(X: np.ndarray, *, pre_standardized: bool = False) -> GramMatrixR
     pre_standardized : bool, default False
         If True, `X` is read as given and only centred. An `X` whose
         largest entry is outside ``2**-256 .. 2**256`` is first divided by
-        one power of two near that entry, as the held-out tests divide it.
+        one power of two near that entry. The tests and `pls1_perm_alpha`
+        that take the result divide it by a power of four internally when
+        its largest diagonal entry (after centring) is outside
+        ``2**-40 .. 2**40``, where
+        their absolute floors would cut real components, and map their
+        outputs back to the scale of the matrix given.
 
     Returns
     -------
@@ -1592,6 +1611,9 @@ def gram_matrix_blocks(
     The result equals ``gram_matrix(X)`` to rounding, not bit for bit.
     Under ``pre_standardized`` each block is scaled on its own, so data
     outside ``2**-256 .. 2**256`` must use `gram_matrix` on the whole ``X``.
+    The calls that take the result rescale it themselves, by a power of
+    four, when its scale would reach their absolute floors, and map their
+    outputs back.
     """
     g, p = None, 0
     for block in blocks:

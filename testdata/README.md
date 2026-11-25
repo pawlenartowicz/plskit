@@ -7,7 +7,7 @@ from the Rust core, consumed by every wrapper's parity tests.
 
 - `manifest.json` — manifest v2: `schema_version`, `producing_version`,
   and one entry per case with `inputs` / `outputs` / `kwargs` / `hashes`.
-- `inputs/<name>.npz` — input arrays (`X`, `y`, …). Immutable per fixture id.
+- `inputs/<name>.npz` — input arrays (`X`, `y`, …). An input file never changes; a fixture may move to a new input file, with the reason in the change.
 - `outputs/<function>/<name>.npz` — frozen outputs from the Rust core.
 - `schema.json` — JSON-Schema v2 for the manifest.
 
@@ -34,8 +34,9 @@ committed value, NaN equal to NaN, an infinity equal only to itself, integer
 and string entries exactly equal. Otherwise the committed bytes stay. A case's
 input goes in with its output: when the output moved, the staged input
 replaces the committed one even if it alone is within tolerance, so no output
-is committed next to an input it was not computed from. The generator prints
-every file it added or replaced.
+is committed next to an input it was not computed from. A committed input
+that is not equivalent to the staged one fails the whole settle, before any
+file is written. The generator prints every file it added or replaced.
 
 This makes regeneration host-independent. The LLVM backend, FMA contraction
 and libm differ between hosts, so a raw regeneration on `aarch64-apple-darwin`
@@ -74,6 +75,8 @@ drift by at most one ulp (e.g. `bic_scores` around 274).
 `rtol=1e-14` (about 45 machine epsilons, 68 ulps at 6126) absorbs that with
 headroom and is still four orders of magnitude below the smallest change a
 fixture exists to catch.
+
+The p-value fields (`pvalue`, `pvalues` and `pvalues_by_k__values`) must also match to `1e-10` relative: `|actual - expected| <= 1e-10 * |expected|`, on top of the default rule. So an expected 0 matches only an exact 0, and NaN still equals NaN. A p-value can be tiny (some fixtures hold p below `1e-20`), and under an absolute tolerance alone a tiny p passes any wrong value, including 0 or a value 100 times smaller. The relative bound is tighter than the default rule for every array p-value and for any 0-D p-value below 0.01. The list of fields and the `1e-10` are `P_FIELDS` and `P_RTOL` in `plskit-testdata-gen/src/settle.rs`.
 
 Every wrapper's corpus test applies these numbers (`plskit-rs/tests/corpus.rs`,
 `plskit-py/tests/test_corpus.py`,

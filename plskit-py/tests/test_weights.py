@@ -17,7 +17,7 @@ _WEIGHT_ERRORS = {
     # case: (weights for n = 40, exception type, code, reason or None)
     "negative": (np.r_[-0.1, np.ones(39)], plskit.PlsKitInvalidWeights,
                  "invalid_weights", "negative"),
-    # FitOpts::check_n_eff, which the seam sets through FitOpts::default().
+    # pls1_fit always runs the n_eff check, so the seam raises it.
     "insufficient_effective_n": (np.r_[1.0, np.full(39, 1e-6)],
                                  plskit.PlsKitInvalidWeights,
                                  "invalid_weights", "insufficient_effective_n"),
@@ -103,10 +103,13 @@ def test_confirmatory_ci_skip_rate_guard_fires():
 
 
 def test_confirmatory_ci_max_skip_rate_one_returns_truncated():
-    X, y, w = _pathological()
+    # Ten rows hold almost all the weight: about 10% of subsamples are
+    # skipped, which counts toward max_skip_rate only, not max_failure_rate.
+    X, y, _ = _pathological()
+    w = np.full(60, 1e-8)
+    w[:10] = 1.0
     r = plskit.pls1_confirmatory_test(
-        X, y, k=3, test_method="raw_perm", args={"n_perm": 200},
-        ci=True, weights=w, n_boot=500, seed=0,
-        max_skip_rate=1.0, max_failure_rate=1.0,
+        X, y, k=1, test_method="raw_perm", args={"n_perm": 200},
+        ci=True, weights=w, n_boot=1000, seed=0, max_skip_rate=1.0,
     )
     assert r.ci.n_boot_finite < r.ci.n_boot

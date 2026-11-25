@@ -37,93 +37,17 @@ mod multi_k;
 pub(crate) use multi_k::nspace_blocks_built;
 pub(crate) use multi_k::{
     K_DUAL_MAX, NSPACE_BATCH, NspaceFold, NspaceGram, NspaceOutcome, NspaceSplit,
-    fold_column_nspace, nspace_eligible_perm_null, nspace_eligible_raw_perm,
-    nspace_eligible_split_exact, nspace_eligible_split_nb, nspace_perm_row, pls1_nspace_kernel,
-    split_columns_r_nspace,
+    fold_column_nspace, nspace_allowed_perm_null, nspace_allowed_raw_perm, nspace_allowed_split,
+    nspace_perm_row, nspace_run_bytes, pls1_nspace_kernel, split_columns_r_nspace,
 };
-
-/// Hard cap on the training-set size the dual route will accept.
-///
-/// The routes build the all-row `G` (`n²` f64s, about 512 MB at a split
-/// route's `n ≈ 2·4000`, 200 MB with 5 folds), then one training block
-/// `K_A` and `M` per running unit: folds (`pls1_cv_r2_columns`) and splits
-/// (`pls3_split_zbars_columns`) run in batches of `resample::map_units`.
-/// The flop rule below already excludes training sets that large,
-/// so this should never bind; it bounds `G` specifically, so getting the
-/// flop rule wrong should make `G` degrade to "slower", never to an
-/// out-of-memory kill. It does not bound `run_raw_perm`'s `n × (B + 1)`
-/// outcome buffer `y_mat` in `signal_test.rs`, which scales with `B`
-/// unchecked.
-pub(crate) const DUAL_ROUTE_MAX_N_TR: usize = 4000;
-
-/// Should this loop take the dual route?
-///
-/// The cost rule of a Gram route that builds its Gram matrix per unit:
-/// `pls1_perm_null`'s n-space route (`multi_k::nspace_eligible_perm_null`),
-/// whose one unit is the call and whose `G = X̃X̃'` is a full product of the
-/// standardized block. The routes that read their blocks from one all-row
-/// Gram matrix per call decide by that cost instead ([`one_gram_cost`]).
-///
-/// `n_tr` is the block's row count, `p` the feature count,
-/// `n_replicates` the number of outcome columns amortizing one precompute
-/// (`B` at `pls1_perm_null`, whose observed fit stays primal), and `q` the
-/// per-replicate multiplicity: how many `n_tr × p` passes a primal
-/// replicate makes, and how many `n_tr × n_tr` products a Gram replicate
-/// makes, the component count `k`, whose `G` precompute does not grow with
-/// `k`. The rule is conservative: a primal PLS1 replicate makes about
-/// `2k + 1` passes over `X̃`, not `k`.
-///
-/// # The rule
-/// Flop counts for one unit are `B·n_tr·p·q` primal versus
-/// `n_tr²·p + B·n_tr²·q` dual, giving
-/// `speedup ≈ (1/p + 1/(B·q))⁻¹ / n_tr`, so the route pays exactly when
-///
-/// ```text
-/// n_tr < (1/p + 1/(B·q))⁻¹
-/// ```
-///
-/// Rearranged to `n_tr·(B·q + p) < p·B·q` to avoid dividing. The numerator
-/// is a *harmonic* combination of `p` and `B·q`, not their minimum: it falls
-/// to half the min when the two are comparable, so rounding the rule up to
-/// `min(p, B·q)` would admit a band of inputs that are slower, not faster.
-/// Both halves have to hold and they fail for different reasons:
-/// `n_tr ≥ p` means the Gram is bigger than the data it came from, and
-/// `n_tr ≥ B·q` means there are not enough replicates to amortize the
-/// precompute.
-///
-/// These are flop counts, not measurements. The primal inner operation is
-/// memory-bandwidth bound at small `q` while the Gram is a high-intensity
-/// BLAS-3 call, so the measured crossover sits somewhere other than this
-/// one, which is why the rule is used as a conservative guard and not as a
-/// tuned threshold.
-#[allow(clippy::many_single_char_names)]
-pub(crate) fn use_dual_route(n_tr: usize, p: usize, n_replicates: usize, q: usize) -> bool {
-    // `n_tr = 0` would satisfy the rule below for any positive `p` and
-    // `B·q`. A zero `p`, `n_replicates` or `q` fails it on its own.
-    if n_tr == 0 || n_tr > DUAL_ROUTE_MAX_N_TR {
-        return false;
-    }
-    let bq = n_replicates.saturating_mul(q);
-    // f64 rather than integer arithmetic: `n_tr·(bq + p)` and `p·bq` stay
-    // inside f64's exact-integer range (2^53) for the `p`, `n_replicates`
-    // and `q` this crate's call sites actually pass — 1e11 at the largest
-    // test case — so in practice the comparison is exact. Nothing here
-    // enforces that bound, but a rounding past it is harmless: it can only
-    // pick the slower of two routes the equivalence tests already require to
-    // agree numerically.
-    #[allow(clippy::cast_precision_loss)]
-    let (n_f, p_f, bq_f) = (n_tr as f64, p as f64, bq as f64);
-    n_f * (bq_f + p_f) < p_f * bq_f
-}
 
 /// Multiply-adds of the one all-row Gram matrix a route reads its per-unit
 /// blocks from (`HeldOutGram::from_x`, a symmetric product): `n²·p/2`, or
 /// none when the call already holds it (`gram_held`: the `split_nb` gate's,
 /// which `auto` and `split_nb` pass on). The eligibility rules of those
 /// routes add their per-unit and per-replicate work and compare the sum
-/// with the primal route's work, both in multiply-adds. Like
-/// [`use_dual_route`] they are evaluated in f64, where a rounding can only
-/// pick the slower of two routes that agree.
+/// with the primal route's work, both in multiply-adds, evaluated in f64,
+/// where a rounding can only pick the slower of two routes that agree.
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn one_gram_cost(n: usize, p: usize, gram_held: bool) -> f64 {
     if gram_held {
@@ -133,210 +57,76 @@ pub(crate) fn one_gram_cost(n: usize, p: usize, gram_held: bool) -> f64 {
     }
 }
 
-use faer::{Col, MatRef};
-
-/// Multiple of its rounding bound by which `split_exact`'s tall moment arm
-/// at k ≥ 2 (`signal_test::split_column_r_gram_p_moments`) requires its
-/// centred test-half scores, and its constant tests, to clear zero before
-/// it keeps its own correlation instead of the test-row arm's.
-pub(crate) const RESOLVE_BAND: f64 = 4.0;
-
-/// Conditioning cap of the tall moment arms (`signal_test::moments_resolved`):
-/// a column keeps the correlation formed from the test half's moments only
-/// when its centred test-half scores have norm `t_c ≥ SCORE_BAND·F_te·‖coef‖`,
-/// that is `κ = F_te·‖coef‖/t_c ≤ 1/SCORE_BAND`; otherwise the test-row arm
-/// scores it. The two arms' `r` differ by about `η·κ`, with `η` below
-/// `1e-16` as measured by
-/// `signal_test::tests::moment_gate_sends_ill_conditioned_scores_to_the_test_rows`,
-/// so past the cap `r` moves by at most about `1e-13`, inside the `1e-12`
-/// bit-near tolerance.
-pub(crate) const SCORE_BAND: f64 = 1e-3;
-
-/// Pooled K-fold CV R² for PLS1 at K = 1, for every column of `y_mat` at
-/// once, through the Gram route.
-///
-/// # The identity this function exploits
-/// At `K = 1` NIPALS gives `w = X̃'z/‖X̃'z‖`, `t = X̃w`, `p = X̃'t/(t't)`, so
-/// `p'w = t't/(t't) = 1` *exactly* and `pls1_coef_at_k`'s
-/// `coef = W(P'W)⁻¹Q` collapses to `coef = w·q`. Writing `G = X̃_tr X̃_tr'`
-/// and `M = X̃_te X̃_tr'` and substituting:
-///
-/// ```text
-/// coef = X̃_tr'z · c   with   c = (z'G z) / (z'G² z)
-/// ŷ_te = X̃_te coef   = c · M z
-/// ```
-///
-/// Both quadratic forms come from two `O(n_tr²)` matrix-vector products —
-/// `G²z` as `G(Gz)`, never forming `G²`. So CV R², which is *not* invariant
-/// to the scale of the coefficient, is reachable without refits: unlike
-/// `split_perm_nr_zbars`' correlation argument, the scalar itself is needed,
-/// and it too is a dual quantity. `K ≥ 2` breaks this closed form, because
-/// deflation makes component 2's weights depend on component 1's
-/// y-dependent scores. It does not break the Gram route itself: `raw_perm`
-/// sends dense, unweighted `K ≥ 2` input (up to `multi_k::K_DUAL_MAX`) to
-/// the n-space kernel (`multi_k::pls1_nspace_kernel`) instead.
-///
-/// # Truncation
-/// `fit::pls1_kernel` drops the component, and the fold then predicts zero,
-/// when `‖X̃'z‖` falls under
-/// `max(1e-14, fit::w_rel_floor(n_tr, p, ‖X̃_tr‖_F, ‖z‖))` or `t't` under
-/// `1e-14`. Here `‖X̃'z‖ = √(z'Gz)` and `t't = (z'G²z)/(z'Gz)`, with `z`
-/// from the same `standardize1` call as on the primal route and
-/// `‖X̃_tr‖_F = √trace(G)`, equal to the primal route's `norm_l2` to
-/// rounding, and the same exits apply. `z'Gz` is formed from a rounded `G`
-/// and resolves `‖X̃'z‖` only to about `√(p·ε)·‖X̃_tr‖_F·‖z‖`, far above the
-/// floor, so on a training `y` orthogonal to `X̃_tr` up to rounding this
-/// route can keep a component (`c` then divides one rounding residue by
-/// another) where the primal predicts zero. A constant training `y` gives
-/// `z = 0` and a zero prediction on both routes.
-///
-/// # What is NOT hoisted
-/// `y` is standardized with each fold's own training moments and
-/// `signal_test::pooled_cv_r2_columns` pools `ss_res` / `ss_tot` across
-/// folds, so the per-fold `y` scale does not cancel out of the pooled ratio.
-/// That standardization is therefore recomputed per fold *per column*:
-/// `O(n)` each, free next to the Gram products, and wrong if hoisted.
-///
-/// # Scope
-/// Dense, unweighted, `K = 1`. Those are not checked: the parameters that
-/// would make them otherwise are simply absent from the signature, so an
-/// ineligible call cannot be written. `run_raw_perm` owns the routing
-/// decision and passes the call's all-row Gram matrix `g`
-/// (`signal_test::block_gram`); each fold's `G` and `M` are its blocks
-/// (`HeldOutGram::part_blocks`). Folds run in batches of
-/// `resample::map_units`, each counted as its `G` and `M`; the result does
-/// not depend on the batch size.
-///
-/// # Shapes
-/// - `g`: the all-row Gram matrix of `X̃` (`n × n`), X centred over all
-///   rows and divided by the one column scale over all rows
-///   (`linalg::held_out_scale`)
-/// - `y_mat`: `(n, n_cols)` raw outcomes; column 0 is the observed `y`
-/// - returns: `(n_cols,)` pooled CV R², one per column
-///
-/// # Errors
-/// `NonFiniteInput` when a fold's standardized training y of column 0 is
-/// not finite (a finite y near `±f64::MAX` can overflow in `y − mean`). A
-/// null column that fails the same way is NaN instead, as in
-/// `signal_test::pooled_cv_r2_columns` (change together).
-///
-/// # Panics
-/// Never (all indexing is over caller-supplied fold index vectors).
-#[allow(clippy::many_single_char_names)]
-#[allow(clippy::similar_names)]
-pub(crate) fn pls1_cv_r2_columns(
-    g: &crate::held_out_gram::HeldOutGram,
-    y_mat: MatRef<'_, f64>,
-    folds: &[Vec<usize>],
-) -> crate::error::PlsKitResult<Vec<f64>> {
-    use crate::fit::NIPALS_ABS_FLOOR;
-    use crate::linalg::standardize1;
-
-    type Contrib = crate::error::PlsKitResult<(f64, f64)>;
-
-    let n_cols = y_mat.ncols();
-    let p = g.n_features();
-    let train_rows = |fi: usize| crate::signal_test::fold_train_rows(folds, fi);
-
-    // One fold's contribution for every column. Nothing the size of X is
-    // written.
-    let fold_columns = |fi: usize| -> Vec<Contrib> {
-        let val_idx = folds[fi].as_slice();
-        let train_idx = train_rows(fi);
-        let n_tr = train_idx.len();
-        let n_val = val_idx.len();
-        // Built once per fold and reused by every column. G is n_tr × n_tr,
-        // M is n_val × n_tr, both blocks of the all-row Gram matrix with the
-        // halves centred by the training means; neither carries p.
-        let (gk, m) = g.part_blocks(&train_idx, val_idx, None);
-        let x_fro = (0..n_tr).map(|i| gk[(i, i)]).sum::<f64>().max(0.0).sqrt();
-
-        crate::resample::map_indexed(n_cols, |col| {
-            // Column `col` on the training rows, standardized with its own
-            // moments.
-            let y_tr = Col::<f64>::from_fn(n_tr, |i| y_mat[(train_idx[i], col)]);
-            let (z, y_mean, y_scale) = standardize1(y_tr.as_ref());
-            // The primal fold fit's y-side check (`check_fit_y_and_k` in
-            // `signal_test::cv_fold_contribution`; change together).
-            crate::fit::check_finite_col(z.as_ref())?;
-            let z_norm = z.norm_l2();
-
-            // Seq inside the per-column worker: outer Rayon owns the pool.
-            let seq = faer::Par::Seq;
-            let g1 = crate::linalg::mat_vec(gk.as_ref(), z.as_ref(), seq); // G z
-            let g2 = crate::linalg::mat_vec(gk.as_ref(), g1.as_ref(), seq); // G² z, as G(Gz)
-            let num: f64 = (0..n_tr).map(|i| z[i] * g1[i]).sum(); // z'Gz
-            let den: f64 = (0..n_tr).map(|i| z[i] * g2[i]).sum(); // z'G²z
-
-            // fit::pls1_kernel's exits (change together): a truncated K = 1
-            // fit has coef = 0, hence a zero prediction.
-            let w_norm = num.max(0.0).sqrt();
-            let tt = if num > 0.0 { den / num } else { 0.0 };
-            let w_floor = crate::fit::w_rel_floor(n_tr, p, x_fro, z_norm);
-            let stops = w_norm < NIPALS_ABS_FLOOR.max(w_floor) || tt < NIPALS_ABS_FLOOR;
-            let y_pred: Col<f64> = if stops {
-                Col::<f64>::zeros(n_val)
-            } else {
-                let c = num / den;
-                let mz = crate::linalg::mat_vec(m.as_ref(), z.as_ref(), seq);
-                Col::<f64>::from_fn(n_val, |i| c * mz[i])
-            };
-            // `(ss_res, ss_tot)` on the validation rows, y on the training
-            // fold's scale (`signal_test::cv_fold_ss`; change together).
-            let ys_val =
-                Col::<f64>::from_fn(n_val, |i| (y_mat[(val_idx[i], col)] - y_mean) / y_scale);
-            #[allow(clippy::cast_precision_loss)]
-            let mean_val: f64 = (0..n_val).map(|i| ys_val[i]).sum::<f64>() / n_val as f64;
-            let res: f64 = (0..n_val).map(|i| (y_pred[i] - ys_val[i]).powi(2)).sum();
-            let tot: f64 = (0..n_val).map(|i| (ys_val[i] - mean_val).powi(2)).sum();
-            Ok((res, tot))
-        })
-    };
-
-    // Folds in batches of `resample::map_units`, each counted as `G`
-    // (`n_tr × n_tr`) and `M` (`n_val × n_tr`) at the largest training set;
-    // the columns of a fold map in parallel.
-    let n = y_mat.nrows();
-    let n_tr_max = n - folds.iter().map(Vec::len).min().unwrap_or(0);
-    let gram_unit = crate::resample::fold_blocks_bytes(n, folds, n_tr_max);
-    let rows: Vec<Vec<Contrib>> = crate::resample::map_units(folds.len(), gram_unit, fold_columns);
-
-    // Fold order, from `0.0`: a failed fit of column 0 is returned (the
-    // first in fold order); a failed fit of another column makes it NaN,
-    // and its contributions from the other folds are dropped.
-    let mut ss_res = vec![0.0_f64; n_cols];
-    let mut ss_tot = vec![0.0_f64; n_cols];
-    let mut failed = vec![false; n_cols];
-    for row in rows {
-        for (col, r) in row.into_iter().enumerate() {
-            if failed[col] {
-                continue;
-            }
-            match r {
-                Ok((res, tot)) => {
-                    ss_res[col] += res;
-                    ss_tot[col] += tot;
-                }
-                Err(e) if col == 0 => return Err(e),
-                Err(_) => failed[col] = true,
-            }
-        }
-    }
-
-    // Pooled ratio, matching signal_test::pooled_cv_r2_columns's final
-    // expression exactly.
-    Ok((0..n_cols)
-        .map(|col| {
-            if failed[col] {
-                f64::NAN
-            } else if ss_tot[col] > 0.0 {
-                1.0 - ss_res[col] / ss_tot[col]
-            } else {
-                0.0
-            }
-        })
-        .collect())
+/// Multiply-adds of an n-space route: `gram` for its Gram matrix
+/// ([`one_gram_cost`], or `n²·p` for `pls1_perm_null`'s block built from
+/// `X̃`), then per unit and outcome column `passes` products with the
+/// unit's `n_tr × n_tr` block and one with its `n_val × n_tr` map.
+#[allow(clippy::cast_precision_loss, clippy::many_single_char_names)]
+pub(crate) fn nspace_work(
+    gram: f64,
+    units: usize,
+    n_cols: usize,
+    passes: usize,
+    n_tr: usize,
+    n_val: usize,
+) -> f64 {
+    let (u, c, q) = (units as f64, n_cols as f64, passes as f64);
+    let (t, v) = (n_tr as f64, n_val as f64);
+    gram + u * c * (q * t * t + v * t)
 }
+
+/// Multiply-adds of the primal refit over `units` units of `n_cols` outcome
+/// columns at `k` components, as the n-space rules count them: per column
+/// and unit `X̃'z`, a score and a loading pass per component (the last
+/// loading not counted) on the `n_tr` training rows, and `X̃_val·coef` on the
+/// `n_val` others, `p` columns each.
+#[allow(clippy::cast_precision_loss, clippy::many_single_char_names)]
+fn primal_refit_work(
+    units: usize,
+    n_cols: usize,
+    k: usize,
+    n_tr: usize,
+    n_val: usize,
+    p: usize,
+) -> f64 {
+    let (u, c, kf) = (units as f64, n_cols as f64, k as f64);
+    let (t, v) = (n_tr as f64, n_val as f64);
+    u * c * (2.0 * kf * t + v) * p as f64
+}
+
+/// [`primal_refit_work`] of `raw_perm`'s folds: `n_folds` folds of
+/// `n_perm + 1` columns, the largest training fold `n − ⌊n/n_folds⌋`.
+pub(crate) fn primal_work_raw_perm(
+    n: usize,
+    n_folds: usize,
+    p: usize,
+    n_perm: usize,
+    k: usize,
+) -> f64 {
+    let n_tr = n - n / n_folds;
+    primal_refit_work(n_folds, n_perm.saturating_add(1), k, n_tr, n - n_tr, p)
+}
+
+/// [`primal_refit_work`] of `split_exact`'s refit route: `n_splits` splits
+/// of `n_perm + 1` columns, the halves of `resample::split_sizes(n, k)`.
+pub(crate) fn primal_work_split_exact(
+    n: usize,
+    p: usize,
+    n_perm: usize,
+    n_splits: usize,
+    k: usize,
+) -> f64 {
+    let (n_train, n_test) = crate::resample::split_sizes(n, k);
+    primal_refit_work(n_splits, n_perm.saturating_add(1), k, n_train, n_test, p)
+}
+
+/// `split_nb`'s refit on halves: `split_exact`'s with the one observed
+/// column per split.
+pub(crate) fn primal_work_split_nb(n: usize, p: usize, n_splits: usize, k: usize) -> f64 {
+    primal_work_split_exact(n, p, 0, n_splits, k)
+}
+
+use faer::Col;
 
 /// Per-column z̄ for the PLS3 `split_exact` statistic through the Gram
 /// route. Returns `cols.len()` values; column 0 is the observed Y and
@@ -504,7 +294,7 @@ pub(crate) fn pls1_cv_r2_columns(
 /// that configuration.
 ///
 /// # Preconditions
-/// `q >= 1`. Not checked here: `pls3_signal_test::dual_route_eligible`
+/// `q >= 1`. Not checked here: `pls3_signal_test::gram_route_allowed`
 /// refuses `q == 0` before this function is ever called. `max_iter >= 1`
 /// whenever `keep_y` is `Some`, which `pls3_confirmatory_test` validates
 /// before either route runs.
@@ -513,13 +303,18 @@ pub(crate) fn pls1_cv_r2_columns(
 /// - `all`: `HeldOutGram` (`n × n`) of X on its all-row scale, unweighted
 /// - `cols`: the `(n, q)` raw outcome `cols.y` and its null columns
 /// - `y_scale`: `(q,)`
-/// - returns: `(cols.len(),)`
+/// - returns: `(cols.len(),)`, and the number of failed splits (column 0's
+///   `r` exactly 0, `signal_test::zbars_from_rows`)
+///
+/// # Errors
+/// `MemoryBudget` when one split does not fit the budget beside the
+/// `call_bytes` the caller holds (the all-row Gram matrix it built or holds).
 ///
 /// # Panics
 /// Never (indexing is over the caller-supplied splits and the row
 /// permutations `cols` draws from its own seeds).
 #[allow(clippy::many_single_char_names)]
-#[allow(clippy::similar_names)]
+#[allow(clippy::similar_names, clippy::too_many_arguments)]
 pub(crate) fn pls3_split_zbars_columns(
     all: &crate::held_out_gram::HeldOutGram,
     cols: &crate::resample::Columns<'_>,
@@ -528,22 +323,30 @@ pub(crate) fn pls3_split_zbars_columns(
     keep_y: Option<usize>,
     max_iter: usize,
     tol: f64,
-) -> Vec<f64> {
-    // Splits in batches of `resample::map_units`, each counted as `G`
-    // (`n_tr × n_tr`) and `M` (`n_te × n_tr`); the columns of a split map
-    // in parallel. Nothing the size of X is written. Every split has the
+    call_bytes: usize,
+) -> crate::error::PlsKitResult<(Vec<f64>, usize)> {
+    // Splits in batches of `resample::map_units`, each counted by
+    // `pls3_signal_test::gram_unit_bytes`; the columns of a split map in
+    // parallel. Nothing the size of X is written. Every split has the
     // same training size (the split sizes depend on `n` and `k` only), so
     // the first split's stands for all.
-    let n_tr = splits.first().map_or(0, |sp| sp.tr.len());
-    let gram_unit = crate::signal_test::split_blocks_bytes(splits, n_tr);
-    // ±0.9999 pre-atanh clamp mirrored from `signal_test::nb_test` (change
-    // together): keeps the statistic identical to the primal route's and z̄
-    // finite at |r| = 1.
-    crate::signal_test::zbars_over_splits(splits, cols.len(), gram_unit, |sp| {
-        pls3_split_columns_r(all, cols, sp, y_scale, keep_y, max_iter, tol)
-            .into_iter()
-            .map(|r| r.clamp(-0.9999, 0.9999).atanh())
-            .collect()
+    let (n_tr, n_te) = splits
+        .first()
+        .map_or((0, 0), |sp| (sp.tr.len(), sp.te.len()));
+    let gram_unit = crate::pls3_signal_test::gram_unit_bytes(
+        n_tr,
+        n_te,
+        cols.y.ncols(),
+        cols.len(),
+        rayon::current_num_threads(),
+    );
+    crate::signal_test::zbars_over_splits(splits, cols.len(), 0, call_bytes, gram_unit, |sp| {
+        Ok(
+            pls3_split_columns_r(all, cols, sp, y_scale, keep_y, max_iter, tol)
+                .into_iter()
+                .map(crate::signal_test::fisher_z)
+                .collect(),
+        )
     })
 }
 
@@ -606,8 +409,7 @@ pub(crate) fn pls3_split_columns_r(
             return 0.0;
         }
 
-        // Lower triangle pinned for byte-parity stability, matching
-        // `signal_test::eigenvalues_symmetric`. faer returns
+        // Lower triangle pinned for byte-parity stability. faer returns
         // eigenvalues ascending, so the leading pair is the last.
         let Ok((lambda, eig_u)) = crate::linalg::self_adjoint_eigen(c.as_ref(), seq) else {
             return 0.0;
@@ -739,11 +541,12 @@ mod tests {
         x_cross[(7, 0)] = -1e300;
         let ones = Col::<f64>::from_fn(3, |_| 1.0);
         let ys = crate::linalg::held_out_scale(y.as_ref(), None, false);
-        let seeds: Vec<u64> = (0..5).collect();
         let cols = crate::resample::Columns {
             y: y.as_ref(),
-            seeds: &seeds,
+            seed: 0,
+            n_perm: 5,
             null_map: None,
+            w: None,
         };
         for (label, x, k_a_finite) in [("K_A and M", &x_both, false), ("M", &x_cross, true)] {
             let g = crate::held_out_gram::HeldOutGram::from_x(x.as_ref(), None, ones.as_ref());
@@ -760,7 +563,10 @@ mod tests {
                         keep_y,
                         fit.max_iter,
                         fit.tol,
+                        0,
                     )
+                    .unwrap()
+                    .0
                 });
                 assert_eq!(log.len(), 1, "{label} {keep_y:?}: one pass, {log:?}");
                 assert!(
@@ -779,7 +585,7 @@ mod tests {
     fn pls3_split_exact_on_the_gram_route_stays_finite_when_x_overflows() {
         let (n, p, q, n_perm) = (40, 200, 3, 19);
         assert!(
-            crate::pls3_signal_test::dual_route_eligible(None, n, p, q, n_perm, 6, false),
+            crate::pls3_signal_test::split_exact_takes_gram(None, n, p, q, n_perm, 6, false),
             "premise: Gram route"
         );
         let (x0, _) = crate::test_support::signal_data(n, p, 11);
@@ -819,81 +625,6 @@ mod tests {
         }
     }
 
-    // Worked cases spanning the shapes the rule has to separate.
-    // `n_replicates` is the third argument throughout — the runners pass
-    // `B + 1`, so 1000 here stands for B = 1000, a difference far inside the
-    // rule's resolution. These are the rule's contract;
-    // if a future edit moves any of them the rule changed meaning, not just
-    // its constants.
-
-    #[test]
-    fn wide_shapes_take_the_dual_route() {
-        // PLS3 at fMRI scale: n_tr = 50, p = 300_000, q = 10 ⇒ est. ~200× speedup.
-        assert!(use_dual_route(50, 300_000, 1000, 10));
-        // PLS1, small n and wide p: n_tr = 80, p = 300_000, q = 1 ⇒ est. ~12× speedup.
-        assert!(use_dual_route(80, 300_000, 1000, 1));
-    }
-
-    #[test]
-    fn memory_cap_overrides_a_favourable_flop_count() {
-        // n_tr = 4001, p = 1e6, B·q = 1e5:
-        //   4001 · (1e5 + 1e6) = 4.40e9  <  1e6 · 1e5 = 1e11
-        // so the flop rule alone would take the dual route. The cap is what
-        // stops it. The premise is asserted so a future edit to the rule
-        // cannot quietly make this test vacuous.
-        let n_tr = DUAL_ROUTE_MAX_N_TR + 1;
-        let p = 1_000_000_usize;
-        let n_rep = 100_000_usize;
-        let flop_rule_says_yes = (n_tr as f64) * ((n_rep + p) as f64) < (p as f64) * (n_rep as f64);
-        assert!(
-            flop_rule_says_yes,
-            "test premise: flop rule must favour dual here"
-        );
-        assert!(!use_dual_route(n_tr, p, n_rep, 1));
-        // One row under the cap, the same input routes dual.
-        assert!(use_dual_route(DUAL_ROUTE_MAX_N_TR, p, n_rep, 1));
-    }
-
-    #[test]
-    fn too_few_replicates_stays_primal() {
-        // `n_tr ≥ n_replicates·q` means the precompute cannot be amortized,
-        // and it sinks the route on its own even when p is enormous:
-        //   1000 · (2 + 1e7) = 1.0e10  >  1e7 · 2 = 2e7.
-        // n_tr is well under the memory cap, so the cap is not what decides.
-        assert!(!use_dual_route(1000, 10_000_000, 2, 1));
-    }
-
-    #[test]
-    fn gram_bigger_than_the_data_stays_primal() {
-        // `n_tr ≥ p` means the Gram is bigger than the matrix it came from,
-        // and it sinks the route on its own even with a huge replicate count.
-        assert!(!use_dual_route(500, 100, 1_000_000, 1));
-        // n_tr = 400, p = 200, q = 1: est. 0.5x (slower).
-        assert!(!use_dual_route(400, 200, 1000, 1));
-    }
-
-    #[test]
-    fn harmonic_form_is_stricter_than_the_min() {
-        // At p == B·q the harmonic combination is half the min, so the band
-        // between the two must route primal — rounding the rule up to
-        // min(p, B·q) would admit inputs that are slower, not faster.
-        let (p, bq) = (1000_usize, 1000_usize);
-        let half = p / 2;
-        assert!(!use_dual_route(half + 10, p, bq, 1));
-        assert!(use_dual_route(half - 10, p, bq, 1));
-    }
-
-    #[test]
-    fn degenerate_inputs_stay_primal() {
-        assert!(!use_dual_route(0, 0, 0, 0));
-        assert!(!use_dual_route(10, 0, 100, 1));
-        assert!(!use_dual_route(10, 100, 0, 1));
-        assert!(!use_dual_route(10, 100, 100, 0));
-        // No training rows: the flop rule alone would accept it
-        // (0 < 100·100), so the guard is what refuses.
-        assert!(!use_dual_route(0, 100, 100, 1));
-    }
-
     /// Wide X and a Y whose column `j` is `x_j + x_{j+q}`, with the all-row
     /// scales of both.
     #[allow(clippy::many_single_char_names)]
@@ -919,16 +650,16 @@ mod tests {
         let (n, p, q, n_perm) = (40, 120, 3, 49);
         let [x, y] = pls3_linked(n, p, q, 23);
         let [xs, ys] = all_row_scales(&x, &y);
-        let (_, mut rng) = crate::rng::resolve_seed(Some(23)).expect("seed");
-        let splits = crate::signal_test::draw_splits(n, 1, 6, &mut rng).expect("splits");
-        let seeds = crate::rng::child_seeds(&mut rng, n_perm);
+        let splits = crate::signal_test::draw_splits(n, 1, 6, 23).expect("splits");
         let cols = crate::resample::Columns {
             y: y.as_ref(),
-            seeds: &seeds,
+            seed: 23,
+            n_perm,
             null_map: None,
+            w: None,
         };
         assert!(
-            use_dual_route(splits[0].tr.len(), p, cols.len(), q),
+            crate::pls3_signal_test::split_exact_takes_gram(None, n, p, q, n_perm, 6, false),
             "premise: Gram route"
         );
         let held = crate::held_out_gram::HeldOutGram::from_x(x.as_ref(), None, xs.as_ref());
@@ -944,7 +675,10 @@ mod tests {
                 xs.as_ref(),
                 ys.as_ref(),
                 &o,
-            );
+                0,
+            )
+            .unwrap()
+            .0;
             if let Some(ky) = keep_y {
                 crate::pls3_signal_test::assert_away_from_keep_ties(
                     x.as_ref(),
@@ -965,7 +699,10 @@ mod tests {
                 keep_y,
                 o.max_iter,
                 o.tol,
-            );
+                0,
+            )
+            .unwrap()
+            .0;
             for (c, (g, z)) in dual.iter().zip(&primal).enumerate() {
                 assert!(
                     (g - z).abs() <= 1e-12,
@@ -983,19 +720,29 @@ mod tests {
         let (n, p, q, n_perm) = (40, 120, 3, 49);
         let [x, y] = pls3_linked(n, p, q, 31);
         let [xs, ys] = all_row_scales(&x, &y);
-        let (_, mut rng) = crate::rng::resolve_seed(Some(31)).expect("seed");
-        let splits = crate::signal_test::draw_splits(n, 1, 6, &mut rng).expect("splits");
-        let seeds = crate::rng::child_seeds(&mut rng, n_perm);
+        let splits = crate::signal_test::draw_splits(n, 1, 6, 31).expect("splits");
         let observed = |_: usize, mut m: faer::MatMut<'_, f64>| m.copy_from(y.as_ref());
         let cols = crate::resample::Columns {
             y: y.as_ref(),
-            seeds: &seeds,
+            seed: 31,
+            n_perm,
             null_map: Some(&observed),
+            w: None,
         };
         let fit = crate::pls3::Pls3FitOpts::default();
         let g = crate::held_out_gram::HeldOutGram::from_x(x.as_ref(), None, xs.as_ref());
-        let z =
-            pls3_split_zbars_columns(&g, &cols, &splits, ys.as_ref(), None, fit.max_iter, fit.tol);
+        let z = pls3_split_zbars_columns(
+            &g,
+            &cols,
+            &splits,
+            ys.as_ref(),
+            None,
+            fit.max_iter,
+            fit.tol,
+            0,
+        )
+        .unwrap()
+        .0;
         let exceed = z[1..].iter().filter(|v| **v >= z[0]).count();
         assert_eq!(exceed, n_perm, "p must be 1: z = {z:?}");
     }
@@ -1017,7 +764,7 @@ mod tests {
             if j == 0 { f[i] + e } else { e }
         });
         assert!(
-            crate::pls3_signal_test::dual_route_eligible(None, n, p, q, 99, 4, true),
+            crate::pls3_signal_test::split_exact_takes_gram(None, n, p, q, 99, 4, true),
             "premise: Gram route"
         );
         for args in [

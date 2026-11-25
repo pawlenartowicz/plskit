@@ -52,7 +52,6 @@ pub fn basic_n80_d6_k2(root: &Path) -> Result<Case> {
             n_perm: 200,
             return_perm_matrix: false,
             pre_standardized: false,
-            verbose: false,
         },
         Some(42),
     )?;
@@ -67,6 +66,10 @@ pub fn basic_n80_d6_k2(root: &Path) -> Result<Case> {
         w.add_i64("k", &scalar_i64(i64::try_from(result.k)?))?;
         w.add_i64("seed", &scalar_i64(i64::try_from(result.seed)?))?;
         w.add_f64("n_eff", &scalar_f64(result.n_eff))?;
+        w.add_i64(
+            "n_failed_perms",
+            &scalar_i64(i64::try_from(result.n_failed_perms)?),
+        )?;
         w.finish()?;
     }
 
@@ -136,7 +139,6 @@ fn perm_null_case(
             n_perm,
             return_perm_matrix: false,
             pre_standardized: false,
-            verbose: false,
         },
         Some(42),
     )?;
@@ -151,6 +153,10 @@ fn perm_null_case(
         w.add_i64("k", &scalar_i64(i64::try_from(result.k)?))?;
         w.add_i64("seed", &scalar_i64(i64::try_from(result.seed)?))?;
         w.add_f64("n_eff", &scalar_f64(result.n_eff))?;
+        w.add_i64(
+            "n_failed_perms",
+            &scalar_i64(i64::try_from(result.n_failed_perms)?),
+        )?;
         w.finish()?;
     }
 
@@ -311,7 +317,6 @@ fn tall_case(
             n_perm: TALL_N_PERM,
             return_perm_matrix: false,
             pre_standardized: false,
-            verbose: false,
         },
         Some(42),
     )?;
@@ -326,6 +331,10 @@ fn tall_case(
         w.add_i64("k", &scalar_i64(i64::try_from(result.k)?))?;
         w.add_i64("seed", &scalar_i64(i64::try_from(result.seed)?))?;
         w.add_f64("n_eff", &scalar_f64(result.n_eff))?;
+        w.add_i64(
+            "n_failed_perms",
+            &scalar_i64(i64::try_from(result.n_failed_perms)?),
+        )?;
         w.finish()?;
     }
 
@@ -376,7 +385,6 @@ fn perm_null_run(c: &PermNullCall<'_>) -> Result<PermNullOutput> {
             n_perm: c.n_perm,
             return_perm_matrix: c.return_perm_matrix,
             pre_standardized: c.pre_standardized,
-            verbose: false,
         },
         Some(42),
     )?)
@@ -407,6 +415,10 @@ fn perm_null_call(root: &Path, c: &PermNullCall<'_>) -> Result<Case> {
         w.add_i64("k", &scalar_i64(i64::try_from(result.k)?))?;
         w.add_i64("seed", &scalar_i64(i64::try_from(result.seed)?))?;
         w.add_f64("n_eff", &scalar_f64(result.n_eff))?;
+        w.add_i64(
+            "n_failed_perms",
+            &scalar_i64(i64::try_from(result.n_failed_perms)?),
+        )?;
         if let Some(nc) = result.n_covariates {
             w.add_i64("n_covariates", &scalar_i64(i64::try_from(nc)?))?;
         }

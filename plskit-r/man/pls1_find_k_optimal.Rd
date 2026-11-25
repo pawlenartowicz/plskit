@@ -13,13 +13,12 @@ pls1_find_k_optimal(
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  verbose = FALSE,
   weights = NULL,
   covariates = NULL
 )
 }
 \arguments{
-\item{X, y, k_max, selector, diagnostic, args, pre_standardized, seed, verbose, weights, covariates}{See the canonical reference.}
+\item{X, y, k_max, selector, diagnostic, args, pre_standardized, seed, weights, covariates}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("find_k_optimal_result", "plskit_result")}.
@@ -28,4 +27,10 @@ A list of class \code{c("find_k_optimal_result", "plskit_result")}.
 R binding of \code{pls1_find_k_optimal}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
 "2.3 K-selection" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
+}
+\examples{
+set.seed(1)
+X <- matrix(rnorm(40 * 20), 40, 20)
+y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+pls1_find_k_optimal(X, y, k_max = 5, seed = 1)
 }

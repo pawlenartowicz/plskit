@@ -135,12 +135,11 @@ def test_fit_find_k_args_wrong_typed_value_is_invalid_args(mode, find_k_args):
     assert ei.value.code == "invalid_args"
 
 
-# The seam reads an aligned C- or F-contiguous X in place and copies any
-# other layout column-major. X read row-major gives the bits of the C-ordered
-# reference, and other layouts agree to the corpus tolerance. The public API
-# hands X on in its own layout, so a public fit has the bits of the raw fit
-# of the same array, and repeating it repeats them. Every layout gives the
-# same error where the fit fails.
+# The seam reads an aligned F-contiguous X in place and copies any other
+# layout column-major, so every layout gives the bits of the F-ordered fit.
+# The public API hands X on in its own layout, so a public fit has the bits
+# of the raw fit of the same array, and repeating it repeats them. Every
+# layout gives the same error where the fit fails.
 _FIT_FIELDS = ("T", "P", "W", "Q", "coef", "beta", "intercept", "n_eff")
 
 
@@ -188,23 +187,6 @@ def _same(got, ref):
         np.array_equal(got[f], ref[f]) for f in _FIT_FIELDS)
 
 
-def _close(got, ref, atol=1e-10, rtol=1e-14):
-    """Agreement at the corpus array tolerance, `atol + rtol * |ref|`."""
-    if isinstance(ref, tuple) or isinstance(got, tuple):
-        return got == ref
-    return got["shape"] == ref["shape"] and all(
-        np.allclose(got[f].view(np.float64), ref[f].view(np.float64),
-                    rtol=rtol, atol=atol, equal_nan=True)
-        for f in _FIT_FIELDS)
-
-
-def _read_row_major(Xl):
-    """The extension reads a C-contiguous array row-major, which gives the
-    bits of the C-ordered reference. Any other layout is read column-major
-    and agrees within tolerance."""
-    return Xl.flags.c_contiguous
-
-
 def _fields(type_name, fields):
     """`make_result` for a direct extension call: the record's own fields."""
     return fields
@@ -239,18 +221,17 @@ def test_fit_x_layouts_agree(weighted, pre_standardized, sparse):
     w = np.random.default_rng(6).uniform(0.2, 3.0, size=40) if weighted else None
     raw, public = _fitters(y, sparse, dict(pre_standardized=pre_standardized, weights=w))
 
-    ref = _outcome(lambda: raw(np.ascontiguousarray(X)))
+    ref = _outcome(lambda: raw(np.asfortranarray(X)))
     assert not isinstance(ref, tuple)
     for name, Xl in _layouts(X).items():
-        same = _same if _read_row_major(Xl) else _close
         got = _outcome(lambda: raw(Xl))
-        assert same(got, ref), (name, "raw")
+        assert _same(got, ref), (name, "raw")
         assert _same(_outcome(lambda: public(Xl)), got), (name, "public")
         assert _same(_outcome(lambda: public(Xl)), got), (name, "public, again")
-    # float32 input: the public API's float64 cast keeps the C order and is
-    # read in place.
+    # float32 input: the public API's float64 cast keeps the C order, and the
+    # extension copies it column-major like any C-ordered X.
     X64 = X.astype(np.float32).astype(np.float64)
-    ref32 = _outcome(lambda: raw(np.ascontiguousarray(X64)))
+    ref32 = _outcome(lambda: raw(np.asfortranarray(X64)))
     assert _same(_outcome(lambda: public(X.astype(np.float32))), ref32)
 
 
@@ -263,10 +244,9 @@ def test_fit_edge_shapes_x_layouts_agree(shape, pre_standardized):
     y = rng.normal(size=n)
     raw, public = _fitters(y, False, dict(pre_standardized=pre_standardized), k=1)
     for call in (raw, public):  # the two raise different exception types
-        ref = _outcome(lambda: call(np.ascontiguousarray(X)))
+        ref = _outcome(lambda: call(np.asfortranarray(X)))
         for name, Xl in _layouts(X).items():
-            same = _same if _read_row_major(Xl) else _close
-            assert same(_outcome(lambda: call(Xl)), ref), (name, call.__name__)
+            assert _same(_outcome(lambda: call(Xl)), ref), (name, call.__name__)
 
 
 @pytest.mark.parametrize("order", ["C", "F"])
@@ -279,7 +259,7 @@ def test_fit_non_finite_x_raises_in_both_orders(order, pre_standardized, weighte
     if weighted:
         w = np.ones(30)
         w[7] = 0.0  # a zero weight does not hide the non-finite entry
-    # The raw extension, in both orders it reads in place.
+    # The raw extension, in both orders: F read in place, C copied column-major.
     arguments = {"X": np.asarray(X, order=order), "y": y, "k": 2,
                  "pre_standardized": pre_standardized, "weights": w}
     with pytest.raises(plskit._plskit.PlsKitException) as ei:

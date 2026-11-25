@@ -2,9 +2,7 @@
 
 ## What `n_eff` is
 
-`n_eff` is Kish's effective sample size: `(Σwᵢ)² / Σwᵢ²`, computed on
-the raw (pre-normalization) weight vector. For uniform or absent weights,
-every term equals 1 and `n_eff = n`.
+`n_eff` is Kish's effective sample size: `(Σwᵢ)² / Σwᵢ²`, computed on the mean-one weights (`wᵢ · n / Σw`). Kish's ratio does not depend on the scale of the weights, so this gives the value of the raw weights up to rounding. For uniform or absent weights, every term equals 1 and `n_eff = n`.
 
 `n_eff` captures how much information the weighted sample contains: a
 sample where one observation has all the weight has `n_eff ≈ 1`; a
@@ -27,7 +25,7 @@ errors before any fitting.
 | Function | Checked against |
 |---|---|
 | `pls1_fit`, `spls1_fit` | `k` |
-| `pls1_confirmatory_test` (every method, with or without `ci`) | `k` |
+| `pls1_confirmatory_test` (every method, with or without `ci`) | the largest `k` of the set |
 | `pls1_perm_null` | `k` |
 | `spls1_find_keep_optimal` | `k` |
 | `pls1_find_k_optimal`, `pls1_find_k_sequence`, `spls1_find_k_optimal`, `spls1_find_k_sequence` | `k_max` |
@@ -60,6 +58,7 @@ loop treats it:
   subsamples exceeds `max_skip_rate` (default `0.01`), the call errors
   with `ResamplingDegenerate` rather than return a CI built from the
   surviving, unrepresentative draws.
+  A replicate's half split (for `holdout_corr`) whose fit fails the same check, or has all its weights zero, costs that replicate its `holdout_corr` only, and counts as a skip too.
 
 ## What users see
 
@@ -69,6 +68,8 @@ loop treats it:
   sample size is too small for the number of components requested.
   Actions: lower `k` (or `k_max`), flatten extreme weights, or add
   observations.
+
+- **The same error from the cross-validated selection** (`pls1_find_k_optimal` and `spls1_find_k_optimal` with `r2_se` or `r2_max`, `spls1_find_keep_optimal`, `pls1_fit(k="optimal")`) can also mean that all the positive weight sits in one CV fold, so no fold has weight on both its training and its validation rows. Lowering `k` does not help there. The same holds for the folds of `raw_perm` in `pls1_confirmatory_test`, for its `split_exact` and `split_nb` when fewer than 2 of the drawn splits have weight on both halves (also in the steps of a `k` sequence that run them), and for its `e` when a half of its one split has zero total weight.
 
 - **`PlsKitError` with code `invalid_argument`** ("insufficient n for
   k=...") from a top-level call without weights, or with all-equal weights
@@ -80,13 +81,9 @@ loop treats it:
   from `pls1_confirmatory_test(ci=True)`:
   your weights are healthy on the full data, but too many subsamples
   failed individually (each subsample draws fewer rows, so its `n_eff` is
-  smaller). The exception carries `skipped`, `total`, `skip_rate` and
-  `threshold`. Actions: lower `k`, soften the weight distribution, raise
+  smaller). A half split whose fit fails on the weights counts as a skip of its `holdout_corr`, so raising `max_skip_rate` covers it too. The exception carries `skipped`, `total`, `skip_rate` and
+  `threshold`. The call also returns it when no draw is left after skips and failures, and raising `max_skip_rate` does not help then. The same holds when every draw left has a NaN holdout correlation. Actions: lower `k`, soften the weight distribution, raise
   `m_rate` to draw larger subsamples (`m = ceil(n^m_rate)`), or raise
   `max_skip_rate` to accept the dropped draws knowingly.
 
-The wrappers always run the check. Rust callers can turn it off for
-`pls1_fit` / `spls1_fit`; see
-[Bypassing the `n_eff` check](../rust/api.md#bypassing-the-n_eff-check-rust-only).
-How the check is wired through the engine is described in
-[the n_eff check (internals)](../internals/n-eff-check.md).
+The wrappers and the Rust API always run the check. How the check is wired through the engine is described in [the n_eff check (internals)](../internals/n-eff-check.md).

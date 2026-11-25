@@ -9,7 +9,7 @@ This is the extended companion to `fit_and_ci.py`. Where that example
 demonstrates a single recommended test + CI, this one walks the full
 omnibus method axis on the same data so the methods can be compared
 side by side, including the score/split_exact complementarity
-(`docs/python/api.md` §3.1, "Five test methods").
+(`docs/python/api.md` §3.1, "Six test methods").
 
 Pipeline:
 
@@ -29,13 +29,14 @@ Pipeline:
                       (anisotropy-aware, K-free)
        * e:           universal inference (split-LR e-value,
                       calibration-free, non-asymptotic α bound)
+       * sv_perm:     in-sample permutation test on d₁ = ‖X̃ᵀỹ‖ at k = 1
      Reporting `score` and `split_exact` side-by-side is the canonical
      pattern (`docs/python/api.md` §3.1): they complement rather than
      replace each other. `score` wins on signal diffuse across many
      directions, `split_exact` on signal concentrated in a few, as here.
-     `split_exact`'s p-value is floored at 1/(n_perm+1); the closed-form
-     and asymptotic p-values are not, so compare them against α, not
-     against each other.
+     The p-values of `split_exact` and `sv_perm` are floored at
+     1/(n_perm+1); the closed-form and asymptotic p-values are not, so
+     compare them against α, not against each other.
      `raw_perm` is legacy (`docs/concepts/PLS1/fit-and-predict.md`) and
      is omitted here.
   4. Re-run the recommended test (`split_exact`) with `ci=True` to attach
@@ -58,9 +59,9 @@ Pipeline:
        * engine diagnostic counters.
 
 The CI bundle uses an independent resampling pass (subsamples for β, half
-splits for the holdout correlation, bootstrap resamples for leverage) on a child-seed
-branch of the user-facing seed, so the omnibus and CI streams don't
-interfere.
+splits for the holdout correlation, bootstrap resamples for leverage).
+The CI pass draws on its own tagged random streams from the same seed, so
+it does not share draws with the test.
 """
 
 from __future__ import annotations
@@ -78,6 +79,7 @@ _OMNIBUS_ARGS: dict[str, dict] = {
     "split_nb":    {"n_splits": 50},
     "score":       {},
     "e":           {},
+    "sv_perm":     {"n_perm": 500},
 }
 
 
@@ -131,7 +133,7 @@ def main() -> None:
             f"{fmt_workload(r)}"
         )
     print(
-        "  (split_exact's p-value is floored at 1/(n_perm+1); legacy"
+        "  (split_exact and sv_perm p-values are floored at 1/(n_perm+1); legacy"
         " raw_perm is omitted.)"
     )
     print(

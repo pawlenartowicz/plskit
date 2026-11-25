@@ -273,7 +273,7 @@ fn all_equal_weights_report_n_eff_n_like_the_fits() {
         let fit = plskit::pls1_fit(
             x.as_ref(),
             y.as_ref(),
-            plskit::KSpec::Fixed(1),
+            1,
             Some(w.as_ref()),
             None,
             plskit::FitOpts::default(),

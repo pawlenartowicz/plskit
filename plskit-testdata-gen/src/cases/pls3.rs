@@ -11,13 +11,14 @@ use plskit::{
 
 use crate::cases::pls1_confirmatory_test::write_k_set;
 use crate::cases::{
-    CasePaths, faer_col_to_array, faer_mat_to_array, ndarray_to_faer_mat, scalar_f64, scalar_i64,
-    synth_xy,
+    CasePaths, add_count, case_files, faer_col_to_array, faer_mat_to_array, ndarray_to_faer_mat,
+    scalar_f64, scalar_i64, synth_xy,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
 
-/// Shared signal strength and factor count for every PLS3 fixture.
+/// Shared signal strength and factor count of the PLS3 fixtures; the
+/// weak-signal cases set their own `snr`.
 const SYNTH_K_SIGNAL: usize = 2;
 const SYNTH_SNR: f64 = 4.0;
 const CASE_SEED: u64 = 42;
@@ -206,6 +207,9 @@ pub fn transform_basic_n80_p6_q3_k2(root: &Path) -> Result<Case> {
 /// in place of X (kwarg `"gram": true`).
 struct Pls3SplitExactCase<'a> {
     name: &'a str,
+    /// Stem of the inputs file, `inputs/{inputs_name}.npz`. Cases that share
+    /// a file must share its design, seed and `snr`.
+    inputs_name: &'a str,
     auto: bool,
     gram: bool,
     /// `Some(rotate)` runs `sv_perm` with that flag instead; `n_splits` is then unused.
@@ -221,7 +225,8 @@ struct Pls3SplitExactCase<'a> {
 /// Generic `pls3_confirmatory_test` / `split_exact` case writer.
 ///
 /// # Errors
-/// Returns an error if fixture files cannot be written or the test fails.
+/// Returns an error if fixture files cannot be written, the test fails, or
+/// [`crate::cases::ensure_off_floor`] rejects its p-value.
 ///
 /// # Panics
 /// Panics if the result omits `n_perm` / `n_splits` — unreachable for
@@ -229,11 +234,13 @@ struct Pls3SplitExactCase<'a> {
 #[allow(clippy::many_single_char_names)]
 fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
     let function = "pls3_confirmatory_test";
-    let paths = CasePaths::build(root, function, c.name)?;
+    let rel_inputs = format!("inputs/{}.npz", c.inputs_name);
+    let rel_outputs = format!("outputs/{function}/{}.npz", c.name);
+    let (abs_inputs, abs_outputs) = case_files(root, &rel_inputs, &rel_outputs)?;
     let (x, y) = synth_xy(c.n, c.p, c.q, SYNTH_K_SIGNAL, c.snr, CASE_SEED);
 
     {
-        let mut w = NpzWriter::create(&paths.abs_inputs)?;
+        let mut w = NpzWriter::create(&abs_inputs)?;
         w.add_f64("X", &x.clone().into_dyn())?;
         w.add_f64("Y", &y.clone().into_dyn())?;
         w.finish()?;
@@ -266,9 +273,10 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
     } else {
         pls3_confirmatory_test(xf.as_ref(), yf.as_ref(), 1, opts)?
     };
+    crate::cases::ensure_off_floor(c.name, r.pvalue, r.n_perm)?;
 
     {
-        let mut w = NpzWriter::create(&paths.abs_outputs)?;
+        let mut w = NpzWriter::create(&abs_outputs)?;
         w.add_f64("pvalue", &scalar_f64(r.pvalue))?;
         w.add_f64(
             "statistic",
@@ -285,6 +293,9 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
         if let Some(ns) = r.n_splits {
             w.add_i64("n_splits", &scalar_i64(i64::try_from(ns)?))?;
         }
+        add_count(&mut w, "n_failed_splits", r.n_failed_splits)?;
+        add_count(&mut w, "n_failed_perms", r.n_failed_perms)?;
+        add_count(&mut w, "n_failed_folds", r.n_failed_folds)?;
         if let Some(sr) = r.stable_rank {
             w.add_f64("stable_rank", &scalar_f64(sr))?;
         }
@@ -298,8 +309,8 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
     Ok(Case {
         name: c.name.to_string(),
         function: function.into(),
-        inputs: paths.rel_inputs,
-        outputs: paths.rel_outputs,
+        inputs: rel_inputs,
+        outputs: rel_outputs,
         kwargs: {
             let mut kw = serde_json::json!({
                 "k": 1,
@@ -316,14 +327,19 @@ fn split_exact_case(root: &Path, c: &Pls3SplitExactCase<'_>) -> Result<Case> {
             kw
         },
         hashes: Hashes {
-            inputs_sha256: sha256_of_file(&paths.abs_inputs)?,
-            outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
+            inputs_sha256: sha256_of_file(&abs_inputs)?,
+            outputs_sha256: sha256_of_file(&abs_outputs)?,
         },
     })
 }
 
+/// Signal of `inputs/pls3_confirmatory_split_exact_weak.npz` (n=80, p=6,
+/// q=3): puts p mid-range so the fixtures pin the null columns' ranks.
+const SPLIT_EXACT_WEAK_SNR: f64 = 0.6;
+
 /// Case: `pls3_confirmatory_test` with `test_method=split_exact`, `n_perm=200`,
-/// `n_splits=30`, `seed=42`.
+/// `n_splits=30`, `seed=42`, on the weak-signal inputs
+/// `inputs/pls3_confirmatory_split_exact_weak.npz`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or the test fails.
@@ -332,10 +348,11 @@ pub fn confirmatory_split_exact(root: &Path) -> Result<Case> {
         root,
         &Pls3SplitExactCase {
             name: "pls3_confirmatory_split_exact",
+            inputs_name: "pls3_confirmatory_split_exact_weak",
             auto: false,
             gram: false,
             sv_rotate: None,
-            snr: SYNTH_SNR,
+            snr: SPLIT_EXACT_WEAK_SNR,
             n: 80,
             p: 6,
             q: 3,
@@ -347,7 +364,7 @@ pub fn confirmatory_split_exact(root: &Path) -> Result<Case> {
 
 /// Case: `pls3_confirmatory_test` with `test_method=auto`, `n_perm=200`,
 /// `n_splits=30`, `seed=42` on n=80, p=6, q=3. `auto` runs `split_exact` on
-/// every PLS3 design.
+/// every PLS3 design. It reads the inputs of [`confirmatory_split_exact`].
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or the test fails.
@@ -356,10 +373,11 @@ pub fn confirmatory_auto_split_exact(root: &Path) -> Result<Case> {
         root,
         &Pls3SplitExactCase {
             name: "pls3_confirmatory_auto_split_exact",
+            inputs_name: "pls3_confirmatory_split_exact_weak",
             auto: true,
             gram: false,
             sv_rotate: None,
-            snr: SYNTH_SNR,
+            snr: SPLIT_EXACT_WEAK_SNR,
             n: 80,
             p: 6,
             q: 3,
@@ -372,14 +390,7 @@ pub fn confirmatory_auto_split_exact(root: &Path) -> Result<Case> {
 /// Case: `pls3_confirmatory_test` with `test_method=split_exact` on a wide design
 /// (n=30, p=100, q=3), `n_perm=100`, `n_splits=30`, `seed=42`.
 ///
-/// The corpus's only `pls3_confirmatory_test` fixture that reaches the Gram
-/// route in `plskit-rs/src/dual_route.rs`. The permutation branch takes that
-/// route when `n_tr·(B·q + p) < p·B·q` holds, with `n_tr = 15` (half of `n`,
-/// via `resample::split_sizes`), `q = 3` and `B = n_perm + 1`. At this shape
-/// the inequality reduces to `n_perm ≥ 5`, so `n_perm = 100` clears it by
-/// 20×. Narrowing X or shrinking `n_perm` past that bound silently sends the
-/// fixture back onto the primal route and the Gram route loses its only
-/// cross-language coverage on this family.
+/// Its route is pinned in `plskit-rs/src/fixture_route_pins.rs`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or the test fails.
@@ -388,6 +399,7 @@ pub fn confirmatory_split_exact_wide(root: &Path) -> Result<Case> {
         root,
         &Pls3SplitExactCase {
             name: "pls3_confirmatory_split_exact_wide",
+            inputs_name: "pls3_confirmatory_split_exact_wide",
             auto: false,
             gram: false,
             sv_rotate: None,
@@ -411,6 +423,7 @@ pub fn confirmatory_gram_split_exact(root: &Path) -> Result<Case> {
         root,
         &Pls3SplitExactCase {
             name: "pls3_confirmatory_test_gram_split_exact",
+            inputs_name: "pls3_confirmatory_test_gram_split_exact",
             auto: false,
             gram: true,
             sv_rotate: None,
@@ -424,15 +437,15 @@ pub fn confirmatory_gram_split_exact(root: &Path) -> Result<Case> {
     )
 }
 
-/// Weak signal for the raw `sv_perm` pair: at the shared `SYNTH_SNR` the
-/// observed singular value beats every permutation and p sits at the floor
-/// whether or not `rotate` is applied.
+/// Weak signal for the raw `sv_perm` pair and the Gram `sv_perm` case with
+/// `rotate`: at the shared `SYNTH_SNR` the observed singular value beats
+/// every permutation and p sits at the floor.
 const SV_PERM_RAW_SNR: f64 = 0.1;
 
 /// A `pls3_confirmatory_test` `sv_perm` case (`n_perm = 99`).
 fn sv_perm_case(
     root: &Path,
-    name: &str,
+    (name, inputs_name): (&str, &str),
     (gram, rotate): (bool, bool),
     (n, p): (usize, usize),
     snr: f64,
@@ -441,6 +454,7 @@ fn sv_perm_case(
         root,
         &Pls3SplitExactCase {
             name,
+            inputs_name,
             auto: false,
             gram,
             sv_rotate: Some(rotate),
@@ -462,7 +476,7 @@ fn sv_perm_case(
 pub fn confirmatory_sv_perm(root: &Path) -> Result<Case> {
     sv_perm_case(
         root,
-        "pls3_confirmatory_sv_perm",
+        ("pls3_confirmatory_sv_perm", "pls3_confirmatory_sv_perm"),
         (false, false),
         (80, 6),
         SV_PERM_RAW_SNR,
@@ -476,7 +490,10 @@ pub fn confirmatory_sv_perm(root: &Path) -> Result<Case> {
 pub fn confirmatory_sv_perm_rotate(root: &Path) -> Result<Case> {
     sv_perm_case(
         root,
-        "pls3_confirmatory_sv_perm_rotate",
+        (
+            "pls3_confirmatory_sv_perm_rotate",
+            "pls3_confirmatory_sv_perm_rotate",
+        ),
         (false, true),
         (80, 6),
         SV_PERM_RAW_SNR,
@@ -491,7 +508,10 @@ pub fn confirmatory_sv_perm_rotate(root: &Path) -> Result<Case> {
 pub fn confirmatory_sv_perm_gram(root: &Path) -> Result<Case> {
     sv_perm_case(
         root,
-        "pls3_confirmatory_test_gram_sv_perm",
+        (
+            "pls3_confirmatory_test_gram_sv_perm",
+            "pls3_confirmatory_test_gram_sv_perm",
+        ),
         (true, false),
         (30, 100),
         SYNTH_SNR,
@@ -499,27 +519,32 @@ pub fn confirmatory_sv_perm_gram(root: &Path) -> Result<Case> {
 }
 
 /// Case: `sv_perm` with `rotate=true` on `gram_matrix(X)` of the wide
-/// design (n=30, p=100, q=3).
+/// design (n=30, p=100, q=3), on weak-signal inputs of its own.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or the test fails.
 pub fn confirmatory_sv_perm_rotate_gram(root: &Path) -> Result<Case> {
     sv_perm_case(
         root,
-        "pls3_confirmatory_test_gram_sv_perm_rotate",
+        (
+            "pls3_confirmatory_test_gram_sv_perm_rotate",
+            "pls3_confirmatory_test_gram_sv_perm_rotate_weak",
+        ),
         (true, true),
         (30, 100),
-        SYNTH_SNR,
+        SV_PERM_RAW_SNR,
     )
 }
 
 /// Case: `pls3_confirmatory_test` with `test_method=split_nb`, `n_splits=30`,
-/// `seed=42`. Same design as `confirmatory_split_exact`, which clears the
-/// auto-gate on X, so the run is not rerouted and the pinned `test_method` is
+/// `seed=42`, on n = 80, p = 6, q = 3 at `SYNTH_SNR`, whose X clears the
+/// auto-gate, so the run is not rerouted and the pinned `test_method` is
 /// `split_nb`.
 ///
 /// # Errors
-/// Returns an error if fixture files cannot be written or the test fails.
+/// Returns an error if fixture files cannot be written, the test fails, or
+/// [`crate::cases::ensure_off_floor`] rejects its p-value (only possible
+/// after a reroute to a permutation method).
 ///
 /// # Panics
 /// Panics if the result omits `n_splits` — unreachable for a split method.
@@ -551,6 +576,7 @@ pub fn confirmatory_split_nb(root: &Path) -> Result<Case> {
             ..Pls3ConfirmatoryTestOpts::default()
         },
     )?;
+    crate::cases::ensure_off_floor(name, r.pvalue, r.n_perm)?;
 
     {
         let mut w = NpzWriter::create(&paths.abs_outputs)?;
@@ -569,6 +595,9 @@ pub fn confirmatory_split_nb(root: &Path) -> Result<Case> {
                 r.n_splits.expect("split_nb reports n_splits"),
             )?),
         )?;
+        add_count(&mut w, "n_failed_splits", r.n_failed_splits)?;
+        add_count(&mut w, "n_failed_perms", r.n_failed_perms)?;
+        add_count(&mut w, "n_failed_folds", r.n_failed_folds)?;
         if let Some(sr) = r.stable_rank {
             w.add_f64("stable_rank", &scalar_f64(sr))?;
         }

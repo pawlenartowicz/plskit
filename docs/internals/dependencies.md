@@ -9,14 +9,12 @@ uses them. Shared version requirements are declared once, in
 | Crate | Requirement | Used for |
 |---|---|---|
 | `faer` | `0.24` | dense linear algebra |
-| `rand`, `rand_chacha` | `0.10` | `ChaCha8Rng`, the one generator the engine uses |
+| `commonstats` | `0.3`, feature `resample` only | every random draw: Philox4x32-10 streams and the permutation draws (LGPL-3.0-or-later) |
 | `getrandom` | `0.4` | OS entropy when the caller passes no seed |
 | `rayon` | `1.8` | thread pools and parallel loops |
 | `thiserror` | `2` | the `PlsKitError` enum |
 
-The crate has no feature flags and no optional dependencies. Tests also
-use `approx`, `proptest`, `serde_json`, `ndarray`, `ndarray-npy` and `zip`;
-the last four read the `.npz` fixtures of the [test corpus](testdata.md).
+The crate has no optional dependencies and one feature flag, `route-log`, off by default and turned on only for its own tests. Tests also use `rand` and `rand_chacha` (synthetic test data), `approx`, `serde_json`, `ndarray` and `ndarray-npy`; the last three read the `.npz` fixtures of the [test corpus](testdata.md).
 
 ## faer
 
@@ -29,25 +27,15 @@ LAPACK crate.
 - **SIMD is chosen at run time.** `faer` dispatches its kernels through
   `pulp`, so one binary uses the instruction sets of the machine it runs
   on ([Building from source](building.md)).
-- **The engine never reads faer's global parallelism.** That setting
-  follows the size of the Rayon pool, and the degree changes how a
-  reduction is split, so results would round differently at different
-  thread counts. Engine code passes an explicit `Par` to the helpers in
-  `linalg.rs`: `Par::Seq` inside resampling workers and a fixed degree of
-  8 elsewhere. `clippy.toml` lists the `faer` entry points that read the
-  global setting under `disallowed-methods`. The operator `*` on `faer`
-  matrices reads it too and cannot be listed;
-  `tests/thread_count_parity.rs` catches that at run time.
+- **The engine never reads faer's global parallelism.** That setting follows the size of the Rayon pool, and the degree changes how a reduction is split, so results would round differently at different thread counts. Engine code passes an explicit `Par` to the helpers in `linalg.rs`: `Par::Seq` or the fixed degree, chosen per call; some fits inside resampling workers can take the fixed degree (see `fit::ParChoice`). `clippy.toml` lists the `faer` entry points that read the global setting under `disallowed-methods`. The operator `*` on `faer` matrices reads it too and cannot be listed; `tests/thread_count_parity.rs` catches that at run time.
 
 ## Random numbers
 
-All randomness comes from `ChaCha8Rng` (`plskit-rs/src/rng.rs`).
+All randomness comes from Philox4x32-10 through `commonstats` (`plskit-rs/src/rng.rs`).
 
-- A call with no seed draws one from the operating system through
-  `getrandom`. The result reports the seed that was used.
-- A resampling loop draws one child seed per iteration from the parent
-  generator, in order, before any parallel work starts. Iteration `i` uses
-  the same seed whichever thread runs it.
+- A call with no seed draws one from the operating system through `getrandom`. The result reports the seed that was used, and passing it back as `seed` reproduces the results.
+- Each unit of work (a null column, a split, a fold assignment, a CI replicate) opens its own stream, keyed by `(seed, id, tag)`: the call's seed, the unit's index and a tag that names the kind of draw. A unit's draws do not depend on the thread that runs it or on the order the units run in.
+- Null column `c` of a permutation null is commonstats' `gen_resample_indices(Scheme::Permutation, n, c, seed)`, the row shuffle neurostats draws as its draw `c` at the same seed.
 
 This is why a fixed seed gives the same bytes at any thread count
 ([Threads](../concepts/threads.md)). `tests/thread_count_parity.rs` runs

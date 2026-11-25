@@ -197,12 +197,23 @@ impl MatF64<'_> {
     }
 
     /// Copy a row-major buffer (`flat[i * ncols + j]`) into column-major storage.
+    ///
+    /// The copy runs in 32 x 32 tiles. A row-by-row copy writes with a
+    /// stride of `nrows`, so each write lands on another memory page; a
+    /// tile keeps its rows and columns in cache and in the TLB.
     #[must_use]
     pub fn from_row_major(flat: &[f64], nrows: usize, ncols: usize) -> MatF64<'static> {
+        const TILE: usize = 32;
         let mut data = vec![0.0; nrows * ncols];
-        for i in 0..nrows {
-            for j in 0..ncols {
-                data[i + j * nrows] = flat[i * ncols + j];
+        for i0 in (0..nrows).step_by(TILE) {
+            let i1 = (i0 + TILE).min(nrows);
+            for j0 in (0..ncols).step_by(TILE) {
+                let j1 = (j0 + TILE).min(ncols);
+                for j in j0..j1 {
+                    for i in i0..i1 {
+                        data[i + j * nrows] = flat[i * ncols + j];
+                    }
+                }
             }
         }
         MatF64::Owned { data, nrows, ncols }
@@ -349,7 +360,7 @@ pub enum Value<'a> {
     BoolVec(Vec<bool>),
     /// A named record (a result, a nested result, an `args` dict).
     Record(Record<'a>),
-    /// An ordered list (`list[CIScalar]`, warnings).
+    /// Input only: a list of counts or values.
     List(Vec<Value<'a>>),
 }
 
@@ -469,5 +480,32 @@ mod tests {
         }
         let owned = rm.into_owned();
         assert_eq!(owned.col_major(), cm.col_major());
+    }
+
+    #[test]
+    fn from_row_major_follows_the_element_rule() {
+        // Empty sides, one element, edge tiles on both sides, one side under a tile.
+        for (nrows, ncols) in [(0, 5), (5, 0), (1, 1), (33, 7), (7, 33), (65, 97)] {
+            let flat: Vec<f64> = (0..nrows * ncols).map(|k| k as f64).collect();
+            let MatF64::Owned {
+                data,
+                nrows: r,
+                ncols: c,
+            } = MatF64::from_row_major(&flat, nrows, ncols)
+            else {
+                panic!("{nrows} x {ncols}: not an owned column-major matrix");
+            };
+            assert_eq!((r, c), (nrows, ncols));
+            assert_eq!(data.len(), nrows * ncols, "{nrows} x {ncols}");
+            for i in 0..nrows {
+                for j in 0..ncols {
+                    assert_eq!(
+                        data[i + j * nrows],
+                        flat[i * ncols + j],
+                        "{nrows} x {ncols}: element ({i}, {j})"
+                    );
+                }
+            }
+        }
     }
 }

@@ -9,14 +9,14 @@
 // Exact comparisons are intended where the two calls share the value's bits.
 #![allow(clippy::float_cmp)]
 
-use faer::{Col, ColRef, Mat, MatRef};
-use plskit::linalg::{standardize, standardize1};
-use plskit::{
+use crate::linalg::{standardize, standardize1};
+use crate::{
     ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, ConfirmatoryTestOutput, FitOpts,
-    GramMatrixOutput, KSpec, Pls3ConfirmatoryTestOpts, PlsKitError, gram_matrix,
-    pls1_confirmatory_test, pls1_fit, pls1_perm_alpha, pls1_perm_alpha_gram,
-    pls3_confirmatory_test, pls3_confirmatory_test_gram,
+    GramMatrixOutput, Pls3ConfirmatoryTestOpts, PlsKitError, gram_matrix, pls1_confirmatory_test,
+    pls1_fit, pls1_perm_alpha, pls1_perm_alpha_gram, pls3_confirmatory_test,
+    pls3_confirmatory_test_gram,
 };
+use faer::{Col, ColRef, Mat, MatRef};
 
 /// `SplitMix64` mapped to `[-1, 1)`.
 struct Stream(u64);
@@ -425,7 +425,7 @@ fn gram_refuses_keep_x_below_p() {
 fn gram_refuses_ci() {
     let (g, y, _) = gram_fixture();
     let o = ConfirmatoryTestOpts {
-        ci: Some(plskit::CIOpts::default()),
+        ci: Some(crate::CIOpts::default()),
         ..opts(pls1_methods(1)[3], false)
     };
     invalid_argument(
@@ -552,15 +552,8 @@ fn perm_alpha_runs_at_k_up_to_k_dual_max() {
         let obj = pls1_perm_alpha_gram(&g, yy.as_ref(), k).expect("object form");
         assert_eq!(raw.k_used, obj.k_used, "k = {k}");
         assert!(raw.k_used[0] <= k);
-        let fit = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(k),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .expect("pls1_fit");
+        let fit =
+            pls1_fit(x.as_ref(), y.as_ref(), k, None, None, FitOpts::default()).expect("pls1_fit");
         if raw.k_used[0] != k || fit.k_used != k {
             continue;
         }
@@ -844,6 +837,69 @@ fn pls3_sv_perm_gram_equals_raw() {
             assert_eq!(raw.n_perm, gram.n_perm);
             let rel = (raw.statistic.unwrap() / gram.statistic.unwrap() - 1.0).abs();
             assert!(rel < 1e-10, "{what}: rel {rel}");
+        }
+    }
+}
+
+/// `raw_perm` at `k` 1 on tiny folds, 20 columns. On each case the Gram
+/// call and the X call both succeed, with the same statistic and p-value
+/// to `1e-10` relative, or both fail with the same error code:
+/// - 8 rows in 4 folds: two-row validation folds, six training rows;
+/// - 8 rows in 7 folds: one-row validation folds (`ss_tot = 0` there);
+/// - 3 rows in 2 folds: one fold trains on a single row, where the X call
+///   can leave the n-space route while the Gram call runs its kernel;
+/// - 8 rows in 8 folds: a validation check, both calls refuse `n_folds = n`.
+#[test]
+fn raw_perm_gram_k1_on_small_folds_matches_x() {
+    let rel = |a: f64, b: f64| a == b || (a - b).abs() <= 1e-10 * a.abs().max(b.abs());
+    for (n, n_folds, refused) in [(8, 4, false), (8, 7, false), (3, 2, false), (8, 8, true)] {
+        let what = format!("n {n}, n_folds {n_folds}");
+        let (x, y) = data(n, 20, 5);
+        let g = gram_matrix(x.as_ref(), false).unwrap();
+        let o = ConfirmatoryTestOpts {
+            seed: Some(5),
+            ..opts(
+                ConfirmatoryArgs::RawPerm {
+                    n_perm: 19,
+                    n_folds,
+                },
+                false,
+            )
+        };
+        let on = |input| pls1_confirmatory_test(input, o);
+        let a = on(ConfirmatoryTestInput::Raw {
+            x: x.as_ref(),
+            y: y.as_ref(),
+            k: Some(&[1]),
+            weights: None,
+            covariates: None,
+            null_y: None,
+        });
+        let b = on(ConfirmatoryTestInput::Gram {
+            gram: &g,
+            y: y.as_ref(),
+            k: Some(&[1]),
+            covariates: None,
+            null_y: None,
+        });
+        match (a, b) {
+            (Ok(a), Ok(b)) => {
+                eprintln!(
+                    "{what}: both succeed (p {}, statistic {:?})",
+                    a.pvalue, a.statistic
+                );
+                assert!(!refused, "{what}: the X call accepts n_folds = n");
+                assert!(rel(a.pvalue, b.pvalue), "{what}: p {a:?} {b:?}");
+                assert!(
+                    rel(a.statistic.unwrap(), b.statistic.unwrap()),
+                    "{what}: statistic {a:?} {b:?}"
+                );
+            }
+            (Err(a), Err(b)) => {
+                eprintln!("{what}: both fail ({}: {a})", a.code());
+                assert_eq!(a.code(), b.code(), "{what}: {a} / {b}");
+            }
+            (a, b) => panic!("{what}: X {a:?}, gram {b:?}"),
         }
     }
 }

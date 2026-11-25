@@ -54,6 +54,43 @@ TITLES = {
     "profiles_search": "Split a fitted PLS1 coefficient, choosing the number of factors",
 }
 
+# Runnable @examples, one per function. Each is self-contained and small, so a
+# CRAN check runs it in a few seconds; permutation counts go through `args`.
+_XY = """set.seed(1)
+X <- matrix(rnorm(40 * 20), 40, 20)
+y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+"""
+_Y2 = "Y <- cbind(y, y + rnorm(40))\n"
+_SMALL = 'test_method = "split_exact", args = list(n_perm = 19, n_splits = 5)'
+EXAMPLES = {
+    "preprocess": _XY + "preprocess(X, y)",
+    "pls1_fit": _XY + "fit <- pls1_fit(X, y, k = 3, seed = 1)\nfit",
+    "pls1_predict": _XY + "fit <- pls1_fit(X, y, k = 3)\npls1_predict(fit, X[1:5, ])",
+    "pls1_find_k_optimal": _XY + "pls1_find_k_optimal(X, y, k_max = 5, seed = 1)",
+    "pls1_find_k_sequence": _XY + f"pls1_find_k_sequence(X, y, k_max = 4, {_SMALL}, seed = 1)",
+    "spls1_fit": _XY + "spls1_fit(X, y, k = 2, keep = 5)",
+    "spls1_find_keep_optimal": _XY + "spls1_find_keep_optimal(X, y, k = 2, seed = 1)",
+    "spls1_find_k_optimal": _XY + "spls1_find_k_optimal(X, y, k_max = 4, keep = 5, seed = 1)",
+    "spls1_find_k_sequence": _XY + f"spls1_find_k_sequence(X, y, k_max = 4, keep = 5, {_SMALL}, seed = 1)",
+    "pls3_fit": _XY + _Y2 + "pls3_fit(X, Y, k = 2)",
+    "plssvd_fit": _XY + _Y2 + "plssvd_fit(X, Y, k = 2)",
+    "pls3_transform": _XY + _Y2 + 'model <- pls3_fit(X, Y, k = 2)\npls3_transform(model, X_new = X[1:5, ], which = "x_scores")',
+    "plssvd_transform": _XY + _Y2 + 'model <- plssvd_fit(X, Y, k = 2)\nplssvd_transform(model, X_new = X[1:5, ], which = "x_scores")',
+    "spls3_fit": _XY + _Y2 + "spls3_fit(X, Y, k = 2, keep_X = 5, keep_Y = 1)",
+    "pls1_confirmatory_test": _XY + f"test <- pls1_confirmatory_test(X, y, args = list(n_perm = 19, n_splits = 5), seed = 1)\ntest$pvalue",
+    "split_nb_gate": _XY + "split_nb_gate(X)",
+    "pls1_perm_null": _XY + "pls1_perm_null(X, y, k = 1, n_perm = 100, seed = 1)",
+    "pls3_confirmatory_test": _XY + _Y2 + f"pls3_confirmatory_test(X, Y, k = 1, {_SMALL}, seed = 1)",
+    "pls1_perm_alpha": _XY + "g <- gram_matrix(X)\npls1_perm_alpha(g, matrix(y, ncol = 1), k = 2)",
+    "gram_matrix": _XY + "g <- gram_matrix(X)\nsubset(g, 1:25)",
+    "rotate": _XY + "fit <- pls1_fit(X, y, k = 2)\nrotate(factors(fit, X, 2L), X)",
+    "factors": _XY + "fit <- pls1_fit(X, y, k = 2)\nfactors(fit, X, 2L)",
+    "pca_basis": _XY + "pca_basis(X)",
+    "profiles_find_n": _XY + "profiles_find_n(X, y, k = 2, n_max = 3, seed = 1)",
+    "profiles": _XY + "fit <- pls1_fit(X, y, k = 2)\nprofiles(fit, X, 2L)",
+    "profiles_search": _XY + "fit <- pls1_fit(X, y, k = 2)\nprofiles_search(fit, X, y, n_max = 3, seed = 1)",
+}
+
 RE_HEADING = re.compile(r"^#{1,6}\s+(.*\S)\s*$")
 RE_FUNCTION = re.compile(r"^\*\*function:\*\*\s*`(\w+)`")
 
@@ -116,6 +153,8 @@ def render_function(fn, r_class, sections):
     name = fn["name"]
     if name not in TITLES:
         raise SystemExit(f"render-r-stubs: no title for {name}; add it to TITLES")
+    if name not in EXAMPLES:
+        raise SystemExit(f"render-r-stubs: no example for {name}; add it to EXAMPLES")
     if name not in sections:
         raise SystemExit(f"render-r-stubs: {name} has no **function:** line in {API_MD}")
     params = fn["params"]
@@ -132,6 +171,8 @@ def render_function(fn, r_class, sections):
         "#'",
         f"#' @param {','.join(p['name'] for p in params)} See the canonical reference.",
         f"#' @return {return_doc(fn, r_class)}",
+        "#' @examples",
+        *(f"#' {l}" if l else "#'" for l in EXAMPLES[name].splitlines()),
         "#' @export",
         f"{name} <- function(",
     ]

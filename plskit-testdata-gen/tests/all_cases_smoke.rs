@@ -2,14 +2,17 @@
 //! runs every case into a scratch directory, and its manifest entries must
 //! equal `testdata/manifest.json` case for case (name, function, inputs,
 //! outputs, kwargs): a case added, removed or edited without
-//! regenerating the corpus fails here. Content hashes are not compared with
-//! the committed ones (fixture bytes may differ across hosts within
-//! tolerance, `testdata/README.md` "Regenerating: settle mode");
+//! regenerating the corpus fails here. Every generated input must also be
+//! equivalent under the corpus tolerance to its committed file, so a drift in
+//! the input draws fails on the day it happens. Content hashes are not
+//! compared with the committed ones (fixture bytes may differ across hosts
+//! within tolerance, `testdata/README.md` "Regenerating: settle mode");
 //! `scripts/check_corpus_hash.py` owns those and `plskit-rs/tests/corpus.rs`
-//! the values.
+//! the output values.
 
 use plskit_testdata_gen::cases::all_cases;
 use plskit_testdata_gen::npz::sha256_of_file;
+use plskit_testdata_gen::settle::{Tolerance, equivalent};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use tempfile::tempdir;
@@ -52,8 +55,8 @@ fn all_cases_matches_the_committed_manifest() {
         );
     }
 
-    let manifest =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../testdata/manifest.json");
+    let testdata = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../testdata");
+    let manifest = testdata.join("manifest.json");
     let committed: Value =
         serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
     let committed: BTreeMap<String, Value> = committed["cases"]
@@ -84,6 +87,24 @@ fn all_cases_matches_the_committed_manifest() {
         assert_eq!(
             entry, &committed[name],
             "{name}: the manifest entry differs from the generator's; regenerate"
+        );
+    }
+
+    for c in &cases {
+        let committed = testdata.join(&c.inputs);
+        assert!(
+            committed.exists(),
+            "{}: testdata/{} is missing; regenerate",
+            c.name,
+            c.inputs
+        );
+        let same = equivalent(&committed, &dir.path().join(&c.inputs), Tolerance::DEFAULT)
+            .unwrap_or_else(|e| panic!("{}: cannot compare testdata/{}: {e}", c.name, c.inputs));
+        assert!(
+            same,
+            "{}: testdata/{} differs from the generated input; an input file never changes: \
+             point the case at a new input file and regenerate",
+            c.name, c.inputs
         );
     }
 }

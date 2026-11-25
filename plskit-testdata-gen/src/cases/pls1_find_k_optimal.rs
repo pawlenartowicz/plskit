@@ -10,8 +10,8 @@ use plskit::{
 };
 
 use crate::cases::{
-    WEIGHTED_N80_D6_INPUTS, Xyw, case_files, ensure_moved, faer_col_to_array, scalar_i64,
-    synth_data, weighted_n80_d6,
+    WEIGHTED_N80_D6_INPUTS, Xyw, add_count, add_counts, case_files, ensure_moved,
+    faer_col_to_array, scalar_i64, synth_data, weighted_n80_d6,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
@@ -79,6 +79,9 @@ pub(crate) fn write_find_k_optimal(path: &Path, r: &FindKOptimalOutput) -> Resul
     if let Some(ref s) = r.diagnostic {
         w.add_string("diagnostic", s)?;
     }
+    add_count(&mut w, "n_failed_folds", r.n_failed_folds)?;
+    add_counts(&mut w, "n_failed_splits", r.n_failed_splits.as_deref())?;
+    add_counts(&mut w, "n_failed_perms", r.n_failed_perms.as_deref())?;
     w.add_i64("seed", &scalar_i64(i64::try_from(r.seed)?))?;
     w.finish()
 }

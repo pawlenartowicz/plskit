@@ -1,7 +1,7 @@
 //! preprocess, `pls1_fit`, `pls1_predict`, `spls1_fit`.
 
 use faer::Col;
-use plskit::{FitOpts, KSpec, PreprocessInput};
+use plskit::{FitOpts, PreprocessInput};
 
 use crate::coerce;
 use crate::convert::{self, col, mat, opt};
@@ -27,7 +27,7 @@ fn put_x(
     }
 }
 
-/// `preprocess(X=None, Y=None, weights=None)`; `Y` may be 1-D or 2-D.
+/// `Y` may be 1-D or 2-D.
 pub(crate) fn preprocess(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.opt_mat("X")?;
     let y = inp.take("Y");
@@ -85,9 +85,6 @@ pub(crate) fn preprocess(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     ))
 }
 
-/// `pls1_fit(X, y, k="optimal", *, k_max=None, find_k_args=None,
-/// pre_standardized=False, seed=None, weights=None, covariates=None)`.
-///
 /// `k` is an integer, or `"optimal"` / `"sequence"` (then `k_max` defaults
 /// to `plskit::find_k::pls1_default_k_max` and `find_k_args` is forwarded
 /// to the selection). With an integer `k`, a non-null `k_max` or
@@ -126,7 +123,7 @@ pub(crate) fn pls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let model = engine(plskit::pls1_fit(
         d.x,
         d.y,
-        KSpec::Fixed(k_int),
+        k_int,
         d.weights,
         d.covariates,
         FitOpts {
@@ -140,7 +137,7 @@ pub(crate) fn pls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     })
 }
 
-/// `pls1_predict(model, X_new, *, covariates=None)`; returns a plain vector.
+/// Returns a plain vector.
 pub(crate) fn pls1_predict(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let model = inp.take("model");
     let x_new = inp.mat("X_new")?;
@@ -156,8 +153,6 @@ pub(crate) fn pls1_predict(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     Ok(Outcome::new(col(&yhat)))
 }
 
-/// `spls1_fit(X, y, k, keep, *, pre_standardized=False, weights=None,
-/// covariates=None)`.
 pub(crate) fn spls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = inp.vec("y")?;
@@ -170,7 +165,7 @@ pub(crate) fn spls1_fit(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let m = engine(plskit::spls1_fit(
         x.as_mat(),
         y.as_col(),
-        KSpec::Fixed(k),
+        k,
         keep,
         w.as_ref().map(VecF64::as_col),
         z.as_ref().map(MatF64::as_mat),

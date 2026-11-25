@@ -102,6 +102,12 @@ the all-row centring and scale. Not exported, because DataFrames exports a
 """
 function subset(g::PlsKitResult{:GramMatrixResult}, rows::AbstractVector{<:Union{Signed,Unsigned}})
     _check_main_thread()
+    any(<(1), rows) && throw(PlsKitError(:invalid_argument, "rows must be row numbers, at least 1", NamedTuple()))
+    if any(>(typemax(Int)), rows)
+        # Past every row; `collect(Int, rows)` would throw InexactError.
+        n = pyconvert(Int, getfield(g, :py).gram.shape[0])
+        throw(PlsKitError(:invalid_argument, "rows must index the $n rows of the Gram matrix", NamedTuple()))
+    end
     return _pycall(getfield(g, :py).subset, collect(Int, rows) .- 1)
 end
 
@@ -113,8 +119,10 @@ is any iterable of matrices (a generator keeps one block in memory at a time,
 plus the `(n, n)` sum), all with the same number of rows. Each block goes through
 `gram_matrix`, so its conversion rules and errors apply. Equal to
 `gram_matrix(hcat(blocks...))` up to rounding. With `pre_standardized=true`, data
-beyond `2^±256` must use `gram_matrix` on the whole `X`. Throws `:invalid_input`
-for no blocks and `:shape_mismatch` for a block with another row count.
+beyond `2^±256` must use `gram_matrix` on the whole `X`. The calls that take the
+result rescale it themselves, by a power of four, when its scale would reach their
+absolute floors, and map their outputs back. Throws `:invalid_input` for no
+blocks and `:shape_mismatch` for a block with another row count.
 """
 function gram_matrix_blocks(blocks; pre_standardized=false)
     _check_main_thread()
@@ -127,15 +135,13 @@ function gram_matrix_blocks(blocks; pre_standardized=false)
             acc = g
         elseif size(g, 1) != size(acc, 1)
             throw(PlsKitError(:shape_mismatch,
-                "gram_matrix_blocks: every block needs the same number of rows " *
-                "($(size(acc, 1)) in the first block, $(size(g, 1)) in a later one)",
+                "block has $(size(g, 1)) rows, the first block has $(size(acc, 1))",
                 NamedTuple()))
         else
             acc .+= g
         end
         p += r.n_features
     end
-    acc === nothing && throw(PlsKitError(:invalid_input,
-        "gram_matrix_blocks: `blocks` is empty; give at least one block", NamedTuple()))
+    acc === nothing && throw(PlsKitError(:invalid_input, "blocks holds no block", NamedTuple()))
     return _pycall(_plskit.GramMatrixResult; gram=acc, n_features=p, pre_standardized)
 end

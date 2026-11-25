@@ -7,7 +7,7 @@ use crate::cases::{
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
 use anyhow::Result;
-use plskit::{FitOpts, KSpec, RotationMethod, VarimaxArgs, pls1_fit, rotate};
+use plskit::{FitOpts, RotationMethod, VarimaxArgs, pls1_fit, rotate};
 use std::path::Path;
 
 /// Case: varimax rotation of a `W*` matrix derived from a synthetic PLS1 fit.
@@ -42,7 +42,7 @@ pub fn varimax_d6_k2(root: &Path) -> Result<Case> {
     let model = pls1_fit(
         x_faer.as_ref(),
         y_faer.as_ref(),
-        KSpec::Fixed(2),
+        2,
         None,
         None,
         FitOpts::default(),

@@ -7,6 +7,7 @@ pub type PlsKitResult<T> = Result<T, PlsKitError>;
 
 /// All errors returned by plskit public functions.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PlsKitError {
     /// X and y have incompatible row counts.
     #[error("dimension mismatch: X has shape {x:?}, y has length {y}")]
@@ -30,19 +31,6 @@ pub enum PlsKitError {
     #[error("non-finite values in input")]
     NonFiniteInput,
 
-    /// NIPALS loop did not converge within the iteration budget.
-    ///
-    /// Reserved — never emitted by any current production path. Kept so
-    /// wrapper error-code enumerations stay stable if a strict-convergence
-    /// mode lands later.
-    #[error("NIPALS did not converge after {iter} iterations (tol={tol})")]
-    ConvergenceFailure {
-        /// Number of iterations attempted.
-        iter: usize,
-        /// Convergence tolerance that was not reached.
-        tol: f64,
-    },
-
     /// Generic invalid-argument error (message describes the problem).
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
@@ -51,23 +39,7 @@ pub enum PlsKitError {
     #[error("internal error: {0}")]
     Internal(String),
 
-    /// Requested rotation method is not implemented in this version.
-    #[error("rotation method '{name}' is not implemented in this version")]
-    RotationMethodNotImplemented {
-        /// Method name as received from the caller (e.g. "promax", "geomin").
-        name: String,
-    },
-
-    /// Method-specific args dict had unknown keys, missing keys, or wrong-typed values.
-    #[error("invalid args for method '{method}': {detail}")]
-    InvalidArgs {
-        /// Method name (e.g. "varimax").
-        method: String,
-        /// Human-readable explanation of which key/value was wrong.
-        detail: String,
-    },
-
-    /// Generic invalid-input error (shape, finiteness, K=0, etc.).
+    /// Generic invalid-input error (shape, K=0, etc.).
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
@@ -85,18 +57,31 @@ pub enum PlsKitError {
         reason: &'static str,
     },
 
-    /// Too many resamples failed per-subsample validation. Carries the raw
-    /// counts and the `max_skip_rate` threshold so callers can report
-    /// context-appropriate messages.
+    /// Too many resamples failed per-subsample validation, or no draw is left
+    /// to reduce after skips and failures, or every draw left has a NaN
+    /// holdout correlation (whatever `max_skip_rate` and
+    /// `max_failure_rate` are). Carries the raw counts and the
+    /// `max_skip_rate` threshold so callers can report context-appropriate
+    /// messages.
     #[error(
-        "Resampling degenerate: {skipped}/{total} draws (skip_rate={skip_rate:.3}) failed \
-         per-subsample validation, exceeding `max_skip_rate` (threshold={threshold:.3}). \
-         The resampling loop cannot produce an unbiased CI under these conditions \
-         — surviving draws over-represent rows with high positive weight. Likely \
-         causes: requested `k` is too large for the effective sample size, the \
-         weight vector is concentrated on too few rows, or `m_rate` is too low. \
-         Remediation: lower `k`, soften the weight distribution, raise `m_rate`, \
-         or raise `max_skip_rate` to accept the truncation knowingly."
+        "Resampling degenerate: {opening} (`max_skip_rate` threshold={threshold:.3}). Either the \
+         skip rate exceeds `max_skip_rate`, or no draw with a holdout correlation is left \
+         after skips and failures (every draw left failed or has a NaN holdout \
+         correlation), so there is nothing to reduce. When draws do survive many skips, they \
+         over-represent rows with high positive weight, so the loop cannot produce \
+         an unbiased CI. Likely causes: requested `k` is too large for the \
+         effective sample size, the weight vector is concentrated on too few rows, \
+         or `m_rate` is too low. Remediation: lower `k`, soften the weight \
+         distribution, raise `m_rate`, or, when the skip rate exceeds `max_skip_rate`, \
+         raise `max_skip_rate` to accept the truncation knowingly.",
+        opening = if *.skipped == 0 {
+            format!("no draw with a holdout correlation is left ({} draws, none skipped)", .total)
+        } else {
+            format!(
+                "{}/{} draws (skip_rate={:.3}) failed per-subsample validation",
+                .skipped, .total, .skip_rate
+            )
+        }
     )]
     ResamplingDegenerate {
         /// Number of resamples that failed per-subsample validation.
@@ -127,7 +112,7 @@ pub enum PlsKitError {
         /// plus workers that succeeded but produced NaN `holdout_corr`.
         observed_holdout_corr: f64,
         /// Number of resamples whose worker (full fit + alignment + composite
-        /// readouts) returned `Err`.
+        /// readouts) returned `Err` other than a weight skip.
         n_worker_failed: usize,
         /// Worker failures plus successful-worker-with-NaN-holdout_corr.
         n_holdout_corr_failed: usize,
@@ -135,18 +120,18 @@ pub enum PlsKitError {
         n_boot: usize,
     },
 
-    /// More than half the permutation null fits failed, so the NaN-as-exceedance
-    /// fail-soft rule (`raw_perm`) would saturate p toward 1 instead of measuring
-    /// anything. Distinct from `ResamplingDegenerate`, whose message diagnoses
-    /// weighted-subsample skips.
+    /// More than half the permutation null statistics are not finite, so the
+    /// non-finite-as-exceedance fail-soft rule (`raw_perm`) would saturate p
+    /// toward 1 instead of measuring anything. Distinct from
+    /// `ResamplingDegenerate`, whose message diagnoses weighted-subsample skips.
     #[error(
-        "permutation null degenerate: {failed}/{total} null fits failed (NaN). \
-         The p-value would be dominated by the conservative NaN-as-exceedance \
+        "permutation null degenerate: {failed}/{total} null statistics are not finite. \
+         The p-value would be dominated by the conservative non-finite-as-exceedance \
          rule rather than the data. Likely causes: `k` too large for `n`, or a \
          pathological weight vector. Lower `k` or check the inputs."
     )]
     PermNullDegenerate {
-        /// Number of permutation null fits that returned NaN.
+        /// Number of permutation null statistics that are not finite.
         failed: usize,
         /// Total permutations attempted (== `n_perm`).
         total: usize,
@@ -194,6 +179,23 @@ pub enum PlsKitError {
         /// Requested number of components.
         k: usize,
     },
+
+    /// A loop of the call does not fit `PLSKIT_MEMORY_BUDGET`: the bytes it
+    /// holds across its units plus one unit are above the budget, or a buffer
+    /// the call checks alone does not fit. Raised before the loop or that
+    /// buffer is allocated, at a nonzero budget only.
+    #[error(
+        "{env} is {budget} bytes; this call needs at least {needed} bytes. Set it to at \
+         least {needed}, or to 0 to run with the least memory.",
+        env = crate::fit::MEMORY_BUDGET_ENV
+    )]
+    MemoryBudget {
+        /// The budget in bytes.
+        budget: u64,
+        /// The bytes the loop needs to run one unit (`u64::MAX` when the count
+        /// overflows). A later loop of the same call may need more.
+        needed: u64,
+    },
 }
 
 impl PlsKitError {
@@ -205,11 +207,8 @@ impl PlsKitError {
             Self::DimensionMismatch { .. } => "dimension_mismatch",
             Self::KExceedsMax { .. } => "k_exceeds_max",
             Self::NonFiniteInput => "non_finite_input",
-            Self::ConvergenceFailure { .. } => "convergence_failure",
             Self::InvalidArgument(_) => "invalid_argument",
             Self::Internal(_) => "internal",
-            Self::RotationMethodNotImplemented { .. } => "rotation_method_not_implemented",
-            Self::InvalidArgs { .. } => "invalid_args",
             Self::InvalidInput(_) => "invalid_input",
             Self::ShapeMismatch(_) => "shape_mismatch",
             Self::InvalidWeights { .. } => "invalid_weights",
@@ -219,6 +218,7 @@ impl PlsKitError {
             Self::OptimalNoComponent => "optimal_no_component",
             Self::SequenceNoRejection { .. } => "sequence_no_rejection",
             Self::InsufficientResidualDf { .. } => "insufficient_residual_df",
+            Self::MemoryBudget { .. } => "memory_budget",
         }
     }
 }
@@ -228,12 +228,38 @@ impl PlsKitError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn resampling_degenerate_opening_names_the_case() {
+        let none_skipped = PlsKitError::ResamplingDegenerate {
+            skipped: 0,
+            total: 100,
+            skip_rate: 0.0,
+            threshold: 1.0,
+        }
+        .to_string();
+        assert!(
+            none_skipped
+                .contains("no draw with a holdout correlation is left (100 draws, none skipped)")
+        );
+        let some_skipped = PlsKitError::ResamplingDegenerate {
+            skipped: 40,
+            total: 100,
+            skip_rate: 0.4,
+            threshold: 0.1,
+        }
+        .to_string();
+        assert!(
+            some_skipped.contains("40/100 draws (skip_rate=0.400) failed per-subsample validation")
+        );
+    }
+
     /// Every variant's `code()` is the string documented in `docs/python/api.md`
     /// ("All codes"); the Python wrapper stamps it on `PlsKitError.code`, so the
     /// strings are a cross-language contract. The index match has no wildcard:
     /// a new variant does not compile until it is given an index, and then fails
     /// until it has a row here (and, by the same review, in the docs).
     #[test]
+    #[allow(clippy::too_many_lines)] // one table row per variant
     fn every_variant_maps_to_its_documented_code() {
         use PlsKitError as E;
         let s = || String::from("x");
@@ -244,23 +270,8 @@ mod tests {
             ),
             (E::KExceedsMax { k: 2, k_max: 1 }, "k_exceeds_max"),
             (E::NonFiniteInput, "non_finite_input"),
-            (
-                E::ConvergenceFailure { iter: 1, tol: 0.1 },
-                "convergence_failure",
-            ),
             (E::InvalidArgument(s()), "invalid_argument"),
             (E::Internal(s()), "internal"),
-            (
-                E::RotationMethodNotImplemented { name: s() },
-                "rotation_method_not_implemented",
-            ),
-            (
-                E::InvalidArgs {
-                    method: s(),
-                    detail: s(),
-                },
-                "invalid_args",
-            ),
             (E::InvalidInput(s()), "invalid_input"),
             (E::ShapeMismatch(s()), "shape_mismatch"),
             (E::InvalidWeights { reason: "negative" }, "invalid_weights"),
@@ -304,6 +315,13 @@ mod tests {
                 },
                 "insufficient_residual_df",
             ),
+            (
+                E::MemoryBudget {
+                    budget: 1,
+                    needed: 2,
+                },
+                "memory_budget",
+            ),
         ];
         let mut seen: Vec<usize> = table
             .iter()
@@ -313,25 +331,36 @@ mod tests {
                     E::DimensionMismatch { .. } => 0,
                     E::KExceedsMax { .. } => 1,
                     E::NonFiniteInput => 2,
-                    E::ConvergenceFailure { .. } => 3,
-                    E::InvalidArgument(_) => 4,
-                    E::Internal(_) => 5,
-                    E::RotationMethodNotImplemented { .. } => 6,
-                    E::InvalidArgs { .. } => 7,
-                    E::InvalidInput(_) => 8,
-                    E::ShapeMismatch(_) => 9,
-                    E::InvalidWeights { .. } => 10,
-                    E::ResamplingDegenerate { .. } => 11,
-                    E::ResampleFailureRateExceeded { .. } => 12,
-                    E::PermNullDegenerate { .. } => 13,
-                    E::OptimalNoComponent => 14,
-                    E::SequenceNoRejection { .. } => 15,
-                    E::InsufficientResidualDf { .. } => 16,
+                    E::InvalidArgument(_) => 3,
+                    E::Internal(_) => 4,
+                    E::InvalidInput(_) => 5,
+                    E::ShapeMismatch(_) => 6,
+                    E::InvalidWeights { .. } => 7,
+                    E::ResamplingDegenerate { .. } => 8,
+                    E::ResampleFailureRateExceeded { .. } => 9,
+                    E::PermNullDegenerate { .. } => 10,
+                    E::OptimalNoComponent => 11,
+                    E::SequenceNoRejection { .. } => 12,
+                    E::InsufficientResidualDf { .. } => 13,
+                    E::MemoryBudget { .. } => 14,
                 }
             })
             .collect();
         seen.sort_unstable();
-        assert_eq!(seen, (0..17).collect::<Vec<_>>(), "one row per variant");
+        assert_eq!(seen, (0..15).collect::<Vec<_>>(), "one row per variant");
+    }
+
+    #[test]
+    fn memory_budget_message_names_the_variable_the_budget_and_the_need() {
+        let e = PlsKitError::MemoryBudget {
+            budget: 1,
+            needed: 2,
+        };
+        assert_eq!(
+            e.to_string(),
+            "PLSKIT_MEMORY_BUDGET is 1 bytes; this call needs at least 2 bytes. \
+             Set it to at least 2, or to 0 to run with the least memory."
+        );
     }
 
     /// The message is all a wrapper's exception carries of this variant's

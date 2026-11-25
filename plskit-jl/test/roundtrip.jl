@@ -42,6 +42,13 @@ end
         end
         @test e isa PlsKitError && e.code === :invalid_argument
     end
+    for (bad, msg) in (([1, 61], "rows must index the 60 rows of the Gram matrix"),
+                       (UInt[typemax(UInt), 1], "rows must index the 60 rows of the Gram matrix"),
+                       ([0, 2], "rows must be row numbers, at least 1"),
+                       (UInt[0, 2], "rows must be row numbers, at least 1"))
+        e = try PLSKit.subset(g, bad); nothing catch err; err end
+        @test e isa PlsKitError && e.code === :invalid_argument && e.msg == msg
+    end
     # a Bool mask is not a list of row numbers
     @test_throws MethodError PLSKit.subset(g, [true, true])
 end
@@ -78,9 +85,12 @@ end
     @test pls1_confirmatory_test(; gram=g, y, kw...).pvalue ==
           pls1_confirmatory_test(; gram=whole, y, kw...).pvalue
     e = try gram_matrix_blocks(Matrix{Float64}[]); nothing catch err; err end
-    @test e isa PlsKitError && e.code == :invalid_input
+    @test e isa PlsKitError && e.code == :invalid_input && e.msg == "blocks holds no block"
     e = try gram_matrix_blocks([X, X[1:20, :]]); nothing catch err; err end
     @test e isa PlsKitError && e.code == :shape_mismatch
+    e = try gram_matrix_blocks([X[1:4, :], X[1:3, :]]); nothing catch err; err end
+    @test e isa PlsKitError && e.code == :shape_mismatch &&
+          e.msg == "block has 3 rows, the first block has 4"
 end
 
 @testset "k takes a set" begin
@@ -164,4 +174,15 @@ end
     @test plskit_error(() -> rotate(f; X=X, L=f.W)).code === :invalid_argument
     @test plskit_error(() -> rotate(f; pre_standardized=true)).code === :invalid_argument
     @test plskit_error(() -> factors(m3, X, 2)).code === :invalid_argument
+end
+
+@testset "failed split counts reach the result" begin
+    # One nonzero row leaves one half of every split with a constant outcome.
+    X = randn(30, 4)
+    y = [1.0; zeros(29)]
+    r = pls1_confirmatory_test(X, y; k=1, test_method="split_exact",
+                               args=(n_perm=19, n_splits=8), seed=1)
+    @test r.n_failed_splits == 8
+    @test r.n_failed_perms == 0
+    @test r.n_failed_folds === nothing
 end

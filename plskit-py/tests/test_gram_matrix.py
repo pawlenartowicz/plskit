@@ -44,6 +44,16 @@ def test_gram_matrix_subset():
         with pytest.raises(PlsKitError) as e:
             r.subset(bad)
         assert e.value.code == "invalid_argument", bad
+    for bad, msg in (
+        ([0, 30], "rows must index the 30 rows of the Gram matrix"),
+        ([-1, 2], "rows must index the 30 rows of the Gram matrix"),
+        ([2**70, 1], "rows must index the 30 rows of the Gram matrix"),
+        ([4], "rows must hold at least 2 rows, got 1"),
+        ([2**70], "rows must hold at least 2 rows, got 1"),
+    ):
+        with pytest.raises(PlsKitError) as e:
+            r.subset(bad)
+        assert str(e.value) == msg, bad
 
 
 def _blocks(X, cuts):
@@ -89,6 +99,11 @@ def test_gram_matrix_blocks_errors():
     with pytest.raises(PlsKitError) as e:
         gram_matrix_blocks([])
     assert e.value.code == "invalid_input"
+    assert str(e.value) == "blocks holds no block"
+    with pytest.raises(PlsKitError) as e:
+        gram_matrix_blocks([X[:4], X[:3]])
+    assert e.value.code == "shape_mismatch"
+    assert str(e.value) == "block has 3 rows, the first block has 4"
     with pytest.raises(PlsKitError) as e:
         gram_matrix_blocks([X, X[:29]])
     assert e.value.code == "shape_mismatch"

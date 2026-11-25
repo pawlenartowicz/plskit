@@ -10,7 +10,7 @@
 #![allow(clippy::disallowed_methods)] // test code: oracles and designs may use faer's global-parallelism APIs
 
 use faer::{Col, Mat};
-use plskit::fit::{FitOpts, KSpec, pls1_fit};
+use plskit::fit::{FitOpts, pls1_fit};
 use plskit::preprocess::{PreprocessInput, preprocess};
 
 #[test]
@@ -24,7 +24,7 @@ fn cache_pattern_round_trip_parity() {
     let m_raw = pls1_fit(
         x.as_ref(),
         y.as_ref(),
-        KSpec::Fixed(3),
+        3,
         Some(w.as_ref()),
         None,
         FitOpts::default(),
@@ -43,7 +43,7 @@ fn cache_pattern_round_trip_parity() {
     let m_cached = pls1_fit(
         xs.as_ref(),
         ys.as_ref(),
-        KSpec::Fixed(3),
+        3,
         Some(wn.as_ref()),
         None,
         FitOpts {
@@ -101,7 +101,7 @@ fn full_rank_weighted_fit_is_weighted_least_squares() {
         let m = pls1_fit(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(k),
+            k,
             weights.map(Col::as_ref),
             None,
             FitOpts::default(),

@@ -5,9 +5,8 @@ weights through the `weights` argument.
 
 ## What they mean
 
-- A length-`n` non-negative vector of precision or sampling weights. Each
-  row of `(X, y)` is scaled by `√w`. With as many components as `X` has
-  independent columns, the weighted fit is weighted least squares.
+- A length-`n` non-negative vector of observation weights. Each row of `(X, y)` is scaled by `√w`. With as many components as `X` has independent columns, the weighted fit is weighted least squares.
+- Under the null hypothesis, every weighted test, the closed-form `score` included, keeps each weight on its row and takes `y` as exchangeable across the rows of positive weight: the same variance on every such row. With precision weights, where the variance of row `i` is proportional to `1/w_i`, the closed-form `score` is conservative.
 - Weights are normalized to mean 1 (`w / mean(w)`) on every call, so their
   overall scale does not matter. The standardization of `X` and `y` uses
   the weighted mean and variance

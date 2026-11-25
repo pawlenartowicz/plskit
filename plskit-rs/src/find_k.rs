@@ -2,11 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use rand::seq::SliceRandom;
-
 use crate::error::{PlsKitError, PlsKitResult};
 use crate::fit::{
-    FitOpts, IMPLICIT_MAX_MEAN_RATIO, KSpec, ParChoice, PreparedFit, check_fit_y_and_k,
+    FitOpts, IMPLICIT_MAX_MEAN_RATIO, InternalFitOpts, ParChoice, PreparedFit, check_fit_y_and_k,
     pls1_fit_impl, pls1_fit_implicit,
 };
 use crate::linalg::{
@@ -20,6 +18,7 @@ use faer::{Col, ColRef, Mat, MatRef};
 
 /// Selector used in `pls1_find_k_optimal` to pick K* from the candidate range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Selector {
     /// Maximize CV R² with the 1-SE rule (default).
     R2Se,
@@ -44,8 +43,8 @@ pub struct FindKOptimalOpts {
     pub n_folds: usize,
     /// Optional same-sample sequential diagnostic to run on K*. `None` disables
     /// the diagnostic; `Some(method)` enables it (any `ConfirmatoryMethod`
-    /// except `Score` and `Auto`). Selection and test share data, so the resulting
-    /// pvalues are diagnostic only and not honest inference.
+    /// except `Score`, `SvPerm` and `Auto`). Selection and test share data, so
+    /// the resulting pvalues are diagnostic only and not honest inference.
     pub diagnostic: Option<ConfirmatoryMethod>,
     /// Number of permutations for `raw_perm` / `split_exact` diagnostic. Inert
     /// when `diagnostic is None`.
@@ -70,8 +69,6 @@ pub struct FindKOptimalOpts {
     pub pre_standardized: bool,
     /// RNG seed; `None` draws from OS entropy.
     pub seed: Option<u64>,
-    /// Print progress to stderr (reserved for future verbose mode).
-    pub verbose: bool,
 }
 
 impl Default for FindKOptimalOpts {
@@ -85,7 +82,6 @@ impl Default for FindKOptimalOpts {
             force: false,
             pre_standardized: false,
             seed: None,
-            verbose: false,
         }
     }
 }
@@ -120,14 +116,34 @@ pub struct FindKOptimalOutput {
     pub n_eff: f64,
     /// Stable rank of X as the sequence-level auto-gate read it (centred, and
     /// divided by its all-row scale unless `pre_standardized`). `Some`
-    /// whenever `diagnostic == Some(SplitNb)`, whether the gate fired or
-    /// not, and also under `force`. `None` otherwise, including when
-    /// no diagnostic was requested. NaN when the Gram matrix of X as the gate
+    /// whenever `diagnostic == Some(SplitNb)` without `force`, whether the
+    /// gate fired or not. `None` otherwise: under `force` (the gate does not
+    /// compute it) and when no diagnostic was requested. NaN when the Gram matrix of X as the gate
     /// read it is not finite; the gate then fires.
     pub stable_rank: Option<f64>,
     /// Rank of `[1, Z]` minus 1 (covariates kept after aliased columns are
     /// dropped); `None` without covariates.
     pub n_covariates: Option<usize>,
+    /// Of the CV folds, the number that are degenerate or failed: the
+    /// held-out R² is not finite at one or more candidates (that value is
+    /// left out of the candidate's `cv_scores` and `cv_scores_se`), or the
+    /// fold's validation outcome has no spread (`ss_tot <= 0`, scored R² = 0
+    /// at every candidate and kept in the means). `Some` whenever
+    /// `cv_scores` is `Some` (`r2_se`, `r2_max`), `0` when no fold ran
+    /// (`k_star = 0` from the full-data check); `None` for `bic`.
+    pub n_failed_folds: Option<usize>,
+    /// One entry per step of the `diagnostic` that ran, in step order, each
+    /// the same field of that step's `ConfirmatoryTestOutput`: of the
+    /// `n_splits` splits drawn, the number left out or degenerate. `Some`
+    /// for `split_exact` and `split_nb` (empty at `k_star = 0`), `None`
+    /// for other methods and when no diagnostic ran.
+    pub n_failed_splits: Option<Vec<usize>>,
+    /// One entry per step of the `diagnostic` that ran, in step order, each
+    /// the same field of that step's `ConfirmatoryTestOutput`: of the
+    /// `n_perm` null statistics, the number that are not finite. `Some` for
+    /// `raw_perm` and `split_exact` (empty at `k_star = 0`), `None` for
+    /// other methods and when no diagnostic ran.
+    pub n_failed_perms: Option<Vec<usize>>,
 }
 
 impl FindKOptimalOutput {
@@ -172,7 +188,7 @@ pub fn pls1_default_k_max(
     covariates: Option<MatRef<'_, f64>>,
 ) -> PlsKitResult<usize> {
     let n = x.nrows();
-    let (w_norm, n_eff) = crate::fit::validate_and_normalize_weights(weights, n, 0)?;
+    let (w_norm, n_eff) = crate::fit::validate_and_normalize_weights(weights, n)?;
     let residual_df = covariates
         .map(|z| {
             if z.nrows() != n {
@@ -231,6 +247,7 @@ pub fn pls1_default_k_max(
 /// - `InvalidArgument` if `diagnostic == Some(Score)`, `Some(SvPerm)` or `Some(Auto)`
 /// - `NonFiniteInput` when X, y, or weights contain NaN/inf
 /// - `InvalidWeights` for negative, all-zero, or insufficient-`n_eff` weights
+/// - `InvalidWeights` with reason `insufficient_effective_n` when every CV fold has zero weight on its training or validation rows (all the positive weight sits in one fold)
 /// - `ShapeMismatch` when `covariates` does not have `n_samples` rows
 /// - `NonFiniteInput` when `covariates` holds NaN/inf
 /// - `InsufficientResidualDf` when `n_samples − rank([1, Z]) < k_max + 1`
@@ -357,9 +374,17 @@ fn find_k_optimal_impl(
 
     let (w_norm, n_eff_val) = crate::fit::validate_weights_for_k(weights, n, k_max)?;
 
-    let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
+    let seed_used = crate::rng::resolve_seed(opts.seed, n)?;
+    // Data and argument errors come before any memory check, at every budget.
+    crate::fit::check_finite_mat(x)?;
+    crate::fit::check_finite_col(y)?;
+    if matches!(opts.selector, Selector::R2Se | Selector::R2Max) {
+        reject_cv_leave_one_out(n, opts.n_folds, cv_n_folds(n, opts.n_folds))?;
+    }
     let wref = w_norm.as_ref().map(Col::as_ref);
     let mut adj = adjust_for_find_k(x, y, covariates, wref, opts.pre_standardized, k_max)?;
+    // The adjusted copy is held beside every loop below.
+    let _held = crate::fit::hold_bytes(adjusted_bytes(x, covariates));
     // Weighted `bic` on the adjusted data fits its rows scaled in place by
     // the √w factor the weighted fit would apply to a copy, as
     // `pls1_fit_covariates` does: the same kernel input, and no n×p copy
@@ -383,8 +408,10 @@ fn find_k_optimal_impl(
                     true,
                 )?;
                 if opts.diagnostic.is_some() {
-                    // Free the scaled copy before the rebuild allocates its own.
+                    // Free the scaled copy before the rebuild allocates its own,
+                    // which its check then counts alone.
                     drop(adj.take());
+                    let _free = crate::fit::hold_bytes(0);
                     adj = adjust_for_find_k(x, y, covariates, wref, opts.pre_standardized, k_max)?;
                 }
                 Some(selected)
@@ -405,15 +432,16 @@ fn find_k_optimal_impl(
     // `k_star = 0` with empty score maps on every selector: the CV selectors
     // get that from the shared CV layer (`cv_select`), the BIC selector from
     // its own full-data fit (an empty sweep, see `select_bic`).
-    let (k_star, cv_scores, cv_scores_se, bic_scores, selector_str): (
+    let (k_star, cv_scores, cv_scores_se, bic_scores, n_failed_folds, selector_str): (
         usize,
         Option<BTreeMap<usize, f64>>,
         Option<BTreeMap<usize, f64>>,
         Option<BTreeMap<usize, f64>>,
+        Option<usize>,
         &'static str,
     ) = match opts.selector {
         Selector::R2Se => {
-            let (k, scores, se) = select_cv(
+            let (k, scores, se, failed) = select_cv(
                 x,
                 y,
                 k_max,
@@ -422,12 +450,12 @@ fn find_k_optimal_impl(
                 wref,
                 scale.as_ref(),
                 keep,
-                &mut rng,
+                seed_used,
             )?;
-            (k, Some(scores), se, None, "r2_se")
+            (k, Some(scores), se, None, Some(failed), "r2_se")
         }
         Selector::R2Max => {
-            let (k, scores, _) = select_cv(
+            let (k, scores, _, failed) = select_cv(
                 x,
                 y,
                 k_max,
@@ -436,9 +464,9 @@ fn find_k_optimal_impl(
                 wref,
                 scale.as_ref(),
                 keep,
-                &mut rng,
+                seed_used,
             )?;
-            (k, Some(scores), None, None, "r2_max")
+            (k, Some(scores), None, None, Some(failed), "r2_max")
         }
         Selector::Bic => {
             let (k, scores) = match bic_in_place {
@@ -453,80 +481,99 @@ fn find_k_optimal_impl(
                     adj.is_some(),
                 )?,
             };
-            (k, None, None, Some(scores), "bic")
+            (k, None, None, Some(scores), None, "bic")
         }
     };
 
-    let (pvalues, diagnostic_str, stable_rank) = if let (Some(method), 0) =
-        (opts.diagnostic, k_star)
-    {
-        // No component to test. Report the method the sequence would have
-        // run, with the same gate evaluation `run_incremental_sequence`
-        // makes, so `diagnostic` and `stable_rank` keep their meaning.
-        if matches!(method, ConfirmatoryMethod::SplitNb) {
-            let gate = crate::signal_test::resolve_split_nb(
-                x,
-                wref,
-                n_eff_val,
-                opts.force,
-                scale.as_ref(),
+    let (pvalues, diagnostic_str, stable_rank, n_failed_splits, n_failed_perms) =
+        if let (Some(method), 0) = (opts.diagnostic, k_star) {
+            // No component to test. Report the method the sequence would have
+            // run, with the same gate evaluation `run_incremental_sequence`
+            // makes, so `diagnostic` and `stable_rank` keep their meaning. Under
+            // `force` the gate decides nothing and computes no rank, so its Gram
+            // matrix (the test's input) is not built. The count lists are empty
+            // for the counts the reported method sets.
+            let (ran, stable_rank) = if matches!(method, ConfirmatoryMethod::SplitNb) && !opts.force
+            {
+                let gate = crate::signal_test::resolve_split_nb(
+                    x,
+                    wref,
+                    n_eff_val,
+                    opts.force,
+                    scale.as_ref(),
+                )?;
+                (gate.method(), gate.stable_rank)
+            } else {
+                (method, None)
+            };
+            let splits = matches!(
+                ran,
+                ConfirmatoryMethod::SplitExact | ConfirmatoryMethod::SplitNb
+            );
+            let perms = matches!(
+                ran,
+                ConfirmatoryMethod::SplitExact | ConfirmatoryMethod::RawPerm
             );
             (
                 Some(Col::zeros(0)),
-                Some(gate.method().as_str().to_owned()),
-                Some(gate.stable_rank),
+                Some(ran.as_str().to_owned()),
+                stable_rank,
+                splits.then(Vec::new),
+                perms.then(Vec::new),
+            )
+        } else if let Some(method) = opts.diagnostic {
+            // stop_early_override=true so we collect the full p-value vector up to K*.
+            let seq_args = SequentialArgs::defaults_for(method).ok_or_else(|| {
+                PlsKitError::InvalidArgument(format!(
+                    "{} has no sequential variant",
+                    method.as_str()
+                ))
+            })?;
+            let seq_args = match seq_args {
+                SequentialArgs::RawPerm { .. } => SequentialArgs::RawPerm {
+                    n_perm: opts.n_perm,
+                },
+                SequentialArgs::SplitNb { .. } => SequentialArgs::SplitNb {
+                    n_splits: opts.n_splits,
+                    force: opts.force,
+                },
+                SequentialArgs::SplitExact { .. } => SequentialArgs::SplitExact {
+                    n_perm: opts.n_perm,
+                    n_splits: opts.n_splits,
+                },
+                SequentialArgs::E => SequentialArgs::E,
+                SequentialArgs::Auto { .. } => {
+                    unreachable!("`Some(Auto)` is rejected at the top of this function")
+                }
+            };
+            let r = run_incremental_sequence(
+                x,
+                y,
+                k_star,
+                w_norm.as_ref().map(Col::as_ref),
+                n_eff_val,
+                IncrementalSequenceOpts {
+                    args: seq_args,
+                    alpha: 0.05,
+                    stop_early_override: true, // collect ALL p-values up to K*
+                    pre_standardized,
+                    seed: Some(crate::rng::child_seed(seed_used, 0, crate::rng::TAG_SEQNC)),
+                    keep,
+                },
+                basis,
+            )?;
+            // Echo what RAN, not what was asked for: the hoisted `split_nb`
+            // auto-gate can reroute the whole sequence to `split_exact`.
+            (
+                Some(r.pvalues),
+                Some(r.method),
+                r.stable_rank,
+                r.n_failed_splits,
+                r.n_failed_perms,
             )
         } else {
-            (Some(Col::zeros(0)), Some(method.as_str().to_owned()), None)
-        }
-    } else if let Some(method) = opts.diagnostic {
-        // stop_early_override=true so we collect the full p-value vector up to K*.
-        let seq_args = SequentialArgs::defaults_for(method).ok_or_else(|| {
-            PlsKitError::InvalidArgument(format!("{} has no sequential variant", method.as_str()))
-        })?;
-        let seq_args = match seq_args {
-            SequentialArgs::RawPerm { .. } => SequentialArgs::RawPerm {
-                n_perm: opts.n_perm,
-            },
-            SequentialArgs::SplitNb { .. } => SequentialArgs::SplitNb {
-                n_splits: opts.n_splits,
-                force: opts.force,
-            },
-            SequentialArgs::SplitExact { .. } => SequentialArgs::SplitExact {
-                n_perm: opts.n_perm,
-                n_splits: opts.n_splits,
-            },
-            SequentialArgs::E => SequentialArgs::E,
-            SequentialArgs::Auto { .. } => {
-                unreachable!("`Some(Auto)` is rejected at the top of this function")
-            }
+            (None, None, None, None, None)
         };
-        let r = run_incremental_sequence(
-            x,
-            y,
-            k_star,
-            w_norm.as_ref().map(Col::as_ref),
-            n_eff_val,
-            IncrementalSequenceOpts {
-                args: seq_args,
-                alpha: 0.05,
-                stop_early_override: true, // collect ALL p-values up to K*
-                pre_standardized,
-                seed: Some({
-                    use rand::Rng;
-                    rng.next_u64()
-                }),
-                verbose: opts.verbose,
-                keep,
-            },
-            basis,
-        )?;
-        // Echo what RAN, not what was asked for: the hoisted `split_nb`
-        // auto-gate can reroute the whole sequence to `split_exact`.
-        (Some(r.pvalues), Some(r.method), r.stable_rank)
-    } else {
-        (None, None, None)
-    };
 
     Ok(FindKOptimalOutput {
         k_star,
@@ -540,6 +587,9 @@ fn find_k_optimal_impl(
         n_eff: n_eff_val,
         stable_rank,
         n_covariates: basis.map(crate::covariates::CovariateBasis::n_covariates),
+        n_failed_folds,
+        n_failed_splits,
+        n_failed_perms,
     })
 }
 
@@ -547,7 +597,8 @@ fn find_k_optimal_impl(
 #[derive(Debug, Clone, Copy)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct FindKSequenceOpts {
-    /// Per-step test method (any `ConfirmatoryMethod` except `Score`).
+    /// Per-step test method (any `ConfirmatoryMethod` except `Score` and
+    /// `SvPerm`).
     /// `SplitNb` is subject to the sequence-level auto-gate:
     /// a flagged design runs `split_exact` instead, and
     /// `FindKSequenceOutput.test_method` says so. `Auto` (the default)
@@ -556,7 +607,7 @@ pub struct FindKSequenceOpts {
     /// covariates `Auto` resolves to `split_exact`, and `split_nb`, `score`
     /// and `e` are refused.
     pub test_method: ConfirmatoryMethod,
-    /// Significance threshold for sequential rejection.
+    /// Significance threshold for sequential rejection, in (0, 1).
     pub alpha: f64,
     /// Number of permutations for `raw_perm` / `split_exact` / `auto`.
     pub n_perm: usize,
@@ -575,8 +626,6 @@ pub struct FindKSequenceOpts {
     pub pre_standardized: bool,
     /// RNG seed; `None` draws from OS entropy.
     pub seed: Option<u64>,
-    /// Print progress to stderr (reserved for future verbose mode).
-    pub verbose: bool,
 }
 
 impl Default for FindKSequenceOpts {
@@ -589,7 +638,6 @@ impl Default for FindKSequenceOpts {
             force: false,
             pre_standardized: false,
             seed: None,
-            verbose: false,
         }
     }
 }
@@ -616,12 +664,24 @@ pub struct FindKSequenceOutput {
     /// request that reached the stable-rank check (p > 4, `n_eff` above
     /// 1000 without `keep`, at least 250 with it, and p ≤ 100·n without
     /// `keep`); `None` otherwise. On a `split_nb` request it is set
-    /// whether the gate fired or not, and also under `force`. NaN when the
+    /// whether the gate fired or not, and `None` under `force`. NaN when the
     /// Gram matrix of X as the gate read it is not finite; the gate then fires.
     pub stable_rank: Option<f64>,
     /// Rank of `[1, Z]` minus 1 (covariates kept after aliased columns are
     /// dropped); `None` without covariates.
     pub n_covariates: Option<usize>,
+    /// One entry per step that ran, in step order (the length is the number
+    /// of steps run; `pvalues` has `k_max` entries, NaN past the stop),
+    /// each the same field of that step's
+    /// `ConfirmatoryTestOutput`: of the `n_splits` splits drawn, the number
+    /// left out or degenerate. `Some` for `split_exact` and `split_nb`,
+    /// `None` otherwise.
+    pub n_failed_splits: Option<Vec<usize>>,
+    /// One entry per step that ran, in step order, each the same field of
+    /// that step's `ConfirmatoryTestOutput`: of the `n_perm` null
+    /// statistics, the number that are not finite. `Some` for `raw_perm`
+    /// and `split_exact`, `None` otherwise.
+    pub n_failed_perms: Option<Vec<usize>>,
 }
 
 impl FindKSequenceOutput {
@@ -662,6 +722,7 @@ impl FindKSequenceOutput {
 ///
 /// # Errors
 /// - `InvalidArgument` for `k_max == 0`
+/// - `InvalidArgument` when `alpha` is not finite or not in (0, 1)
 /// - `KExceedsMax` for `k_max > n_features`
 /// - `DimensionMismatch` for shape disagreements
 /// - `InvalidArgument` for `Score` or `SvPerm` test method (no sequential variant)
@@ -726,6 +787,7 @@ pub fn spls1_find_k_sequence(
 
 #[allow(clippy::needless_pass_by_value)]
 #[allow(clippy::many_single_char_names)]
+#[allow(clippy::too_many_lines)]
 fn find_k_sequence_impl(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -750,6 +812,12 @@ fn find_k_sequence_impl(
     }
     if k_max == 0 {
         return Err(PlsKitError::InvalidArgument("k_max must be >= 1".into()));
+    }
+    let alpha = opts.alpha;
+    if !(alpha.is_finite() && alpha > 0.0 && alpha < 1.0) {
+        return Err(PlsKitError::InvalidArgument(format!(
+            "alpha must be finite and in (0, 1), got {alpha}"
+        )));
     }
     let max_allowed = x.ncols();
     if k_max > max_allowed {
@@ -797,7 +865,13 @@ fn find_k_sequence_impl(
         }
     }
     let wref = w_norm.as_ref().map(Col::as_ref);
+    if covariates.is_some() {
+        crate::fit::check_finite_mat(x)?;
+        crate::fit::check_finite_col(y)?;
+    }
     let adj = adjust_for_find_k(x, y, covariates, wref, opts.pre_standardized, k_max)?;
+    // The adjusted copy is held beside every step's loops.
+    let _held = crate::fit::hold_bytes(adjusted_bytes(x, covariates));
     let (x, y, pre_standardized) = match &adj {
         Some(a) => (a.x.as_ref(), a.y.as_ref(), true),
         None => (x, y, opts.pre_standardized),
@@ -815,7 +889,6 @@ fn find_k_sequence_impl(
             stop_early_override: false,
             pre_standardized,
             seed: opts.seed,
-            verbose: opts.verbose,
             keep,
         },
         basis,
@@ -832,6 +905,8 @@ fn find_k_sequence_impl(
         n_eff: n_eff_val,
         stable_rank: r.stable_rank,
         n_covariates: basis.map(crate::covariates::CovariateBasis::n_covariates),
+        n_failed_splits: r.n_failed_splits,
+        n_failed_perms: r.n_failed_perms,
     })
 }
 
@@ -839,9 +914,12 @@ fn find_k_sequence_impl(
 /// their residuals on `[1, Z]` (the caller then reads them as
 /// `pre_standardized`). `None` without covariates.
 ///
+/// The caller has checked that X and y are finite.
+///
 /// # Errors
-/// `NonFiniteInput`, `ShapeMismatch` and `InsufficientResidualDf` as
-/// `pls1_confirmatory_test` raises them.
+/// `NonFiniteInput` (on `Z`), `ShapeMismatch` and `InsufficientResidualDf`
+/// as `pls1_confirmatory_test` raises them; then `MemoryBudget` when the
+/// adjusted copy of X ([`adjusted_bytes`]) does not fit alone.
 fn adjust_for_find_k(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -853,11 +931,24 @@ fn adjust_for_find_k(
     let Some(z) = covariates else {
         return Ok(None);
     };
-    crate::fit::check_finite_mat(x)?;
-    crate::fit::check_finite_col(y)?;
-    let adj = crate::covariates::adjust(x, y, z, w_norm, pre_standardized)?;
-    adj.basis.check_df(k)?;
-    Ok(Some(adj))
+    let basis = crate::covariates::basis_for(x, z, w_norm)?;
+    basis.check_df(k)?;
+    crate::resample::units_at_once(1, adjusted_bytes(x, covariates), 0)?;
+    Ok(Some(crate::covariates::adjust_on(
+        x,
+        y,
+        basis,
+        w_norm,
+        pre_standardized,
+    )))
+}
+
+/// Bytes of the adjusted copy of X that [`adjust_for_find_k`] writes and
+/// the selection, the diagnostic and the sequence then hold
+/// (`fit::hold_bytes`): `copy(n, p)` with covariates, else 0.
+/// shortcut: the covariate basis and the adjusted y are not counted, count them if a capped run is killed there.
+fn adjusted_bytes(x: MatRef<'_, f64>, covariates: Option<MatRef<'_, f64>>) -> usize {
+    covariates.map_or(0, |_| crate::resample::copy_bytes(x.nrows(), x.ncols()))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -870,10 +961,8 @@ fn adjust_for_find_k(
 /// ([`FoldData::fit_predict`]), the standardized `y` of both sides (the
 /// validation side with the training moments), and, in `cv_select`'s
 /// second pass, the standardized blocks. Per-fold weights are re-normalized to
-/// mean 1; an unnormalizable slice yields `None` → that fold runs
-/// unweighted (kept rather than an explicit uniform fill, which would run
-/// the weighted code path and is not provably bit-identical to the
-/// unweighted path).
+/// mean 1. A fold reaches [`prep_fold`] only with positive weight on both
+/// sides, since `cv_select` leaves out the others.
 struct FoldData {
     train_idx: Vec<usize>,
     val_idx: Vec<usize>,
@@ -903,6 +992,16 @@ struct FoldData {
     on_blocks: bool,
 }
 
+/// The training rows of fold `fi`: every other fold's rows, in fold order.
+fn fold_train_idx(folds: &[Vec<usize>], fi: usize) -> Vec<usize> {
+    folds
+        .iter()
+        .enumerate()
+        .filter(|(j, _)| *j != fi)
+        .flat_map(|(_, f)| f.iter().copied())
+        .collect()
+}
+
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
 fn prep_fold(
@@ -914,18 +1013,13 @@ fn prep_fold(
     val_idx: &[usize],
     scale: ColRef<'_, f64>,
 ) -> PlsKitResult<FoldData> {
-    let train_idx: Vec<usize> = folds
-        .iter()
-        .enumerate()
-        .filter(|(j, _)| *j != fi)
-        .flat_map(|(_, f)| f.iter().copied())
-        .collect();
+    let train_idx = fold_train_idx(folds, fi);
     let y_tr = col_row_subset(y, &train_idx);
     let y_val = col_row_subset(y, val_idx);
     let nv = y_val.nrows();
 
     // Slice and re-normalize weights for train fold (if weights are provided).
-    // An unnormalizable slice yields None → that fold runs unweighted.
+    // Both slices have a positive sum: `cv_select` leaves out the other folds.
     let train_w_full: Option<Col<f64>> = weights.map(|w| col_row_subset(w, &train_idx));
     let train_w_norm: Option<Col<f64>> = train_w_full
         .as_ref()
@@ -953,7 +1047,7 @@ fn prep_fold(
     // The fit on the training block renormalizes the fold's weights (and
     // takes all-equal ones as none) and scales its rows by their square
     // roots; the fit on X in place takes the same factors, row by row.
-    let (w_fit, _) = crate::fit::validate_and_normalize_weights(train_wref, n_tr, 1)?;
+    let (w_fit, _) = crate::fit::validate_and_normalize_weights(train_wref, n_tr)?;
     let sqw = w_fit.as_ref().map(|w| crate::linalg::sqrt_col(w.as_ref()));
     let n = x.nrows();
     let mut row_factor = Col::<f64>::zeros(n);
@@ -1136,17 +1230,19 @@ impl FoldData {
         let m = pls1_fit_impl(
             xs_tr.as_ref(),
             self.ys_tr.as_ref(),
-            KSpec::Fixed(k),
+            k,
             train_wref,
             None,
             FitOpts {
                 pre_standardized: true,
-                // check_n_eff: false — per-fold slice may have low n_eff; let the math degrade
-                // and rely on the parent statistic to absorb noise.
-                check_n_eff: false,
                 // Auto: the fit picks its arm from its shape (`fit::resolve_par`),
                 // so the bits do not depend on the batch or the pool.
                 par: ParChoice::Auto,
+            },
+            InternalFitOpts {
+                // check_n_eff: false — per-fold slice may have low n_eff; let the math degrade
+                // and rely on the parent statistic to absorb noise.
+                check_n_eff: false,
                 keep,
             },
         )?;
@@ -1231,6 +1327,14 @@ fn reject_cv_leave_one_out(n: usize, requested: usize, effective: usize) -> PlsK
 /// `None` where its fit is left to the fold's standardized blocks; `fit_k`
 /// is the component count of its fits.
 ///
+/// # Folds left out
+/// Under weights, a fold whose validation rows or training rows have zero
+/// weight sum is left out: it is not fitted, and its row is NaN at every
+/// candidate, so every candidate's mean and SE rest on the same folds.
+/// When every fold is left out it returns `InvalidWeights` with reason
+/// `insufficient_effective_n`, before any fold is fitted. That happens
+/// exactly when all the positive weight sits in one fold.
+///
 /// # No extractable component
 /// Before any fold runs, it asks the full data whether a first component
 /// exists at all ([`first_component_exhausted`], at `check_keep`). When it
@@ -1240,12 +1344,15 @@ fn reject_cv_leave_one_out(n: usize, requested: usize, effective: usize) -> PlsK
 /// below 0 on an orthogonal one) and a pick, and a fold may even extract a
 /// component the full data cannot, so a pick there names a model the
 /// full-data fit returns as the `k_used = 0` zero model. The check draws
-/// nothing from `rng`.
+/// nothing.
 ///
-/// Each fold is independent and RNG-free (the only RNG use is the shuffle).
+/// Each fold is independent and draws nothing: the only draw is the fold
+/// shuffle, `resample::shuffled_folds(n, n_folds, seed, 0)`.
 /// Two passes, both in batches of `resample::map_units` by the memory
-/// budget. The first runs every fold on X in place, one unit being one
-/// fold fit ([`cv_fold_bytes`] at `fit_k`). The second
+/// budget, beside the full-data fit's buffers, which the budget counts as
+/// held for the call and checks before that fit runs. The first runs every
+/// fold on X in place, one unit being one fold fit ([`cv_fold_bytes`] at
+/// `fit_k`). The second
 /// (`resample::fill_pending`) reruns the candidates the first left `None`
 /// on [`FoldData::on_blocks`], one unit adding the fold's two standardized
 /// blocks (`resample::fold_blocks_bytes`) and, when weighted, the √w-scaled
@@ -1266,36 +1373,63 @@ fn cv_select<F>(
     candidates: &[usize],
     fit_k: usize,
     use_1se: bool,
-    rng: &mut crate::rng::Rng,
+    seed: u64,
     fold_work: F,
-) -> PlsKitResult<(usize, BTreeMap<usize, f64>, BTreeMap<usize, f64>)>
+) -> PlsKitResult<(usize, BTreeMap<usize, f64>, BTreeMap<usize, f64>, usize)>
 where
     F: Fn(&mut FoldData, &[usize]) -> PlsKitResult<Vec<Option<f64>>> + Sync,
 {
     use crate::resample::{copy_bytes, fill_pending, fold_blocks_bytes, map_units};
-    if first_component_exhausted(x, y, weights, check_keep)? {
-        return Ok((0, BTreeMap::new(), BTreeMap::new()));
-    }
     let (n, p) = (x.nrows(), x.ncols());
-    let mut indices: Vec<usize> = (0..n).collect();
-    indices.shuffle(rng);
-    let folds = crate::linalg::fold_split(&indices, n_folds);
+    // The full-data fit to one component is counted as held for the whole
+    // call, so the check before it covers it and the folds.
+    // shortcut: its standardized `n × p` copy is not counted; the fit writes it only for a column whose mean is over `fit::IMPLICIT_MAX_MEAN_RATIO` (1000) times its scale, an implicit fit that cannot decide where to stop at the truncation floor, or an implicit fit that is not finite (entries near ±f64::MAX), so count it if a capped run is killed on such X.
+    let call = crate::fit::pls1_fit_bytes(p, 1);
+    // `fold_split`'s largest fold has `⌈n / n_folds⌉` rows.
+    let unit = cv_fold_bytes(p, fit_k, n.div_ceil(n_folds));
+    crate::resample::units_at_once(n_folds, call, unit)?;
+    if first_component_exhausted(x, y, weights, check_keep)? {
+        return Ok((0, BTreeMap::new(), BTreeMap::new(), 0));
+    }
+    let folds = crate::resample::shuffled_folds(n, n_folds, seed, 0);
+    // A fold with no weight on its training or validation rows is left out:
+    // it is not fitted and scores NaN at every candidate.
+    let left_out: Vec<bool> = (0..folds.len())
+        .map(|fi| {
+            weights.is_some_and(|w| {
+                [fold_train_idx(&folds, fi).as_slice(), folds[fi].as_slice()]
+                    .iter()
+                    .any(|idx| crate::linalg::weight_sum(col_row_subset(w, idx).as_ref()) == 0.0)
+            })
+        })
+        .collect();
+    if left_out.iter().all(|&m| m) {
+        return Err(PlsKitError::InvalidWeights {
+            reason: "insufficient_effective_n",
+        });
+    }
     let run = |fi: usize, cells: &[usize], on_blocks: bool| {
         let mut fd = prep_fold(x, y, weights, &folds, fi, folds[fi].as_slice(), scale)?;
         fd.on_blocks = on_blocks;
-        fold_work(&mut fd, cells)
+        let degenerate = fd.ss_tot() <= 0.0;
+        fold_work(&mut fd, cells).map(|row| (row, degenerate))
     };
 
     // Pass 1: every candidate fit on X in place; an error stands for its
-    // fold.
+    // fold. It also marks the folds whose validation outcome has no spread.
     let all: Vec<usize> = (0..candidates.len()).collect();
-    let n_val = folds.iter().map(Vec::len).max().unwrap_or(0);
-    let unit = cv_fold_bytes(p, fit_k, n_val);
-    let rows: Vec<Vec<Option<PlsKitResult<f64>>>> =
-        map_units(folds.len(), unit, |fi| match run(fi, &all, false) {
-            Ok(row) => row.into_iter().map(|v| v.map(Ok)).collect(),
-            Err(e) => vec![Some(Err(e))],
-        });
+    let (rows, degenerate): (Vec<Vec<Option<PlsKitResult<f64>>>>, Vec<bool>) =
+        map_units(folds.len(), call, unit, |fi| {
+            if left_out[fi] {
+                return (all.iter().map(|_| Some(Ok(f64::NAN))).collect(), false);
+            }
+            match run(fi, &all, false) {
+                Ok((row, degenerate)) => (row.into_iter().map(|v| v.map(Ok)).collect(), degenerate),
+                Err(e) => (vec![Some(Err(e))], false),
+            }
+        })?
+        .into_iter()
+        .unzip();
 
     // Pass 2: the candidates left to the blocks. A failed fit fills the
     // fold's first pending cell with its error, which aborts the selection
@@ -1308,10 +1442,11 @@ where
     };
     let rows = fill_pending(
         rows,
+        call,
         unit.saturating_add(fold_blocks_bytes(n, &folds, p))
             .saturating_add(fit_copy),
         |fi, pending| match run(fi, pending, true) {
-            Ok(vals) => vals
+            Ok((vals, _)) => vals
                 .into_iter()
                 .map(|v| Ok(v.expect("a fit on the blocks always predicts")))
                 .collect(),
@@ -1319,12 +1454,17 @@ where
                 .chain(pending[1..].iter().map(|_| Ok(f64::NAN)))
                 .collect(),
         },
-    );
+    )?;
     let r2_matrix: Vec<Vec<f64>> = rows
         .into_iter()
         .map(|row| row.into_iter().collect::<PlsKitResult<Vec<f64>>>())
         .collect::<PlsKitResult<Vec<_>>>()?;
-    Ok(aggregate_and_pick(&r2_matrix, candidates, use_1se))
+    Ok(aggregate_and_pick(
+        &r2_matrix,
+        &degenerate,
+        candidates,
+        use_1se,
+    ))
 }
 
 /// Bytes of the large buffers one fold of [`cv_select`] holds while it fits
@@ -1348,16 +1488,21 @@ fn cv_fold_bytes(p: usize, fit_k: usize, n_val: usize) -> usize {
 }
 
 /// Aggregate per-fold R² rows into mean/SE maps keyed by `candidates`,
-/// then pick: the best finite mean, or — under the 1-SE rule — the
-/// SMALLEST candidate whose mean is within one SE of the best. Shared by
-/// `select_cv` (candidates = component counts `1..=max_comp`) and
+/// then pick: the best finite mean, the smallest candidate among equal
+/// ones, or — under the 1-SE rule — the SMALLEST candidate whose mean is
+/// within one SE of the best. Shared by `select_cv` (candidates =
+/// component counts `1..=max_comp`) and
 /// `spls1_find_keep_optimal` (candidates = the keep grid): "smallest" is
-/// the parsimony order on both axes.
+/// the parsimony order on both axes. The last value counts the folds that
+/// are `degenerate` (one flag per row) or have a non-finite value at one or
+/// more candidates.
+#[allow(clippy::type_complexity)]
 fn aggregate_and_pick(
     r2_matrix: &[Vec<f64>],
+    degenerate: &[bool],
     candidates: &[usize],
     use_1se: bool,
-) -> (usize, BTreeMap<usize, f64>, BTreeMap<usize, f64>) {
+) -> (usize, BTreeMap<usize, f64>, BTreeMap<usize, f64>, usize) {
     let mut cv_scores = BTreeMap::new();
     let mut cv_scores_se = BTreeMap::new();
     for (ci, &cand) in candidates.iter().enumerate() {
@@ -1378,10 +1523,12 @@ fn aggregate_and_pick(
             cv_scores_se.insert(cand, se);
         }
     }
+    // `max_by` returns the last of equal maxima: the smallest key in reverse order.
     let best = *cv_scores
         .iter()
+        .rev()
         .filter(|(_, v)| v.is_finite())
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Less))
+        .max_by(|a, b| a.1.total_cmp(b.1))
         .map_or(&candidates[0], |(c, _)| c);
     let pick = if use_1se {
         let threshold = cv_scores[&best] - cv_scores_se.get(&best).copied().unwrap_or(0.0);
@@ -1394,7 +1541,12 @@ fn aggregate_and_pick(
     } else {
         best
     };
-    (pick, cv_scores, cv_scores_se)
+    let n_failed = r2_matrix
+        .iter()
+        .zip(degenerate)
+        .filter(|&(row, &d)| d || row.iter().any(|v| !v.is_finite()))
+        .count();
+    (pick, cv_scores, cv_scores_se, n_failed)
 }
 
 /// The `r2_se` / `r2_max` selectors: [`cv_select`] over the component
@@ -1415,17 +1567,21 @@ fn select_cv(
     weights: Option<ColRef<'_, f64>>,
     scale: ColRef<'_, f64>,
     keep: Option<usize>,
-    rng: &mut crate::rng::Rng,
-) -> PlsKitResult<(usize, BTreeMap<usize, f64>, Option<BTreeMap<usize, f64>>)> {
+    seed: u64,
+) -> PlsKitResult<(
+    usize,
+    BTreeMap<usize, f64>,
+    Option<BTreeMap<usize, f64>>,
+    usize,
+)> {
     // k-fold CV with optional 1-SE rule.
     // CV-R² convention (cites the "CV-R² convention" anchor on `pooled_cv_r2_columns` in
     // signal_test.rs): this function uses per-fold *weighted-validation* R² averaged across
     // folds, which differs from raw_perm's pooled SS_res/SS_tot convention. The two are not
     // interchangeable; each method owns the convention appropriate to its statistic.
+    // The caller has run `reject_cv_leave_one_out`.
     let n = x.nrows();
-    let requested_n_folds = n_folds;
     let n_folds = cv_n_folds(n, n_folds);
-    reject_cv_leave_one_out(n, requested_n_folds, n_folds)?;
     let max_comp = k_max.min(n.saturating_sub(n_folds + 2)).max(1);
 
     // row[k-1] = CV R² for this fold and k components.
@@ -1439,11 +1595,19 @@ fn select_cv(
         for (k, y_pred) in preds.iter().enumerate() {
             row[k] = fd.r2(y_pred, ss_tot);
         }
+        // A fit that stops early is its stopped model at the higher k; the
+        // zero model predicts the training mean, 0 on the standardized y.
+        let stopped = if preds.is_empty() {
+            fd.r2(&Col::zeros(fd.ys_val.nrows()), ss_tot)
+        } else {
+            row[preds.len() - 1]
+        };
+        row[preds.len()..].fill(stopped);
         Ok(cells.iter().map(|&c| Some(row[c])).collect())
     };
 
     let candidates: Vec<usize> = (1..=max_comp).collect();
-    let (k_star, cv_scores, cv_scores_se) = cv_select(
+    let (k_star, cv_scores, cv_scores_se, n_failed_folds) = cv_select(
         x,
         y,
         weights,
@@ -1453,13 +1617,14 @@ fn select_cv(
         &candidates,
         max_comp,
         use_1se,
-        rng,
+        seed,
         fold_work,
     )?;
     Ok((
         k_star,
         cv_scores,
         if use_1se { Some(cv_scores_se) } else { None },
+        n_failed_folds,
     ))
 }
 
@@ -1474,7 +1639,9 @@ fn select_cv(
 /// on less its first `k` score columns times their y-loadings: the weighted
 /// residual sum of squares of the `k`-component model, with no pass over X.
 /// No component kept gives `k_star = 0` and no scores. Two layouts of the
-/// same X agree to rounding, not to the bit.
+/// same X agree to rounding, not to the bit. The fit's buffers, with the
+/// √w-scaled copy of X a weighted fit under `pre_standardized` writes, are
+/// checked against the budget before it runs.
 #[allow(clippy::many_single_char_names)]
 fn select_bic(
     x: MatRef<'_, f64>,
@@ -1485,20 +1652,30 @@ fn select_bic(
     keep: Option<usize>,
     pre_standardized: bool,
 ) -> PlsKitResult<(usize, BTreeMap<usize, f64>)> {
+    // shortcut: the standardized `n × p` copy the fit falls back to is not counted; it is written only for a column whose mean is over `fit::IMPLICIT_MAX_MEAN_RATIO` (1000) times its scale, an implicit fit that cannot decide where to stop at the truncation floor, or an implicit fit that is not finite (entries near ±f64::MAX), so count it if a capped run is killed on such X.
+    let copy = if pre_standardized && weights.is_some() {
+        crate::resample::copy_bytes(x.nrows(), x.ncols())
+    } else {
+        0
+    };
+    let need = crate::fit::pls1_fit_bytes(x.ncols(), k_max).saturating_add(copy);
+    crate::resample::units_at_once(1, need, 0)?;
     let m = pls1_fit_impl(
         x,
         y,
-        KSpec::Fixed(k_max),
+        k_max,
         weights,
         None,
         FitOpts {
             pre_standardized,
+            ..FitOpts::default()
+        },
+        InternalFitOpts {
             // check_n_eff: false: the BIC sweep below iterates 1..=k_used and
             // is truncation-tolerant by design (rank-deficient X just shortens
             // the sweep); n_eff was already validated at the top-level entry.
             check_n_eff: false,
             keep,
-            ..FitOpts::default()
         },
     )?;
     // A first-component truncation (constant y, or y orthogonal to X up to
@@ -1558,16 +1735,18 @@ fn first_component_exhausted(
     let m = pls1_fit_impl(
         x,
         y,
-        KSpec::Fixed(1),
+        1,
         weights,
         None,
         FitOpts {
             pre_standardized: false,
+            ..FitOpts::default()
+        },
+        InternalFitOpts {
             // check_n_eff: false: the truncation is the answer sought here,
             // not an error, and n_eff was validated at the entry.
             check_n_eff: false,
             keep,
-            ..FitOpts::default()
         },
     )?;
     Ok(m.k_used == 0)
@@ -1595,8 +1774,6 @@ pub struct FindKeepOptimalOpts {
     pub n_folds: usize,
     /// RNG seed; `None` draws from OS entropy.
     pub seed: Option<u64>,
-    /// Print the swept keep grid to stderr.
-    pub verbose: bool,
 }
 
 impl Default for FindKeepOptimalOpts {
@@ -1604,7 +1781,6 @@ impl Default for FindKeepOptimalOpts {
         Self {
             n_folds: 5,
             seed: None,
-            verbose: false,
         }
     }
 }
@@ -1634,6 +1810,11 @@ pub struct FindKeepOptimalOutput {
     /// Rank of `[1, Z]` minus 1 (covariates kept after aliased columns are
     /// dropped); `None` without covariates.
     pub n_covariates: Option<usize>,
+    /// As `FindKOptimalOutput::n_failed_folds`, over the keep grid: the CV
+    /// folds whose held-out R² is not finite at one or more keeps, or whose
+    /// validation outcome has no spread (`ss_tot <= 0`, scored R² = 0). `0`
+    /// when no fold ran (`keep_star = 0`).
+    pub n_failed_folds: usize,
 }
 
 /// Keep-count tuning at fixed `k` (`docs/python/api.md` §2b.2): sweep a
@@ -1666,6 +1847,7 @@ pub struct FindKeepOptimalOutput {
 /// - `InvalidArgument` for `k == 0`
 /// - `KExceedsMax` for `k > n_features`
 /// - `NonFiniteInput` / `InvalidWeights` as per `pls1_fit`
+/// - `InvalidWeights` with reason `insufficient_effective_n` when every CV fold has zero weight on its training or validation rows (all the positive weight sits in one fold)
 /// - `ShapeMismatch` when `covariates` does not have `n_samples` rows
 /// - `NonFiniteInput` when `covariates` holds NaN/inf
 /// - `InsufficientResidualDf` when `n_samples − rank([1, Z]) < k + 1`
@@ -1715,16 +1897,15 @@ pub(crate) fn find_keep_optimal_impl(
     crate::fit::check_finite_col(y)?;
     let (w_norm, n_eff_val) = crate::fit::validate_weights_for_k(weights, n, k)?;
 
-    let (seed_used, mut rng) = crate::rng::resolve_seed(opts.seed)?;
+    let seed_used = crate::rng::resolve_seed(opts.seed, n)?;
     let grid = keep_grid(d);
-    if opts.verbose {
-        eprintln!("spls1_find_keep_optimal: sweeping keep grid {grid:?} at fixed k={k}");
-    }
 
     let n_folds = cv_n_folds(n, opts.n_folds);
     reject_cv_leave_one_out(n, opts.n_folds, n_folds)?;
     let wref = w_norm.as_ref().map(Col::as_ref);
     let adj = adjust_for_find_k(x, y, covariates, wref, pre_standardized, k)?;
+    // The adjusted copy is held beside the selection.
+    let _held = crate::fit::hold_bytes(adjusted_bytes(x, covariates));
     let (x, y, pre_standardized) = match &adj {
         Some(a) => (a.x.as_ref(), a.y.as_ref(), true),
         None => (x, y, pre_standardized),
@@ -1746,7 +1927,7 @@ pub(crate) fn find_keep_optimal_impl(
     // dense fit cannot extract a component from gives none at any keep, and
     // one it can gives a component at the dense endpoint of the grid.
     let scale = crate::linalg::held_out_scale(x, wref, pre_standardized);
-    let (keep_star, cv_scores, cv_scores_se) = cv_select(
+    let (keep_star, cv_scores, cv_scores_se, n_failed_folds) = cv_select(
         x,
         y,
         wref,
@@ -1756,7 +1937,7 @@ pub(crate) fn find_keep_optimal_impl(
         &grid,
         k,
         true,
-        &mut rng,
+        seed_used,
         fold_work,
     )?;
     // Nothing was swept when there is no first component (`keep_star = 0`).
@@ -1771,6 +1952,7 @@ pub(crate) fn find_keep_optimal_impl(
         seed: seed_used,
         n_eff: n_eff_val,
         n_covariates: adj.as_ref().map(|a| a.basis.n_covariates()),
+        n_failed_folds,
     })
 }
 
@@ -1831,15 +2013,7 @@ mod tests {
         let (x, ys) = degenerate_ys(60, 8, 5);
         for (name, y) in &ys {
             // The premise: pls1_fit gives the zero model on this y.
-            let m = pls1_fit(
-                x.as_ref(),
-                y.as_ref(),
-                KSpec::Fixed(2),
-                None,
-                None,
-                FitOpts::default(),
-            )
-            .unwrap();
+            let m = pls1_fit(x.as_ref(), y.as_ref(), 2, None, None, FitOpts::default()).unwrap();
             assert_eq!(m.k_used, 0, "{name}: premise");
             for selector in [Selector::R2Se, Selector::R2Max, Selector::Bic] {
                 let opts = FindKOptimalOpts {
@@ -2002,7 +2176,7 @@ mod tests {
                 (ConfirmatoryMethod::E, false, "e", false),
                 (ConfirmatoryMethod::RawPerm, false, "raw_perm", false),
                 (ConfirmatoryMethod::SplitNb, false, "split_exact", true),
-                (ConfirmatoryMethod::SplitNb, true, "split_nb", true),
+                (ConfirmatoryMethod::SplitNb, true, "split_nb", false),
             ] {
                 for selector in [Selector::Bic, Selector::R2Se] {
                     let r = pls1_find_k_optimal(
@@ -2027,6 +2201,16 @@ mod tests {
                     assert_eq!(r.pvalues.as_ref().unwrap().nrows(), 0, "{tag}");
                     assert_eq!(r.diagnostic.as_deref(), Some(expect), "{tag}");
                     assert_eq!(r.stable_rank.is_some(), has_rank, "{tag}");
+                    assert_eq!(
+                        r.n_failed_splits,
+                        matches!(expect, "split_exact" | "split_nb").then(Vec::new),
+                        "{tag}"
+                    );
+                    assert_eq!(
+                        r.n_failed_perms,
+                        matches!(expect, "split_exact" | "raw_perm").then(Vec::new),
+                        "{tag}"
+                    );
                     if has_rank {
                         assert_eq!(
                             r.stable_rank.unwrap().to_bits(),
@@ -2130,10 +2314,10 @@ mod tests {
 
     /// The `split_nb` gate reads its effective-sample input off ONE formula
     /// at every entry point. These weights sit on the `n_eff` floor of 25:
-    /// Kish `n_eff` of the raw weights is `24.999999999999996` (fires), of
-    /// their normalized copy `25.00000000000002` (does not). Recomputing it
-    /// from the normalized weights the sequence is handed would run `split_nb`
-    /// on a design `split_nb_gate` and `pls1_confirmatory_test` both reroute.
+    /// Kish `n_eff` of their mean-one copy is `25.00000000000002`, just above
+    /// it (does not fire), and of the raw weights `24.999999999999996` (fires).
+    /// An entry point that formed it on the raw weights would reroute to
+    /// `split_exact` on a design the others run with `split_nb`.
     #[test]
     fn split_nb_gate_agrees_across_entry_points_at_the_n_eff_floor() {
         let (x, y) = synth(26, 8, 1, 4.0, 3);
@@ -2146,8 +2330,8 @@ mod tests {
                 .fires
         );
         let gate = crate::signal_test::split_nb_gate(x.as_ref(), Some(w.as_ref()), false).unwrap();
-        assert!(gate.n_eff < 25.0, "n_eff = {}", gate.n_eff);
-        assert!(gate.fires);
+        assert!(gate.n_eff >= 25.0, "n_eff = {}", gate.n_eff);
+        assert!(!gate.fires);
 
         let conf = crate::signal_test::pls1_confirmatory_test(
             crate::signal_test::ConfirmatoryTestInput::Raw {
@@ -2168,7 +2352,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(conf.test_method, "split_exact");
+        assert_eq!(conf.test_method, "split_nb");
         assert_eq!(
             conf.stable_rank.unwrap().to_bits(),
             gate.stable_rank.to_bits()
@@ -2189,7 +2373,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(seq.test_method, "split_exact");
+        assert_eq!(seq.test_method, "split_nb");
         assert_eq!(seq.n_eff.to_bits(), gate.n_eff.to_bits());
         assert_eq!(
             seq.stable_rank.unwrap().to_bits(),
@@ -2213,7 +2397,7 @@ mod tests {
         )
         .unwrap();
         assert!(opt.k_star >= 1);
-        assert_eq!(opt.diagnostic.as_deref(), Some("split_exact"));
+        assert_eq!(opt.diagnostic.as_deref(), Some("split_nb"));
         assert_eq!(
             opt.stable_rank.unwrap().to_bits(),
             gate.stable_rank.to_bits()
@@ -2348,10 +2532,10 @@ mod tests {
         let forced =
             pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, None, opts(true)).unwrap();
         assert_eq!(forced.test_method, "split_nb");
-        // Both carry what the gate saw — that is what makes the reroute
-        // explainable to the caller, and `force` doesn't suppress it.
-        assert_eq!(rerouted.stable_rank, forced.stable_rank);
+        // The reroute carries what the gate saw; under `force` the gate
+        // decides nothing and does not compute the rank.
         assert!(rerouted.stable_rank.is_some());
+        assert_eq!(forced.stable_rank, None);
     }
 
     #[allow(clippy::many_single_char_names)]
@@ -2509,10 +2693,7 @@ mod tests {
             },
         )
         .unwrap();
-        let seq_seed = {
-            use rand::Rng;
-            crate::rng::resolve_seed(Some(5)).unwrap().1.next_u64()
-        };
+        let seq_seed = crate::rng::child_seed(5, 0, crate::rng::TAG_SEQNC);
         let want = run_incremental_sequence(
             adj.x.as_ref(),
             adj.y.as_ref(),
@@ -2525,7 +2706,6 @@ mod tests {
                 stop_early_override: true,
                 pre_standardized: true,
                 seed: Some(seq_seed),
-                verbose: false,
                 keep: None,
             },
             Some(&adj.basis),
@@ -2600,7 +2780,8 @@ mod tests {
         let y = Col::<f64>::from_fn(n, |i| 3.0 * z[(i, 0)] + e[i]);
         let (n_perm, n_splits) = (199, 4);
         let opts = FindKSequenceOpts {
-            alpha: 1.0,
+            // every p below 1 rejects
+            alpha: 1.0 - f64::EPSILON,
             n_perm,
             n_splits,
             seed: Some(5),
@@ -2612,13 +2793,8 @@ mod tests {
         assert_eq!(seq.test_method, "split_exact");
         assert_eq!(plain.test_method, "split_nb");
         assert_eq!(seq.n_covariates, Some(2));
-        // Step 1's seed: one draw is discarded, the next is the test seed.
-        let (_, mut rng) = crate::rng::resolve_seed(Some(5)).unwrap();
-        let step_seed = {
-            use rand::Rng;
-            let _ = rng.next_u64();
-            rng.next_u64()
-        };
+        // Step 1's test seed, on its own stream.
+        let step_seed = crate::rng::child_seed(5, 1, crate::rng::TAG_STEPS);
         let direct = pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
@@ -2632,7 +2808,6 @@ mod tests {
                 args: ConfirmatoryArgs::SplitExact { n_perm, n_splits },
                 pre_standardized: false,
                 seed: Some(step_seed),
-                verbose: false,
                 ci: None,
                 max_skip_rate: 0.01,
                 keep: None,
@@ -2653,6 +2828,101 @@ mod tests {
             seq.pvalues[0]
         );
         assert!(seq.pvalues[1].is_finite(), "step 2 did not run");
+    }
+
+    /// The three sequence entry points copy the per-step counts of the
+    /// sequence they run: `pls1_find_k_sequence` and `spls1_find_k_sequence`
+    /// return the lists of `run_incremental_sequence` on the same inputs and
+    /// seed, and the `diagnostic` of `pls1_find_k_optimal` has one entry per
+    /// tested component. At `k_star = 0` a requested diagnostic gives empty
+    /// lists (and the early return of `cv_select` 0 failed folds); without
+    /// a diagnostic both lists are `None`.
+    #[test]
+    fn find_k_outputs_copy_the_step_counts() {
+        let (x, y) = synth(60, 5, 1, 4.0, 3);
+        let (n_perm, n_splits) = (99, 8);
+        let seq_opts = FindKSequenceOpts {
+            test_method: ConfirmatoryMethod::SplitExact,
+            n_perm,
+            n_splits,
+            seed: Some(5),
+            ..Default::default()
+        };
+        for keep in [None, Some(3)] {
+            let got = match keep {
+                None => pls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, None, None, seq_opts),
+                Some(kp) => {
+                    spls1_find_k_sequence(x.as_ref(), y.as_ref(), 3, kp, None, None, seq_opts)
+                }
+            }
+            .unwrap();
+            let want = run_incremental_sequence(
+                x.as_ref(),
+                y.as_ref(),
+                3,
+                None,
+                60.0,
+                IncrementalSequenceOpts {
+                    args: SequentialArgs::SplitExact { n_perm, n_splits },
+                    alpha: 0.05,
+                    stop_early_override: false,
+                    pre_standardized: false,
+                    seed: Some(5),
+                    keep,
+                },
+                None,
+            )
+            .unwrap();
+            assert!(got.n_failed_splits.is_some(), "keep {keep:?}");
+            assert_eq!(got.n_failed_splits, want.n_failed_splits, "keep {keep:?}");
+            assert_eq!(got.n_failed_perms, want.n_failed_perms, "keep {keep:?}");
+        }
+
+        let opt = |y: ColRef<'_, f64>, diagnostic| {
+            pls1_find_k_optimal(
+                x.as_ref(),
+                y,
+                3,
+                None,
+                None,
+                FindKOptimalOpts {
+                    diagnostic,
+                    n_perm,
+                    n_splits,
+                    seed: Some(5),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let r = opt(y.as_ref(), Some(ConfirmatoryMethod::SplitExact));
+        assert!(r.k_star > 0, "premise: k_star > 0");
+        assert_eq!(r.n_failed_splits.map(|v| v.len()), Some(r.k_star));
+        assert_eq!(r.n_failed_perms.map(|v| v.len()), Some(r.k_star));
+
+        let constant = Col::<f64>::from_fn(60, |_| 1.0);
+        let empty = Some(vec![]);
+        for (method, ran, splits, perms) in [
+            (
+                ConfirmatoryMethod::SplitExact,
+                "split_exact",
+                &empty,
+                &empty,
+            ),
+            (ConfirmatoryMethod::SplitNb, "split_nb", &empty, &None),
+            (ConfirmatoryMethod::RawPerm, "raw_perm", &None, &empty),
+            (ConfirmatoryMethod::E, "e", &None, &None),
+        ] {
+            let r = opt(constant.as_ref(), Some(method));
+            assert_eq!(r.k_star, 0, "{method:?}");
+            assert_eq!(r.diagnostic.as_deref(), Some(ran), "{method:?}");
+            assert_eq!(&r.n_failed_splits, splits, "{method:?}");
+            assert_eq!(&r.n_failed_perms, perms, "{method:?}");
+            assert_eq!(r.n_failed_folds, Some(0), "{method:?}");
+        }
+
+        let r = opt(y.as_ref(), None);
+        assert!(r.n_failed_splits.is_none() && r.n_failed_perms.is_none());
     }
 
     /// The sequence resolves `Auto` once on the full X, so at one seed it
@@ -2753,6 +3023,35 @@ mod tests {
                 matches!(r, Err(PlsKitError::InvalidArgument(_))),
                 "{tag}: {r:?}"
             );
+        }
+    }
+
+    /// `alpha` must be finite and lie strictly between 0 and 1, on the dense
+    /// and the sparse sequence alike.
+    #[test]
+    fn find_k_sequence_rejects_alpha_outside_the_open_unit_interval() {
+        let (x, y) = synth(40, 4, 1, 2.0, 7);
+        for alpha in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            1.0,
+            -0.1,
+            2.0,
+        ] {
+            let opts = FindKSequenceOpts {
+                alpha,
+                ..Default::default()
+            };
+            let dense = pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, None, opts);
+            let sparse = spls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, 2, None, None, opts);
+            for (tag, r) in [("dense", dense), ("sparse", sparse)] {
+                assert!(
+                    matches!(r, Err(PlsKitError::InvalidArgument(_))),
+                    "{tag} alpha={alpha}: {r:?}"
+                );
+            }
         }
     }
 
@@ -3031,10 +3330,11 @@ mod tests {
     }
 
     /// A `find_k_optimal` result as flat values for the layout tests:
-    /// `k_star`, `n_eff`, `stable_rank` (NaN when absent), each score map as
-    /// its length then its values (`-1` when absent), then the p-values.
+    /// `k_star`, `n_eff`, `stable_rank` (NaN when absent) and each score map
+    /// as its length then its values (`-1` when absent) go into `v`; the
+    /// diagnostic p-values go into `p`.
     #[allow(clippy::cast_precision_loss)]
-    fn push_optimal(v: &mut Vec<f64>, r: &FindKOptimalOutput) {
+    fn push_optimal(v: &mut Vec<f64>, p: &mut Vec<f64>, r: &FindKOptimalOutput) {
         fn push_map(v: &mut Vec<f64>, m: Option<&BTreeMap<usize, f64>>) {
             match m {
                 Some(m) => {
@@ -3048,16 +3348,17 @@ mod tests {
         push_map(v, r.cv_scores.as_ref());
         push_map(v, r.cv_scores_se.as_ref());
         push_map(v, r.bic_scores.as_ref());
-        if let Some(p) = &r.pvalues {
-            v.extend((0..p.nrows()).map(|i| p[i]));
+        if let Some(pv) = &r.pvalues {
+            p.extend((0..pv.nrows()).map(|i| pv[i]));
         }
     }
 
     /// The selections fit X in its own layout (BIC selection on the full
     /// data, the selections by cross-validation in each fold), so padded,
     /// row-major and reversed-column views agree with the owned matrix to
-    /// the corpus tolerance, with the same `k_star` / `keep_star` and the
-    /// same number of scores and p-values, over the copy-free families with
+    /// the corpus tolerance (the p-values also to the corpus p rule), with
+    /// the same `k_star` / `keep_star` and the same number of scores and
+    /// p-values, over the copy-free families with
     /// and without `pre_standardized`: BIC and `r2_se` selection, each with
     /// and without a diagnostic, on `pls1_find_k_optimal` and
     /// `spls1_find_k_optimal`, and `spls1_find_keep_optimal`. The diagnostic
@@ -3067,7 +3368,9 @@ mod tests {
     #[allow(clippy::cast_precision_loss)]
     #[allow(clippy::many_single_char_names)]
     fn selection_agrees_across_layouts() {
-        use crate::test_support::{Agree, assert_layout_agree, copy_free_families};
+        use crate::test_support::{
+            Agree, assert_agree, assert_layout_agree, copy_free_families, for_each_layout,
+        };
         for f in copy_free_families() {
             let w = f.w.as_ref().map(Col::as_ref);
             for pre in [false, true] {
@@ -3088,19 +3391,29 @@ mod tests {
                         ..Default::default()
                     };
                     let what = format!("{selector:?} {} pre={pre} {diagnostic:?}", f.name);
-                    assert_layout_agree(&x, &what, Agree::Corpus(1e-10), |xv| {
-                        let mut v = Vec::new();
-                        push_optimal(
-                            &mut v,
-                            &pls1_find_k_optimal(xv, y.as_ref(), 3, w, None, opts)?,
-                        );
-                        push_optimal(
-                            &mut v,
-                            &spls1_find_k_optimal(xv, y.as_ref(), 3, 3, w, None, opts)?,
-                        );
-                        Ok(v)
-                    })
-                    .unwrap();
+                    for_each_layout(
+                        &x,
+                        |_, xv| {
+                            let (mut v, mut p) = (Vec::new(), Vec::new());
+                            push_optimal(
+                                &mut v,
+                                &mut p,
+                                &pls1_find_k_optimal(xv, y.as_ref(), 3, w, None, opts).unwrap(),
+                            );
+                            push_optimal(
+                                &mut v,
+                                &mut p,
+                                &spls1_find_k_optimal(xv, y.as_ref(), 3, 3, w, None, opts).unwrap(),
+                            );
+                            (v, p)
+                        },
+                        |view, got, want| {
+                            let what = format!("{what} [{view}]");
+                            assert_agree(&got.0, &want.0, Agree::Corpus(1e-10), &what);
+                            let what = format!("{what} pvalues");
+                            assert_agree(&got.1, &want.1, Agree::CorpusP(1e-10), &what);
+                        },
+                    );
                 }
                 let what = format!("keep_optimal {} pre={pre}", f.name);
                 assert_layout_agree(&x, &what, Agree::Corpus(1e-10), |xv| {
@@ -3168,7 +3481,6 @@ mod tests {
             .unwrap();
         let peak_at = |budget| {
             let (live, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
-            let (_, mut rng) = crate::rng::resolve_seed(Some(7)).unwrap();
             pool.install(|| {
                 crate::fit::with_budget(budget, || {
                     cv_select(
@@ -3181,7 +3493,7 @@ mod tests {
                         &[1],
                         1,
                         false,
-                        &mut rng,
+                        7,
                         |_, cells| {
                             peak.fetch_max(live.fetch_add(1, SeqCst) + 1, SeqCst);
                             // Hold the fold open so that folds run together overlap.
@@ -3201,9 +3513,10 @@ mod tests {
 
     /// A fold of `cv_select` counts one fit to `fit_k` components, its
     /// `p × (fit_k + 2)` buffers and its block of validation rows
-    /// ([`cv_fold_bytes`]): a budget of two such units runs two of the four
-    /// folds at once. The second pass, which refits the folds left to the
-    /// blocks, adds the fold's standardized blocks and, weighted, the
+    /// ([`cv_fold_bytes`]), beside the full-data fit to one component the
+    /// call holds: a budget of that fit and two such units runs two of the
+    /// four folds at once. The second pass, which refits the folds left to
+    /// the blocks, adds the fold's standardized blocks and, weighted, the
     /// √w-scaled copy of the training block to the unit.
     #[test]
     #[allow(clippy::many_single_char_names)]
@@ -3211,6 +3524,7 @@ mod tests {
         let (n, p) = (16_usize, 7_usize);
         let (x, y) = crate::test_support::signal_data(n, p, 101);
         let w = crate::test_support::test_weights(n);
+        let full = crate::fit::pls1_fit_bytes(p, 1);
         let unit = cv_fold_bytes(p, 1, n / 4);
         let folds = crate::linalg::fold_split(&(0..n).collect::<Vec<_>>(), 4);
         let blocks = crate::resample::fold_blocks_bytes(n, &folds, p);
@@ -3221,9 +3535,8 @@ mod tests {
                 0
             };
             let unit2 = unit + blocks + fit_copy;
-            let (_, mut rng) = crate::rng::resolve_seed(Some(7)).unwrap();
             let (_, log) = crate::resample::with_batch_log(|| {
-                crate::fit::with_budget(u64::try_from(2 * unit2).unwrap(), || {
+                crate::fit::with_budget(u64::try_from(full + 2 * unit2).unwrap(), || {
                     cv_select(
                         x.as_ref(),
                         y.as_ref(),
@@ -3234,7 +3547,7 @@ mod tests {
                         &[1],
                         1,
                         false,
-                        &mut rng,
+                        7,
                         |fd, cells| Ok(vec![fd.on_blocks.then_some(0.0); cells.len()]),
                     )
                     .unwrap()
@@ -3244,6 +3557,238 @@ mod tests {
             crate::resample::assert_batches(&log, 4, first, 1);
             crate::resample::assert_batches(&log, 4, 2, 1);
         }
+    }
+
+    /// The BIC selector checks its full-data fit before it runs, weighted
+    /// and not: budget 1 is `MemoryBudget` and the `needed` it names runs.
+    #[test]
+    fn bic_checks_its_full_data_fit() {
+        let (x, y) = synth(40, 30, 2, 1.0, 5);
+        let w = crate::test_support::test_weights(40);
+        let opts = FindKOptimalOpts {
+            selector: Selector::Bic,
+            seed: Some(3),
+            ..Default::default()
+        };
+        for weights in [None, Some(w.as_ref())] {
+            crate::test_support::assert_needed_runs(|b| {
+                crate::fit::with_budget(b, || {
+                    pls1_find_k_optimal(x.as_ref(), y.as_ref(), 3, weights, None, opts)
+                })
+            });
+        }
+    }
+
+    /// With covariates, the selection holds the adjusted copy of X: on each
+    /// selector the final `needed` is at least that copy above the call
+    /// without covariates, one byte below it is `MemoryBudget`, and it runs.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn covariate_selection_counts_the_adjusted_copy() {
+        let (n, p) = (40, 300);
+        let (x, y) = synth(n, p, 2, 1.0, 6);
+        let z = crate::test_support::unif(n, 2, 8);
+        let copy = crate::resample::copy_bytes(n, p) as u64;
+        for selector in [Selector::R2Se, Selector::Bic] {
+            let opts = FindKOptimalOpts {
+                selector,
+                seed: Some(3),
+                ..Default::default()
+            };
+            let run = |cov: Option<MatRef<'_, f64>>, b| {
+                crate::fit::with_budget(b, || {
+                    pls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, None, cov, opts)
+                })
+            };
+            let plain = crate::test_support::assert_needed_runs(|b| run(None, b));
+            let needed = crate::test_support::assert_needed_runs(|b| run(Some(z.as_ref()), b));
+            assert!(
+                needed >= plain + copy,
+                "{selector:?}: {needed} < {plain} + {copy}"
+            );
+            let r = run(Some(z.as_ref()), needed - 1);
+            assert!(
+                matches!(r, Err(PlsKitError::MemoryBudget { .. })),
+                "{selector:?}: {r:?}"
+            );
+        }
+    }
+
+    /// Non-finite X or y is `NonFiniteInput` at budget 1, with and without
+    /// covariates, on every selector: the data check runs before the memory
+    /// check.
+    #[test]
+    fn non_finite_input_wins_over_the_budget() {
+        let (x, y) = synth(40, 30, 2, 1.0, 5);
+        let z = crate::test_support::unif(40, 2, 8);
+        let mut x_nan = x.clone();
+        x_nan[(3, 4)] = f64::NAN;
+        let mut y_nan = y.clone();
+        y_nan[7] = f64::INFINITY;
+        for selector in [Selector::R2Se, Selector::Bic] {
+            let opts = FindKOptimalOpts {
+                selector,
+                ..Default::default()
+            };
+            for cov in [None, Some(z.as_ref())] {
+                for (xi, yi) in [(&x_nan, &y), (&x, &y_nan)] {
+                    let r = crate::fit::with_budget(1, || {
+                        pls1_find_k_optimal(xi.as_ref(), yi.as_ref(), 2, None, cov, opts)
+                    });
+                    assert!(
+                        matches!(r, Err(PlsKitError::NonFiniteInput)),
+                        "{selector:?}: {r:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Runs `run(None, b)` and `run(Some(z), b)` to their final `needed`:
+    /// with covariates it is at least `copy` above, and one byte below it is
+    /// `MemoryBudget` though the call without covariates fits there.
+    fn assert_counts_the_copy<T: std::fmt::Debug>(
+        name: &str,
+        z: MatRef<'_, f64>,
+        copy: u64,
+        run: impl Fn(Option<MatRef<'_, f64>>, u64) -> PlsKitResult<T>,
+    ) -> u64 {
+        let plain = crate::test_support::assert_needed_runs(|b| run(None, b));
+        let needed = crate::test_support::assert_needed_runs(|b| run(Some(z), b));
+        assert!(
+            needed >= plain + copy,
+            "{name}: {needed} < {plain} + {copy}"
+        );
+        let r = run(Some(z), needed - 1);
+        assert!(
+            matches!(r, Err(PlsKitError::MemoryBudget { .. })),
+            "{name}: {r:?}"
+        );
+        plain
+    }
+
+    /// With covariates, every step of `find_k_sequence` and of the
+    /// `find_k_optimal` diagnostic counts the adjusted copy of X held beside
+    /// it. On pre-standardized X, which the plain call reads in place (on raw
+    /// X it holds its standardized copy where the covariate call holds the
+    /// adjusted one). Premise: the diagnostic, not the selection, sets the
+    /// plain call's final `needed`.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn covariate_steps_count_the_adjusted_copy() {
+        let (n, p) = (200, 50);
+        let (x, y) = synth(n, p, 2, 4.0, 6);
+        let z = crate::test_support::unif(n, 2, 8);
+        let copy = crate::resample::copy_bytes(n, p) as u64;
+        let seq = FindKSequenceOpts {
+            test_method: ConfirmatoryMethod::SplitExact,
+            n_perm: 99,
+            n_splits: 4,
+            pre_standardized: true,
+            seed: Some(3),
+            ..Default::default()
+        };
+        assert_counts_the_copy("sequence", z.as_ref(), copy, |cov, b| {
+            crate::fit::with_budget(b, || {
+                pls1_find_k_sequence(x.as_ref(), y.as_ref(), 2, None, cov, seq)
+            })
+        });
+        let opts = |diagnostic| FindKOptimalOpts {
+            diagnostic,
+            n_perm: 99,
+            n_splits: 4,
+            pre_standardized: true,
+            seed: Some(3),
+            ..Default::default()
+        };
+        let run = |cov: Option<MatRef<'_, f64>>, b, o| {
+            crate::fit::with_budget(b, || {
+                pls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, None, cov, o)
+            })
+        };
+        let with_diag = assert_counts_the_copy("diagnostic", z.as_ref(), copy, |cov, b| {
+            run(cov, b, opts(Some(ConfirmatoryMethod::SplitExact)))
+        });
+        let selection = crate::test_support::assert_needed_runs(|b| run(None, b, opts(None)));
+        assert!(with_diag > selection, "premise: {with_diag} <= {selection}");
+    }
+
+    /// With covariates, the covariate checks, the residual-df check and the
+    /// leave-one-out rejection give their own errors at budget 1, before the
+    /// adjusted copy's memory check.
+    #[test]
+    fn covariate_argument_errors_win_over_the_budget() {
+        let (x, y) = synth(40, 30, 2, 1.0, 5);
+        let wide_z = crate::test_support::unif(40, 30, 8);
+        let mut z_nan = crate::test_support::unif(40, 2, 9);
+        z_nan[(0, 1)] = f64::NAN;
+        let short_z = crate::test_support::unif(39, 2, 9);
+        let at_1 = |z: &Mat<f64>, k: usize| {
+            crate::fit::with_budget(1, || {
+                pls1_find_k_optimal(
+                    x.as_ref(),
+                    y.as_ref(),
+                    k,
+                    None,
+                    Some(z.as_ref()),
+                    FindKOptimalOpts::default(),
+                )
+            })
+        };
+        let r = at_1(&wide_z, 10);
+        assert!(
+            matches!(r, Err(PlsKitError::InsufficientResidualDf { .. })),
+            "{r:?}"
+        );
+        let r = at_1(&z_nan, 2);
+        assert!(matches!(r, Err(PlsKitError::NonFiniteInput)), "{r:?}");
+        let r = at_1(&short_z, 2);
+        assert!(matches!(r, Err(PlsKitError::ShapeMismatch(_))), "{r:?}");
+        let r = crate::fit::with_budget(1, || {
+            pls1_find_k_sequence(
+                x.as_ref(),
+                y.as_ref(),
+                10,
+                None,
+                Some(wide_z.as_ref()),
+                FindKSequenceOpts::default(),
+            )
+        });
+        assert!(
+            matches!(r, Err(PlsKitError::InsufficientResidualDf { .. })),
+            "sequence: {r:?}"
+        );
+        let r = crate::fit::with_budget(1, || {
+            spls1_find_keep_optimal(
+                x.as_ref(),
+                y.as_ref(),
+                10,
+                None,
+                Some(wide_z.as_ref()),
+                FindKeepOptimalOpts::default(),
+            )
+        });
+        assert!(
+            matches!(r, Err(PlsKitError::InsufficientResidualDf { .. })),
+            "keep: {r:?}"
+        );
+        // n = 2 leaves single-row folds.
+        let (x2, y2) = synth(2, 3, 1, 1.0, 5);
+        let z2 = crate::test_support::unif(2, 1, 8);
+        let r = crate::fit::with_budget(1, || {
+            pls1_find_k_optimal(
+                x2.as_ref(),
+                y2.as_ref(),
+                1,
+                None,
+                Some(z2.as_ref()),
+                FindKOptimalOpts::default(),
+            )
+        });
+        assert!(
+            matches!(r, Err(PlsKitError::InvalidArgument(_))),
+            "leave-one-out: {r:?}"
+        );
     }
 
     /// The BIC sweep of `select_bic` (a fit to `k_max` on raw X) agrees, to
@@ -3270,7 +3815,7 @@ mod tests {
         for f in families {
             let n = f.x.nrows();
             let (w_norm, n_eff) =
-                crate::fit::validate_and_normalize_weights(f.w.as_ref().map(Col::as_ref), n, 4)
+                crate::fit::validate_and_normalize_weights(f.w.as_ref().map(Col::as_ref), n)
                     .unwrap();
             let wr = w_norm.as_ref().map(Col::as_ref);
             for keep in [None, Some(3)] {
@@ -3282,14 +3827,16 @@ mod tests {
                 let m = pls1_fit_impl(
                     xs.as_ref(),
                     ys.as_ref(),
-                    KSpec::Fixed(4),
+                    4,
                     wr,
                     None,
                     FitOpts {
                         pre_standardized: true,
+                        ..FitOpts::default()
+                    },
+                    InternalFitOpts {
                         check_n_eff: false,
                         keep,
-                        ..FitOpts::default()
                     },
                 )
                 .unwrap();
@@ -3405,13 +3952,10 @@ mod tests {
         let mut check = |name: &str, x: MatRef<'_, f64>, y: &Col<f64>, w: Option<&Col<f64>>| {
             let (n, p) = (x.nrows(), x.ncols());
             let (w_norm, _) =
-                crate::fit::validate_and_normalize_weights(w.map(Col::as_ref), n, 1).unwrap();
+                crate::fit::validate_and_normalize_weights(w.map(Col::as_ref), n).unwrap();
             let wr = w_norm.as_ref().map(Col::as_ref);
             let scale = crate::linalg::held_out_scale(x, wr, false);
-            let (_, mut rng) = crate::rng::resolve_seed(Some(7)).unwrap();
-            let mut idx: Vec<usize> = (0..n).collect();
-            idx.shuffle(&mut rng);
-            let folds = crate::linalg::fold_split(&idx, 5);
+            let folds = crate::resample::shuffled_folds(n, 5, 7, 0);
             let mut sweeps: Vec<(usize, Option<usize>)> = vec![(3, None)];
             sweeps.extend(keep_grid(p).into_iter().map(|kp| (2, Some(kp))));
             for fi in 0..folds.len() {
@@ -3482,7 +4026,7 @@ mod tests {
         ] {
             let n = x.nrows();
             let (w_norm, _) =
-                crate::fit::validate_and_normalize_weights(w.map(Col::as_ref), n, 1).unwrap();
+                crate::fit::validate_and_normalize_weights(w.map(Col::as_ref), n).unwrap();
             let wr = w_norm.as_ref().map(Col::as_ref);
             let folds = crate::linalg::fold_split(&(0..n).collect::<Vec<_>>(), 5);
             let scale = crate::linalg::held_out_scale(x, wr, false);
@@ -3591,5 +4135,273 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// X of rank 1 stops every fold's fit at one component, so the higher
+    /// candidates score the one-component model: equal means, and `r2_max`
+    /// takes the smallest of the tied k.
+    #[test]
+    fn cv_scores_past_a_truncated_fit_score_the_truncated_model() {
+        let v = crate::test_support::unif_col(60, 3);
+        let x = Mat::<f64>::from_fn(60, 5, |i, j| (j + 1) as f64 * v[i] + 10.0 * j as f64);
+        let y = Col::<f64>::from_fn(60, |i| 2.0 * v[i] + 1.0);
+        for selector in [Selector::R2Max, Selector::R2Se] {
+            let out = pls1_find_k_optimal(
+                x.as_ref(),
+                y.as_ref(),
+                3,
+                None,
+                None,
+                FindKOptimalOpts {
+                    selector,
+                    seed: Some(1),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let s = out.cv_scores.unwrap();
+            for k in [2, 3] {
+                assert!(s[&k].is_finite(), "{selector:?} k={k}: {}", s[&k]);
+                assert_eq!(s[&k].to_bits(), s[&1].to_bits(), "{selector:?} k={k}");
+            }
+            if selector == Selector::R2Max {
+                assert_eq!(out.k_star, 1);
+            }
+        }
+    }
+
+    /// The fold layout `cv_select` draws from `seed`: the shuffle of
+    /// `0..n` split into `n_folds` folds.
+    fn cv_layout(seed: u64, n: usize, n_folds: usize) -> Vec<Vec<usize>> {
+        crate::resample::shuffled_folds(n, n_folds, seed, 0)
+    }
+
+    /// Four rows of weight 1 and 96 of weight 0 in 5 folds: some fold has
+    /// no positive row. Redrawing X and y on the zero-weight rows moves no
+    /// CV score of the three CV selectors.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn cv_scores_ignore_rows_of_zero_weight() {
+        let n = 100;
+        let pos = [3, 40, 41, 77];
+        let seed = 2;
+        let folds = cv_layout(seed, n, 5);
+        assert!(
+            !folds.iter().any(|f| pos.iter().all(|r| f.contains(r))),
+            "premise: seed {seed} puts the four positive rows in one fold"
+        );
+        assert!(
+            folds.iter().any(|f| !pos.iter().any(|r| f.contains(r))),
+            "premise: some fold has no positive row"
+        );
+        let (x, y) = synth(n, 6, 1, 2.0, 31);
+        let xr = crate::test_support::unif(n, 6, 131);
+        let yr = crate::test_support::unif_col(n, 132);
+        let x2 = Mat::<f64>::from_fn(n, 6, |i, j| {
+            if pos.contains(&i) {
+                x[(i, j)]
+            } else {
+                xr[(i, j)]
+            }
+        });
+        let y2 = Col::<f64>::from_fn(n, |i| if pos.contains(&i) { y[i] } else { yr[i] });
+        let w = Col::<f64>::from_fn(n, |i| if pos.contains(&i) { 1.0 } else { 0.0 });
+        let agree = |what: &str, a: &BTreeMap<usize, f64>, b: &BTreeMap<usize, f64>| {
+            assert_eq!(
+                a.keys().collect::<Vec<_>>(),
+                b.keys().collect::<Vec<_>>(),
+                "{what}"
+            );
+            for ((c, &u), &v) in a.iter().zip(b.values()) {
+                let same =
+                    (u.is_nan() && v.is_nan()) || (u - v).abs() <= 1e-12 * u.abs().max(v.abs());
+                assert!(same, "{what} at {c}: {u} vs {v}");
+            }
+        };
+        let opts = FindKOptimalOpts {
+            n_folds: 5,
+            seed: Some(seed),
+            ..Default::default()
+        };
+        let dense = |x: &Mat<f64>, y: &Col<f64>| {
+            pls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, Some(w.as_ref()), None, opts).unwrap()
+        };
+        let sparse = |x: &Mat<f64>, y: &Col<f64>| {
+            spls1_find_k_optimal(x.as_ref(), y.as_ref(), 2, 3, Some(w.as_ref()), None, opts)
+                .unwrap()
+        };
+        for (name, a, b) in [
+            ("pls1_find_k_optimal", dense(&x, &y), dense(&x2, &y2)),
+            ("spls1_find_k_optimal", sparse(&x, &y), sparse(&x2, &y2)),
+        ] {
+            agree(
+                name,
+                a.cv_scores.as_ref().unwrap(),
+                b.cv_scores.as_ref().unwrap(),
+            );
+            agree(
+                name,
+                a.cv_scores_se.as_ref().unwrap(),
+                b.cv_scores_se.as_ref().unwrap(),
+            );
+        }
+        let keep = |x: &Mat<f64>, y: &Col<f64>| {
+            spls1_find_keep_optimal(
+                x.as_ref(),
+                y.as_ref(),
+                1,
+                Some(w.as_ref()),
+                None,
+                FindKeepOptimalOpts {
+                    n_folds: 5,
+                    seed: Some(seed),
+                },
+            )
+            .unwrap()
+        };
+        let (a, b) = (keep(&x, &y), keep(&x2, &y2));
+        agree("spls1_find_keep_optimal", &a.cv_scores, &b.cv_scores);
+        agree("spls1_find_keep_optimal", &a.cv_scores_se, &b.cv_scores_se);
+    }
+
+    /// `n_failed_folds` counts the CV folds a weight left out and the folds
+    /// whose validation outcome has no spread, on `pls1_find_k_optimal`
+    /// (`r2_se`, `r2_max`; `None` for `bic`) and on `spls1_find_keep_optimal`.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn cv_counts_failed_folds() {
+        let (n, k_max, seed) = (40, 2, 0);
+        let folds = cv_layout(seed, n, cv_n_folds(n, 5));
+        let (x, y) = synth(n, 6, 1, 2.0, 33);
+        let counts = |y: &Col<f64>, w: Option<&Col<f64>>| {
+            let w = w.map(Col::as_ref);
+            let optimal = |selector| {
+                let opts = FindKOptimalOpts {
+                    selector,
+                    n_folds: 5,
+                    seed: Some(seed),
+                    ..Default::default()
+                };
+                pls1_find_k_optimal(x.as_ref(), y.as_ref(), k_max, w, None, opts)
+                    .unwrap()
+                    .n_failed_folds
+            };
+            let opts = FindKeepOptimalOpts {
+                n_folds: 5,
+                seed: Some(seed),
+            };
+            let keep = spls1_find_keep_optimal(x.as_ref(), y.as_ref(), k_max, w, None, opts)
+                .unwrap()
+                .n_failed_folds;
+            (
+                optimal(Selector::R2Se),
+                optimal(Selector::R2Max),
+                optimal(Selector::Bic),
+                keep,
+            )
+        };
+        let expect = |c: usize| (Some(c), Some(c), None, c);
+
+        assert_eq!(counts(&y, None), expect(0), "unweighted, continuous y");
+
+        // (a) Weight 1 on eight rows: a fold with no weighted validation row
+        // is left out, and one with a single weighted validation row has a
+        // weighted validation outcome with no spread.
+        let pos = [1, 6, 12, 17, 23, 28, 31, 37];
+        let per_fold: Vec<usize> = folds
+            .iter()
+            .map(|f| pos.iter().filter(|r| f.contains(r)).count())
+            .collect();
+        assert!(
+            per_fold.contains(&0) && !per_fold.iter().all(|&c| c == 0),
+            "premise: {per_fold:?}"
+        );
+        assert!(
+            per_fold.contains(&1),
+            "premise: a fold with one weighted row, {per_fold:?}"
+        );
+        assert!(
+            per_fold.iter().all(|&c| pos.len() - c > k_max),
+            "premise: every training part holds k_max + 1 weighted rows, {per_fold:?}"
+        );
+        let w = Col::<f64>::from_fn(n, |i| if pos.contains(&i) { 1.0 } else { 0.0 });
+        let failed = per_fold.iter().filter(|&&c| c < 2).count();
+        assert_eq!(
+            counts(&y, Some(&w)),
+            expect(failed),
+            "weighted, {per_fold:?}"
+        );
+
+        // (b) Unweighted, y constant on the validation rows of one fold.
+        let (fi, c) = (2, 1.0);
+        let yc = Col::<f64>::from_fn(n, |i| if folds[fi].contains(&i) { c } else { y[i] });
+        let scale = crate::linalg::held_out_scale(x.as_ref(), None, false);
+        let fd = prep_fold(
+            x.as_ref(),
+            yc.as_ref(),
+            None,
+            &folds,
+            fi,
+            &folds[fi],
+            scale.as_ref(),
+        )
+        .unwrap();
+        assert!(fd.ss_tot() <= 0.0, "premise: ss_tot {}", fd.ss_tot());
+        assert_eq!(counts(&yc, None), expect(1), "constant on fold {fi}");
+    }
+
+    /// Two rows of weight 1 and 38 of weight 0 in 5 folds: when both sit in
+    /// one fold, no fold has weight on both sides and the call is an error;
+    /// otherwise every score is finite.
+    #[test]
+    fn cv_errors_when_no_fold_has_weight_on_both_sides() {
+        let n = 40;
+        let pos = [5, 17];
+        let (x, y) = synth(n, 4, 1, 2.0, 32);
+        let w = Col::<f64>::from_fn(n, |i| if pos.contains(&i) { 1.0 } else { 0.0 });
+        let (mut together, mut apart) = (0, 0);
+        for seed in 0..50 {
+            let folds = cv_layout(seed, n, 5);
+            let same_fold = folds.iter().any(|f| pos.iter().all(|r| f.contains(r)));
+            let out = pls1_find_k_optimal(
+                x.as_ref(),
+                y.as_ref(),
+                1,
+                Some(w.as_ref()),
+                None,
+                FindKOptimalOpts {
+                    n_folds: 5,
+                    seed: Some(seed),
+                    ..Default::default()
+                },
+            );
+            if same_fold {
+                together += 1;
+                assert!(
+                    matches!(
+                        out,
+                        Err(PlsKitError::InvalidWeights {
+                            reason: "insufficient_effective_n"
+                        })
+                    ),
+                    "seed {seed}: {out:?}"
+                );
+            } else {
+                apart += 1;
+                let out = out.unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
+                for v in out
+                    .cv_scores
+                    .unwrap()
+                    .values()
+                    .chain(out.cv_scores_se.unwrap().values())
+                {
+                    assert!(v.is_finite(), "seed {seed}: {v}");
+                }
+            }
+        }
+        assert!(
+            together > 0 && apart > 0,
+            "together {together}, apart {apart}"
+        );
     }
 }

@@ -27,7 +27,7 @@ live.
 | Suite | File | Cases run | Finds `testdata/` by | When it is missing |
 |---|---|---|---|---|
 | Rust | `plskit-rs/tests/corpus.rs` | all | the parent of the crate directory | the test fails |
-| Python | `plskit-py/tests/test_corpus.py` | all | `../../testdata` from the test directory | calls `pytest.skip` |
+| Python | `plskit-py/tests/test_corpus.py` | all | `PLSKIT_TESTDATA`, else `../../testdata` from the test directory | skipped; an error when `PLSKIT_REQUIRE_CORPUS` is set |
 | R | `plskit-r/tests/testthat/test-corpus.R` | all | `PLSKIT_TESTDATA`, else the first ancestor directory that holds `testdata/manifest.json` | skipped; an error when `PLSKIT_REQUIRE_CORPUS` is set |
 | Julia | `plskit-jl/test/corpus.jl` | one per function | `PLSKIT_TESTDATA`, else `../../testdata` from the test directory | skipped; an error when `PLSKIT_REQUIRE_CORPUS` is set |
 
@@ -44,7 +44,7 @@ Guards against a fixture that nothing checks:
   function that `corpus.rs` has no arm for.
 - Python: a case fails when the fixture holds a key no arm reads.
 - R and Julia: every fixture key must resolve to a result field by name.
-- CI sets `PLSKIT_REQUIRE_CORPUS=1` for the R and Julia jobs, and runs
+- CI sets `PLSKIT_REQUIRE_CORPUS=1` for the Python, R and Julia jobs, and runs
   `scripts/check_corpus_hash.py`, which fails when a file's hash differs
   from the one in `manifest.json`.
 
@@ -78,7 +78,8 @@ Guards against a fixture that nothing checks:
 
 ## Changing an existing fixture
 
-- A fixture's inputs are immutable per fixture id.
+- An input file never changes; a fixture may move to a new input file, with the reason in the change.
+- To change an input on purpose, write a new input file under a new path and point the case at it. Delete the old file in the same change when no case reads it.
 - Outputs change only by running the generator. It rewrites a file only
   when the result moved beyond the tolerance, so unrelated fixtures stay
   byte-identical

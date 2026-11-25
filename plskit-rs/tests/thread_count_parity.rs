@@ -42,7 +42,7 @@ use common::{perm_opts, synth};
 use faer::{Col, Mat, MatRef};
 use plskit::{
     CIOpts, ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
-    FindKOptimalOpts, FindKSequenceOpts, FitOpts, KSpec, ParChoice, PermNullOpts,
+    FindKOptimalOpts, FindKSequenceOpts, FitOpts, ParChoice, PermNullOpts,
     Pls3ConfirmatoryTestOpts, Pls3FitOpts, ProfilesFindNOpts, Selector, factors, pca_basis,
     pls1_confirmatory_test, pls1_find_k_optimal, pls1_find_k_sequence, pls1_fit, pls1_perm_alpha,
     pls1_perm_null, pls3_confirmatory_test, pls3_fit, profiles_find_n, split_nb_gate,
@@ -140,21 +140,13 @@ fn pls1_fit_auto_is_pool_size_invariant() {
     ] {
         let (x, y) = synth(n, d, 1.0, 3);
         c.check(&format!("pls1_fit {n}x{d} k={k}"), || {
-            pls1_fit(
-                x.as_ref(),
-                y.as_ref(),
-                KSpec::Fixed(k),
-                None,
-                None,
-                FitOpts::default(),
-            )
-            .unwrap()
+            pls1_fit(x.as_ref(), y.as_ref(), k, None, None, FitOpts::default()).unwrap()
         });
     }
-    // The Python seam hands the kernel a row-major *view* of `X`
-    // (`np_mat_view`, `MatRef::from_row_major_slice`) instead of a
-    // column-major copy. The standardized X keeps a row-major input's
-    // layout, so that view must be pool-invariant on its own.
+    // A Rust caller can hand the kernel a row-major view of `X`
+    // (`MatRef::from_row_major_slice`). The standardized X keeps a
+    // row-major input's layout, so that view must be pool-invariant on
+    // its own.
     let (x_col_major, y5) = synth(2000, 600, 1.0, 3);
     let mut x_row_major: Vec<f64> = Vec::with_capacity(2000 * 600);
     for i in 0..2000 {
@@ -164,15 +156,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
     }
     let x_row_view = MatRef::from_row_major_slice(&x_row_major, 2000, 600);
     c.check("pls1_fit row-major view 2000x600 k=5", || {
-        pls1_fit(
-            x_row_view,
-            y5.as_ref(),
-            KSpec::Fixed(5),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap()
+        pls1_fit(x_row_view, y5.as_ref(), 5, None, None, FitOpts::default()).unwrap()
     });
     // Pool: a row-major view at least 2048 columns wide forms `Xs'·t` with
     // plskit's own row split (a fixed number of row pieces, summed in piece
@@ -186,7 +170,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
         pls1_fit(
             x_wide_t.transpose(),
             y_wide.as_ref(),
-            KSpec::Fixed(3),
+            3,
             None,
             None,
             FitOpts::default(),
@@ -210,7 +194,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
         pls1_fit(
             x_std_t.transpose(),
             y_std.as_ref(),
-            KSpec::Fixed(3),
+            3,
             None,
             None,
             FitOpts {
@@ -227,7 +211,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
         pls1_fit(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(5),
+            5,
             Some(w.as_ref()),
             None,
             FitOpts::default(),
@@ -238,7 +222,7 @@ fn pls1_fit_auto_is_pool_size_invariant() {
         spls1_fit(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(5),
+            5,
             100,
             None,
             None,
@@ -263,7 +247,7 @@ fn pls1_fit_weighted_row_major_is_pool_size_invariant() {
         pls1_fit(
             x_t.transpose(),
             y.as_ref(),
-            KSpec::Fixed(3),
+            3,
             Some(w.as_ref()),
             None,
             FitOpts::default(),
@@ -326,9 +310,9 @@ fn pls3_fits_auto_are_pool_size_invariant() {
         )
         .unwrap()
     });
-    // The Python seam hands both fits a C-ordered `X` as a row-major view,
-    // standardized or `pre_standardized_x` (copied column-major by the
-    // fit): each must be pool-invariant in that layout too.
+    // A Rust caller can hand both fits a row-major `X`, standardized or
+    // `pre_standardized_x` (copied column-major by the fit): each must be
+    // pool-invariant in that layout too.
     let row_major = |x: &Mat<f64>| -> Vec<f64> {
         (0..x.nrows())
             .flat_map(|i| (0..x.ncols()).map(move |j| (i, j)))
@@ -398,8 +382,10 @@ const CI: CIOpts = CIOpts {
 #[test]
 fn split_exact_primal_is_pool_size_invariant() {
     let mut c = Checker::default();
-    // Pool: 40x4000 dense, k = 3 (past the n-space route's
-    // cap, so the primal refit and its held-out scoring GEMV).
+    // Guard only (not shown to be pool-sensitive): 40x4000 dense, k = 3,
+    // takes the n-space route, whose held-out scaling and held-out Gram
+    // blocks (`held_out_scale`, `HeldOutGram::from_x`) give the same bits
+    // at every degree.
     let (x, y) = synth(40, 4000, 1.0, 5);
     let split_exact = ConfirmatoryArgs::SplitExact {
         n_perm: 50,
@@ -408,12 +394,16 @@ fn split_exact_primal_is_pool_size_invariant() {
     c.check("split_exact 40x4000 k=3", || {
         confirmatory(&x, &y, 3, None, split_exact, None, 23)
     });
-    // Pool: the weighted primal arm, same shape.
+    // Guard only (not shown to be pool-sensitive): the weighted run, same
+    // shape; its work runs serial below the `n·d·k >= 1e6` cutoff.
     let w = row_weights(40);
     c.check("split_exact weighted 40x4000 k=3", || {
         confirmatory(&x, &y, 3, Some(&w), split_exact, None, 24)
     });
-    // Pool: tall (Gram-p route) with the CI bundle.
+    // Guard only (not shown to be pool-sensitive): tall, with the CI
+    // bundle. It takes the primal route, serial below the `n·d·k >= 1e6`
+    // cutoff, and the CI bundle's holdout scoring runs `Par::Seq` inside
+    // its replicate workers.
     let (xt, yt) = synth(5000, 50, 1.0, 25);
     c.check("split_exact 5000x50 k=2 + ci", || {
         confirmatory(
@@ -489,7 +479,9 @@ fn split_exact_nspace_is_pool_size_invariant() {
 fn other_pls1_confirmatory_methods_are_pool_size_invariant() {
     let mut c = Checker::default();
     let (x, y) = synth(40, 4000, 1.0, 6);
-    // Pool: `split_nb`'s statistic and `stable_rank`.
+    // Guard only (not shown to be pool-sensitive): `split_nb` at this shape
+    // reaches only kernels whose bits do not follow the degree
+    // (`held_out_scale`, `HeldOutGram::from_x`).
     c.check("split_nb 40x4000 k=3", || {
         confirmatory(
             &x,
@@ -504,9 +496,9 @@ fn other_pls1_confirmatory_methods_are_pool_size_invariant() {
             12,
         )
     });
-    // Pool: score and e read the full design once (`X'y`, the Gram matrix
-    // and its eigenvalues; e scores a 1000x600 half), past the GEMV split
-    // and the EVD's parallel threshold.
+    // Guard only (not shown to be pool-sensitive): score reads the full
+    // design once (`X'y` and the two moments of the 600x600 Gram matrix
+    // `X'X`). Pool: e scores a 1000x600 half, past the GEMV split.
     let (xt, yt) = synth(2000, 600, 1.0, 7);
     c.check("score 2000x600 k=1", || {
         confirmatory(
@@ -581,8 +573,8 @@ fn other_pls1_confirmatory_methods_are_pool_size_invariant() {
             3032,
         )
     });
-    // Guard only (not shown to be pool-sensitive): `raw_perm`'s K = 1 Gram
-    // closed form, `G` and `M` summed over several column blocks (32-row
+    // Guard only (not shown to be pool-sensitive): `raw_perm`'s n-space
+    // route at k = 1, `G` and `M` summed over several column blocks (32-row
     // training folds, 8,192-column blocks, three of them). Shape pinned in
     // `fixture_route_pins::thread_count_parity_shapes_take_their_routes`.
     let (xb, yb) = synth(40, 20_000, 1.0, 41);
@@ -612,9 +604,10 @@ fn other_pls1_confirmatory_methods_are_pool_size_invariant() {
 #[test]
 fn subsample_ci_holdout_is_pool_size_invariant() {
     let mut c = Checker::default();
-    // Pool: the CI bundle's holdout correlation scores the held-out rows
-    // with the subsample fit's β; 30 holdout rows x 4000 features clears
-    // faer's GEMV split.
+    // Guard only (not shown to be pool-sensitive): the CI bundle's holdout
+    // correlation scores 30 held-out rows x 4000 features with `Par::Seq`
+    // inside its replicate workers, and the score part's 100x100 work
+    // gives the same bits in every pool.
     let (x, y) = synth(100, 4000, 1.0, 8);
     c.check("score + ci 100x4000 k=2", || {
         confirmatory(
@@ -671,7 +664,14 @@ fn perm_alpha_is_pool_size_invariant() {
     let mut c = Checker::default();
     // Guard only: every product is `Par::Seq`; the columns map in parallel.
     let (x, yy) = two_block(40, 2000, 64, 19);
-    let (xs, _, _) = plskit::linalg::standardize(x.as_ref());
+    let (xs, _, _) = plskit::preprocess(plskit::PreprocessInput {
+        x: Some(x.as_ref()),
+        y: None,
+        weights: None,
+    })
+    .unwrap()
+    .x_std
+    .unwrap();
     let mut g = Mat::<f64>::zeros(40, 40);
     faer::linalg::matmul::matmul(
         g.as_mut(),
@@ -927,7 +927,9 @@ fn pls3_confirmatory_is_pool_size_invariant() {
         )
         .unwrap()
     };
-    // Pool: dense `split_nb` at q = 4.
+    // Guard only (not shown to be pool-sensitive): dense `split_nb` at
+    // q = 4 reaches only kernels whose bits do not follow the degree
+    // (`held_out_scale`, `HeldOutGram::from_x`).
     let (x4, y4) = two_block(60, 3000, 4, 11);
     c.check("pls3 split_nb 60x3000x4", || {
         pls3_test(

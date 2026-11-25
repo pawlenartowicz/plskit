@@ -9,6 +9,9 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_precision_loss)] // sample-size usize → f64 casts are routine in math kernels
 
+/// Monte-Carlo H0 calibration of the inference paths.
+#[cfg(test)]
+mod calibration_mc;
 /// Every split's training sums from the cells of the balanced split design,
 /// through one Walsh–Hadamard transform, for the tall held-out routes.
 pub(crate) mod cell_sums;
@@ -31,6 +34,9 @@ pub mod fit;
 /// Route pins for the corpus fixtures that exist to exercise one route.
 #[cfg(test)]
 mod fixture_route_pins;
+/// The held-out tests and `pls1_perm_alpha` on a caller's Gram matrix.
+#[cfg(test)]
+mod gram_input;
 /// p-space Gram backend (Improved Kernel PLS, Algorithm 2) for the fixed-X
 /// PLS1 resampling loops at `n ≫ p`. Crate-internal: the route is chosen by
 /// the engine from `(n_tr, p, B, k)` and is not observable from any public
@@ -40,8 +46,15 @@ pub(crate) mod gram_p;
 /// kernels taken from its blocks. Only `gram_matrix` and its output are on
 /// the public surface.
 pub(crate) mod held_out_gram;
+/// The scaling and centring rule of the held-out tests and the CV folds.
+#[cfg(test)]
+mod held_out_scaling_rule;
 /// Low-level linear algebra helpers (standardize, row-subset, etc.).
-pub mod linalg;
+pub(crate) mod linalg;
+/// The parity cases of `tests/memory_budget_parity.rs`, checked for one
+/// route across budgets.
+#[cfg(test)]
+mod memory_budget_cases;
 /// PCA basis of standardized `X`.
 pub mod pca;
 /// PLS1 dual coefficients from a caller's Gram matrix (`pls1_perm_alpha`),
@@ -64,9 +77,17 @@ pub mod preprocess;
 /// Resampling utilities (permutation indices, split-half indices).
 pub mod resample;
 /// Seeded RNG construction.
-pub mod rng;
+pub(crate) mod rng;
 /// Simple-structure rotation of PLS weights (varimax).
 pub mod rotate;
+/// The route choice of the resampling loops: least work per √lanes that
+/// fit the memory budget. Public only under the `route-log` feature, for
+/// its `take_routes`.
+#[cfg(feature = "route-log")]
+#[doc(hidden)]
+pub mod route_select;
+#[cfg(not(feature = "route-log"))]
+mod route_select;
 /// Sequential component tests (step-down inference). Crate-internal helper
 /// used by `pls1_find_k_sequence` and the diagnostic path of `pls1_find_k_optimal`.
 pub(crate) mod sequential;
@@ -100,7 +121,7 @@ pub use find_k::{
     FindKeepOptimalOpts, FindKeepOptimalOutput, Selector, pls1_find_k_optimal,
     pls1_find_k_sequence, spls1_find_k_optimal, spls1_find_k_sequence, spls1_find_keep_optimal,
 };
-pub use fit::{FitOpts, KSpec, ParChoice, Pls1Model, pls1_fit, spls1_fit};
+pub use fit::{FitOpts, ParChoice, Pls1Model, pls1_fit, spls1_fit};
 pub use held_out_gram::{GramMatrixOutput, gram_matrix};
 pub use pca::{PcaBasisOutput, pca_basis};
 pub use perm_alpha::{PermAlphaOutput, pls1_perm_alpha, pls1_perm_alpha_gram};

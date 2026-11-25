@@ -12,29 +12,6 @@ use crate::inputs::Inputs;
 use crate::methods;
 use crate::value::{MatF64, Outcome, Record, Value};
 
-/// A count argument. A negative whole number is `invalid_input` (the engine's
-/// range error), not `invalid_argument`; every other bad value stays
-/// `invalid_argument`.
-fn count_value(name: &str, v: &Value<'_>) -> Result<usize, BindError> {
-    let negative = match *v {
-        Value::I64(n) => n < 0,
-        Value::F64(x) => x.is_finite() && x.fract() == 0.0 && x < 0.0,
-        _ => false,
-    };
-    if negative {
-        return Err(BindError::new(
-            "invalid_input",
-            format!("{name} must be at least 1, got {}", coerce::describe(v)),
-        ));
-    }
-    coerce::to_usize(v).map_err(|w| BindError::invalid_argument(format!("{name} {w}")))
-}
-
-fn count(inp: &mut Inputs<'_>, name: &str) -> Result<usize, BindError> {
-    let v = inp.take(name);
-    count_value(name, &v)
-}
-
 /// Coefficient, `pre_standardized`, covariate count, model value: see [`first_arg`].
 type FirstArg = (Col<f64>, bool, Option<Option<usize>>, Value<'static>);
 
@@ -61,14 +38,12 @@ fn first_arg(v: Value<'_>, x: MatRef<'_, f64>, with_model: bool) -> Result<First
     Ok((c.as_col().to_owned(), false, None, Value::Null))
 }
 
-/// `factors(model_or_coef, X, n, *, covariates=None, pre_standardized=None)`.
-///
 /// A fit with covariates needs them and a fit without refuses them; a
 /// vector takes them or not.
 pub(crate) fn factors(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let first = inp.take("model_or_coef");
     let x = inp.mat("X")?;
-    let n = count(inp, "n")?;
+    let n = inp.usize("n")?;
     let z = inp.opt_covariates()?;
     let set = inp.opt_bool("pre_standardized")?;
     inp.finish()?;
@@ -92,7 +67,6 @@ pub(crate) fn factors(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     Ok(done(convert::factors(&out, Value::Null)))
 }
 
-/// `pca_basis(X, *, pre_standardized=False)`.
 pub(crate) fn pca_basis(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let pre_standardized = inp.bool("pre_standardized")?;
@@ -101,13 +75,11 @@ pub(crate) fn pca_basis(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     Ok(done(convert::pca_basis(&out)))
 }
 
-/// `profiles_find_n(X, y, k, n_max=9, *, args=None, pre_standardized=False,
-/// seed=None)`.
 pub(crate) fn profiles_find_n(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let x = inp.mat("X")?;
     let y = inp.vec("y")?;
     let k = inp.usize("k")?;
-    let n_max = count(inp, "n_max")?;
+    let n_max = inp.usize("n_max")?;
     let args = inp.opt_record("args")?;
     let pre_standardized = inp.bool("pre_standardized")?;
     let seed = inp.seed()?;
@@ -194,15 +166,12 @@ fn split_and_rotate(
     ))
 }
 
-/// `profiles(model_or_coef, X, n, *, rotation="varimax", args=None,
-/// pre_standardized=None)`.
-///
 /// `X` is the data the fit came from. Standardization follows
 /// `pre_standardized`, else the model, else is on for a vector.
 pub(crate) fn profiles(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     let first = inp.take("model_or_coef");
     let x = inp.mat("X")?;
-    let n = count(inp, "n")?;
+    let n = inp.usize("n")?;
     let rotation = inp.string("rotation")?;
     let args = inp.opt_record("args")?;
     let set = inp.opt_bool("pre_standardized")?;
@@ -226,9 +195,6 @@ pub(crate) fn profiles(inp: &mut Inputs<'_>) -> Result<Outcome, BindError> {
     ))
 }
 
-/// `profiles_search(model, X, y, *, n_max=9, rotation="varimax", args=None,
-/// find_n_args=None, seed=None)`.
-///
 /// `profiles` at the `n` that `profiles_find_n` picks, with that search on
 /// the result. Fold fits use `model.k_used` components. `n_star = 0` runs
 /// `n = 1`.
@@ -236,7 +202,7 @@ pub(crate) fn profiles_search(inp: &mut Inputs<'_>) -> Result<Outcome, BindError
     let model = inp.take("model");
     let x = inp.mat("X")?;
     let y = inp.vec("y")?;
-    let n_max = count(inp, "n_max")?;
+    let n_max = inp.usize("n_max")?;
     let rotation = inp.string("rotation")?;
     let args = inp.opt_record("args")?;
     let find_n_args = inp.opt_record("find_n_args")?;

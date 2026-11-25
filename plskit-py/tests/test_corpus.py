@@ -22,12 +22,16 @@ ROOT = Path(os.environ.get("PLSKIT_TESTDATA")
 MANIFEST = ROOT / "manifest.json"
 
 # Corpus tolerances (testdata/README.md "Tolerance"), numpy's rule
-# |actual - expected| <= atol + rtol * |expected|. The rule is owned by
-# plskit-testdata-gen/src/settle.rs::close; assert_close and the direct
-# assert_allclose calls below mirror it: change together.
+# |actual - expected| <= atol + rtol * |expected|. A p-value field (P_FIELDS)
+# must also hold |actual - expected| <= P_RTOL * |expected| (the p rule). The
+# rule and the p rule are owned by plskit-testdata-gen/src/settle.rs (close,
+# P_FIELDS, P_RTOL); the two assert_allclose calls in assert_close mirror it:
+# change together.
 ATOL_SCALAR = 1e-12
 ATOL_ARRAY = 1e-10
 RTOL = 1e-14
+P_FIELDS = ("pvalue", "pvalues", "pvalues_by_k__values")
+P_RTOL = 1e-10
 
 _MISSING = object()
 # Fields of a CIScalar that a fixture key can end in.
@@ -71,13 +75,16 @@ def assert_close(actual, expected, name: str):
         exp_str = expected_val.decode() if isinstance(expected_val, bytes) else expected_val
         assert actual_str == exp_str, f"{name}: expected {exp_str!r}, got {actual_str!r}"
         return
-    # Mirrors plskit-testdata-gen/src/settle.rs::close: change together.
+    # Mirrors the rule and the p rule owned by
+    # plskit-testdata-gen/src/settle.rs: change together.
     if np.isscalar(expected) or (hasattr(expected, "shape") and expected.shape == ()):
-        np.testing.assert_allclose(actual, float(expected), rtol=RTOL, atol=ATOL_SCALAR,
-                                   err_msg=name)
+        expected = float(expected)
+        atol = ATOL_SCALAR
     else:
-        np.testing.assert_allclose(actual, expected, rtol=RTOL, atol=ATOL_ARRAY,
-                                   err_msg=name)
+        atol = ATOL_ARRAY
+    np.testing.assert_allclose(actual, expected, rtol=RTOL, atol=atol, err_msg=name)
+    if name.rsplit(".", 1)[-1] in P_FIELDS:
+        np.testing.assert_allclose(actual, expected, rtol=P_RTOL, atol=0, err_msg=name)
 
 
 def _resolve_corpus_weights(case, kw, inputs):
@@ -185,6 +192,14 @@ def _comparable(v):
     return v
 
 
+def _column_sign_up(m):
+    """`m` with each column flipped so its largest-magnitude entry is
+    positive. Same rule as column_sign_up in corpus.rs, test-corpus.R and
+    corpus.jl: change together."""
+    top = m[np.argmax(np.abs(m), axis=0), np.arange(m.shape[1])]
+    return m * np.where(top < 0, -1.0, 1.0)
+
+
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
 def test_corpus_case(case):
     fn = case["function"]
@@ -253,6 +268,14 @@ def test_corpus_case(case):
         )
     elif fn == "gram_matrix":
         r = plskit.gram_matrix(X, **kwargs)
+    elif fn == "pca_basis":
+        # Column signs of V are arbitrary: compare both sides with each
+        # column's largest-magnitude entry made positive.
+        r = plskit.pca_basis(X, **kwargs)
+        r = dataclasses.replace(r, V=_column_sign_up(r.V))
+        expected["v"] = _column_sign_up(expected["v"])
+    elif fn == "split_nb_gate":
+        r = plskit.split_nb_gate(X, **kwargs)
     elif fn == "spls1_fit":
         # `seed` here is the data-generation seed: spls1_fit is deterministic
         # and takes none (the Rust corpus arm ignores it too).

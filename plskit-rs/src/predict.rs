@@ -26,12 +26,11 @@ use crate::fit::Pls1Model;
 /// - returns: `(n_new,)`
 ///
 /// # Errors
-/// - `PlsKitError::DimensionMismatch` when `x_new.ncols() != model.beta.nrows()`
+/// - `PlsKitError::ShapeMismatch` when `x_new.ncols() != model.beta.nrows()`,
+///   or when `covariates` does not have `n_new` rows and `p_z` columns
 /// - `PlsKitError::NonFiniteInput` when `x_new` or `covariates` contains NaN/inf
 /// - `PlsKitError::InvalidArgument` when `covariates` is missing for a model
 ///   fitted with covariates, or given for a model fitted without them
-/// - `PlsKitError::ShapeMismatch` when `covariates` does not have `n_new`
-///   rows and `p_z` columns
 ///
 /// # Panics
 /// Never (shape validated at entry).
@@ -42,10 +41,10 @@ pub fn pls1_predict(
 ) -> PlsKitResult<Col<f64>> {
     let d = model.beta.nrows();
     if x_new.ncols() != d {
-        return Err(PlsKitError::DimensionMismatch {
-            x: (x_new.nrows(), x_new.ncols()),
-            y: d,
-        });
+        return Err(PlsKitError::ShapeMismatch(format!(
+            "x_new has {} columns, model was fit on {d}",
+            x_new.ncols()
+        )));
     }
     crate::fit::check_finite_mat(x_new)?;
     let cov = match (&model.covariate_coef, covariates) {
@@ -106,7 +105,7 @@ pub fn pls1_predict(
 #[allow(clippy::many_single_char_names)]
 mod tests {
     use super::*;
-    use crate::fit::{FitOpts, KSpec, pls1_fit};
+    use crate::fit::{FitOpts, pls1_fit};
     use approx::assert_relative_eq;
     use faer::Mat;
 
@@ -132,15 +131,7 @@ mod tests {
         let n = y.nrows();
         let x = Mat::<f64>::from_fn(n, 6, |i, j| x[(i, j)] + 3.0);
         let y = Col::<f64>::from_fn(n, |i| 2.0 * y[i] + 10.0);
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(3),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
+        let m = pls1_fit(x.as_ref(), y.as_ref(), 3, None, None, FitOpts::default()).unwrap();
         let y_hat = pls1_predict(&m, x.as_ref(), None).unwrap();
         let mean_y: f64 = (0..n).map(|i| y[i]).sum::<f64>() / n as f64;
         let sd_y = ((0..n).map(|i| (y[i] - mean_y).powi(2)).sum::<f64>() / n as f64).sqrt();
@@ -154,34 +145,21 @@ mod tests {
     }
 
     #[test]
-    fn predict_dimension_mismatch_errors() {
+    fn predict_column_mismatch_is_shape_mismatch() {
         let (x, y) = linear_data(30, 5, 2, 1);
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
+        let m = pls1_fit(x.as_ref(), y.as_ref(), 2, None, None, FitOpts::default()).unwrap();
         let bad = Mat::<f64>::zeros(4, 6);
         let r = pls1_predict(&m, bad.as_ref(), None);
-        assert!(matches!(r, Err(PlsKitError::DimensionMismatch { .. })));
+        assert!(
+            matches!(&r, Err(PlsKitError::ShapeMismatch(m)) if m == "x_new has 6 columns, model was fit on 5"),
+            "{r:?}"
+        );
     }
 
     #[test]
     fn predict_rejects_non_finite_x_new() {
         let (x, y) = linear_data(30, 5, 2, 1);
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
+        let m = pls1_fit(x.as_ref(), y.as_ref(), 2, None, None, FitOpts::default()).unwrap();
         for bad_value in [f64::NAN, f64::INFINITY] {
             let mut bad = x.clone();
             bad[(3, 2)] = bad_value;
@@ -224,7 +202,7 @@ mod tests {
             let m = pls1_fit(
                 x_in.as_ref(),
                 y.as_ref(),
-                KSpec::Fixed(2),
+                2,
                 w.as_ref().map(Col::as_ref),
                 Some(z.as_ref()),
                 FitOpts {
@@ -277,15 +255,7 @@ mod tests {
         let n = 60;
         let (x, y, z, x_new, z_new) = covariate_data(n);
         let fit = |z: Option<MatRef<'_, f64>>| {
-            pls1_fit(
-                x.as_ref(),
-                y.as_ref(),
-                KSpec::Fixed(2),
-                None,
-                z,
-                FitOpts::default(),
-            )
-            .unwrap()
+            pls1_fit(x.as_ref(), y.as_ref(), 2, None, z, FitOpts::default()).unwrap()
         };
         let with = fit(Some(z.as_ref()));
         let without = fit(None);

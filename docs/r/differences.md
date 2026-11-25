@@ -69,7 +69,6 @@ type name, then `"plskit_result"`.
 | `dict[int, float]` (`cv_scores`, ...) | named numeric vector, names `"1"`, `"2"`, ... |
 | `list[int]`, integer array | integer vector |
 | bool array | logical vector |
-| `list[CIScalar]` | unnamed list of `ci_scalar` lists |
 | integer scalar | integer (double above 2^31 - 1) |
 | `seed` | character string (below) |
 
@@ -127,8 +126,6 @@ carries only `kind` and the message.
 
 - A long call cannot be interrupted with Ctrl-C: the engine's worker
   threads do not poll R for interrupts.
-- `verbose = TRUE` writes progress to the process's stderr. Terminal R
-  shows it; RStudio does not display native stderr.
 - Forking after a parallel plskit call (`parallel::mclapply`) can hang
   the child process, because the engine's thread pool does not survive
   `fork`. Use a socket cluster (`parallel::makePSOCKcluster`) instead.

@@ -1,23 +1,54 @@
 //! `pls1_confirmatory_test` fixture cases.
 //!
-//! Eight unweighted cases share one inputs file (`inputs/pls1_confirmatory_inputs.npz`):
-//! six base-method cases (no CI; two of them, `split_exact` and `split_exact_k1`, cover
-//! `split_exact`'s refit and no-refit routes respectively) and two CI-bundle variants
-//! (`level` 0.95 and 0.8).
-//! Five weighted cases share a separate inputs file
-//! (`inputs/pls1_confirmatory_weighted_inputs.npz`) that also carries `weights`.
-//! One further case, `raw_perm_wide`, carries its own wide (n=30, p=100) inputs
-//! file because it is the only shape that routes through `dual_route`. Two
-//! K=2 cases on a wider design (n=60, p=3000), `raw_perm_wide_k2` and
-//! `split_exact_wide_k2`, share `inputs/pls1_confirmatory_wide_n60_d3000_inputs.npz`:
-//! both run the primal engine at p ≫ n.
-//! Six `kset_*` cases test a set of k on existing inputs: `split_exact`,
-//! `raw_perm`, weighted `split_exact`, `split_exact` on `gram_matrix(X)`,
-//! `auto` with no `k` (the default set), and `split_exact` on the wide n=60
-//! inputs, whose combined p is off the permutation floor.
-//! Five `sv_perm` / `score` `n_perm` cases (`n_perm = 99`) reuse existing inputs:
-//! `sv_perm` unweighted, weighted, with covariates and on `gram_matrix(X)`, and
-//! `score` with `n_perm`.
+//! Five unweighted cases share one inputs file (`inputs/pls1_confirmatory_inputs.npz`):
+//! `split_nb`, `score`, `e` and two `split_nb` CI-bundle variants (`level`
+//! 0.95 and 0.8). The `split_nb_gate` case `split_nb_gate_n80_d6` reads it
+//! too.
+//! Four weighted cases (`split_nb`, `score`, `e`, `split_nb_ci`) share a
+//! separate inputs file (`inputs/pls1_confirmatory_weighted_inputs.npz`) that
+//! also carries `weights`.
+//! The wide (n=30, p=100) inputs file `inputs/pls1_confirmatory_wide_inputs.npz`
+//! is read by two Gram cases (`split_nb` and `score` on `gram_matrix(X)`).
+//! Three K=2 cases on a wider design (n=60, p=3000), `raw_perm_wide_k2`,
+//! `split_exact_wide_k2` and `split_nb_wide_k2`, share
+//! `inputs/pls1_confirmatory_wide_n60_d3000_inputs.npz`. The first two run
+//! the primal engine at p ≫ n; `split_nb_wide_k2` runs the n-space route,
+//! not the primal engine.
+//! The generator refuses any case whose p sits at the permutation floor
+//! `1/(n_perm + 1)`. The 19 permutation cases listed below read weak-signal
+//! inputs, so their p sits mid-range. `synth_data` draws X before y, so the
+//! signal strength changes only y: each of these files has the X that
+//! `synth_data` draws at the same shape and seed:
+//! - `inputs/pls1_confirmatory_sv_perm_inputs.npz` (n=80, p=6): `raw_perm`,
+//!   `split_exact` (refit route, K = 2), `split_exact_k1` (no-refit route),
+//!   `kset_split_exact`, `kset_raw_perm` and `kset_default_auto`, beside the
+//!   `sv_perm` and `score` with `n_perm` cases.
+//! - `inputs/pls1_confirmatory_weighted_weak_inputs.npz`: weighted `raw_perm`,
+//!   `split_exact`, `split_exact_k2` and `kset_split_exact`.
+//! - `inputs/pls1_confirmatory_wide_weak_inputs.npz` (n=30, p=100): the Gram
+//!   `split_exact` cases at K = 1, K = 2 and over a set of k.
+//! - `inputs/pls1_confirmatory_wide_raw_perm_weak_inputs.npz` (n=30, p=100):
+//!   `raw_perm_wide`, the only shape that routes `raw_perm` through the
+//!   n-space route at k = 1, and `test_gram_raw_perm`.
+//! - `inputs/pls1_confirmatory_auto_split_exact_weak_inputs.npz` (n=60, p=20):
+//!   `auto_split_exact`.
+//! - `inputs/pls1_confirmatory_covariates_weak_inputs.npz`:
+//!   `split_exact_covariates` and `raw_perm_covariates`.
+//! - `inputs/pls1_confirmatory_covariates_weighted_weak_inputs.npz`:
+//!   `split_exact_covariates_weighted`.
+//!
+//! The other permutation cases at `SYNTH_SNR` are off the floor on their
+//! strong-signal inputs: `raw_perm_wide_k2`, `split_exact_wide_k1`,
+//! `split_exact_wide_k2`, `kset_wide_split_exact` and
+//! `test_gram_split_exact_covariates`.
+//!
+//! Six `kset_*` cases test a set of k: `split_exact`, `raw_perm`, weighted
+//! `split_exact`, `split_exact` on `gram_matrix(X)`, `auto` with no `k` (the
+//! default set), and `split_exact` on the wide n=60 inputs, whose combined p
+//! is off the permutation floor.
+//! Five `sv_perm` / `score` `n_perm` cases (`n_perm = 99`) read weak-signal
+//! inputs: `sv_perm` unweighted, weighted, with covariates and on
+//! `gram_matrix(X)`, and `score` with `n_perm`.
 
 use std::path::Path;
 
@@ -26,13 +57,14 @@ use anyhow::{Context, Result};
 use plskit::{
     CIOpts, ConfirmatoryArgs, ConfirmatoryCI, ConfirmatoryMethod, ConfirmatoryTestInput,
     ConfirmatoryTestOpts, ConfirmatoryTestOutput, gram_matrix, pls1_confirmatory_test,
+    split_nb_gate,
 };
 
 use crate::cases::pls1_find_k_optimal::write_btreemap;
 use crate::cases::{
-    WEIGHTED_PRESTD_N80_D6_INPUTS, Xyw, array_descriptors, case_files, ensure_moved,
-    perm_null_weights, scalar_f64, scalar_i64, synth_covariates, synth_data,
-    weighted_prestd_n80_d6,
+    WEIGHTED_PRESTD_N80_D6_INPUTS, Xyw, add_count, array_descriptors, case_files, ensure_moved,
+    ensure_off_floor, manifest_case, perm_null_weights, scalar_f64, scalar_i64, synth_covariates,
+    synth_data, weighted_prestd_n80_d6,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
@@ -43,6 +75,22 @@ const SYNTH_N: usize = 80;
 const SYNTH_D: usize = 6;
 const SYNTH_K_SIGNAL: usize = 2;
 const SYNTH_SNR: f64 = 4.0;
+/// Signal of the weighted (n = 80, p = 6) and `auto_split_exact` (n = 60,
+/// p = 20) permutation cases: puts p mid-range so the fixtures pin the null
+/// columns' ranks.
+const WEIGHTED_AND_AUTO_WEAK_SNR: f64 = 0.2;
+/// Signal of the wide (n = 30, p = 100) Gram `split_exact` cases: puts p
+/// mid-range so the fixtures pin the null columns' ranks.
+const WIDE_WEAK_SNR: f64 = 0.5;
+/// Signal of the wide (n = 30, p = 100) `raw_perm` cases, X form and Gram
+/// form: puts p mid-range so the fixtures pin the null columns' ranks.
+const WIDE_RAW_PERM_WEAK_SNR: f64 = 0.3;
+/// Signal of the unweighted covariate permutation cases: puts p mid-range so
+/// the fixtures pin the null columns' ranks.
+const COVARIATES_WEAK_SNR: f64 = 0.4;
+/// Signal of the weighted covariate permutation case: puts p mid-range so the
+/// fixtures pin the null columns' ranks.
+const COVARIATES_WEIGHTED_WEAK_SNR: f64 = 0.3;
 /// Shared RNG seed for all cases.
 const CASE_SEED: u64 = 42;
 /// Function name for the manifest.
@@ -167,7 +215,6 @@ fn confirmatory_call(c: &ConfirmatoryCase, data: &Xyw) -> Result<ConfirmatoryTes
         args: c.args,
         pre_standardized,
         seed: Some(CASE_SEED),
-        verbose: false,
         ci: c.ci,
         max_skip_rate: 0.01,
         keep: None,
@@ -203,11 +250,11 @@ fn confirmatory_call(c: &ConfirmatoryCase, data: &Xyw) -> Result<ConfirmatoryTes
 
 /// Write `data` to the case's inputs file (idempotent: same bytes every
 /// call for a shared file), run the call, apply the generator guard `check`
-/// to its output, and write the case's outputs file.
+/// and [`ensure_off_floor`] to its output, and write the case's outputs file.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written, `pls1_confirmatory_test`
-/// fails, or `check` rejects the output.
+/// fails, or `check` or [`ensure_off_floor`] rejects the output.
 fn run_confirmatory_on(
     root: &Path,
     c: &ConfirmatoryCase,
@@ -221,6 +268,7 @@ fn run_confirmatory_on(
 
     let r = confirmatory_call(c, data)?;
     check(&r)?;
+    ensure_off_floor(c.name, r.pvalue, r.n_perm)?;
 
     {
         let mut w = NpzWriter::create(&abs_outputs)?;
@@ -236,6 +284,9 @@ fn run_confirmatory_on(
         if let Some(ns) = r.n_splits {
             w.add_i64("n_splits", &scalar_i64(i64::try_from(ns)?))?;
         }
+        add_count(&mut w, "n_failed_splits", r.n_failed_splits)?;
+        add_count(&mut w, "n_failed_perms", r.n_failed_perms)?;
+        add_count(&mut w, "n_failed_folds", r.n_failed_folds)?;
         if let Some(sr) = r.stable_rank {
             w.add_f64("stable_rank", &scalar_f64(sr))?;
         }
@@ -284,13 +335,13 @@ pub fn raw_perm(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 200, "n_folds": 5},
                 "seed": 42
             }),
-            inputs_name: "pls1_confirmatory_inputs",
+            inputs_name: "pls1_confirmatory_sv_perm_inputs",
             n: SYNTH_N,
             d: SYNTH_D,
             synth_seed: 42,
             k: Some(vec![2]),
             weights: None,
-            snr: SYNTH_SNR,
+            snr: SV_PERM_SNR,
         },
     )
 }
@@ -347,13 +398,13 @@ pub fn split_exact(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 200, "n_splits": 30},
                 "seed": 42
             }),
-            inputs_name: "pls1_confirmatory_inputs",
+            inputs_name: "pls1_confirmatory_sv_perm_inputs",
             n: SYNTH_N,
             d: SYNTH_D,
             synth_seed: 42,
             k: Some(vec![2]),
             weights: None,
-            snr: SYNTH_SNR,
+            snr: SV_PERM_SNR,
         },
     )
 }
@@ -381,13 +432,13 @@ pub fn split_exact_k1(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 200, "n_splits": 30},
                 "seed": 42
             }),
-            inputs_name: "pls1_confirmatory_inputs",
+            inputs_name: "pls1_confirmatory_sv_perm_inputs",
             n: SYNTH_N,
             d: SYNTH_D,
             synth_seed: 42,
             k: Some(vec![1]),
             weights: None,
-            snr: SYNTH_SNR,
+            snr: SV_PERM_SNR,
         },
     )
 }
@@ -558,13 +609,13 @@ pub fn auto_split_exact(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 200, "n_splits": 30},
                 "seed": 42
             }),
-            inputs_name: "pls1_confirmatory_auto_split_exact_inputs",
+            inputs_name: "pls1_confirmatory_auto_split_exact_weak_inputs",
             n: 60,
             d: 20,
             synth_seed: 42,
             k: Some(vec![2]),
             weights: None,
-            snr: SYNTH_SNR,
+            snr: WEIGHTED_AND_AUTO_WEAK_SNR,
         },
     )
 }
@@ -605,15 +656,14 @@ pub fn auto_split_nb(root: &Path) -> Result<Case> {
 /// Case: `pls1_confirmatory_test` with `test_method=raw_perm` on a wide design
 /// (n=30, p=100), `k=1`, `n_perm=100`, `n_folds=5`.
 ///
-/// The corpus's only fixture that reaches the Gram route in
-/// `plskit-rs/src/dual_route.rs`. `run_raw_perm` takes that route when
-/// `k == 1`, `keep` is unset, the design is unweighted, and
-/// `n_tr·(B·q + p) < p·B·q` holds for `n_tr = n − n/n_folds = 24`, `q = 1`
-/// and `B = n_perm + 1`. At this shape the inequality reduces to
-/// `n_perm ≥ 31`, so `n_perm = 100` clears it by more than 3×. Lowering
-/// `n_perm`, raising `n_folds` or narrowing X silently sends the fixture
-/// back onto the primal route, which would leave the Gram route with no
-/// cross-language coverage at all.
+/// The n-space route's `k = 1` reference. `run_raw_perm` admits that route
+/// when `keep` is unset, the design is unweighted and the largest training
+/// fold is under `0.75·p` (`4·n_tr < 3·p`, here 24 against 75), and takes
+/// it when the selector's cost rule does (pinned in
+/// `plskit-rs/src/fixture_route_pins.rs`). Lowering `n_perm`, raising
+/// `n_folds` or narrowing X can send the fixture back onto the primal
+/// route, which would leave the X form's n-space route at `k = 1` without a
+/// corpus case.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
@@ -633,13 +683,13 @@ pub fn raw_perm_wide(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 100, "n_folds": 5},
                 "seed": 42
             }),
-            inputs_name: "pls1_confirmatory_wide_inputs",
+            inputs_name: WIDE_RAW_PERM_WEAK_INPUTS.0,
             n: 30,
             d: 100,
             synth_seed: 42,
             k: Some(vec![1]),
             weights: None,
-            snr: SYNTH_SNR,
+            snr: WIDE_RAW_PERM_WEAK_INPUTS.1,
         },
     )
 }
@@ -647,10 +697,9 @@ pub fn raw_perm_wide(root: &Path) -> Result<Case> {
 /// Case: `pls1_confirmatory_test` with `test_method=raw_perm` on a wide design
 /// (n=60, p=3000), `k=2`, `n_perm=200`, `n_folds=5`.
 ///
-/// The primal `raw_perm` route at p ≫ n: `k = 2` keeps it off the K = 1 Gram
-/// closed form, and the shape is eligible for an n-space Gram route at
-/// K ≥ 2 (both pinned in `plskit-rs/src/fixture_route_pins.rs`), so this
-/// fixture is the primal reference such a route must reproduce.
+/// `raw_perm` at p ≫ n on the n-space route (pinned in
+/// `plskit-rs/src/fixture_route_pins.rs`): the reference of that route at
+/// `k ≥ 2`.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
@@ -716,6 +765,56 @@ pub fn split_exact_wide_k2(root: &Path) -> Result<Case> {
     )
 }
 
+/// Case: `pls1_confirmatory_test` with `test_method=split_nb` on the wide
+/// design of [`raw_perm_wide_k2`], `k=2`, `n_splits=30`, without `force`.
+///
+/// At k = 2 and p ≫ n the split loop takes the n-space route, and the gate
+/// does not fire, so the call runs `split_nb`. The generator refuses the
+/// case unless the stored `test_method` is `split_nb`, so a gate change
+/// cannot turn the fixture into a test of another method.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written, `pls1_confirmatory_test`
+/// fails, or the call does not run `split_nb`.
+pub fn split_nb_wide_k2(root: &Path) -> Result<Case> {
+    let c = ConfirmatoryCase {
+        name: "pls1_confirmatory_split_nb_wide_k2",
+        args: ConfirmatoryArgs::SplitNb {
+            n_splits: 30,
+            force: false,
+        },
+        ci: None,
+        kwargs: serde_json::json!({
+            "k": 2,
+            "test_method": "split_nb",
+            "args": {"n_splits": 30},
+            "seed": 42
+        }),
+        inputs_name: "pls1_confirmatory_wide_n60_d3000_inputs",
+        n: 60,
+        d: 3000,
+        synth_seed: 42,
+        k: Some(vec![2]),
+        weights: None,
+        snr: SYNTH_SNR,
+    };
+    let (x, y) = synth_data(c.n, c.d, SYNTH_K_SIGNAL, c.snr, c.synth_seed);
+    let data = Xyw {
+        x,
+        y,
+        ..Default::default()
+    };
+    run_confirmatory_on(root, &c, &data, |r| {
+        anyhow::ensure!(
+            r.test_method == "split_nb",
+            "{}: test_method = {}, want split_nb",
+            c.name,
+            r.test_method
+        );
+        Ok(())
+    })
+}
+
 /// Non-uniform weights for weighted confirmatory cases: first 40 of 80 obs get 2.0, rest 1.0.
 fn weighted_confirmatory_weights() -> ndarray::Array1<f64> {
     ndarray::Array1::from_shape_fn(SYNTH_N, |i| if i < 40 { 2.0_f64 } else { 1.0_f64 })
@@ -742,13 +841,13 @@ pub fn weighted_raw_perm(root: &Path) -> Result<Case> {
                 "seed": 42,
                 "weights": "nonuniform"
             }),
-            inputs_name: "pls1_confirmatory_weighted_inputs",
+            inputs_name: "pls1_confirmatory_weighted_weak_inputs",
             n: SYNTH_N,
             d: SYNTH_D,
             synth_seed: 77,
             k: Some(vec![1]),
             weights: Some(weighted_confirmatory_weights()),
-            snr: SYNTH_SNR,
+            snr: WEIGHTED_AND_AUTO_WEAK_SNR,
         },
     )
 }
@@ -808,13 +907,13 @@ pub fn weighted_split_exact(root: &Path) -> Result<Case> {
                 "seed": 42,
                 "weights": "nonuniform"
             }),
-            inputs_name: "pls1_confirmatory_weighted_inputs",
+            inputs_name: "pls1_confirmatory_weighted_weak_inputs",
             n: SYNTH_N,
             d: SYNTH_D,
             synth_seed: 77,
             k: Some(vec![1]),
             weights: Some(weighted_confirmatory_weights()),
-            snr: SYNTH_SNR,
+            snr: WEIGHTED_AND_AUTO_WEAK_SNR,
         },
     )
 }
@@ -928,7 +1027,7 @@ const RAW_PERM_TALL_SNR: f64 = 0.05;
 /// with every column of X centered and scaled to unit Euclidean norm and y
 /// centered and scaled to unit (population) variance.
 ///
-/// Pins score's `d > n` eigen branch (`X X'`, through the p-value) and its
+/// Pins score's `d > n` Gram branch (`X X'`, through the p-value) and its
 /// skip-standardize branch in one fixture. The statistic `‖X'y‖²` is then `n`
 /// times the sum of the squared column correlations (about 140), where
 /// unit-variance columns would give `n` times that and the raw inputs about
@@ -989,11 +1088,12 @@ fn score_wide_unit_norm(weights: Option<ndarray::Array1<f64>>) -> Xyw {
 /// Case: [`score_wide_pre_standardized`]'s call under weights
 /// [`perm_null_weights`]`(30)`, on its inputs plus `weights` (own inputs
 /// file). Under `pre_standardized = true` the weights still row-scale X and
-/// y by √w, and at `d > n` the score's eigenvalues come from the √w-scaled
-/// `X X'`; the only fixture of either. The generator refuses it unless the
-/// statistic stays below `1e3` (the `1e-12` scalar tolerance must stay above
-/// its last bit), the p-value is interior (so it pins the eigenvalues), and
-/// the output moves both without the weights and without the flag.
+/// y by √w, and at `d > n` the score reads the trace and squared Frobenius
+/// norm of the √w-scaled `X X'`; the only fixture of either. The generator
+/// refuses it unless the statistic stays below `1e3` (the `1e-12` scalar
+/// tolerance must stay above its last bit), the p-value is interior (so it
+/// pins those two sums), and the output moves both without the weights and
+/// without the flag.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written, `pls1_confirmatory_test`
@@ -1075,13 +1175,13 @@ pub fn weighted_split_exact_k2(root: &Path) -> Result<Case> {
                 "seed": 42,
                 "weights": "nonuniform"
             }),
-            inputs_name: "pls1_confirmatory_weighted_inputs",
+            inputs_name: "pls1_confirmatory_weighted_weak_inputs",
             n: SYNTH_N,
             d: SYNTH_D,
             synth_seed: 77,
             k: Some(vec![2]),
             weights: Some(weighted_confirmatory_weights()),
-            snr: SYNTH_SNR,
+            snr: WEIGHTED_AND_AUTO_WEAK_SNR,
         },
     )
 }
@@ -1169,8 +1269,8 @@ fn weighted_split_nb_ci_case(
     }
 }
 
-/// Case: [`split_nb_ci`]'s call under weights, on the weighted inputs of
-/// [`weighted_raw_perm`]. The only fixture of the weighted subsampling CI
+/// Case: [`split_nb_ci`]'s call under weights, on the weighted inputs
+/// `inputs/pls1_confirmatory_weighted_inputs.npz`. The only fixture of the weighted subsampling CI
 /// bundle. The generator refuses it unless all 300 replicates are finite, so
 /// the bundle is not a fail-soft remnant.
 ///
@@ -1235,10 +1335,11 @@ pub fn weighted_prestd_split_nb_ci(root: &Path) -> Result<Case> {
 }
 
 /// One `pls1_confirmatory_test` case on `gram_matrix(X)` in place of X
-/// (kwarg `"gram": true`), on the wide inputs of [`raw_perm_wide`]
-/// (n = 30, p = 100).
+/// (kwarg `"gram": true`), on wide inputs (n = 30, p = 100): `(inputs_name, snr)` is
+/// [`WIDE_INPUTS`] or [`WIDE_WEAK_INPUTS`].
 fn gram_case(
     root: &Path,
+    (inputs_name, snr): (&'static str, f64),
     name: &'static str,
     args: ConfirmatoryArgs,
     k: &[usize],
@@ -1251,16 +1352,30 @@ fn gram_case(
             args,
             ci: None,
             kwargs,
-            inputs_name: "pls1_confirmatory_wide_inputs",
+            inputs_name,
             n: 30,
             d: 100,
             synth_seed: 42,
             k: Some(k.to_vec()),
             weights: None,
-            snr: SYNTH_SNR,
+            snr,
         },
     )
 }
+
+/// The wide inputs of the Gram `split_nb` and `score` cases.
+const WIDE_INPUTS: (&str, f64) = ("pls1_confirmatory_wide_inputs", SYNTH_SNR);
+
+/// Wide inputs with the X of [`WIDE_INPUTS`] and a weaker y, for the
+/// `raw_perm` cases.
+const WIDE_RAW_PERM_WEAK_INPUTS: (&str, f64) = (
+    "pls1_confirmatory_wide_raw_perm_weak_inputs",
+    WIDE_RAW_PERM_WEAK_SNR,
+);
+
+/// Wide inputs with the X of [`WIDE_INPUTS`] and a weaker y, for the Gram
+/// `split_exact` cases.
+const WIDE_WEAK_INPUTS: (&str, f64) = ("pls1_confirmatory_wide_weak_inputs", WIDE_WEAK_SNR);
 
 /// Case: `split_exact` at `k = 1` (`n_perm = 100`, `n_splits = 20`) on
 /// `gram_matrix(X)`.
@@ -1270,6 +1385,7 @@ fn gram_case(
 pub fn gram_split_exact_k1(root: &Path) -> Result<Case> {
     gram_case(
         root,
+        WIDE_WEAK_INPUTS,
         "pls1_confirmatory_test_gram_split_exact_k1",
         ConfirmatoryArgs::SplitExact {
             n_perm: 100,
@@ -1291,6 +1407,7 @@ pub fn gram_split_exact_k1(root: &Path) -> Result<Case> {
 pub fn gram_split_exact_k2(root: &Path) -> Result<Case> {
     gram_case(
         root,
+        WIDE_WEAK_INPUTS,
         "pls1_confirmatory_test_gram_split_exact_k2",
         ConfirmatoryArgs::SplitExact {
             n_perm: 100,
@@ -1312,6 +1429,7 @@ pub fn gram_split_exact_k2(root: &Path) -> Result<Case> {
 pub fn gram_split_nb(root: &Path) -> Result<Case> {
     gram_case(
         root,
+        WIDE_INPUTS,
         "pls1_confirmatory_test_gram_split_nb",
         ConfirmatoryArgs::SplitNb {
             n_splits: 20,
@@ -1332,6 +1450,7 @@ pub fn gram_split_nb(root: &Path) -> Result<Case> {
 pub fn gram_raw_perm(root: &Path) -> Result<Case> {
     gram_case(
         root,
+        WIDE_RAW_PERM_WEAK_INPUTS,
         "pls1_confirmatory_test_gram_raw_perm",
         ConfirmatoryArgs::RawPerm {
             n_perm: 100,
@@ -1345,13 +1464,15 @@ pub fn gram_raw_perm(root: &Path) -> Result<Case> {
     )
 }
 
-/// Case: `score` on `gram_matrix(X)`: `y'Gy` and the eigenvalues of G.
+/// Case: `score` on `gram_matrix(X)`: `y'Gy` and the trace and squared
+/// Frobenius norm of G.
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
 pub fn gram_score(root: &Path) -> Result<Case> {
     gram_case(
         root,
+        WIDE_INPUTS,
         "pls1_confirmatory_test_gram_score",
         ConfirmatoryArgs::Score { n_perm: None },
         &[1],
@@ -1403,14 +1524,16 @@ fn covariate_data(
 }
 
 /// A `ConfirmatoryCase` on the covariate inputs `inputs_name`, whose `n`,
-/// `d`, `synth_seed` and `weights` only label the data
-/// ([`covariate_case`] takes the data itself).
+/// `d`, `synth_seed`, `weights` and `snr` only label the data
+/// ([`covariate_case`] takes the data itself). `snr` is the strength the
+/// caller builds its data at.
 fn covariate_descriptor(
     name: &'static str,
     inputs_name: &'static str,
     args: ConfirmatoryArgs,
     k: usize,
     kwargs: serde_json::Value,
+    snr: f64,
 ) -> ConfirmatoryCase {
     ConfirmatoryCase {
         name,
@@ -1423,7 +1546,7 @@ fn covariate_descriptor(
         synth_seed: CASE_SEED,
         k: Some(vec![k]),
         weights: None,
-        snr: SYNTH_SNR,
+        snr,
     }
 }
 
@@ -1437,7 +1560,7 @@ pub fn split_exact_covariates(root: &Path) -> Result<Case> {
         root,
         &covariate_descriptor(
             "pls1_confirmatory_split_exact_covariates",
-            "pls1_confirmatory_covariates_inputs",
+            "pls1_confirmatory_covariates_weak_inputs",
             ConfirmatoryArgs::SplitExact {
                 n_perm: 200,
                 n_splits: 30,
@@ -1447,8 +1570,9 @@ pub fn split_exact_covariates(root: &Path) -> Result<Case> {
                 "k": 2, "test_method": "split_exact",
                 "args": {"n_perm": 200, "n_splits": 30}, "seed": 42
             }),
+            COVARIATES_WEAK_SNR,
         ),
-        &covariate_data((SYNTH_N, SYNTH_D), CASE_SEED, None, SYNTH_SNR),
+        &covariate_data((SYNTH_N, SYNTH_D), CASE_SEED, None, COVARIATES_WEAK_SNR),
     )
 }
 
@@ -1462,7 +1586,7 @@ pub fn raw_perm_covariates(root: &Path) -> Result<Case> {
         root,
         &covariate_descriptor(
             "pls1_confirmatory_raw_perm_covariates",
-            "pls1_confirmatory_covariates_inputs",
+            "pls1_confirmatory_covariates_weak_inputs",
             ConfirmatoryArgs::RawPerm {
                 n_perm: 200,
                 n_folds: 5,
@@ -1472,13 +1596,14 @@ pub fn raw_perm_covariates(root: &Path) -> Result<Case> {
                 "k": 1, "test_method": "raw_perm",
                 "args": {"n_perm": 200, "n_folds": 5}, "seed": 42
             }),
+            COVARIATES_WEAK_SNR,
         ),
-        &covariate_data((SYNTH_N, SYNTH_D), CASE_SEED, None, SYNTH_SNR),
+        &covariate_data((SYNTH_N, SYNTH_D), CASE_SEED, None, COVARIATES_WEAK_SNR),
     )
 }
 
 /// Case: weighted `split_exact` (`n_perm = 200`, `n_splits = 50`) at `k = 1`
-/// with covariates, on the inputs of [`weighted_split_exact`].
+/// with covariates, on the X and weights of [`weighted_split_exact`].
 ///
 /// # Errors
 /// Returns an error if fixture files cannot be written or `pls1_confirmatory_test` fails.
@@ -1487,7 +1612,7 @@ pub fn split_exact_covariates_weighted(root: &Path) -> Result<Case> {
         root,
         &covariate_descriptor(
             "pls1_confirmatory_split_exact_covariates_weighted",
-            "pls1_confirmatory_covariates_weighted_inputs",
+            "pls1_confirmatory_covariates_weighted_weak_inputs",
             ConfirmatoryArgs::SplitExact {
                 n_perm: 200,
                 n_splits: 50,
@@ -1498,12 +1623,13 @@ pub fn split_exact_covariates_weighted(root: &Path) -> Result<Case> {
                 "args": {"n_perm": 200, "n_splits": 50}, "seed": 42,
                 "weights": "nonuniform"
             }),
+            COVARIATES_WEIGHTED_WEAK_SNR,
         ),
         &covariate_data(
             (SYNTH_N, SYNTH_D),
             77,
             Some(weighted_confirmatory_weights()),
-            SYNTH_SNR,
+            COVARIATES_WEIGHTED_WEAK_SNR,
         ),
     )
 }
@@ -1529,6 +1655,7 @@ pub fn gram_split_exact_covariates(root: &Path) -> Result<Case> {
                 "k": 1, "test_method": "split_exact",
                 "args": {"n_perm": 100, "n_splits": 20}, "seed": 42, "gram": true
             }),
+            SYNTH_SNR,
         ),
         &covariate_data((30, 100), CASE_SEED, None, SYNTH_SNR),
     )
@@ -1577,6 +1704,7 @@ pub fn split_exact_null_y(root: &Path) -> Result<Case> {
         serde_json::json!({
             "k": 1, "test_method": "split_exact", "args": {"n_splits": 30}, "seed": 42
         }),
+        NULL_Y_SNR,
     );
     run_confirmatory_on(root, &c, &data, |r| {
         anyhow::ensure!(
@@ -1588,7 +1716,7 @@ pub fn split_exact_null_y(root: &Path) -> Result<Case> {
     })
 }
 
-/// A `split_exact` / `raw_perm` case over the set `k` on the unweighted
+/// A `split_exact` / `raw_perm` case over the set `k` on the weak-signal
 /// inputs of [`split_exact`] (n = 80, p = 6).
 fn kset_case(
     name: &'static str,
@@ -1601,13 +1729,13 @@ fn kset_case(
         args,
         ci: None,
         kwargs,
-        inputs_name: "pls1_confirmatory_inputs",
+        inputs_name: "pls1_confirmatory_sv_perm_inputs",
         n: SYNTH_N,
         d: SYNTH_D,
         synth_seed: 42,
         k,
         weights: None,
-        snr: SYNTH_SNR,
+        snr: SV_PERM_SNR,
     }
 }
 
@@ -1714,13 +1842,13 @@ pub fn kset_weighted_split_exact(root: &Path) -> Result<Case> {
                 "seed": 42,
                 "weights": "nonuniform"
             }),
-            inputs_name: "pls1_confirmatory_weighted_inputs",
+            inputs_name: "pls1_confirmatory_weighted_weak_inputs",
             n: SYNTH_N,
             d: SYNTH_D,
             synth_seed: 77,
             k: Some(vec![1, 2]),
             weights: Some(weighted_confirmatory_weights()),
-            snr: SYNTH_SNR,
+            snr: WEIGHTED_AND_AUTO_WEAK_SNR,
         },
     )
 }
@@ -1733,6 +1861,7 @@ pub fn kset_weighted_split_exact(root: &Path) -> Result<Case> {
 pub fn gram_kset_split_exact(root: &Path) -> Result<Case> {
     gram_case(
         root,
+        WIDE_WEAK_INPUTS,
         "pls1_confirmatory_test_gram_kset_split_exact",
         ConfirmatoryArgs::SplitExact {
             n_perm: 100,
@@ -1777,9 +1906,14 @@ pub fn kset_wide_split_exact(root: &Path) -> Result<Case> {
     )
 }
 
-/// Weak signal for the `sv_perm` and `score` with `n_perm` cases: at
-/// `SYNTH_SNR` the observed statistic beats every permutation and p sits at
-/// the floor `1/(n_perm + 1)`, which pins nothing about the null.
+/// Weak signal of three inputs files at n = 80, p = 6:
+/// `inputs/pls1_confirmatory_sv_perm_inputs.npz` (the `sv_perm` and `score`
+/// with `n_perm` cases, and the unweighted `raw_perm` / `split_exact`
+/// permutation cases), `inputs/pls1_confirmatory_sv_perm_weighted_inputs.npz`
+/// and `inputs/pls1_confirmatory_sv_perm_covariates_inputs.npz`. It puts p
+/// mid-range so the fixtures pin the null columns' ranks. At `SYNTH_SNR` the
+/// observed statistic beats every permutation and p sits at the floor
+/// `1/(n_perm + 1)`, which pins nothing about the null.
 const SV_PERM_SNR: f64 = 0.1;
 
 /// A permutation-quadratic case (`sv_perm`, or `score` with `n_perm`) at
@@ -1871,6 +2005,7 @@ fn sv_perm_covariates_case(root: &Path, name: &'static str, gram: bool) -> Resul
             SV_PERM_99,
             1,
             kwargs,
+            SV_PERM_SNR,
         ),
         &covariate_data((SYNTH_N, SYNTH_D), CASE_SEED, None, SV_PERM_SNR),
     )
@@ -1943,5 +2078,47 @@ pub fn sv_perm_gram(root: &Path) -> Result<Case> {
                 "gram": true
             }),
         ),
+    )
+}
+
+/// Case: `split_nb_gate` on `inputs/pls1_confirmatory_inputs.npz` (the
+/// default n = 80, p = 6 design, no weights) with `pre_standardized =
+/// false`.
+///
+/// Inputs: `X`. Outputs: `fires` (0/1), `stable_rank`, `n_eff`.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written or `split_nb_gate` fails.
+pub fn split_nb_gate_n80_d6(root: &Path) -> Result<Case> {
+    let name = "split_nb_gate_n80_d6";
+    let function = "split_nb_gate";
+    let rel_inputs = "inputs/pls1_confirmatory_inputs.npz".to_string();
+    let rel_outputs = format!("outputs/{function}/{name}.npz");
+    let (abs_inputs, abs_outputs) = case_files(root, &rel_inputs, &rel_outputs)?;
+    let (x, y) = synth_data(SYNTH_N, SYNTH_D, SYNTH_K_SIGNAL, SYNTH_SNR, CASE_SEED);
+    let data = Xyw {
+        x,
+        y,
+        ..Default::default()
+    };
+    data.write(&abs_inputs)?;
+
+    let r = split_nb_gate(data.x_faer().as_ref(), None, false)?;
+    {
+        let mut w = NpzWriter::create(&abs_outputs)?;
+        // bool has no npz scalar type in this writer; stored as 0/1.
+        w.add_i64("fires", &scalar_i64(i64::from(r.fires)))?;
+        w.add_f64("stable_rank", &scalar_f64(r.stable_rank))?;
+        w.add_f64("n_eff", &scalar_f64(r.n_eff))?;
+        w.finish()?;
+    }
+
+    manifest_case(
+        root,
+        name,
+        function,
+        rel_inputs,
+        rel_outputs,
+        serde_json::json!({"pre_standardized": false}),
     )
 }

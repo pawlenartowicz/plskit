@@ -7,7 +7,8 @@ use anyhow::Result;
 use plskit::{ConfirmatoryMethod, FindKSequenceOpts, pls1_find_k_sequence};
 
 use crate::cases::{
-    Xyw, array_descriptors, faer_col_to_array, scalar_f64, scalar_i64, synth_covariates, synth_data,
+    Xyw, add_counts, array_descriptors, faer_col_to_array, scalar_f64, scalar_i64,
+    synth_covariates, synth_data,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
@@ -86,6 +87,8 @@ fn run_sequence_on(root: &Path, c: &SequenceCase, inputs_name: &str, data: &Xyw)
         w.add_string("test_method", &r.test_method)?;
         w.add_f64("alpha", &scalar_f64(r.alpha))?;
         w.add_i64("seed", &scalar_i64(i64::try_from(r.seed)?))?;
+        add_counts(&mut w, "n_failed_splits", r.n_failed_splits.as_deref())?;
+        add_counts(&mut w, "n_failed_perms", r.n_failed_perms.as_deref())?;
         if let Some(nc) = r.n_covariates {
             w.add_i64("n_covariates", &scalar_i64(i64::try_from(nc)?))?;
         }

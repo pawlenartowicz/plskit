@@ -242,39 +242,39 @@ pub(crate) fn cell_grams(
     (s_a.into_iter().flatten().collect(), xa_1)
 }
 
-/// The bytes [`cells_eligible`] counts, for `n` rows of which `n_b` test
-/// rows per split, `h` cells, `n_splits` splits, `p` columns and column
-/// batches of width `b`: the H cell matrices and the J training matrices
-/// (`(H + J)·p²`), one batch's H cell sums (`H·p·b`), the route's `n × p`
-/// X̃ (`n·p`), the J test-half factors (`J·p²`) and one test half's
-/// standardized copy while it is factored (`n_B·p`; the halves are factored
-/// in budget units, as many at once as the budget allows), all at 8 bytes.
-pub(crate) fn cells_bytes(
-    n: usize,
-    n_b: usize,
-    h: usize,
-    n_splits: usize,
-    p: usize,
-    b: usize,
-) -> usize {
-    (h + 2 * n_splits)
-        .saturating_mul(p)
-        .saturating_mul(p)
-        .saturating_add(h.saturating_mul(p).saturating_mul(b))
-        .saturating_add(n.saturating_mul(p))
-        .saturating_add(n_b.saturating_mul(p))
-        .saturating_mul(8)
+/// The bytes the call holds in `signal_test::CellFrame` for `n` rows, `h`
+/// cells, `n_splits` splits and `p` columns: the H cell matrices and the J
+/// training matrices (`(H + J)` of `p × p`), the J test-half factors (`J`
+/// of `p × p`) and the route's `n × p` X̃, each an owned matrix
+/// (`resample::copy_bytes`).
+pub(crate) fn cell_frame_bytes(n: usize, h: usize, n_splits: usize, p: usize) -> usize {
+    use crate::resample::copy_bytes;
+    copy_bytes(p, p)
+        .saturating_mul(h.saturating_add(n_splits.saturating_mul(2)))
+        .saturating_add(copy_bytes(n, p))
 }
 
-/// Whether a tall route sums its training rows from the cells of `d`, for
-/// X with `p` columns and column batches of width `b`: unweighted only,
-/// only when the design has cells (`m > 0`), and only when the buffers
-/// [`cells_bytes`] counts fit `fit::memory_budget`.
-pub(crate) fn cells_eligible(d: &SplitDesign, p: usize, b: usize, weighted: bool) -> bool {
-    let n = d.cell_rows.len() + d.leftovers.len();
-    let n_b = d.splits.first().map_or(0, |sp| sp.te.len());
-    let bytes = cells_bytes(n, n_b, d.cells(), d.splits.len(), p, b);
-    !weighted && d.m > 0 && u64::try_from(bytes).is_ok_and(|v| v <= crate::fit::memory_budget())
+/// The bytes one batch of `signal_test::cell_rows` holds for `n` rows, `h`
+/// cells, `p` columns, `n_splits` splits and `n_cols` outcome columns in
+/// groups of `g`: its `n × b·g` outcome block, the cell sums of its
+/// `b·g` columns, every split's `X̃_A'y` (`b = cell_batch(n_cols)`) and one
+/// column's `n × g` outcome as the caller builds it before writing it into
+/// the block.
+#[allow(clippy::many_single_char_names)]
+pub(crate) fn cell_batch_bytes(
+    n: usize,
+    h: usize,
+    p: usize,
+    n_splits: usize,
+    n_cols: usize,
+    g: usize,
+) -> usize {
+    use crate::resample::copy_bytes;
+    let w = cell_batch(n_cols).saturating_mul(g);
+    copy_bytes(n, w)
+        .saturating_add(copy_bytes(h, (p + 1 + g).saturating_mul(w)))
+        .saturating_add(copy_bytes(p, n_splits.saturating_mul(w)))
+        .saturating_add(copy_bytes(n, g))
 }
 
 #[cfg(test)]
@@ -288,20 +288,7 @@ mod tests {
     }
 
     fn design(n: usize, n_splits: usize, seed: u64) -> SplitDesign {
-        let (_, mut r) = crate::rng::resolve_seed(Some(seed)).unwrap();
-        balanced_splits(n, split_sizes(n, 1).0, n_splits, &mut r)
-    }
-
-    /// At the default budget the cells serve a large tall call: 10^6 × 20 at
-    /// J = 32 (H = 64, `n_B = 5·10^5`, b = 32) counts about 241 MB.
-    #[test]
-    fn a_large_tall_shape_fits_the_default_budget() {
-        let bytes = cells_bytes(1_000_000, 500_000, 64, 32, 20, CELL_BATCH);
-        assert_eq!(
-            bytes,
-            (128 * 400 + 64 * 20 * 32 + 20_000_000 + 10_000_000) * 8
-        );
-        assert!(u64::try_from(bytes).unwrap() <= crate::fit::DEFAULT_MEMORY_BUDGET);
+        balanced_splits(n, split_sizes(n, 1).0, n_splits, seed)
     }
 
     /// The transform equals the product with the explicit ±1 Walsh matrix

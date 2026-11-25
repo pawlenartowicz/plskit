@@ -30,6 +30,14 @@ pub(crate) fn count(n: usize) -> Value<'static> {
     Value::I64(i64::try_from(n).unwrap_or(i64::MAX))
 }
 
+pub(crate) fn counts(v: &[usize]) -> Value<'static> {
+    Value::IntVec(
+        v.iter()
+            .map(|&n| i64::try_from(n).unwrap_or(i64::MAX))
+            .collect(),
+    )
+}
+
 pub(crate) fn opt<T>(o: Option<T>, f: impl FnOnce(T) -> Value<'static>) -> Value<'static> {
     o.map_or(Value::Null, f)
 }
@@ -226,6 +234,9 @@ pub(crate) fn confirmatory_test(r: ConfirmatoryTestOutput) -> Record<'static> {
         .field("stable_rank", opt(r.stable_rank, Value::F64))
         .field("ci", opt(r.ci, confirmatory_ci))
         .field("n_covariates", opt(r.n_covariates, count))
+        .field("n_failed_splits", opt(r.n_failed_splits, count))
+        .field("n_failed_perms", opt(r.n_failed_perms, count))
+        .field("n_failed_folds", opt(r.n_failed_folds, count))
 }
 
 /// `PermNullResult`. The engine's permutation matrix is row-major
@@ -242,6 +253,7 @@ pub(crate) fn perm_null(out: PermNullOutput) -> Record<'static> {
         beta_perm_z,
         beta_perm_matrix,
         n_covariates,
+        n_failed_perms,
     } = out;
     let matrix = opt(beta_perm_matrix, |flat| {
         let d = flat.len() / n_perm.max(1);
@@ -262,6 +274,7 @@ pub(crate) fn perm_null(out: PermNullOutput) -> Record<'static> {
         .field("beta_perm_matrix", matrix)
         .field("n_eff", Value::F64(n_eff))
         .field("n_covariates", opt(n_covariates, count))
+        .field("n_failed_perms", count(n_failed_perms))
 }
 
 /// `PermAlphaResult`.
@@ -309,6 +322,9 @@ pub(crate) fn find_k_optimal(r: &FindKOptimalOutput) -> Record<'static> {
         .field("n_eff", Value::F64(r.n_eff))
         .field("stable_rank", opt(r.stable_rank, Value::F64))
         .field("n_covariates", opt(r.n_covariates, count))
+        .field("n_failed_folds", opt(r.n_failed_folds, count))
+        .field("n_failed_splits", opt(r.n_failed_splits.as_deref(), counts))
+        .field("n_failed_perms", opt(r.n_failed_perms.as_deref(), counts))
 }
 
 /// `FindKSequenceResult`.
@@ -322,6 +338,8 @@ pub(crate) fn find_k_sequence(r: &FindKSequenceOutput) -> Record<'static> {
         .field("n_eff", Value::F64(r.n_eff))
         .field("stable_rank", opt(r.stable_rank, Value::F64))
         .field("n_covariates", opt(r.n_covariates, count))
+        .field("n_failed_splits", opt(r.n_failed_splits.as_deref(), counts))
+        .field("n_failed_perms", opt(r.n_failed_perms.as_deref(), counts))
 }
 
 /// `FindKeepOptimalResult`.
@@ -343,6 +361,7 @@ pub(crate) fn find_keep_optimal(r: &FindKeepOptimalOutput) -> Record<'static> {
         .field("seed", Value::U64(r.seed))
         .field("n_eff", Value::F64(r.n_eff))
         .field("n_covariates", opt(r.n_covariates, count))
+        .field("n_failed_folds", count(r.n_failed_folds))
 }
 
 /// `PLS3Result`; `rotation_spec` is null until the model is rotated.

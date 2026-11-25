@@ -59,6 +59,10 @@ pub fn k1(root: &Path) -> Result<Case> {
             .collect::<std::result::Result<_, _>>()?;
         w.add_i64("keep_grid", &ndarray::Array1::from_vec(grid).into_dyn())?;
         w.add_i64("seed", &scalar_i64(i64::try_from(r.seed)?))?;
+        w.add_i64(
+            "n_failed_folds",
+            &scalar_i64(i64::try_from(r.n_failed_folds)?),
+        )?;
         w.finish()?;
     }
 

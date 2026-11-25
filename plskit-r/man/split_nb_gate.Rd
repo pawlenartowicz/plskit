@@ -17,3 +17,9 @@ R binding of \code{split_nb_gate}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
 "3.2 Auto-gate query" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
 }
+\examples{
+set.seed(1)
+X <- matrix(rnorm(40 * 20), 40, 20)
+y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+split_nb_gate(X)
+}

@@ -166,6 +166,57 @@ fn equivalence_scales_with_the_committed_value() {
     check_equivalence(relative);
 }
 
+/// A p-value field also needs `|a − e| ≤ 1e-10·|e|`: a tiny committed p
+/// rejects a staged 0 or a value 1e-9 relative off, an expected 0 accepts
+/// only an exact 0, and NaN still equals NaN.
+#[test]
+fn equivalence_holds_p_values_to_1e10_relative() {
+    let p = |scalar| Fx { scalar, ..BASE };
+    let tiny = 4.7e-25;
+    let rows = [
+        ("tiny p against 0", p(tiny), p(0.0), false),
+        ("tiny p against 1/100 of it", p(tiny), p(4.7e-27), false),
+        (
+            "tiny p 1e-9 relative off",
+            p(tiny),
+            p(tiny * (1.0 + 1e-9)),
+            false,
+        ),
+        (
+            "tiny p 1e-11 relative off",
+            p(tiny),
+            p(tiny * (1.0 + 1e-11)),
+            true,
+        ),
+        ("0.3 beyond 1e-12", p(0.3), p(0.3 + 2e-12), false),
+        ("0 against 0", p(0.0), p(0.0), true),
+        (
+            "0 against the smallest positive",
+            p(0.0),
+            p(f64::from_bits(1)),
+            false,
+        ),
+        ("NaN against NaN", p(f64::NAN), p(f64::NAN), true),
+    ];
+    check_equivalence(rows);
+}
+
+/// A field that is not a p-value keeps the default rule alone, so a tiny
+/// committed `statistic` still accepts a staged 0.
+#[test]
+fn equivalence_keeps_the_default_rule_off_p_fields() {
+    let dir = tempdir().unwrap();
+    let committed = dir.path().join("committed.npz");
+    let staged = dir.path().join("staged.npz");
+    for (path, statistic) in [(&committed, 4.7e-25), (&staged, 0.0)] {
+        let mut w = NpzWriter::create(path).unwrap();
+        w.add_f64("statistic", &ArrayD::from_elem(vec![], statistic))
+            .unwrap();
+        w.finish().unwrap();
+    }
+    assert!(equivalent(&committed, &staged, Tolerance::DEFAULT).unwrap());
+}
+
 /// `equivalent` under the default tolerance on each (label, committed,
 /// staged, expected) row.
 fn check_equivalence<'a>(rows: impl IntoIterator<Item = (&'a str, Fx, Fx, bool)>) {
@@ -311,4 +362,64 @@ fn settle_cases_refuses_overlapping_paths() {
             .to_string();
         assert!(err.contains(message), "{message}: got {err:?}");
     }
+}
+
+/// A committed input that the staged run moved beyond tolerance fails the
+/// whole settle before any file is written, even when its output moved too.
+#[test]
+fn settle_cases_refuses_a_moved_input() {
+    let staged_root = tempdir().unwrap();
+    let committed_root = tempdir().unwrap();
+    let (s, c) = (staged_root.path(), committed_root.path());
+    for root in [s, c] {
+        std::fs::create_dir_all(root.join("inputs")).unwrap();
+        std::fs::create_dir_all(root.join("outputs")).unwrap();
+    }
+    let moved_input = Fx {
+        scalar: 0.5 + 1e-6,
+        ..BASE
+    };
+    let moved_output = Fx {
+        scalar: 0.75,
+        ..BASE
+    };
+    write(&c.join("inputs/a.npz"), &BASE);
+    write(&s.join("inputs/a.npz"), &moved_input);
+    write(&c.join("outputs/a.npz"), &BASE);
+    write(&s.join("outputs/a.npz"), &moved_output);
+    let before: Vec<Vec<u8>> = ["inputs/a.npz", "outputs/a.npz"]
+        .iter()
+        .map(|rel| std::fs::read(c.join(rel)).unwrap())
+        .collect();
+
+    let cases = [("inputs/a.npz", "outputs/a.npz")];
+    let err = settle_cases(s, c, &cases, Tolerance::DEFAULT)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("input") && err.contains("moved"),
+        "got {err:?}"
+    );
+    for (rel, bytes) in ["inputs/a.npz", "outputs/a.npz"].iter().zip(&before) {
+        assert_eq!(&std::fs::read(c.join(rel)).unwrap(), bytes, "{rel}");
+    }
+}
+
+/// An input with no committed file is added.
+#[test]
+fn settle_cases_adds_a_new_input() {
+    let staged_root = tempdir().unwrap();
+    let committed_root = tempdir().unwrap();
+    let (s, c) = (staged_root.path(), committed_root.path());
+    std::fs::create_dir_all(s.join("inputs")).unwrap();
+    std::fs::create_dir_all(s.join("outputs")).unwrap();
+    write(&s.join("inputs/a.npz"), &BASE);
+    write(&s.join("outputs/a.npz"), &BASE);
+
+    let cases = [("inputs/a.npz", "outputs/a.npz")];
+    let got = settle_cases(s, c, &cases, Tolerance::DEFAULT).unwrap();
+    assert!(
+        got.contains(&("inputs/a.npz".to_owned(), Outcome::Added)),
+        "got {got:?}"
+    );
 }

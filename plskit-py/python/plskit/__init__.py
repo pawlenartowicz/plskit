@@ -36,7 +36,13 @@ from plskit._api import (
     spls1_find_k_sequence,
     spls3_fit,
 )
-from plskit._errors import PlsKitError, PlsKitInvalidWeights, PlsKitResamplingDegenerate
+from plskit._errors import (
+    PlsKitError,
+    PlsKitInvalidWeights,
+    PlsKitRerouted,
+    PlsKitResamplingDegenerate,
+    PlsKitRotatedSparse,
+)
 from plskit._results import (
     CIScalar,
     ConfirmatoryCI,
@@ -85,6 +91,8 @@ __all__ = [
     "PlsKitError",
     "PlsKitInvalidWeights",
     "PlsKitResamplingDegenerate",
+    "PlsKitRerouted",
+    "PlsKitRotatedSparse",
     "PreprocessResult",
     "PLS1Result",
     "ConfirmatoryTestResult",

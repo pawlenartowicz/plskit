@@ -1,23 +1,34 @@
-//! `factors` fixture cases.
+//! `factors` and `pca_basis` fixture cases.
 
 use crate::cases::{
-    CasePaths, faer_col_to_array, faer_mat_to_array, ndarray_to_faer_col, ndarray_to_faer_mat,
-    scalar_i64, synth_data,
+    CasePaths, case_files, faer_col_to_array, faer_mat_to_array, manifest_case,
+    ndarray_to_faer_col, ndarray_to_faer_mat, scalar_i64, standardize, synth_data,
 };
 use crate::manifest::{Case, Hashes};
 use crate::npz::{NpzWriter, sha256_of_file};
 use anyhow::Result;
 use faer::Mat;
 use ndarray::{Array1, Array2};
-use plskit::linalg::standardize;
 use plskit::{
-    FitOpts, KSpec, ProfilesFindNOpts, RotationMethod, VarimaxArgs, factors, pls1_fit,
+    FitOpts, ProfilesFindNOpts, RotationMethod, VarimaxArgs, factors, pca_basis, pls1_fit,
     profiles_find_n, rotate,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::StandardNormal;
 use std::path::Path;
+
+/// Write the inputs of [`pls1_n50_d10_k2_n3`], `synth_data(50, 10, 2, 4.0,
+/// 42)` as `X` and `y`, to `path` and return them. [`pca_basis_n50_d10`]
+/// reads the same file.
+fn write_factors_inputs(path: &Path) -> Result<(Array2<f64>, Array1<f64>)> {
+    let (x, y) = synth_data(50, 10, 2, 4.0, 42);
+    let mut w = NpzWriter::create(path)?;
+    w.add_f64("X", &x.clone().into_dyn())?;
+    w.add_f64("y", &y.clone().into_dyn())?;
+    w.finish()?;
+    Ok((x, y))
+}
 
 /// Case: a fixed-`k` PLS1 coefficient cut into 3 factors on the PCA basis of
 /// standardized `X` (`factors` standardizes it itself), then varimax-rotated on `L = Xs W_f`.
@@ -33,20 +44,14 @@ pub fn pls1_n50_d10_k2_n3(root: &Path) -> Result<Case> {
     let function = "factors";
     let paths = CasePaths::build(root, function, name)?;
 
-    let (x, y) = synth_data(50, 10, 2, 4.0, 42);
-    {
-        let mut w = NpzWriter::create(&paths.abs_inputs)?;
-        w.add_f64("X", &x.clone().into_dyn())?;
-        w.add_f64("y", &y.clone().into_dyn())?;
-        w.finish()?;
-    }
+    let (x, y) = write_factors_inputs(&paths.abs_inputs)?;
 
     let x_faer = ndarray_to_faer_mat(&x);
     let y_faer = ndarray_to_faer_col(&y);
     let model = pls1_fit(
         x_faer.as_ref(),
         y_faer.as_ref(),
-        KSpec::Fixed(2),
+        2,
         None,
         None,
         FitOpts::default(),
@@ -83,6 +88,65 @@ pub fn pls1_n50_d10_k2_n3(root: &Path) -> Result<Case> {
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
     })
+}
+
+/// Case: `pca_basis` on the inputs of [`pls1_n50_d10_k2_n3`] with
+/// `pre_standardized = false`.
+///
+/// Inputs: `X`. Outputs: `v` (as `pca_basis` returns it) and `s`. Column
+/// signs of `v` are arbitrary, so consumers flip each column to make its
+/// largest-magnitude entry positive before comparing.
+///
+/// # Errors
+/// Returns an error if fixture files cannot be written, `pca_basis` fails,
+/// or [`ensure_no_sign_tie`] rejects `v`.
+pub fn pca_basis_n50_d10(root: &Path) -> Result<Case> {
+    let name = "pca_basis_n50_d10";
+    let function = "pca_basis";
+    let rel_inputs = "inputs/factors_pls1_n50_d10_k2_n3.npz".to_string();
+    let rel_outputs = format!("outputs/{function}/{name}.npz");
+    let (abs_inputs, abs_outputs) = case_files(root, &rel_inputs, &rel_outputs)?;
+    let (x, _) = write_factors_inputs(&abs_inputs)?;
+
+    let r = pca_basis(ndarray_to_faer_mat(&x).as_ref(), false)?;
+    ensure_no_sign_tie(name, &r.v)?;
+    {
+        let mut w = NpzWriter::create(&abs_outputs)?;
+        w.add_f64("v", &faer_mat_to_array(&r.v))?;
+        w.add_f64("s", &faer_col_to_array(&r.s))?;
+        w.finish()?;
+    }
+
+    manifest_case(
+        root,
+        name,
+        function,
+        rel_inputs,
+        rel_outputs,
+        serde_json::json!({"pre_standardized": false}),
+    )
+}
+
+/// Generator guard for the consumers' sign rule on `v`: fail unless, in
+/// every column, the two largest magnitudes differ by more than `1e-6`.
+/// A near tie would let rounding pick a different entry to make positive on
+/// another host.
+///
+/// # Errors
+/// Returns an error naming the first column whose two largest magnitudes
+/// are within `1e-6`.
+fn ensure_no_sign_tie(case: &str, v: &Mat<f64>) -> Result<()> {
+    for j in 0..v.ncols() {
+        let mut m: Vec<f64> = (0..v.nrows()).map(|i| v[(i, j)].abs()).collect();
+        m.sort_by(|a, b| b.total_cmp(a));
+        if let [a, b, ..] = m[..] {
+            anyhow::ensure!(
+                a - b > 1e-6,
+                "{case}: column {j} of v has its two largest magnitudes {a} and {b} within 1e-6; the sign flip would not be stable"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Case: `profiles_find_n` at `seed = 7` with default options, which pins
@@ -164,4 +228,17 @@ pub fn find_n_n100_d12_k2(root: &Path) -> Result<Case> {
             outputs_sha256: sha256_of_file(&paths.abs_outputs)?,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_no_sign_tie;
+
+    #[test]
+    fn ensure_no_sign_tie_refuses_a_near_tie() {
+        let tied = faer::mat![[0.6, 1.0], [-0.6 - 1e-7, 0.0]];
+        assert!(ensure_no_sign_tie("c", &tied).is_err());
+        let clear = faer::mat![[0.6, 1.0], [-0.7, 0.0]];
+        assert!(ensure_no_sign_tie("c", &clear).is_ok());
+    }
 }

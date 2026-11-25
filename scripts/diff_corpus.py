@@ -97,7 +97,9 @@ def compare_field(a: np.ndarray, b: np.ndarray) -> tuple[bool, str]:
     diff = np.abs(x - y)
     scale = np.maximum(np.abs(x), np.abs(y))
     rel = np.divide(diff, scale, out=np.zeros_like(diff), where=scale > 0)
-    ulp = np.abs(ordered(x).astype(np.float64) - ordered(y).astype(np.float64))
+    ox, oy = ordered(x), ordered(y)
+    # Unsigned difference of the integer images: exact, and cannot overflow.
+    ulp = (np.maximum(ox, oy).view(np.uint64) - np.minimum(ox, oy).view(np.uint64)).astype(np.float64)
     ok = bool(np.all(diff <= np.maximum(ABS_TOL, REL_TOL * scale)))
     return ok, f"max abs {diff.max():.3e}, max rel {rel.max():.3e}, max ulp {ulp.max():.0f}"
 
@@ -130,8 +132,7 @@ def diff_trees(
         a, b = load_npz(ref / f), load_npz(cand / f)
         if set(a) != set(b):
             report(False, f"{f}: keys differ: {sorted(set(a) ^ set(b))}")
-            continue
-        for key in sorted(a):
+        for key in sorted(set(a) & set(b)):
             ok, msg = compare_field(a[key], b[key])
             report(ok, f"{f} :: {key}: {msg}", identical=(msg == "bit-identical"))
     out("SIMILAR" if similar else "NOT SIMILAR")
@@ -201,6 +202,22 @@ def self_test() -> int:
         if got != expect:
             failures += 1
             print(f"self-test FAIL: {name}: similar={got}, expected {expect}")
+    # A new key must not hide a moved shared field: the moved one gets its own FAIL line.
+    with tempfile.TemporaryDirectory() as tmp:
+        ref, cand = Path(tmp) / "ref", Path(tmp) / "cand"
+        write_tree(ref, base)
+        write_tree(cand, {**variant(v=np.array([1.0, -2.0, 1e3, np.nan])), "new": np.zeros(1)})
+        lines: list[str] = []
+        diff_trees(ref, cand, quiet=True, out=lines.append)
+    if not any(line.startswith("FAIL ") and ":: v:" in line for line in lines):
+        failures += 1
+        print("self-test FAIL: new key hides a moved shared field")
+    # ulp counts are exact: 84 ulp near 1, and across zero.
+    for a, b, want in [(1.0, 1.0 + 84 * 2.0**-52, 84.0), (-1.0, 1.0, 2.0 * 0x3FF0000000000000)]:
+        _, msg = compare_field(np.array([a]), np.array([b]))
+        if f"max ulp {want:.0f}" not in msg:
+            failures += 1
+            print(f"self-test FAIL: ulp count {msg}, expected {want:.0f}")
     print("self-test OK" if failures == 0 else f"self-test: {failures} failure(s)")
     return 0 if failures == 0 else 1
 

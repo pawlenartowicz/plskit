@@ -23,13 +23,13 @@
 #![allow(clippy::many_single_char_names)]
 #![allow(clippy::cast_precision_loss)]
 
-use faer::{Col, ColRef, Mat, MatRef};
-use plskit::linalg::{standardize, standardize_weighted};
-use plskit::{
+use crate::linalg::{standardize, standardize_weighted};
+use crate::{
     ConfirmatoryArgs, ConfirmatoryTestInput, ConfirmatoryTestOpts, FindKOptimalOpts,
     FindKeepOptimalOpts, Pls3ConfirmatoryTestOpts, Selector, pls1_confirmatory_test,
     pls1_find_k_optimal, pls1_perm_alpha, pls3_confirmatory_test, spls1_find_keep_optimal,
 };
+use faer::{Col, ColRef, Mat, MatRef};
 
 /// `SplitMix64` mapped to `[-1, 1)`: deterministic data without a dev-dependency.
 struct Stream(u64);

@@ -21,6 +21,7 @@ use crate::error::{PlsKitError, PlsKitResult};
 pub(crate) struct HeldOutGram {
     g: Mat<f64>,
     n_features: usize,
+    div: f64,
 }
 
 #[cfg(test)]
@@ -84,7 +85,11 @@ impl HeldOutGram {
             j0 += w;
         }
         mirror_lower(&mut g);
-        Self { g, n_features: p }
+        Self {
+            g,
+            n_features: p,
+            div: 1.0,
+        }
     }
 
     /// `D·G·D` with `D = diag(√w_norm)`: the Gram matrix of `X̃` with the √w
@@ -102,6 +107,7 @@ impl HeldOutGram {
                 }
             }),
             n_features: self.n_features,
+            div: self.div,
         }
     }
 
@@ -111,10 +117,24 @@ impl HeldOutGram {
     /// centred matrix must pass `perm_alpha::check_gram_entries` (diagonal,
     /// symmetry, Cauchy-Schwarz); its lower triangle is kept and mirrored.
     ///
+    /// When `pre_standardized` and the largest diagonal entry `D` of the
+    /// centred matrix is outside `[2^-2E, 2^2E]`
+    /// (`linalg::PRE_STANDARDIZED_BAND_EXP`), the matrix is then divided by
+    /// `div²`, a power of four with `D/div²` in `[1, 4)` for a normal `D`, so it is the Gram
+    /// matrix of `X̃/div` and the kernels' absolute floors do not cut
+    /// components for its scale. The entries of `G` are products of X's, so
+    /// its band is the square of the band X is kept in, and `D` bounds every
+    /// `|G_ij|` by Cauchy-Schwarz. A standardized Gram matrix has `D` about
+    /// `p`, inside the band, and is never divided.
+    ///
     /// # Errors
     /// `ShapeMismatch` when `g` is not square; `NonFiniteInput` when `g` is
     /// not finite; `InvalidInput` when the centred matrix fails a check.
-    pub(crate) fn from_gram(mut g: Mat<f64>, n_features: usize) -> PlsKitResult<Self> {
+    pub(crate) fn from_gram(
+        mut g: Mat<f64>,
+        n_features: usize,
+        pre_standardized: bool,
+    ) -> PlsKitResult<Self> {
         if g.nrows() != g.ncols() {
             return Err(PlsKitError::ShapeMismatch(format!(
                 "gram must be square, got {} x {}",
@@ -141,12 +161,30 @@ impl HeldOutGram {
         }
         crate::perm_alpha::check_gram_entries(g.as_ref(), n_features)?;
         mirror_lower(&mut g);
-        Ok(Self { g, n_features })
+        let d = (0..n).map(|i| g[(i, i)]).fold(0.0, f64::max);
+        let e = 2 * crate::linalg::PRE_STANDARDIZED_BAND_EXP;
+        let mut div = 1.0;
+        if pre_standardized && !(2f64.powi(-e)..=2f64.powi(e)).contains(&d) {
+            // `pow2_scale(d).0 = 2^b`; that of its square root is `2^⌊b/2⌋`.
+            div = crate::linalg::pow2_scale(crate::linalg::pow2_scale(d).0.sqrt()).0;
+            let d2 = div * div;
+            for j in 0..n {
+                for i in 0..n {
+                    g[(i, j)] /= d2;
+                }
+            }
+        }
+        Ok(Self { g, n_features, div })
     }
 
     /// `G`.
     pub(crate) fn g(&self) -> MatRef<'_, f64> {
         self.g.as_ref()
+    }
+
+    /// `G` is the Gram matrix of `X̃/div`; 1 when not divided.
+    pub(crate) fn div(&self) -> f64 {
+        self.div
     }
 
     /// The column count of the `X̃` behind `G`.
@@ -157,6 +195,17 @@ impl HeldOutGram {
     /// `linalg::stable_rank` of `X̃`, from `G`.
     pub(crate) fn stable_rank(&self) -> f64 {
         crate::linalg::stable_rank_from_gram(self.g.as_ref())
+    }
+
+    /// [`Self::stable_rank`], after checking its eigenvalue solver's
+    /// buffers (`linalg::stable_rank_bytes`) against the budget beside the
+    /// bytes the call holds.
+    ///
+    /// # Errors
+    /// `MemoryBudget` when they do not fit.
+    pub(crate) fn checked_stable_rank(&self) -> PlsKitResult<f64> {
+        crate::resample::units_at_once(1, crate::linalg::stable_rank_bytes(self.g.nrows()), 0)?;
+        Ok(self.stable_rank())
     }
 
     /// For training rows `tr` (A) and test rows `te` (B), with `u` the
@@ -210,7 +259,11 @@ pub struct GramMatrixOutput {
     /// all rows and divided by its column standard deviations (population),
     /// or only centred when `pre_standardized` (and then, when X's largest
     /// entry is outside `[2^-256, 2^256]`, divided by a power of two `c`
-    /// that is not stored, so `gram` is the Gram matrix of `X/c`).
+    /// that is not stored, so `gram` is the Gram matrix of `X/c`). Under
+    /// `pre_standardized`, the Gram-form calls divide it by a power of four
+    /// when the largest diagonal entry of their centred copy is outside
+    /// `[2^-40, 2^40]` and map
+    /// their outputs back, so its scale does not cut components.
     pub gram: Mat<f64>,
     /// The column count `p` of `X`, constant columns included.
     pub n_features: usize,
@@ -235,9 +288,9 @@ impl GramMatrixOutput {
                 rows.len()
             )));
         }
-        if let Some(&r) = rows.iter().find(|&&r| r >= n) {
+        if rows.iter().any(|&r| r >= n) {
             return Err(PlsKitError::InvalidArgument(format!(
-                "row {r} is out of range for a Gram matrix of {n} rows"
+                "rows must index the {n} rows of the Gram matrix"
             )));
         }
         Ok(Self {
@@ -248,14 +301,28 @@ impl GramMatrixOutput {
     }
 }
 
-/// The all-row Gram matrix `X̃X̃'` the held-out tests compute from `X`, bit
-/// for bit: `X` centred over all rows and divided by its column standard
-/// deviations (population), or only centred when `pre_standardized`
-/// (and divided by one power of two `c` near its largest entry when that
-/// entry is outside `[2^-256, 2^256]`, see `linalg::held_out_scale`; `c` is
-/// not returned, so `pls1_perm_alpha_gram`'s `alpha` and the `score`
-/// statistic from this matrix are those of `X/c`, while p-values are not
-/// affected). Computing it once lets a caller reuse it across calls on the same `X`.
+/// The exponent of the band `gram_matrix` keeps a flagged X in: outside
+/// `[2^-256, 2^256]` the products of X's entries leave the `f64` range.
+const GRAM_OVERFLOW_EXP: i32 = 256;
+
+/// The all-row Gram matrix `X̃X̃'` of `X`: `X` centred over all rows and
+/// divided by its column standard deviations (population), or only centred
+/// when `pre_standardized` (and divided by one power of two `c` near its
+/// largest entry when that entry is outside `[2^-256, 2^256]`; `c` is not
+/// returned, so `pls1_perm_alpha_gram`'s `alpha` and the `score` and
+/// `sv_perm` statistics (PLS1 and PLS3) from this matrix are those of `X/c`,
+/// while p-values are not affected).
+/// It is the matrix the held-out tests compute from `X`, bit for bit,
+/// except under `pre_standardized` when X's largest entry is outside
+/// `[2^-20, 2^20]`: the tests then divide X by a power of two near that
+/// entry (`linalg::held_out_scale`), and their matrix differs from this one
+/// by a power of four. The Gram-form calls (`pls1_perm_alpha_gram`, the
+/// `Gram` form of `pls1_confirmatory_test`, `pls3_confirmatory_test_gram`)
+/// divide a flagged matrix by a power of four when the largest diagonal
+/// entry of their centred copy is outside `[2^-40, 2^40]` and map their
+/// outputs back, so its
+/// scale does not cut components. Computing it once lets a caller reuse it
+/// across calls on the same `X`.
 ///
 /// # Errors
 /// [`PlsKitError::InvalidArgument`] when `x` has fewer than 2 rows;
@@ -275,7 +342,18 @@ pub fn gram_matrix(x: MatRef<'_, f64>, pre_standardized: bool) -> PlsKitResult<G
     }
     crate::fit::check_finite_mat(x)?;
     crate::fit::with_thread_limit(|| {
-        let scale = crate::linalg::held_out_scale(x, None, pre_standardized);
+        let scale = if pre_standardized {
+            let m = x.norm_max();
+            let e = GRAM_OVERFLOW_EXP;
+            let c = if (2f64.powi(-e)..=2f64.powi(e)).contains(&m) {
+                1.0
+            } else {
+                crate::linalg::pow2_scale(m).0
+            };
+            faer::Col::<f64>::from_fn(x.ncols(), |_| c)
+        } else {
+            crate::linalg::held_out_scale(x, None, false)
+        };
         let g = HeldOutGram::from_x(x, None, scale.as_ref());
         Ok(GramMatrixOutput {
             gram: g.g,
@@ -564,7 +642,7 @@ mod tests {
         let xs = Mat::<f64>::from_fn(n, p, |i, j| x[(i, j)] / scale[j]);
         let g_raw = mat_mul(xs.as_ref(), xs.transpose(), Par::Seq);
         let want = HeldOutGram::from_x(x.as_ref(), None, scale.as_ref());
-        let got = HeldOutGram::from_gram(g_raw.clone(), p).unwrap();
+        let got = HeldOutGram::from_gram(g_raw.clone(), p, false).unwrap();
         assert_eq!(got.n_features(), p);
         assert_close(got.g(), want.g(), 1e-12, "G");
         let tr: Vec<usize> = (0..n).step_by(2).collect();
@@ -578,14 +656,64 @@ mod tests {
         let g_sub =
             Mat::<f64>::from_fn(rows.len(), rows.len(), |i, j| want.g()[(rows[i], rows[j])]);
         let x_sub = Mat::<f64>::from_fn(rows.len(), p, |i, j| x[(rows[i], j)]);
-        let sub = HeldOutGram::from_gram(g_sub, p).unwrap();
+        let sub = HeldOutGram::from_gram(g_sub, p, false).unwrap();
         let sub_want = HeldOutGram::from_x(x_sub.as_ref(), None, scale.as_ref());
         assert_close(sub.g(), sub_want.g(), 1e-12, "G[S, S]");
 
         let mut bad = g_raw.clone();
         bad[(1, 0)] += 1.0;
-        let err = HeldOutGram::from_gram(bad, p).expect_err("asymmetric");
+        let err = HeldOutGram::from_gram(bad, p, false).expect_err("asymmetric");
         assert!(err.to_string().contains("not symmetric"), "{err}");
+    }
+
+    /// Under the flag, `from_gram` divides a `G` whose largest diagonal
+    /// entry is outside `2^±40` by `div²`, with `div` a power of two that
+    /// puts that entry in `[1, 4)`, bit for bit. A standardized `G`, the
+    /// standardized `G` of a wide X and an unflagged far `G` are not divided.
+    #[test]
+    fn from_gram_divides_a_far_pre_standardized_gram_by_a_power_of_four() {
+        let xs = crate::linalg::standardize(raw_x(12, 7, 22).as_ref()).0;
+        let far = |s: f64| {
+            let x = Mat::<f64>::from_fn(12, 7, |i, j| xs[(i, j)] * s);
+            gram_matrix(x.as_ref(), true).unwrap().gram
+        };
+        for s in [2f64.powi(-30), 2f64.powi(30)] {
+            let h = HeldOutGram::from_gram(far(s), 7, true).unwrap();
+            let plain = HeldOutGram::from_gram(far(s), 7, false).unwrap();
+            let div = h.div();
+            assert_eq!(
+                crate::linalg::pow2_scale(div).0.to_bits(),
+                div.to_bits(),
+                "s = {s:e}: div = {div:e} is a power of two"
+            );
+            let d = (0..12).map(|i| h.g()[(i, i)]).fold(0.0, f64::max);
+            assert!((1.0..4.0).contains(&d), "s = {s:e}: D = {d:e}");
+            let want = Mat::<f64>::from_fn(12, 12, |i, j| plain.g()[(i, j)] / (div * div));
+            assert_mat_bits_eq(h.g(), want.as_ref(), &format!("s = {s:e}"));
+        }
+        let kept = [
+            (
+                "standardized",
+                HeldOutGram::from_gram(gram_matrix(xs.as_ref(), true).unwrap().gram, 7, true),
+            ),
+            (
+                "wide",
+                HeldOutGram::from_gram(
+                    gram_matrix(raw_x(12, 2000, 23).as_ref(), false)
+                        .unwrap()
+                        .gram,
+                    2000,
+                    true,
+                ),
+            ),
+            (
+                "unflagged",
+                HeldOutGram::from_gram(far(2f64.powi(-30)), 7, false),
+            ),
+        ];
+        for (what, h) in kept {
+            assert_eq!(h.unwrap().div().to_bits(), 1f64.to_bits(), "{what}");
+        }
     }
 
     /// `with_row_weights` equals `diag(√w)·X̃X̃'·diag(√w)` by hand, with X
@@ -646,6 +774,26 @@ mod tests {
         }
     }
 
+    /// Under the flag, X is divided only outside `2^±256`: inside, the
+    /// matrix of `X·s` is the matrix of X times `s²`, to the bit, also where
+    /// the held-out tests divide X.
+    #[test]
+    fn gram_matrix_keeps_its_overflow_band() {
+        let x = raw_x(12, 7, 21);
+        let want = gram_matrix(x.as_ref(), true).unwrap().gram;
+        for s in [
+            2f64.powi(-30),
+            2f64.powi(30),
+            2f64.powi(-200),
+            2f64.powi(200),
+        ] {
+            let xs = Mat::<f64>::from_fn(12, 7, |i, j| x[(i, j)] * s);
+            let got = gram_matrix(xs.as_ref(), true).unwrap().gram;
+            let scaled = Mat::<f64>::from_fn(12, 12, |i, j| want[(i, j)] * s * s);
+            assert_mat_bits_eq(got.as_ref(), scaled.as_ref(), &format!("s = {s:e}"));
+        }
+    }
+
     /// `subset(rows)` is `gram[rows, rows]` in the order given, repeats
     /// included, with `n_features` and `pre_standardized` kept.
     #[test]
@@ -668,6 +816,18 @@ mod tests {
                 matches!(err, PlsKitError::InvalidArgument(_)),
                 "{rows:?}: {err}"
             );
+        }
+        for (rows, want) in [
+            (
+                &[0, 12][..],
+                "rows must index the 12 rows of the Gram matrix",
+            ),
+            (&[5], "rows must hold at least 2 rows, got 1"),
+        ] {
+            let Err(PlsKitError::InvalidArgument(m)) = full.subset(rows) else {
+                panic!("{rows:?}: not InvalidArgument");
+            };
+            assert_eq!(m, want, "{rows:?}");
         }
     }
 

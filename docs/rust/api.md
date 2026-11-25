@@ -13,7 +13,7 @@ orientation and side-by-side examples for users moving between languages.
 
 To cap the thread count, set `PLSKIT_NUM_THREADS`; see
 [Threads](../concepts/threads.md). To bound the memory of the resampling
-loops (default 2 GiB), set `PLSKIT_MEMORY_BUDGET`; see
+loops (default 4 GiB), set `PLSKIT_MEMORY_BUDGET`; see
 [Memory budget](../concepts/threads.md#memory-budget).
 
 ## Surface at a glance
@@ -25,7 +25,7 @@ Python wrapper:
 - **Sparse PLS1** — `spls1_fit`, `spls1_find_keep_optimal`, `spls1_find_k_optimal`, `spls1_find_k_sequence`. `keep ∈ [1, n_features]`; `keep = n_features` reproduces the dense functions bit-exactly. One axis is always fixed: no joint `(k, keep)` 2-D search. Prediction uses `pls1_predict` on the `Pls1Model` returned by `spls1_fit` — no separate `spls1_predict`. Per-coordinate β CIs are not offered under selection (post-selection inference, deferred to a separate spec).
 - **PLS3 / PLSSVD** — `pls3_fit` (alias `plssvd_fit`), `pls3_transform` (alias `plssvd_transform`), `pls3_confirmatory_test`. Symmetric X↔Y covariance analysis: one SVD of the standardized `X'Y`, no deflation, so all `k ≤ min(p, q)` components are orthogonal by construction and `p ≫ n` is the ordinary case. There is no `pls3_predict` — neither block is the outcome. Observation weights are not implemented for this family and error rather than being ignored.
 - **Sparse PLS3**: `spls3_fit`. Keep-count selection on both salience sides: `keep_x ∈ [1, n_features]` bounds the non-zeros per `U` column, `keep_y ∈ [1, n_targets]` per `V` column. `keep_x = n_features && keep_y = n_targets` delegates to `pls3_fit` and is bit-identical; off that endpoint `max_iter = 0` and a NaN, infinite or negative `tol` return `InvalidArgument` (in `pls3_confirmatory_test` too). Unlike the dense fit the columns are not orthogonal and `singular_values` are not singular values of `X'Y`, so no explained-variance share can be read off them. `k_used` is decided independently of the dense fit's and may exceed it for the same `(x, y, k)`. There is no `spls3_find_keep_optimal` and no per-component keep budget. `pls3_confirmatory_test` also accepts `keep_x` / `keep_y` on its options struct, applying the selection inside each training half only; a `keep_x` below `n_features` silently forces the primal route (the Gram reduction needs `u` to be a positive multiple of `X'Yv`), and this confirmatory sparse surface is Rust-only today, with no wrapper exposing it.
-- **Inference**: `pls1_confirmatory_test` (with the six methods `raw_perm` / `split_nb` / `split_exact` / `score` / `sv_perm` / `e`; `score` takes `ConfirmatoryArgs::Score { n_perm }` (`None` is the closed form) and `sv_perm` takes `ConfirmatoryArgs::SvPerm { n_perm, rotate }`; `split_exact` is the recommended method; see [Choosing the method in Rust](#choosing-the-method-in-rust)). `ConfirmatoryTestInput::Raw` and `::Gram` take `k: Option<&[usize]>`: `Some(&[1])` tests one `k`, `Some(&[1, 2, 3])` a set, combined by min-p, and `None` the default set `1..=8` cut by the design ([A set of `k`](../concepts/PLS1/inference.md#a-set-of-k)). `ConfirmatoryTestOutput.k` is the tested set (`Vec<usize>`), `statistic` is `None` for a set of more than one `k`, and `pvalues_by_k` / `statistics_by_k` hold each `k`'s own p and statistic. The result names no `k` to fit at. CIs ride on `pls1_confirmatory_test(ci=true)`. `ci` is beta, not to be trusted yet. It scales X and y once over all rows, as the held-out tests do (not under `pre_standardized`). Its `holdout_corr` half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do. The β and leverage resamples are centred with their own means too, except under `pre_standardized`, where they use X and y as given, as the reference fit does. `pls1_perm_null` is the permutation-null engine (`PermNullOpts` implements `Default`, `n_perm` 1000). It takes no Gram matrix: a caller who holds only one gets the dual coefficients of the fit from `pls1_perm_alpha`. `split_nb_gate` answers whether the `split_nb` auto-gate flags a design, without running a test. `pls1_perm_alpha` returns PLS1 dual coefficients (`coef = X̃'·alpha`) for every column of `y` from a caller's Gram matrix `X̃X̃'`, at `1 ≤ k ≤ 10`; it takes no `x`. `gram_matrix` returns the all-row Gram matrix `X̃X̃'` the held-out tests compute from `x`; `GramMatrixOutput::subset(rows)` returns `gram[rows, rows]`. A `GramMatrixOutput` goes in place of `x` to `pls1_confirmatory_test` (`ConfirmatoryTestInput::Gram`), `pls3_confirmatory_test_gram` and `pls1_perm_alpha_gram`; a caller with a raw matrix builds the struct (its fields are public). Under `pre_standardized`, an `x` whose largest entry is outside `[2^-256, 2^256]` gives the Gram matrix of `x` divided by a power of two `c` near that entry, which the output does not keep: p-values from it are those of `x`, but the `score` statistic and `pls1_perm_alpha_gram`'s `alpha` are those of `x / c`.
+- **Inference**: `pls1_confirmatory_test` (with the six methods `raw_perm` / `split_nb` / `split_exact` / `score` / `sv_perm` / `e`; `score` takes `ConfirmatoryArgs::Score { n_perm }` (`None` is the closed form) and `sv_perm` takes `ConfirmatoryArgs::SvPerm { n_perm, rotate }`; `split_exact` is the recommended method; see [Choosing the method in Rust](#choosing-the-method-in-rust)). `ConfirmatoryTestInput::Raw` and `::Gram` take `k: Option<&[usize]>`: `Some(&[1])` tests one `k`, `Some(&[1, 2, 3])` a set, combined by min-p, and `None` the default set `1..=8` cut by the design ([A set of `k`](../concepts/PLS1/inference.md#a-set-of-k)). `ConfirmatoryTestOutput.k` is the tested set (`Vec<usize>`), `statistic` is `None` for a set of more than one `k`, and `pvalues_by_k` / `statistics_by_k` hold each `k`'s own p and statistic. The result names no `k` to fit at. CIs ride on `pls1_confirmatory_test(ci=true)`. `ci` is beta, not to be trusted yet. Its β subsamples and `holdout_corr` half splits scale X and y once over all rows, as the held-out tests do (not under `pre_standardized`). The half split centres the training half with its own means and the held-out half with the training means, as the held-out tests do, and each β subsample is centred with its own means. Each leverage resample is standardized on its own (weighted) means and SDs, as the full-data fit is. Under `pre_standardized` the β and leverage resamples use X and y as given, as the reference fit does. `pls1_perm_null` is the permutation-null engine (`PermNullOpts` implements `Default`, `n_perm` 1000). It takes no Gram matrix: a caller who holds only one gets the dual coefficients of the fit from `pls1_perm_alpha`. `split_nb_gate` answers whether the `split_nb` auto-gate flags a design, without running a test. `pls1_perm_alpha` returns PLS1 dual coefficients (`coef = X̃'·alpha`) for every column of `y` from a caller's Gram matrix `X̃X̃'`, at `1 ≤ k ≤ 10`; it takes no `x`. `gram_matrix` returns the all-row Gram matrix `X̃X̃'` the held-out tests compute from `x`; `GramMatrixOutput::subset(rows)` returns `gram[rows, rows]`. A `GramMatrixOutput` goes in place of `x` to `pls1_confirmatory_test` (`ConfirmatoryTestInput::Gram`), `pls3_confirmatory_test_gram` and `pls1_perm_alpha_gram`; a caller with a raw matrix builds the struct (its fields are public). Under `pre_standardized`, an `x` whose largest entry is outside `[2^-256, 2^256]` gives the Gram matrix of `x` divided by a power of two `c` near that entry, which the output does not keep: p-values from it are those of `x`, but the `score` and `sv_perm` statistics (PLS1 and PLS3) and `pls1_perm_alpha_gram`'s `alpha` are those of `x / c`. Under `pre_standardized` (and with `covariates` in `pls1_confirmatory_test`), the calls that take a `GramMatrixOutput` divide it by a power of four internally when its largest diagonal entry (after centring) is outside `[2^-40, 2^40]`, where their absolute floors would cut real components, and map their outputs back to the scale of the matrix given.
 - **Interpretive** — `rotate` with pluggable `L` and method-axis `(method, args)` dispatch. `factors` (`factors(coef, x, n, pre_standardized, covariates)`) splits one coefficient vector into `n` orthogonal parts that sum to it, and `FactorsOutput::rotated(r)` applies an orthogonal `R` to them, returning the new `FactorsOutput` and the `R` after sorting and sign pinning. `pca_basis` gives the right singular vectors of standardized `X`, and `profiles_find_n` chooses `n`. The packaged calls `profiles` and `profiles_search` live in `plskit-bind`, not in this crate; in Rust, call `pls1_fit`, `factors`, `FactorsOutput::rotated` (with `R` from `rotate` on `W`) and, to choose `n`, `profiles_find_n` yourself. `Pls3Model::rotated(r)` rotates a PLS3 fit by an orthogonal `r` and returns `(Pls3Model, R)`, with `R` after sorting and sign pinning.
 
 `covariates: Option<MatRef<f64>>` is a parameter of `pls1_fit`, `spls1_fit`, `pls1_predict`, `pls1_perm_null`, the k-selection functions and `factors`, and a field of `ConfirmatoryTestInput`, next to `null_y: Option<MatRef<f64>>`. See [Covariates](../concepts/PLS1/covariates.md) for what it does and which methods take it.
@@ -57,7 +57,7 @@ the Python signatures in [api.md](../python/api.md) §2b:
 pub fn spls1_fit(
     x: MatRef<f64>,
     y: ColRef<f64>,
-    k: KSpec,           // KSpec::Fixed(usize) — no string modes
+    k: usize,
     keep: usize,        // keep ∈ [1, n_features]
     weights: Option<ColRef<f64>>,
     covariates: Option<MatRef<f64>>,
@@ -72,7 +72,7 @@ pub fn spls1_find_keep_optimal(
     weights: Option<ColRef<f64>>,
     covariates: Option<MatRef<f64>>,
     opts: FindKeepOptimalOpts,
-    // FindKeepOptimalOpts: n_folds (default 5), seed, verbose
+    // FindKeepOptimalOpts: n_folds (default 5), seed
 ) -> PlsKitResult<FindKeepOptimalOutput>
 // FindKeepOptimalOutput: keep_star, k, cv_scores, cv_scores_se, keep_grid, seed, n_eff, n_covariates
 
@@ -139,7 +139,7 @@ pub fn pls3_confirmatory_test(
     //    ConfirmatoryArgs::SplitNb { n_splits, force }
     //    or ConfirmatoryArgs::SvPerm { n_perm, rotate };
     // pre_standardized_x, pre_standardized_y, keep_x, keep_y, max_iter (100),
-    // tol (1e-8), seed, verbose
+    // tol (1e-8), seed
 ) -> PlsKitResult<ConfirmatoryTestOutput>
 
 pub fn pls3_confirmatory_test_gram(
@@ -222,7 +222,7 @@ for block in blocks {                      // each block: (n, p_b), same n
 }
 ```
 
-The sum equals `gram_matrix` on the joined X to rounding, not bit for bit. The loop does not check row counts: blocks with a different `n` make the `+=` panic. Under `pre_standardized`, data beyond `2^±256` must use `gram_matrix` on the whole X, since each block is scaled by its own power of two. The wrappers' `gram_matrix_blocks` does this loop.
+The sum equals `gram_matrix` on the joined X to rounding, not bit for bit. The loop does not check row counts: blocks with a different `n` make the `+=` panic. Under `pre_standardized`, data beyond `2^±256` must use `gram_matrix` on the whole X, since each block is scaled by its own power of two. The calls that take the sum rescale it themselves, by a power of four, when its scale would reach their absolute floors, and map their outputs back. The wrappers' `gram_matrix_blocks` does this loop.
 
 See [api.md](../python/api.md) §3.6.
 
@@ -253,10 +253,10 @@ Fitting PLS1 with three components:
 
 ```rust
 // Rust
-use plskit::{pls1_fit, FitOpts, KSpec};
+use plskit::{pls1_fit, FitOpts};
 
 // x: Mat<f64> of shape (n, p), y: Col<f64> of length n
-let result = pls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(3), None, None, FitOpts::default())?;
+let result = pls1_fit(x.as_ref(), y.as_ref(), 3, None, None, FitOpts::default())?;
 ```
 
 ```python
@@ -266,48 +266,16 @@ result = plskit.pls1_fit(X, y, k=3)
 ```
 
 Function name and arguments match; types and call syntax follow each
-language's conventions. In Rust, `k` is a `KSpec` (only `KSpec::Fixed` exists;
-the Python string modes `"optimal"` and `"sequence"` are the separate
+language's conventions. In Rust, `k` is a `usize` (the Python string modes `"optimal"` and `"sequence"` are the separate
 `pls1_find_k_optimal` and `pls1_find_k_sequence` functions), `weights` is an
 `Option<ColRef<f64>>` passed positionally (`None` for uniform weights), and
 the keyword options collect in an options struct (`FitOpts` here). Errors
 come back as `PlsKitResult<T>`. To fit at a selected K the way the string
-modes do, pass `KSpec::Fixed(sel.k_to_fit()?)`: `k_to_fit` on
+modes do, pass `sel.k_to_fit()?`: `k_to_fit` on
 `FindKOptimalOutput` / `FindKSequenceOutput` returns `k_star`, or
 `PlsKitError::OptimalNoComponent` / `PlsKitError::SequenceNoRejection`
 when `k_star` is `0`. Every wrapper's string modes go through it. The [quickstart](quickstart.md) has a
 complete, runnable program.
-
-## Bypassing the `n_eff` check (Rust only)
-
-`pls1_fit` refuses a fit when the effective sample size is below `k + 1`
-(see [effective sample size](../concepts/effective-sample-size.md)). Rust
-callers who have a reason to fit anyway can turn the check off through
-`FitOpts::check_n_eff`:
-
-```rust
-use plskit::{pls1_fit, FitOpts, KSpec};
-
-let model = pls1_fit(
-    x,
-    y,
-    KSpec::Fixed(k),
-    weights,
-    None,
-    FitOpts {
-        check_n_eff: false,
-        ..FitOpts::default()
-    },
-)?;
-```
-
-With the check off, the PLS1 kernel runs on whatever the weighted data supports and
-may return fewer components than requested (read `model.k_used`). The
-flag also disables the truncation guard for `pre_standardized: true` fits,
-so a fit that stops short returns a model instead of an `InvalidInput`
-error. The Python, R, and Julia wrappers do not expose `check_n_eff`, and
-it exists only on `pls1_fit` / `spls1_fit`: the other top-level entry
-points always run the check.
 
 ## Result types
 

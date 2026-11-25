@@ -20,8 +20,9 @@ pub struct PcaBasisOutput {
 /// Right singular vectors and singular values of standardized `X`, keeping
 /// `s > 1e-10 s[0]`, so `K = rank(Xs)`.
 ///
-/// `Xs = X` standardized with [`crate::linalg::standardize`] (column means
-/// removed, `ddof = 0` scales), or `x` itself when `pre_standardized`. Then
+/// `Xs = X` standardized as [`preprocess`](crate::preprocess::preprocess)
+/// standardizes X without weights (column means removed, `ddof = 0`
+/// scales), or `x` itself when `pre_standardized`. Then
 /// `Xs = U diag(s) V'` and `V` has orthonormal columns.
 ///
 /// Tall full-rank `Xs` takes `V` and `s` from the eigendecomposition of
@@ -34,20 +35,35 @@ pub struct PcaBasisOutput {
 /// # Errors
 ///
 /// - [`PlsKitError::InvalidInput`] — `x` has no rows or no columns, has
-///   non-finite values, has every column constant (when standardized), or
-///   has all singular values zero.
+///   every column constant (when standardized), or has all singular values
+///   zero.
+/// - [`PlsKitError::NonFiniteInput`] — `x` has a NaN or an infinity.
+/// - [`PlsKitError::MemoryBudget`] — the copy of `x` and the SVD's buffers
+///   do not fit `PLSKIT_MEMORY_BUDGET`, checked after the checks on `x`.
 /// - [`PlsKitError::Internal`] — the SVD failed.
 pub fn pca_basis(x: MatRef<'_, f64>, pre_standardized: bool) -> PlsKitResult<PcaBasisOutput> {
-    crate::fit::with_thread_limit(|| pca_basis_impl(x, pre_standardized, crate::fit::par_fixed()))
+    crate::fit::with_thread_limit(|| {
+        check_x(x, pre_standardized)?;
+        let need = crate::factors::fold_svd_bytes(x.nrows(), x.ncols());
+        crate::resample::units_at_once(1, need, 0)?;
+        basis(x, pre_standardized, crate::fit::par_fixed())
+    })
 }
 
-/// Body of [`pca_basis`], on the caller's pool; `par` threads the Gram
-/// product of [`tall_svd_v`] (`Par::Seq` inside replicate workers).
+/// Body of [`pca_basis`] without its budget check, on the caller's pool;
+/// `par` threads the Gram product of [`tall_svd_v`] (`Par::Seq` inside
+/// replicate workers).
 pub(crate) fn pca_basis_impl(
     x: MatRef<'_, f64>,
     pre_standardized: bool,
     par: Par,
 ) -> PlsKitResult<PcaBasisOutput> {
+    check_x(x, pre_standardized)?;
+    basis(x, pre_standardized, par)
+}
+
+/// The checks on `x` that [`pca_basis`] runs before the SVD.
+fn check_x(x: MatRef<'_, f64>, pre_standardized: bool) -> PlsKitResult<()> {
     if x.nrows() == 0 || x.ncols() == 0 {
         return Err(PlsKitError::InvalidInput(format!(
             "X has shape ({}, {}); both dimensions must be at least 1",
@@ -56,10 +72,24 @@ pub(crate) fn pca_basis_impl(
         )));
     }
     if !x.is_all_finite() {
+        return Err(PlsKitError::NonFiniteInput);
+    }
+    // A constant column standardizes to rounding noise, not to zeros, so
+    // an all-constant X would give a basis of noise.
+    let n = x.nrows();
+    if !pre_standardized
+        && (0..x.ncols()).all(|j| scaled_moments(n, |i| x[(i, j)], None).is_constant(n))
+    {
         return Err(PlsKitError::InvalidInput(
-            "X contains non-finite values".into(),
+            "every column of X is constant".into(),
         ));
     }
+    Ok(())
+}
+
+/// The SVD and the kept prefix of [`pca_basis`] on an `x` that passed
+/// [`check_x`].
+fn basis(x: MatRef<'_, f64>, pre_standardized: bool, par: Par) -> PlsKitResult<PcaBasisOutput> {
     // An `x` used as given that is far from unit scale is divided by a
     // power of two `c`, and its singular values multiplied back.
     let mut c = 1.0;
@@ -72,20 +102,12 @@ pub(crate) fn pca_basis_impl(
             None => tall_svd_v(x, par),
         }
     } else {
-        // A constant column standardizes to rounding noise, not to zeros, so
-        // an all-constant X would give a basis of noise.
-        let n = x.nrows();
-        if (0..x.ncols()).all(|j| scaled_moments(n, |i| x[(i, j)], None).is_constant(n)) {
-            return Err(PlsKitError::InvalidInput(
-                "every column of X is constant".into(),
-            ));
-        }
         tall_svd_v(standardize(x).0.as_ref(), par)
     }
     .map_err(|e| PlsKitError::Internal(format!("SVD of X failed: {e:?}")))?;
 
     // Singular values are non-increasing, so the kept ones are a prefix.
-    // The shape check above makes `min(N, D) ≥ 1`, so `s[0]` exists.
+    // The shape check of `check_x` makes `min(N, D) ≥ 1`, so `s[0]` exists.
     let s0 = sv[0];
     let k = (0..sv.nrows()).take_while(|&i| sv[i] > 1e-10 * s0).count();
     if k == 0 {
@@ -185,8 +207,9 @@ mod tests {
     fn pca_error_table() {
         let mut nan = unif(10, 4, 3);
         nan[(2, 1)] = f64::NAN;
-        let cases: [(&str, Mat<f64>, bool); 5] = [
-            ("nan", nan, false),
+        let r = pca_basis(nan.as_ref(), false);
+        assert!(matches!(r, Err(PlsKitError::NonFiniteInput)), "nan: {r:?}");
+        let cases: [(&str, Mat<f64>, bool); 4] = [
             ("all zero", Mat::zeros(10, 4), true),
             ("all zero standardized", Mat::zeros(10, 4), false),
             ("no rows", Mat::zeros(0, 4), false),
@@ -199,6 +222,31 @@ mod tests {
                     Err(PlsKitError::InvalidInput(_))
                 ),
                 "{name}"
+            );
+        }
+    }
+
+    /// `pca_basis` checks its buffers at the entry: budget 1 is
+    /// `MemoryBudget` and the `needed` it names runs, wide and tall. X that
+    /// fails its checks before the SVD keeps its own code at budget 1.
+    #[test]
+    fn pca_basis_checks_its_buffers() {
+        for (n, d) in [(20, 300), (300, 20)] {
+            let x = unif(n, d, 9);
+            crate::test_support::assert_needed_runs(|b| {
+                crate::fit::with_budget(b, || pca_basis(x.as_ref(), false))
+            });
+        }
+        let mut nan = unif(10, 4, 3);
+        nan[(2, 1)] = f64::NAN;
+        let r = crate::fit::with_budget(1, || pca_basis(nan.as_ref(), false));
+        assert!(matches!(r, Err(PlsKitError::NonFiniteInput)), "nan: {r:?}");
+        let constant = Mat::<f64>::from_fn(20, 3, |_, j| [0.1, 3.7, -1e5][j]);
+        for (name, x) in [("constant", constant), ("no rows", Mat::zeros(0, 4))] {
+            let r = crate::fit::with_budget(1, || pca_basis(x.as_ref(), false));
+            assert!(
+                matches!(r, Err(PlsKitError::InvalidInput(_))),
+                "{name}: {r:?}"
             );
         }
     }
@@ -329,8 +377,9 @@ mod tests {
 
     #[test]
     fn pre_standardized_far_from_unit_scale() {
-        // 2^300 is past `pre_standardized_div`'s range, so `x` is divided by
-        // a power of two before the Gram product, which would overflow.
+        // Both scales are outside `pre_standardized_div`'s band: at 2^20 the
+        // largest entry is a little under 2^21, and at 2^300 the Gram product would
+        // overflow. `x` is divided by a power of two before the product.
         let xs = standardize(unif(300, 10, 13).as_ref()).0;
         let b = pca_basis(xs.as_ref(), true).unwrap();
         for c in [2f64.powi(20), 2f64.powi(300)] {

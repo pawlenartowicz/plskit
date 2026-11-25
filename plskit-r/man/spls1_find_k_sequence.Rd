@@ -14,13 +14,12 @@ spls1_find_k_sequence(
   args = NULL,
   pre_standardized = FALSE,
   seed = NULL,
-  verbose = FALSE,
   weights = NULL,
   covariates = NULL
 )
 }
 \arguments{
-\item{X, y, k_max, keep, test_method, alpha, args, pre_standardized, seed, verbose, weights, covariates}{See the canonical reference.}
+\item{X, y, k_max, keep, test_method, alpha, args, pre_standardized, seed, weights, covariates}{See the canonical reference.}
 }
 \value{
 A list of class \code{c("find_k_sequence_result", "plskit_result")}.
@@ -29,4 +28,10 @@ A list of class \code{c("find_k_sequence_result", "plskit_result")}.
 R binding of \code{spls1_find_k_sequence}. Arguments, defaults and result fields are
 documented once, in the canonical reference: section
 "2b.3 K-selection at fixed keep" of \url{https://github.com/pawlenartowicz/plskit/blob/main/docs/python/api.md}.
+}
+\examples{
+set.seed(1)
+X <- matrix(rnorm(40 * 20), 40, 20)
+y <- 2 * (X[, 1] + X[, 2]) + rnorm(40)
+spls1_find_k_sequence(X, y, k_max = 4, keep = 5, test_method = "split_exact", args = list(n_perm = 19, n_splits = 5), seed = 1)
 }

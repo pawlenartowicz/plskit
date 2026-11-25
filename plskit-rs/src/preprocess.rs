@@ -216,7 +216,7 @@ fn normalized_weights(
     let n_eff = if crate::fit::weights_all_equal(wn.as_ref()) {
         w.nrows() as f64
     } else {
-        compute_n_eff(w)
+        compute_n_eff(wn.as_ref())
     };
     Ok((Some(wn), Some(n_eff)))
 }

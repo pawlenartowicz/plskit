@@ -7,9 +7,12 @@
 //! names, dtypes and shapes; `f64` entries within `atol_scalar` (0-D) or
 //! `atol_array` (otherwise) plus `rtol` times the committed value, NaN equal
 //! to NaN, an infinity equal only to itself; integer and string entries
-//! exactly equal. Cross-host rounding drift stays inside that contract, so it
-//! never reaches the committed bytes. A case's input settles with its output
-//! (`settle_cases`): when the output moved, the staged input goes in too.
+//! exactly equal. A p-value entry (named in [`P_FIELDS`]) must also be within
+//! [`P_RTOL`] times the committed value. Cross-host rounding drift stays
+//! inside that contract, so it never reaches the committed bytes. A committed
+//! input never changes: `settle_cases` fails the whole settle when a staged
+//! input moved beyond tolerance. A case's input settles with its output: when
+//! the output moved, the staged input (within tolerance) goes in too.
 
 use anyhow::{Result, anyhow};
 use ndarray::{ArrayD, IxDyn, OwnedRepr};
@@ -39,8 +42,18 @@ impl Tolerance {
     };
 }
 
+/// The `f64` entries that hold p-values. Each also has to match its
+/// committed value to [`P_RTOL`] relative, on top of the [`Tolerance`]: a
+/// tiny p passes any wrong value under an absolute tolerance alone.
+pub const P_FIELDS: [&str; 3] = ["pvalue", "pvalues", "pvalues_by_k__values"];
+
+/// Relative tolerance for a p-value entry: `|a − e| ≤ P_RTOL·|e|`, so an
+/// expected 0 passes only an exact 0.
+pub const P_RTOL: f64 = 1e-10;
+
 /// Whether the `.npz` files at `committed` and `staged` hold the same fixture
-/// under `tol`. Byte-identical files short-circuit to `true`.
+/// under `tol`, with the p rule ([`P_FIELDS`]) on p-value entries.
+/// Byte-identical files short-circuit to `true`.
 ///
 /// # Errors
 /// Returns an error if either file cannot be read or is not a valid `.npz`.
@@ -66,8 +79,12 @@ pub fn equivalent(committed: &Path, staged: &Path, tol: Tolerance) -> Result<boo
             } else {
                 tol.atol_array
             };
+            let p = P_FIELDS.contains(&name.strip_suffix(".npy").unwrap_or(name));
             if x.shape() != y.shape()
-                || !x.iter().zip(&y).all(|(&c, &s)| close(s, c, atol, tol.rtol))
+                || !x
+                    .iter()
+                    .zip(&y)
+                    .all(|(&c, &s)| close(s, c, atol, tol.rtol) && (!p || close(s, c, 0.0, P_RTOL)))
             {
                 return Ok(false);
             }
@@ -96,12 +113,17 @@ fn read<T: ReadableElement>(r: &mut NpzReader<Cursor<Vec<u8>>>, name: &str) -> O
 /// finite `e`, NaN equal to NaN, an infinity equal only to itself (without
 /// the finiteness guard `rtol·|inf|` would accept anything).
 ///
-/// This function owns the corpus comparison rule. The same rule is applied
-/// by `close` and `RTOL` in `plskit-rs/tests/corpus.rs`, by `Agree::Corpus`
-/// in `assert_agree` (`plskit-rs/src/test_support.rs`), by `assert_close` in
+/// This function, with [`P_FIELDS`] and [`P_RTOL`] for the p rule in
+/// [`equivalent`], owns the corpus comparison rule. The same rule, p rule
+/// included, is applied by `allowed` and `close` in
+/// `plskit-rs/tests/corpus.rs`, by `assert_close` in
 /// `plskit-py/tests/test_corpus.py`, by `compare` in
-/// `plskit-r/tests/testthat/test-corpus.R` and by `close_enough` in
-/// `plskit-jl/test/corpus.jl`: change them together. The numbers are in
+/// `plskit-r/tests/testthat/test-corpus.R` and by `matches` and
+/// `close_enough` in `plskit-jl/test/corpus.jl`: change them together.
+/// `Agree::Corpus` in `assert_agree` (`plskit-rs/src/test_support.rs`)
+/// applies the default rule, and `Agree::CorpusP` adds the p rule for
+/// p-values; they compare two engine runs in layout parity tests, never a
+/// fixture. The numbers are in
 /// [`Tolerance::DEFAULT`] and `testdata/README.md` "Tolerance".
 #[allow(clippy::float_cmp)]
 fn close(a: f64, e: f64, atol: f64, rtol: f64) -> bool {
@@ -160,7 +182,9 @@ fn install(staged_root: &Path, committed_root: &Path, rel: &str) -> Result<Outco
 }
 
 /// Settle every case's `(inputs, outputs)` files onto `committed_root`
-/// under `tol`. Outputs settle first. A case's input then settles with its
+/// under `tol`. Before anything is written, every staged input with a
+/// committed counterpart must be [`equivalent`] to it: a committed input
+/// never changes. Outputs settle first. A case's input then settles with its
 /// output: when the output moved, the staged input goes in with it even if
 /// that input alone is within tolerance, so no committed output is paired
 /// with an input it was not computed from. Kept outputs are within tolerance
@@ -169,8 +193,9 @@ fn install(staged_root: &Path, committed_root: &Path, rel: &str) -> Result<Outco
 /// file with its outcome.
 ///
 /// # Errors
-/// Returns an error when an output belongs to more than one case or a path
-/// is both an input and an output, and on I/O failure or an unreadable `.npz`.
+/// Returns an error when an output belongs to more than one case, a path is
+/// both an input and an output, or a committed input moved beyond `tol`, and
+/// on I/O failure or an unreadable `.npz`.
 pub fn settle_cases(
     staged_root: &Path,
     committed_root: &Path,
@@ -187,6 +212,12 @@ pub fn settle_cases(
     }
     if let Some(rel) = inputs.iter().find(|rel| outputs.contains(*rel)) {
         return Err(anyhow!("{rel} is both an input and an output"));
+    }
+    for &rel in &inputs {
+        let committed = committed_root.join(rel);
+        if committed.exists() && !equivalent(&committed, &staged_root.join(rel), tol)? {
+            return Err(anyhow!("input {rel} moved"));
+        }
     }
 
     let mut settled = Vec::with_capacity(outputs.len() + inputs.len());

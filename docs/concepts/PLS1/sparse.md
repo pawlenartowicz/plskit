@@ -65,11 +65,7 @@ selection.
    below `n_features`, plus `n_features` itself. For 100 features that is
    `1, 2, 4, 8, 16, 32, 64, 100`. The grid actually swept is returned on
    `result.keep_grid`.
-2. **Cross-validation.** For each fold (`args={"n_folds": ...}`, default 5)
-   the training part is standardized on its own rows, the validation part
-   with the training moments, and a sparse fit is run at every grid point.
-   Each fold yields one CV R² per `keep`. Sparsity is tuned inside the
-   training part of each fold, never on validation rows.
+2. **Cross-validation.** `X` is divided once by its column scales over all rows (weighted when `weights` are given; used as given under `pre_standardized`). For each fold (`args={"n_folds": ...}`, default 5) the training rows are centred with their own means and the validation rows with those same means, `y` is standardized in each fold, and a sparse fit is run at every grid point. Each fold yields one CV R² per `keep`. Sparsity is tuned inside the training part of each fold, never on validation rows.
 3. **Selection.** Per `keep`, the mean CV R² across folds and its standard
    error (fold SD divided by √folds) are recorded on `cv_scores` /
    `cv_scores_se`. `keep_star` is the **smallest** `keep` whose mean is at
@@ -96,12 +92,7 @@ fit.
 
 ### `selector="bic"` is biased toward more components
 
-The BIC selector reuses the dense complexity penalty, `k · ln(n_eff)`. It
-does not account for `keep`. Under sparsity this under-penalizes each
-added component, so BIC tends to select a larger `k` than a keep-aware
-penalty would. BIC values are also not comparable across different `keep`
-values. This is a deliberate first-version simplification. Prefer the
-default `selector="r2_se"` for sparse fits.
+The BIC selector reuses the dense complexity penalty, `k · ln(n_eff)`. It does not account for `keep`. Under sparsity this under-penalizes each added component, so BIC tends to select a larger `k` than a keep-aware penalty would. BIC values are also not comparable across different `keep` values. Prefer the default `selector="r2_se"` for sparse fits.
 
 ## Why there are no per-coordinate β CIs
 

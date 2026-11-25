@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::cases::{
-    WEIGHTED_PRESTD_N80_D6_INPUTS, Xyw, case_files, ensure_moved, faer_col_to_array,
+    WEIGHTED_PRESTD_N80_D6_INPUTS, Xyw, add_counts, case_files, ensure_moved, faer_col_to_array,
     ndarray_to_faer_col, ndarray_to_faer_mat, scalar_f64, scalar_i64, synth_data,
     weighted_prestd_n80_d6,
 };
@@ -152,6 +152,8 @@ fn sequence_case(
         w.add_string("test_method", &r.test_method)?;
         w.add_f64("alpha", &scalar_f64(r.alpha))?;
         w.add_i64("seed", &scalar_i64(i64::try_from(r.seed)?))?;
+        add_counts(&mut w, "n_failed_splits", r.n_failed_splits.as_deref())?;
+        add_counts(&mut w, "n_failed_perms", r.n_failed_perms.as_deref())?;
         w.finish()?;
     }
 
@@ -403,6 +405,8 @@ pub fn split_exact_tall_keep10(root: &Path) -> Result<Case> {
         w.add_string("test_method", &r.test_method)?;
         w.add_f64("alpha", &scalar_f64(r.alpha))?;
         w.add_i64("seed", &scalar_i64(i64::try_from(r.seed)?))?;
+        add_counts(&mut w, "n_failed_splits", r.n_failed_splits.as_deref())?;
+        add_counts(&mut w, "n_failed_perms", r.n_failed_perms.as_deref())?;
         w.finish()?;
     }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare every plskit fit in cases.GROUPS with its outside references.
+"""Compare every plskit routine in cases.GROUPS and cases.CHECKS with its outside references.
 
 Prints the largest difference per comparison; --save also writes
 results/validation.csv. Exit code 1 when a difference exceeds cases.TOL.
@@ -7,7 +7,7 @@ results/validation.csv. Exit code 1 when a difference exceeds cases.TOL.
 import argparse
 import sys
 
-from cases import GROUPS, TOL, data, max_diff
+from cases import CHECKS, GROUPS, TOL, data, max_diff
 from common import ROOT, write_csv
 
 # n x p: small, wide, tall
@@ -22,7 +22,7 @@ def main():
     ap.add_argument("--save", action="store_true", help="also write results/validation.csv")
     args = ap.parse_args()
     rows = []
-    for name, group in GROUPS.items():
+    for name, group in {**GROUPS, **CHECKS}.items():
         for n, p in SHAPES:
             d = data(name, n, p)
             for k in KS:

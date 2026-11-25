@@ -87,6 +87,8 @@ produced them.
 Errors raised by the Rust engine surface as `plskit.PlsKitError`
 (with `PlsKitInvalidWeights` and `PlsKitResamplingDegenerate`
 subclasses) and carry a stable `.code` for programmatic handling.
+Warnings are `PlsKitRerouted` and `PlsKitRotatedSparse` (subclasses
+of `UserWarning`).
 
 ## This is a thin wrapper
 

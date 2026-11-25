@@ -127,6 +127,9 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             req("n_eff", "f64"),
             opt("stable_rank", "f64"),
             opt("n_covariates", "i64"),
+            opt("n_failed_folds", "i64"),
+            opt("n_failed_splits", "intvec"),
+            opt("n_failed_perms", "intvec"),
         ],
     },
     ResultTypeSpec {
@@ -141,6 +144,8 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             req("n_eff", "f64"),
             opt("stable_rank", "f64"),
             opt("n_covariates", "i64"),
+            opt("n_failed_splits", "intvec"),
+            opt("n_failed_perms", "intvec"),
         ],
     },
     ResultTypeSpec {
@@ -155,6 +160,7 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             req("seed", "u64"),
             req("n_eff", "f64"),
             opt("n_covariates", "i64"),
+            req("n_failed_folds", "i64"),
         ],
     },
     ResultTypeSpec {
@@ -178,6 +184,9 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             opt("stable_rank", "f64"),
             opt("ci", "record:ConfirmatoryCI"),
             opt("n_covariates", "i64"),
+            opt("n_failed_splits", "i64"),
+            opt("n_failed_perms", "i64"),
+            opt("n_failed_folds", "i64"),
         ],
     },
     ResultTypeSpec {
@@ -203,6 +212,7 @@ static RESULT_TYPES: &[ResultTypeSpec] = &[
             opt("beta_perm_matrix", "mat"),
             req("n_eff", "f64"),
             opt("n_covariates", "i64"),
+            req("n_failed_perms", "i64"),
         ],
     },
     ResultTypeSpec {

@@ -12,8 +12,9 @@ use faer::{Accum, Col, ColRef, Mat, MatMut, MatRef, Par};
 // sets how faer splits a reduction (a column-major GEMV sums one partial
 // product per piece), so those calls round differently under different
 // pool sizes. The crate calls the functions below instead, with `Par::Seq`
-// inside replicate workers and `fit::par_fixed()` elsewhere, so no result
-// depends on the pool size.
+// or the fixed degree, chosen per call; some fits inside resampling workers
+// can take the fixed degree (see `fit::ParChoice`). So no result depends on
+// the pool size.
 
 /// `a · b` with an explicit `par`: the call operator `*` makes (zeroed
 /// destination, `Accum::Replace`, `alpha = 1`), minus the global read.
@@ -276,22 +277,59 @@ pub(crate) fn self_adjoint_eigenvalues(
 /// factorizations here are `k × k`; `Par::Seq` costs nothing at that size
 /// and is what faer's own LU threshold (`128²`) picks below it.
 pub(crate) fn lu_solve_in_place(a: MatRef<'_, f64>, b: MatMut<'_, f64>) {
-    use faer::dyn_stack::{MemBuffer, MemStack};
+    let mut s = LuScratch::new(a.nrows(), b.ncols());
+    lu_solve_with(a, b, &mut s);
+}
+
+/// The buffers of [`lu_solve_with`], for systems up to `n_max × n_max`
+/// with up to `rhs_max` right-hand sides, so a caller that solves many
+/// small systems allocates them once.
+pub(crate) struct LuScratch {
+    lu: Mat<f64>,
+    perm: Vec<usize>,
+    perm_inv: Vec<usize>,
+    mem: faer::dyn_stack::MemBuffer,
+}
+
+impl LuScratch {
+    pub(crate) fn new(n_max: usize, rhs_max: usize) -> Self {
+        use faer::linalg::lu::partial_pivoting::{factor, solve};
+        Self {
+            lu: Mat::<f64>::zeros(n_max, n_max),
+            perm: vec![0usize; n_max],
+            perm_inv: vec![0usize; n_max],
+            mem: faer::dyn_stack::MemBuffer::new(
+                factor::lu_in_place_scratch::<usize, f64>(
+                    n_max,
+                    n_max,
+                    Par::Seq,
+                    faer::Spec::default(),
+                )
+                .or(solve::solve_in_place_scratch::<usize, f64>(
+                    n_max,
+                    rhs_max,
+                    Par::Seq,
+                )),
+            ),
+        }
+    }
+}
+
+/// [`lu_solve_in_place`] on the caller's buffers `s` (`a` at most
+/// `s`'s `n_max` square, `b` at most its `rhs_max` columns): the same
+/// factorization and solve.
+#[allow(clippy::many_single_char_names)]
+pub(crate) fn lu_solve_with(a: MatRef<'_, f64>, b: MatMut<'_, f64>, s: &mut LuScratch) {
+    use faer::dyn_stack::MemStack;
     use faer::linalg::lu::partial_pivoting::{factor, solve};
     let n = a.nrows();
-    let mut lu = a.to_owned();
-    let mut perm = vec![0usize; n];
-    let mut perm_inv = vec![0usize; n];
-    let mut mem = MemBuffer::new(
-        factor::lu_in_place_scratch::<usize, f64>(n, n, Par::Seq, faer::Spec::default()).or(
-            solve::solve_in_place_scratch::<usize, f64>(n, b.ncols(), Par::Seq),
-        ),
-    );
-    let stack = MemStack::new(&mut mem);
+    let mut lu = s.lu.as_mut().submatrix_mut(0, 0, n, n);
+    lu.copy_from(a);
+    let stack = MemStack::new(&mut s.mem);
     let (_, p) = factor::lu_in_place(
         lu.as_mut(),
-        &mut perm,
-        &mut perm_inv,
+        &mut s.perm[..n],
+        &mut s.perm_inv[..n],
         Par::Seq,
         stack,
         faer::Spec::default(),
@@ -420,10 +458,11 @@ pub fn standardize_apply(
 /// rows: those the canonical standardization gives it (weighted moments,
 /// mean-one `w`, when `w` is given), as `pls1_fit` scales X and the PLS3
 /// tests scale X and Y; or, when `pre_standardized`, where the block is
-/// used as given, all ones, except that a block whose largest entry (on a
-/// row of positive weight) is outside `[2^-256, 2^256]` gets one common
-/// power of two near it ([`pre_standardized_scale`]). Every held-out
-/// result is unchanged by a common positive factor on the block.
+/// used as given, all ones, except that a block whose largest entry is
+/// outside `[2^-20, 2^20]` gets one common power of two near it
+/// ([`pre_standardized_scale`]; with `w`, the mean-one weights, the largest
+/// entry of the √w-scaled rows). Every held-out result is unchanged by a
+/// common positive factor on the block.
 pub(crate) fn held_out_scale(
     x: MatRef<'_, f64>,
     w: Option<ColRef<'_, f64>>,
@@ -436,15 +475,26 @@ pub(crate) fn held_out_scale(
     fit_x_moments(x, w, crate::fit::par_fixed()).scale
 }
 
+/// The exponent `E` of the band a block used as given (`pre_standardized`)
+/// is kept in: a block whose largest entry is outside `[2^-E, 2^E]` is
+/// divided by a power of two near that entry ([`pre_standardized_scale`]).
+/// The kernels' absolute floors (`1e-14`) would cut real components of a
+/// block on a small scale, and products of far entries leave the `f64`
+/// range; a power of two moves no bit of an entry, so only floor decisions
+/// move.
+pub(crate) const PRE_STANDARDIZED_BAND_EXP: i32 = 20;
+
 /// The power of two a block used as given (`pre_standardized`) is divided
-/// by: `Some(`[`pow2_scale`]` of its largest entry)` when that entry is
-/// outside `[2^-256, 2^256]`, else `None`. Products of such entries leave
-/// the `f64` range (the Gram matrix overflows from about 1e154), and a
-/// power of two moves no bit of an entry, so a fit or test on the divided
-/// block is the one on the block, up to that factor. With weights `w`
-/// (any non-negative weights), the entries are read times [`row_keep`],
-/// so a row of weight 0, which no weighted result reads, does not pick
-/// the power of two.
+/// by: `Some(`[`pow2_scale`]` of its largest entry m)` when `m` is outside
+/// `[2^-E, 2^E]` ([`PRE_STANDARDIZED_BAND_EXP`]), else `None`. On a block
+/// on a small scale the kernels' absolute floors (`1e-14`) cut real
+/// components, and products of far entries leave the `f64` range (the Gram
+/// matrix overflows from about 1e154); a power of two moves no bit of an
+/// entry, so a fit or test on the divided block is the one on the block, up
+/// to that factor, with only floor decisions moved. With `w`, the mean-one
+/// weights, `m` is the largest entry of the row-scaled block the weighted
+/// fit reads, `|√w_i · x_ij|`, so a row of weight 0 does not pick the power
+/// of two.
 pub(crate) fn pre_standardized_scale(
     x: MatRef<'_, f64>,
     w: Option<ColRef<'_, f64>>,
@@ -452,16 +502,18 @@ pub(crate) fn pre_standardized_scale(
     let m = match w {
         None => x.norm_max(),
         Some(w) => {
+            let s = sqrt_col(w);
             let mut m = 0.0_f64;
             for j in 0..x.ncols() {
                 for i in 0..x.nrows() {
-                    m = m.max((x[(i, j)] * row_keep(w[i])).abs());
+                    m = m.max((s[i] * x[(i, j)]).abs());
                 }
             }
             m
         }
     };
-    (!(2f64.powi(-256)..=2f64.powi(256)).contains(&m)).then(|| pow2_scale(m).0)
+    let e = PRE_STANDARDIZED_BAND_EXP;
+    (!(2f64.powi(-e)..=2f64.powi(e)).contains(&m)).then(|| pow2_scale(m).0)
 }
 
 /// `x` divided by its [`pre_standardized_scale`] `c` under `w`, as a
@@ -521,6 +573,42 @@ pub(crate) fn center_rows_fro(
         scale.nrows(),
         x.ncols()
     );
+    let (xs, mean, terms) = center_rows_terms(x, idx, w, row_scale, scale, par);
+    (xs, mean, fro_from_terms(&terms))
+}
+
+/// Rows `idx` of `x` (repeats allowed) standardized on their own (weighted)
+/// moments, with their means, computed as `standardize_weighted` computes
+/// them on `row_subset(x, idx)` (`w` indexed by output row), without the
+/// gathered copy.
+pub(crate) fn standardize_rows(
+    x: MatRef<'_, f64>,
+    idx: &[usize],
+    w: Option<ColRef<'_, f64>>,
+) -> (Mat<f64>, Col<f64>) {
+    let w_prime: Option<Col<f64>> = w.map(renormalize_mean_one);
+    let (xs, mean, _, _) = standardize_columns_terms(
+        x,
+        Some(idx),
+        w_prime.as_ref().map(owned_col_slice),
+        None,
+        None,
+        true,
+        Par::Seq,
+    );
+    (xs, mean)
+}
+
+/// [`center_rows_fro`] with the columns' [`fro_term`]s in column order in
+/// place of the norm.
+fn center_rows_terms(
+    x: MatRef<'_, f64>,
+    idx: &[usize],
+    w: Option<ColRef<'_, f64>>,
+    row_scale: Option<ColRef<'_, f64>>,
+    scale: ColRef<'_, f64>,
+    par: Par,
+) -> (Mat<f64>, Col<f64>, Vec<f64>) {
     let w_prime: Option<Col<f64>> = w.map(renormalize_mean_one);
     let row_scale: Option<Vec<f64>> = row_scale.map(|r| (0..r.nrows()).map(|i| r[i]).collect());
     let scale: Vec<f64> = (0..scale.nrows()).map(|j| scale[j]).collect();
@@ -533,7 +621,7 @@ pub(crate) fn center_rows_fro(
         true,
         par,
     );
-    (xs, mean, fro_from_terms(&terms))
+    (xs, mean, terms)
 }
 
 /// Bytes one block of [`centered_blocks`] may hold per half: small
@@ -570,16 +658,17 @@ pub(crate) fn stream_blocks_bytes(n_a: usize, n_b: usize) -> usize {
 
 /// `center_rows_fro(x, tr, w_tr, sw_tr, scale)` and
 /// `standardize_apply_rows(x, te, mean_tr, scale, sw_te)`, `width` columns
-/// at a time: `f(j0, a, c)` receives the two blocks of columns
-/// `j0 .. j0 + a.ncols()`, in column order, and nothing the size of `x` is
-/// written. Each column's moments are one sum chain in row order whatever
-/// columns it is grouped with ([`scaled_moments_block`]), so every entry of
-/// `a` and `c` has the bits the two full calls give, and the blocks are
-/// column-major for every layout of `x`. `te` may be empty.
+/// at a time: `f(j0, a, c, mean)` receives the two blocks of columns
+/// `j0 .. j0 + a.ncols()` and those columns' training means, in column
+/// order, and nothing the size of `x` is written. Each column's moments
+/// are one sum chain in row order whatever columns it is grouped with
+/// ([`scaled_moments_block`]), so every entry of `a` and `c` has the bits
+/// the two full calls give, and the blocks are column-major for every
+/// layout of `x`. `te` may be empty.
 ///
-/// Returns `‖X̃_tr‖_F` from the column moments, the block values combined
-/// by [`fro_from_terms`]: valid under [`center_rows_fro`]'s condition
-/// on `w_tr` and `sw_tr`.
+/// Returns `‖X̃_tr‖_F` from the column moments: [`fro_from_terms`] over
+/// every column's term, so the bits of [`center_rows_fro`]'s third value
+/// at every `width`, and valid under its condition on `w_tr` and `sw_tr`.
 ///
 /// # Panics
 /// When `width` is zero, or `scale` does not have one entry per column of
@@ -598,7 +687,7 @@ pub(crate) fn centered_blocks(
     sw_te: Option<ColRef<'_, f64>>,
     scale: ColRef<'_, f64>,
     width: usize,
-    mut f: impl FnMut(usize, MatRef<'_, f64>, MatRef<'_, f64>),
+    mut f: impl FnMut(usize, MatRef<'_, f64>, MatRef<'_, f64>, ColRef<'_, f64>),
 ) -> f64 {
     assert!(width > 0, "centered_blocks: width must be positive");
     assert_eq!(
@@ -609,19 +698,19 @@ pub(crate) fn centered_blocks(
         x.ncols()
     );
     let p = x.ncols();
-    let mut fro = Vec::with_capacity(p.div_ceil(width));
+    let mut terms = Vec::with_capacity(p);
     let mut j0 = 0;
     while j0 < p {
         let w = width.min(p - j0);
         let xb = x.subcols(j0, w);
         let sb = scale.subrows(j0, w);
-        let (a, mean, fro_b) = center_rows_fro(xb, tr, w_tr, sw_tr, sb, Par::Seq);
+        let (a, mean, terms_b) = center_rows_terms(xb, tr, w_tr, sw_tr, sb, Par::Seq);
         let c = standardize_apply_rows(xb, te, mean.as_ref(), sb, sw_te);
-        fro.push(fro_b);
-        f(j0, a.as_ref(), c.as_ref());
+        terms.extend(terms_b);
+        f(j0, a.as_ref(), c.as_ref(), mean.as_ref());
         j0 += w;
     }
-    fro_from_terms(&fro)
+    fro_from_terms(&terms)
 }
 
 /// `standardize_apply(row_subset(x, idx), mean, scale)` in one pass, with
@@ -641,6 +730,37 @@ pub(crate) fn standardize_apply_rows(
             times_row_factor(standardized(x[(idx[i], j)], mean[j], scale[j]), r[i])
         }),
     };
+    requarter_rows(out.as_mut(), x, idx, mean, scale, row_scale);
+    out
+}
+
+/// [`standardize_apply_rows`] written into `out` (`idx.len() × x.ncols()`).
+pub(crate) fn standardize_apply_rows_into(
+    mut out: MatMut<'_, f64>,
+    x: MatRef<'_, f64>,
+    idx: &[usize],
+    mean: ColRef<'_, f64>,
+    scale: ColRef<'_, f64>,
+    row_scale: Option<ColRef<'_, f64>>,
+) {
+    for j in 0..x.ncols() {
+        for i in 0..idx.len() {
+            let z = standardized(x[(idx[i], j)], mean[j], scale[j]);
+            out[(i, j)] = row_scale.map_or(z, |r| times_row_factor(z, r[i]));
+        }
+    }
+    requarter_rows(out, x, idx, mean, scale, row_scale);
+}
+
+/// The [`requarter`] pass of [`standardize_apply_rows`] over `out`.
+fn requarter_rows(
+    mut out: MatMut<'_, f64>,
+    x: MatRef<'_, f64>,
+    idx: &[usize],
+    mean: ColRef<'_, f64>,
+    scale: ColRef<'_, f64>,
+    row_scale: Option<ColRef<'_, f64>>,
+) {
     for j in 0..x.ncols() {
         requarter(
             idx.len(),
@@ -650,7 +770,6 @@ pub(crate) fn standardize_apply_rows(
             |i, v| out[(i, j)] = row_scale.map_or(v, |r| times_row_factor(v, r[i])),
         );
     }
-    out
 }
 
 /// `X̃'v` for `X̃ = (x − 1·mean')/scale`, entry `j` the sum over the rows
@@ -679,18 +798,27 @@ pub(crate) fn centered_xt_vec(
 
 /// `Σw` in index order: the sum [`normalize_weights`] checks for zero
 /// before renormalizing.
-fn weight_sum(w: ColRef<'_, f64>) -> f64 {
+pub(crate) fn weight_sum(w: ColRef<'_, f64>) -> f64 {
     (0..w.nrows()).map(|i| w[i]).sum()
 }
 
 /// `w · n / Σw`, the mean-one renormalization `standardize_weighted`,
 /// `standardize1_weighted` and `normalize_weights` perform, factored out.
-/// Same expression, same summation order.
+/// Same expression, same summation order. When `Σw` or `max(w)·n` overflows
+/// (finite weights near `f64::MAX`), the same expression runs on `w` divided by the
+/// power of two [`pow2_scale`] picks for its largest entry, which moves no
+/// bit of a normal entry, so the weights keep their ratios.
 pub(crate) fn renormalize_mean_one(w: ColRef<'_, f64>) -> Col<f64> {
     let n = w.nrows();
     let s = weight_sum(w);
     let n_f = n as f64;
-    Col::<f64>::from_fn(n, |i| w[i] * n_f / s)
+    if s.is_finite() && (w.norm_max() * n_f).is_finite() {
+        return Col::<f64>::from_fn(n, |i| w[i] * n_f / s);
+    }
+    let inv = pow2_scale(w.norm_max()).1;
+    let ws = Col::<f64>::from_fn(n, |i| w[i] * inv);
+    let s = weight_sum(ws.as_ref());
+    Col::<f64>::from_fn(n, |i| ws[i] * n_f / s)
 }
 
 /// `√w[i]` for every `i`: the row factor of the √w row-scaling convention.
@@ -1745,17 +1873,17 @@ impl RowPass for TMul<'_> {
 /// the caller then multiplies with faer.
 ///
 /// Column `j` is `Σᵢ tᵢ·xᵢⱼ` from `0.0` in row order. Under `Par::Rayon` the
-/// rows are cut into [`crate::fit::PAR_DEGREE`] contiguous pieces, each
+/// rows are cut into [`crate::fit::par_degree`] contiguous pieces, each
 /// summed on its own from `0.0` and the pieces' sums then added in piece
 /// order, `((p₀ + p₁) + p₂) + …` up to the last piece, so the bits depend
-/// on the shape and on `par`, never on the pool size; `Par::Seq` and
-/// `Par::Rayon` can differ in the last bits, as faer's two arms do. The
-/// parallel arm maps chunks of columns in parallel ([`t_mul_chunk_width`]:
-/// about `PAR_DEGREE` chunks up to `PAR_DEGREE · T_MUL_CHUNK` columns,
-/// chunks of [`T_MUL_CHUNK`] columns on wider rows, the last chunk
-/// shorter); each chunk forms the pieces for its columns, the first in
-/// place and the others in one chunk-sized scratch, so no partial vector of
-/// length `d` is allocated. The chunks never change a piece's rows or the
+/// on the shape and on `par`, never on the pool size outside the test switch
+/// of `par_degree`; `Par::Seq` and `Par::Rayon` can differ in the last bits,
+/// as faer's two arms do. The parallel arm maps chunks of columns in
+/// parallel ([`t_mul_chunk_width`]: about `PAR_DEGREE` chunks up to
+/// `PAR_DEGREE · T_MUL_CHUNK` columns, chunks of [`T_MUL_CHUNK`] columns on
+/// wider rows, the last chunk shorter); each chunk forms the pieces for its
+/// columns, the first in place and the others in one chunk-sized scratch, so
+/// no partial vector of length `d` is allocated. The chunks never change a piece's rows or the
 /// order of the pieces, so no bit depends on them.
 #[allow(clippy::many_single_char_names)]
 pub(crate) fn row_major_t_mul(
@@ -1781,7 +1909,7 @@ pub(crate) fn row_major_t_mul(
         ),
         Par::Rayon(_) => {
             use rayon::prelude::*;
-            let p = crate::fit::PAR_DEGREE;
+            let p = crate::fit::par_degree();
             let chunk = t_mul_chunk_width(d);
             out.par_chunks_mut(chunk).enumerate().for_each(|(c, o)| {
                 let j0 = c * chunk;
@@ -1823,15 +1951,15 @@ fn t_mul_chunk_width(d: usize) -> usize {
 
 /// `Σ xᵢⱼ²` with no overflow guard. The storage lines (contiguous columns
 /// of a column-major `x`, contiguous rows of a row-major one, columns of any
-/// other layout) are cut into [`crate::fit::PAR_DEGREE`] contiguous ranges;
+/// other layout) are cut into [`crate::fit::par_degree`] contiguous ranges;
 /// each range is summed with four interleaved partial sums over each of its
 /// lines (entry by entry on a strided view, into the first sum), and the
 /// ranges' sums are added in range order. Under `Par::Rayon` the ranges run
 /// in parallel; the bits are the same under either arm and at any pool
-/// size. Non-finite when an entry is non-finite or a square overflows (`|x|`
-/// above about `1e154`). The summation order depends on the layout;
-/// `pls1_fit` uses it only for its truncation floor and as a finiteness
-/// screen.
+/// size, outside the test switch of `par_degree`. Non-finite when an entry
+/// is non-finite or a square overflows (`|x|` above about `1e154`). The
+/// summation order depends on the layout; `pls1_fit` uses it only for its
+/// truncation floor and as a finiteness screen.
 pub(crate) fn sum_of_squares(x: MatRef<'_, f64>, par: Par) -> f64 {
     #[allow(clippy::needless_range_loop)]
     fn add_slice(v: &[f64], acc: &mut [f64; 4]) {
@@ -1852,7 +1980,7 @@ pub(crate) fn sum_of_squares(x: MatRef<'_, f64>, par: Par) -> f64 {
         None
     };
     let lines = if xr.is_some() { x.nrows() } else { x.ncols() };
-    let pieces = crate::fit::PAR_DEGREE;
+    let pieces = crate::fit::par_degree();
     let piece = |k: usize| -> f64 {
         let mut acc = [0.0_f64; 4];
         for l in k * lines / pieces..(k + 1) * lines / pieces {
@@ -2167,6 +2295,7 @@ pub(crate) fn constant_to_rounding(ss: f64, sq: f64, n: usize) -> bool {
 
 /// Kish's effective sample size: `(Σw)² / Σw²`.
 /// Caller is responsible for ensuring `Σw > 0`.
+/// Pass mean-one weights: their sum is `n` and no entry exceeds `n`, so the sums cannot overflow or underflow.
 #[must_use]
 pub fn compute_n_eff(w: ColRef<'_, f64>) -> f64 {
     let n = w.nrows();
@@ -2188,9 +2317,14 @@ pub fn compute_n_eff(w: ColRef<'_, f64>) -> f64 {
 /// Computed from the Gram matrix on `a`'s shorter side (`AA'` or `A'A`),
 /// whose trace is `‖A‖²_F` and whose largest eigenvalue is `σ₁²`: it takes
 /// `min(m, n)²` memory, where an SVD of `a` needs a working copy of `a`.
-/// The product and the eigendecomposition run on the crate's fixed-degree
+/// The product and the eigenvalue solver run on the crate's fixed-degree
 /// Rayon split (`fit::par_fixed`), so the result does not depend on the
-/// size of the Rayon pool it is called from.
+/// size of the Rayon pool it is called from. Above 64 rows on the short
+/// side, `σ₁²` comes from a Lanczos iteration that keeps no `min(m, n)²`
+/// buffer beside the Gram matrix: when it converges, its relative error is
+/// below `1e-13·√min(m, n)`; after 300 restarts unconverged it is a lower
+/// bound of `σ₁²` (so the stable rank is slightly high). NaN when the
+/// iteration overflows (Gram entries above about `1e150`).
 ///
 /// # Panics
 /// Panics if faer's eigendecomposition fails to converge (only expected on
@@ -2212,11 +2346,16 @@ pub fn stable_rank(a: MatRef<'_, f64>) -> f64 {
 
 /// [`stable_rank`] of a matrix whose Gram matrix on its shorter side is
 /// `g`: `trace(g) / λ_max(g)`, `0.0` for an empty or non-positive `g`, NaN
-/// for a non-finite `g`.
+/// for a non-finite `g` and when [`largest_eigenvalue`] overflows.
+///
+/// On `d > LANCZOS_MIN_DIM`, `λ_max` comes from [`largest_eigenvalue`], a
+/// restarted Lanczos iteration whose buffers grow as `d` times a fixed
+/// subspace size instead of `d²`; smaller `g` take the full
+/// eigendecomposition.
 ///
 /// # Panics
-/// When the eigendecomposition fails to converge on a finite `g`, as in
-/// [`stable_rank`].
+/// When an eigendecomposition fails to converge on a finite `g` (only
+/// expected on pathological input), as in [`stable_rank`].
 pub(crate) fn stable_rank_from_gram(g: MatRef<'_, f64>) -> f64 {
     let d = g.nrows();
     if d == 0 {
@@ -2227,15 +2366,127 @@ pub(crate) fn stable_rank_from_gram(g: MatRef<'_, f64>) -> f64 {
     if !g.is_all_finite() {
         return f64::NAN;
     }
-    let (lam, _) = self_adjoint_eigen(g, crate::fit::par_fixed())
-        .expect("eigendecomposition failed to converge");
-    // Ascending, so the last one is σ₁².
-    let sigma1_sq = lam[d - 1];
+    let sigma1_sq = if d <= LANCZOS_MIN_DIM {
+        let (lam, _) = self_adjoint_eigen(g, crate::fit::par_fixed())
+            .expect("eigendecomposition failed to converge");
+        // Ascending, so the last one is σ₁².
+        lam[d - 1]
+    } else {
+        largest_eigenvalue(g)
+    };
     if sigma1_sq <= 0.0 {
         return 0.0;
     }
     let frob_sq: f64 = (0..d).map(|i| g[(i, i)]).sum();
     frob_sq / sigma1_sq
+}
+
+/// Largest `d` on which [`stable_rank_from_gram`] takes the full
+/// eigendecomposition.
+const LANCZOS_MIN_DIM: usize = 64;
+
+/// Lanczos steps per restart of [`largest_eigenvalue`].
+const LANCZOS_STEPS: usize = 32;
+
+/// Restarts after which [`largest_eigenvalue`] returns its Ritz value
+/// unconverged: far above the few that real spectra take (each restart is
+/// a degree-32 polynomial step), so it only bounds the time on a
+/// pathological spectrum.
+const LANCZOS_MAX_RESTARTS: usize = 300;
+
+/// The largest eigenvalue of the PSD `g` (`d > LANCZOS_STEPS`, every entry
+/// read): Lanczos with full reorthogonalization, restarted from its Ritz
+/// vector every [`LANCZOS_STEPS`] steps, until the Ritz residual is at most
+/// `1e-13·‖g‖_F`, which bounds the relative error by `1e-13·√d`. After
+/// [`LANCZOS_MAX_RESTARTS`] restarts it returns the Ritz value, a lower
+/// bound. NaN as soon as a step overflows (a non-finite `α` or residual
+/// norm), without running the remaining restarts. The start vector is a fixed Weyl sequence (no random stream), the
+/// products run on `fit::par_fixed()` and the dot products in order, so the
+/// bits do not depend on the pool size.
+#[allow(clippy::many_single_char_names)] // the textbook names of Lanczos
+fn largest_eigenvalue(g: MatRef<'_, f64>) -> f64 {
+    let d = g.nrows();
+    let par = crate::fit::par_fixed();
+    let dot = |a: ColRef<'_, f64>, b: ColRef<'_, f64>| (0..d).map(|i| a[i] * b[i]).sum::<f64>();
+    let tol = 1e-13 * g.norm_l2();
+    // Weyl sequence: fixed, and not orthogonal to the top eigenvector of a
+    // centred Gram matrix the way a constant vector is (its null vector).
+    #[allow(clippy::cast_precision_loss)] // an index, far below 2^52
+    let mut q = Col::<f64>::from_fn(d, |i| {
+        ((i as f64 + 1.0) * 0.618_033_988_749_894_9).fract() - 0.5
+    });
+    let mut v = Mat::<f64>::zeros(d, LANCZOS_STEPS);
+    let mut theta = 0.0;
+    for _ in 0..LANCZOS_MAX_RESTARTS {
+        let norm = dot(q.as_ref(), q.as_ref()).sqrt();
+        v.col_mut(0).copy_from(&q);
+        v.col_mut(0).iter_mut().for_each(|x| *x /= norm);
+        let (mut alpha, mut beta) = (Vec::new(), Vec::new());
+        let mut last = 0.0;
+        for j in 0..LANCZOS_STEPS {
+            let mut w = mat_vec(g, v.col(j), par);
+            alpha.push(dot(v.col(j), w.as_ref()));
+            // Two passes of Gram-Schmidt against the whole basis.
+            for _ in 0..2 {
+                for i in 0..=j {
+                    let h = dot(v.col(i), w.as_ref());
+                    w.iter_mut()
+                        .zip(v.col(i).iter())
+                        .for_each(|(x, &y)| *x -= h * y);
+                }
+            }
+            last = dot(w.as_ref(), w.as_ref()).sqrt();
+            // Overflow: the tridiagonal would hold `inf`/NaN and no restart
+            // recovers.
+            if !alpha[j].is_finite() || !last.is_finite() {
+                return f64::NAN;
+            }
+            if last <= tol || j + 1 == LANCZOS_STEPS {
+                break;
+            }
+            beta.push(last);
+            v.col_mut(j + 1)
+                .iter_mut()
+                .zip(w.iter())
+                .for_each(|(x, &y)| *x = y / last);
+        }
+        let m = alpha.len();
+        let t = Mat::<f64>::from_fn(m, m, |i, k| match i.abs_diff(k) {
+            0 => alpha[i],
+            1 => beta[i.min(k)],
+            _ => 0.0,
+        });
+        let (lam, s) = self_adjoint_eigen(t.as_ref(), Par::Seq)
+            .expect("eigendecomposition failed to converge");
+        theta = lam[m - 1];
+        q = mat_vec(v.get(.., ..m), s.col(m - 1), par);
+        if last * s[(m - 1, m - 1)].abs() <= tol {
+            break;
+        }
+    }
+    theta
+}
+
+/// The bytes [`stable_rank_from_gram`] writes for a `d × d` Gram matrix:
+/// above `LANCZOS_MIN_DIM` the Lanczos basis and three `d`-vectors (the
+/// step's product, the Ritz vector and the one replacing it); at most
+/// `LANCZOS_MIN_DIM` the eigenvectors and eigenvalues of
+/// [`self_adjoint_eigen`] and faer's scratch for them.
+pub(crate) fn stable_rank_bytes(d: usize) -> usize {
+    use crate::resample::copy_bytes;
+    use faer::linalg::evd::{ComputeEigenvectors, self_adjoint_evd_scratch};
+    if d > LANCZOS_MIN_DIM {
+        return copy_bytes(d, LANCZOS_STEPS + 3);
+    }
+    let scratch = self_adjoint_evd_scratch::<f64>(
+        d,
+        ComputeEigenvectors::Yes,
+        crate::fit::par_fixed(),
+        faer::Spec::default(),
+    );
+    copy_bytes(d, d)
+        .saturating_add(scratch.size_bytes())
+        .saturating_add(copy_bytes(d, 2))
 }
 
 /// Normalize weights so Σw' = n (mean 1). Returns `None` if `Σw == 0`.
@@ -2362,39 +2613,26 @@ fn lanczos_lgamma(x: f64) -> f64 {
     0.5 * (2.0 * std::f64::consts::PI).ln() + (x_minus_one + 0.5) * t.ln() - t + a.ln()
 }
 
-/// Per-row leverage `diag(W (W'W)^-1 W')`.
+/// Per-row leverage `h_i = diag(W (W'W)^-1 W')_i`.
 ///
-/// Computes one LU on `W'W` (cost dominated by `O(K^3)` decomposition + `O(N K^2)`
-/// for the row sweep), instead of recomputing the full inverse matmul. Callers
-/// must ensure `W'W` is non-singular (W is full column rank).
-#[allow(clippy::many_single_char_names)]
+/// Computed as `‖Q_i‖² = ‖w_i' R^-1‖²` from the thin QR `W = QR`: one
+/// Householder QR (`qr_r_seq`) and one triangular solve, both under
+/// `Par::Seq`. Its error grows with `cond(W)`, not with `cond(W)²` as the
+/// normal equations' does. `W` must have at least as many rows as columns
+/// and full column rank; with deficient rank `R` is singular and the values
+/// are not finite.
 pub(crate) fn leverage_diag(w: faer::MatRef<'_, f64>) -> Vec<f64> {
-    let n = w.nrows();
-    let k = w.ncols();
-    let mut wtw = Mat::<f64>::zeros(k, k);
-    matmul(
-        wtw.as_mut(),
-        Accum::Replace,
-        w.transpose(),
-        w,
-        1.0,
+    let r = qr_r_seq(w.to_owned());
+    // Solves R'Z' = W', so Z = W R^-1; faer's triangular solvers take a left factor.
+    let mut zt = w.transpose().to_owned();
+    faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+        r.as_ref().transpose(),
+        zt.as_mut(),
         Par::Seq,
     );
-    let mut m = Mat::<f64>::identity(k, k);
-    lu_solve_in_place(wtw.as_ref(), m.as_mut());
-    let mut tmp = vec![0.0_f64; k];
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        for jj in 0..k {
-            let mut s = 0.0;
-            for kk in 0..k {
-                s += m[(jj, kk)] * w[(i, kk)];
-            }
-            tmp[jj] = s;
-        }
-        out.push((0..k).map(|jj| w[(i, jj)] * tmp[jj]).sum());
-    }
-    out
+    (0..zt.ncols())
+        .map(|i| zt.col(i).squared_norm_l2())
+        .collect()
 }
 
 /// Survival function P(T > t) for Student's t-distribution with `df`.
@@ -2797,6 +3035,103 @@ mod tests {
         );
         assert_relative_eq!(stable_rank_from_gram(Mat::<f64>::zeros(0, 0).as_ref()), 0.0);
     }
+
+    /// The Lanczos `λ_max` behind `stable_rank_from_gram` matches the full
+    /// eigendecomposition within 1e-9 (relative) on flat, decaying, nearly
+    /// tied, rank-1 and centred spectra, at `d` from 3 to 1000, and its bits
+    /// do not depend on the pool size.
+    #[test]
+    #[allow(clippy::many_single_char_names, clippy::cast_precision_loss)]
+    fn stable_rank_from_gram_matches_the_full_eigendecomposition() {
+        // `q·diag(lam)·q'` with `q` an orthonormal basis of fixed vectors.
+        let gram_of = |lam: &[f64]| {
+            let d = lam.len();
+            let lead = Col::<f64>::from_fn(d, |i| 1.0 + i as f64);
+            let others = crate::test_support::unif(d, d - 1, 5);
+            let basis = crate::test_support::orthonormal_basis(lead.as_ref(), others.as_ref(), 0.0);
+            assert_eq!(basis.len(), d);
+            let ql = Mat::<f64>::from_fn(d, d, |i, j| basis[j][i] * lam[j]);
+            let q = Mat::<f64>::from_fn(d, d, |i, j| basis[j][i]);
+            let g = mat_mul(ql.as_ref(), q.transpose(), Par::Seq);
+            Mat::<f64>::from_fn(d, d, |i, j| f64::midpoint(g[(i, j)], g[(j, i)]))
+        };
+        let full = |g: MatRef<'_, f64>| {
+            let (lam, _) = self_adjoint_eigen(g, Par::Seq).unwrap();
+            (0..g.nrows()).map(|i| g[(i, i)]).sum::<f64>() / lam[g.nrows() - 1]
+        };
+        let mut cases: Vec<(String, Mat<f64>)> = Vec::new();
+        for d in [3, 64, 65, 200, 1000] {
+            let flat: Vec<f64> = (0..d).map(|i| 1.0 + 1e-3 * i as f64 / d as f64).collect();
+            let decay: Vec<f64> = (0..d).map(|i| 0.9f64.powf(i as f64)).collect();
+            let tied: Vec<f64> = (0..d)
+                .map(|i| {
+                    if i + 2 >= d {
+                        5.0 - 1e-6 * (d - 1 - i) as f64
+                    } else {
+                        1.0
+                    }
+                })
+                .collect();
+            let rank1: Vec<f64> = (0..d).map(|i| if i + 1 == d { 3.0 } else { 0.0 }).collect();
+            for (name, lam) in [
+                ("flat", flat),
+                ("decay", decay),
+                ("tied", tied),
+                ("rank1", rank1),
+            ] {
+                cases.push((format!("{name} d={d}"), gram_of(&lam)));
+            }
+            // Centred X: the constant vector is in the Gram matrix's null space.
+            let x = Mat::<f64>::from_fn(d, 2 * d, |i, j| {
+                ((i * 7 + j * 13) % 23) as f64 + (j % 5) as f64 * (i as f64).sin()
+            });
+            let mean = |j: usize| (0..d).map(|i| x[(i, j)]).sum::<f64>() / d as f64;
+            let means: Vec<f64> = (0..2 * d).map(mean).collect();
+            let xc = Mat::<f64>::from_fn(d, 2 * d, |i, j| x[(i, j)] - means[j]);
+            cases.push((
+                format!("centred d={d}"),
+                mat_mul(xc.as_ref(), xc.transpose(), Par::Seq),
+            ));
+        }
+        for (name, g) in &cases {
+            let got = stable_rank_from_gram(g.as_ref());
+            let want = full(g.as_ref());
+            assert!((got - want).abs() <= 1e-9 * want, "{name}: {got} vs {want}");
+            let pooled = rayon::ThreadPoolBuilder::new()
+                .num_threads(4)
+                .build()
+                .unwrap()
+                .install(|| stable_rank_from_gram(g.as_ref()));
+            let single = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap()
+                .install(|| stable_rank_from_gram(g.as_ref()));
+            assert_eq!(
+                pooled.to_bits(),
+                single.to_bits(),
+                "{name}: pool size moved the bits"
+            );
+        }
+    }
+
+    #[test]
+    fn stable_rank_from_gram_is_nan_when_lanczos_overflows() {
+        // Finite PSD Gram, entries 1e300 and 2e300: `‖g·v‖²` overflows.
+        let d = 100;
+        let g = Mat::<f64>::from_fn(d, d, |i, j| if i == j { 2e300 } else { 1e300 });
+        assert!(stable_rank_from_gram(g.as_ref()).is_nan());
+    }
+
+    /// The solver's buffers grow as `d`, not `d²`, above `LANCZOS_MIN_DIM`.
+    #[test]
+    fn stable_rank_bytes_are_linear_in_d() {
+        let (a, b) = (stable_rank_bytes(1000), stable_rank_bytes(2000));
+        assert!(
+            b < 3 * a && a < crate::resample::copy_bytes(1000, 1000) / 4,
+            "{a} {b}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2884,12 +3219,9 @@ mod leverage_diag_tests {
     use super::*;
     use faer::Mat;
 
-    /// Textbook two-matmul reference for `diag(W (W'W)^-1 W')`.
+    /// The normal-equation route, kept as the formula this test separates from.
     #[allow(clippy::many_single_char_names)]
-    fn leverage_diag_naive(w: faer::MatRef<'_, f64>) -> Vec<f64> {
-        use faer::Accum;
-        use faer::linalg::matmul::matmul;
-        use faer::linalg::solvers::{PartialPivLu, Solve};
+    fn normal_equations_leverage(w: faer::MatRef<'_, f64>) -> Vec<f64> {
         let n = w.nrows();
         let k = w.ncols();
         let mut wtw = Mat::<f64>::zeros(k, k);
@@ -2899,39 +3231,78 @@ mod leverage_diag_tests {
             w.transpose(),
             w,
             1.0,
-            faer::Par::Seq,
+            Par::Seq,
         );
-        let lu = PartialPivLu::new(wtw.as_ref());
         let mut m = Mat::<f64>::identity(k, k);
-        lu.solve_in_place(m.as_mut());
+        lu_solve_in_place(wtw.as_ref(), m.as_mut());
         (0..n)
             .map(|i| {
-                let mut h = 0.0;
-                for jj in 0..k {
-                    for kk in 0..k {
-                        h += w[(i, jj)] * m[(jj, kk)] * w[(i, kk)];
-                    }
-                }
-                h
+                (0..k)
+                    .map(|jj| w[(i, jj)] * (0..k).map(|kk| m[(jj, kk)] * w[(i, kk)]).sum::<f64>())
+                    .sum()
             })
             .collect()
     }
 
-    #[test]
-    fn leverage_diag_matches_naive_reference() {
+    /// The 20 x 4 draw uniform in `[-0.5, 0.5)` from seed 42.
+    fn draw() -> Mat<f64> {
         use rand::{RngExt, SeedableRng, rngs::StdRng};
         let mut rng = StdRng::seed_from_u64(42);
-        let (n, k) = (20, 4);
-        let w = Mat::<f64>::from_fn(n, k, |_, _| rng.random::<f64>() - 0.5);
-        let h_fast = leverage_diag(w.as_ref());
-        let h_naive = leverage_diag_naive(w.as_ref());
-        for i in 0..n {
+        Mat::<f64>::from_fn(20, 4, |_, _| rng.random::<f64>() - 0.5)
+    }
+
+    fn squared_row_norms(q: faer::MatRef<'_, f64>) -> Vec<f64> {
+        (0..q.nrows())
+            .map(|i| (0..q.ncols()).map(|j| q[(i, j)] * q[(i, j)]).sum())
+            .collect()
+    }
+
+    #[test]
+    fn leverage_of_orthonormal_w_is_its_squared_row_norms() {
+        let q = draw().qr().compute_thin_Q();
+        let want = squared_row_norms(q.as_ref());
+        let h = leverage_diag(q.as_ref());
+        for (i, (hi, wi)) in h.iter().zip(&want).enumerate() {
+            assert!((hi - wi).abs() <= 1e-14, "row {i}: {hi} vs {wi}");
+        }
+    }
+
+    #[test]
+    fn leverage_of_nearly_collinear_columns() {
+        // W spans the column space of Q, with cond(W) about 1e6 from near
+        // collinearity, so its leverage is the squared row norms of Q.
+        let q = draw().qr().compute_thin_Q();
+        let w = Mat::<f64>::from_fn(20, 4, |i, j| match j {
+            1 => q[(i, 0)] + 1e-6 * q[(i, 1)],
+            _ => q[(i, j)],
+        });
+        let want = squared_row_norms(q.as_ref());
+        let old = normal_equations_leverage(w.as_ref());
+        let old_err = old
+            .iter()
+            .zip(&want)
+            .map(|(o, wi)| (o - wi).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            old_err > 1e-8,
+            "premise: the normal equations miss by only {old_err:e}"
+        );
+        let h = leverage_diag(w.as_ref());
+        for (i, (hi, wi)) in h.iter().zip(&want).enumerate() {
             assert!(
-                (h_fast[i] - h_naive[i]).abs() < 1e-10,
-                "i={i}: {} vs {}",
-                h_fast[i],
-                h_naive[i]
+                (hi - wi).abs() <= 1e-8,
+                "row {i}: {hi} vs {wi}, diff {:e}",
+                hi - wi
             );
+        }
+    }
+
+    #[test]
+    fn leverage_of_a_square_w_is_one() {
+        let a = draw();
+        let h = leverage_diag(a.as_ref().subrows(0, 4));
+        for (i, hi) in h.iter().enumerate() {
+            assert!((hi - 1.0).abs() <= 1e-12, "row {i}: {hi}");
         }
     }
 }
@@ -3175,7 +3546,7 @@ mod row_standardize_tests {
         let mut a_all = Mat::<f64>::zeros(tr.len(), x.ncols());
         let mut c_all = Mat::<f64>::zeros(te.len(), x.ncols());
         let mut starts = Vec::new();
-        let fro = centered_blocks(x, tr, te, w, sw_tr, sw_te, scale, width, |j0, a, c| {
+        let fro = centered_blocks(x, tr, te, w, sw_tr, sw_te, scale, width, |j0, a, c, _| {
             starts.push(j0);
             for j in 0..a.ncols() {
                 for i in 0..a.nrows() {
@@ -3219,13 +3590,7 @@ mod row_standardize_tests {
                     assert_mat_bits_eq(c.as_ref(), full_c.as_ref(), &what);
                     let expect: Vec<usize> = (0..37).step_by(width).collect();
                     assert_eq!(starts, expect, "{what}: block starts");
-                    // One term per block (width 1) or one block: the same
-                    // `fro_from_terms` sum. Otherwise block norms are combined.
-                    if width == 1 || width >= 37 {
-                        assert_eq!(fro.to_bits(), full_fro.to_bits(), "{what}: fro");
-                    } else {
-                        approx::assert_relative_eq!(fro, full_fro, max_relative = 1e-13);
-                    }
+                    assert_eq!(fro.to_bits(), full_fro.to_bits(), "{what}: fro");
                     approx::assert_relative_eq!(fro, full_a.norm_l2(), max_relative = 1e-13);
                 }
             }
@@ -3247,7 +3612,7 @@ mod row_standardize_tests {
     /// `fro_from_terms` is NaN when a term is NaN, also when every term is:
     /// `f64::max` drops a NaN, so the largest-term fold alone would read an
     /// all-NaN slice as the zero norm.
-    /// `centered_blocks` combines its block norms with it, so one
+    /// `centered_blocks` combines its column terms with it, so one
     /// all-NaN block makes the whole norm NaN next to a finite block.
     #[test]
     #[allow(clippy::float_cmp, clippy::cast_precision_loss)]
@@ -3278,7 +3643,7 @@ mod row_standardize_tests {
             None,
             ones.as_ref(),
             2,
-            |_, _, _| {},
+            |_, _, _, _| {},
         );
         assert!(fro.is_nan(), "fro = {fro}");
     }
@@ -3323,7 +3688,7 @@ mod row_standardize_tests {
                 None,
                 ones.as_ref(),
                 width,
-                |_, a, c| {
+                |_, a, c, _| {
                     most = most.max(bytes(a) + bytes(c));
                 },
             );
@@ -3443,6 +3808,62 @@ mod row_standardize_tests {
                 }
             }
         }
+    }
+
+    /// A block used as given keeps its scale while its largest entry is in
+    /// `[2^-20, 2^20]`, edges included, and one ulp outside either edge is
+    /// divided by the power of two of that entry. With mean-one weights the
+    /// largest entry is read on the √w-scaled rows: a zero-weight row at
+    /// `2^30`, or a row of weight `2^-12` at `2^24` (scaled entry `2^18`),
+    /// leaves the block as given.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn pre_standardized_scale_band_edges() {
+        let u = unif(12, 3, 46);
+        for edge in [2f64.powi(20), 2f64.powi(-20)] {
+            let bits = edge.to_bits();
+            let outside = f64::from_bits(if edge > 1.0 { bits + 1 } else { bits - 1 });
+            let x = |m: f64| {
+                let mut x = Mat::<f64>::from_fn(12, 3, |i, j| 0.5 * edge * u[(i, j)]);
+                x[(4, 1)] = m;
+                x
+            };
+            assert_eq!(
+                pre_standardized_scale(x(edge).as_ref(), None),
+                None,
+                "{edge:e}"
+            );
+            assert_eq!(
+                pre_standardized_scale(x(outside).as_ref(), None),
+                Some(pow2_scale(outside).0),
+                "{outside:e}"
+            );
+        }
+        let near_one = |far_row: usize, far: f64| {
+            Mat::<f64>::from_fn(12, 3, |i, j| {
+                if i == far_row {
+                    far
+                } else {
+                    1.0 + 0.25 * u[(i, j)]
+                }
+            })
+        };
+        let w = normalize_weights(test_weights(12).as_ref()).expect("positive sum");
+        assert_eq!(w[10], 0.0);
+        let x = near_one(10, 2f64.powi(30));
+        assert_eq!(
+            pre_standardized_scale(x.as_ref(), Some(w.as_ref())),
+            None,
+            "zero weight"
+        );
+        let small = 2f64.powi(-12);
+        let w = Col::<f64>::from_fn(12, |i| if i == 0 { small } else { (12.0 - small) / 11.0 });
+        let x = near_one(0, 2f64.powi(24));
+        assert_eq!(
+            pre_standardized_scale(x.as_ref(), Some(w.as_ref())),
+            None,
+            "small weight"
+        );
     }
 
     /// Used as given, a block's power of two comes from its rows of positive

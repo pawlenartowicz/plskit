@@ -5,8 +5,9 @@
 //!
 //! - Weighted PLS1 cells (non-uniform observation weights): every
 //!   confirmatory method (split_nb, split_exact, score, raw_perm, e),
-//!   split_exact on a concentrated spectrum, and the sequential-deflation
-//!   entry point (`pls1_find_k_sequence`).
+//!   split_exact at k = 2 (its weighted refit route), split_exact on a
+//!   concentrated spectrum, and the sequential-deflation entry point
+//!   (`pls1_find_k_sequence`).
 //! - Unweighted PLS1 cells: split_exact (its no-refit route) and e (a
 //!   tripwire for gross e-value inflation).
 //! - Sparse PLS1 cells (`keep = 2` of 4 columns, unweighted): split_nb,
@@ -20,39 +21,41 @@
 //!   its doc).
 //!
 //! Under H0 (y ⟂ X; Y ⟂ X for PLS3) a valid α-level test rejects at rate
-//! ≤ α. We assert the empirical FPR over `N_REPS` seeded replications (100
-//! for the two sequence cells) stays within a one-sided binomial Monte-Carlo
-//! band of α.
+//! ≤ α. Every cell but the k-set cell runs seeded replications (`N_REPS`,
+//! or `FIND_K_SEQUENCE_WEIGHTED_REPS` for the weighted sequential cell) and
+//! asserts that the empirical FPR stays within a one-sided binomial
+//! Monte-Carlo band of α. The allowed size is 0.065.
 //!
 //! MC slack: the per-rep reject indicator is Bernoulli(p) with p ≤ α under H0,
 //! so FPR_hat has SD ≤ √(α(1−α)/N_REPS). We allow a 3·SD upper band:
 //!
 //!     FPR_hat ≤ α + 3·√(α(1−α)/N_REPS).
 //!
-//! At α = 0.05, N_REPS = 200 this is 0.05 + 3·0.0154 ≈ 0.096. A correctly
-//! calibrated test clears it with margin; a broken path (e.g. a convention
-//! mismatch inflating the statistic under permuted/split nulls) blows past
-//! it. The band is intentionally one-sided: conservative tests (FPR < α) are
-//! fine, only over-rejection is a failure.
+//! At α = 0.05, N_REPS = 2000 this is 0.05 + 3·0.00487 ≈ 0.0646, so a cell
+//! fails a true size of 0.08 or more with probability at least 0.995. A
+//! correctly calibrated test clears it with margin; a broken path (e.g. a
+//! convention mismatch inflating the statistic under permuted/split nulls)
+//! blows past it. The band is intentionally one-sided: conservative tests
+//! (FPR < α) are fine, only over-rejection is a failure.
 
 #![allow(clippy::many_single_char_names)]
 #![allow(clippy::cast_precision_loss)]
 // Prose-heavy module docs: backticking every math token (α, n_reps, …) is noise.
 #![allow(clippy::doc_markdown)]
 
-use faer::{Col, Mat};
-use plskit::{
+use crate::{
     ConfirmatoryArgs, ConfirmatoryMethod, ConfirmatoryTestInput, ConfirmatoryTestOpts,
     FindKSequenceOpts, Pls3ConfirmatoryTestOpts,
     linalg::{stable_rank, standardize_weighted},
     pls1_confirmatory_test, pls1_find_k_sequence, pls3_confirmatory_test, spls1_find_k_sequence,
 };
+use faer::{Col, Mat};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 
 const ALPHA: f64 = 0.05;
-const N_REPS: usize = 200;
+const N_REPS: usize = 2000;
 
 /// Assert the empirical FPR `rejects / n_reps` is at most the 3·SD one-sided
 /// binomial Monte-Carlo upper band at `ALPHA`.
@@ -112,24 +115,8 @@ fn assert_calibrated(
     seed_base: u64,
     keep: Option<usize>,
 ) {
-    assert_calibrated_reps(n, d, k, make_args, label, weighted, seed_base, keep, N_REPS);
-}
-
-/// `assert_calibrated` over `n_reps` replications instead of `N_REPS`.
-#[allow(clippy::too_many_arguments)]
-fn assert_calibrated_reps(
-    n: usize,
-    d: usize,
-    k: usize,
-    make_args: impl Fn() -> ConfirmatoryArgs,
-    label: &str,
-    weighted: bool,
-    seed_base: u64,
-    keep: Option<usize>,
-    n_reps: usize,
-) {
     let mut rejects = 0usize;
-    for rep in 0..n_reps {
+    for rep in 0..N_REPS {
         let (x, y, w) = null_data(n, d, rep);
         let r = pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
@@ -152,7 +139,7 @@ fn assert_calibrated_reps(
             rejects += 1;
         }
     }
-    assert_fpr_within_band(label, rejects, n_reps);
+    assert_fpr_within_band(label, rejects, N_REPS);
 }
 
 /// One H0 replication for the PLS3 cells: X and a multi-column Y drawn
@@ -171,18 +158,8 @@ fn pls3_null_data(n: usize, p: usize, q: usize, rep: usize) -> (Mat<f64>, Mat<f6
 /// `N_REPS` replications. `method` is the method the cell measures; every
 /// replication must report it.
 fn assert_pls3_calibrated(args: ConfirmatoryArgs, method: &str, seed_base: u64) {
-    assert_pls3_calibrated_reps(args, method, seed_base, N_REPS);
-}
-
-/// `assert_pls3_calibrated` over `n_reps` replications instead of `N_REPS`.
-fn assert_pls3_calibrated_reps(
-    args: ConfirmatoryArgs,
-    method: &str,
-    seed_base: u64,
-    n_reps: usize,
-) {
     let mut rejects = 0usize;
-    for rep in 0..n_reps {
+    for rep in 0..N_REPS {
         let (x, y) = pls3_null_data(40, 4, 3, rep);
         let r = pls3_confirmatory_test(
             x.as_ref(),
@@ -200,7 +177,7 @@ fn assert_pls3_calibrated_reps(
             rejects += 1;
         }
     }
-    assert_fpr_within_band(&format!("pls3 {method}"), rejects, n_reps);
+    assert_fpr_within_band(&format!("pls3 {method}"), rejects, N_REPS);
 }
 
 #[test]
@@ -267,9 +244,28 @@ fn split_exact_unweighted_h0_fpr_within_band() {
 }
 
 #[test]
+fn split_exact_weighted_k2_h0_fpr_within_band() {
+    // k = 2 with weights: split_exact's weighted refit route.
+    assert_calibrated(
+        40,
+        4,
+        2,
+        || ConfirmatoryArgs::SplitExact {
+            n_perm: 60,
+            n_splits: 15,
+        },
+        "split_exact weighted k=2",
+        true,
+        6000,
+        None,
+    );
+}
+
+#[test]
 fn score_weighted_h0_fpr_within_band() {
-    // score is closed-form (no resampling): per-rep cost is a single Gram
-    // eigendecomposition, so this loop is the fastest of the three.
+    // score is closed-form (no resampling): per-rep cost is one Gram matrix
+    // and its trace and Frobenius norm, so this loop is the fastest of the
+    // three.
     assert_calibrated(
         40,
         4,
@@ -296,7 +292,7 @@ fn e_unweighted_h0_fpr_within_band() {
 #[test]
 fn raw_perm_weighted_h0_fpr_within_band() {
     // raw_perm: n_perm permutations of y over k-fold CV. Kept at n_perm=60,
-    // n_folds=5 so the 200-rep loop stays under a few seconds.
+    // n_folds=5 so the loop stays under a few seconds.
     assert_calibrated(
         40,
         4,
@@ -330,24 +326,28 @@ fn e_weighted_h0_fpr_within_band() {
     );
 }
 
+/// Replications of [`find_k_sequence_weighted_h0_fpr_within_band`]: at
+/// `N_REPS` its 2000 datasets lean high (131 rejections against an upper edge
+/// of 129.2, while 8000 further datasets give 5.31%), so it runs five times
+/// as many datasets under the same 3·SD band, upper edge 0.0565.
+const FIND_K_SEQUENCE_WEIGHTED_REPS: usize = 10_000;
+
 #[test]
 fn find_k_sequence_weighted_h0_fpr_within_band() {
     // Pins the weighted sequential-deflation path under split_nb: under H0,
-    // P(k_star ≥ 1) ≈ α. Uses 100 reps (instead of 200) — the sequence test runs
-    // k_max=3 confirmatory tests per rep, making each rep ~3× costlier than a
-    // single-component test.
+    // P(k_star ≥ 1) ≈ α.
     //
     // d = 8, not the 4 the other weighted cells use, so that NB actually runs:
     // the auto-gate reroutes any X with ≤ 4 columns outright, and at d = 5 the
-    // weighted stable rank falls under the floor of 3 in 7% of these draws
-    // (min 2.77 over 100 reps) — a coin flip that would blend two methods into
-    // one FPR. At d = 8 the weighted rank spans 3.79–5.38, and Kish n_eff = 34.7
-    // clears the size floor, so every rep is an unforced NB run. Forcing instead
-    // of widening would have hidden the gate rather than satisfied it.
+    // weighted stable rank falls under the floor of 3 in 7% of the first 100
+    // draws (min 2.77), a coin flip that would blend two methods into one FPR.
+    // At d = 8 the weighted rank over the same 100 draws spans 3.79 to 5.38,
+    // and Kish n_eff = 34.7 clears the size floor, so every rep is an unforced
+    // NB run. Forcing instead of widening would have hidden the gate rather
+    // than satisfied it.
     // The per-rep `test_method` assertion below is what keeps that true.
-    const REPS: usize = 100;
     let mut rejects = 0usize;
-    for rep in 0..REPS {
+    for rep in 0..FIND_K_SEQUENCE_WEIGHTED_REPS {
         let (x, y, w) = null_data(40, 8, rep);
         let r = pls1_find_k_sequence(
             x.as_ref(),
@@ -374,7 +374,7 @@ fn find_k_sequence_weighted_h0_fpr_within_band() {
             rejects += 1;
         }
     }
-    assert_fpr_within_band("find_k_sequence", rejects, REPS);
+    assert_fpr_within_band("find_k_sequence", rejects, FIND_K_SEQUENCE_WEIGHTED_REPS);
 }
 
 #[test]
@@ -474,9 +474,8 @@ fn spls1_find_k_sequence_sparse_h0_fpr_within_band() {
     // vary. The dense sibling above covers the sequence path under NB; what
     // this one pins is that the sparse deflation chain holds its level whatever
     // method the gate hands it, which is the method-agnostic half of the claim.
-    const REPS: usize = 100;
     let mut rejects = 0usize;
-    for rep in 0..REPS {
+    for rep in 0..N_REPS {
         let (x, y, _w) = null_data(40, 4, rep);
         let r = spls1_find_k_sequence(
             x.as_ref(),
@@ -498,7 +497,7 @@ fn spls1_find_k_sequence_sparse_h0_fpr_within_band() {
             rejects += 1;
         }
     }
-    assert_fpr_within_band("spls1_find_k_sequence", rejects, REPS);
+    assert_fpr_within_band("spls1_find_k_sequence", rejects, N_REPS);
 }
 
 #[test]
@@ -532,26 +531,21 @@ fn pls3_split_nb_h0_fpr_within_band() {
     );
 }
 
-/// Replications for the `sv_perm` cells: 2000 puts the 3·SD band at about
-/// 0.065, tight enough to catch a size of 0.10 reliably.
-const SV_PERM_REPS: usize = 2000;
-
 #[test]
 fn pls3_sv_perm_h0_fpr_within_band() {
-    assert_pls3_calibrated_reps(
+    assert_pls3_calibrated(
         ConfirmatoryArgs::SvPerm {
             n_perm: 199,
             rotate: false,
         },
         "sv_perm",
         100_000,
-        SV_PERM_REPS,
     );
 }
 
 #[test]
 fn sv_perm_unweighted_h0_fpr_within_band() {
-    assert_calibrated_reps(
+    assert_calibrated(
         40,
         4,
         1,
@@ -563,7 +557,6 @@ fn sv_perm_unweighted_h0_fpr_within_band() {
         false,
         110_000,
         None,
-        SV_PERM_REPS,
     );
 }
 
@@ -585,7 +578,7 @@ fn covariate_null_data(n: usize, d: usize, rep: usize) -> (Mat<f64>, Col<f64>, M
 #[test]
 fn sv_perm_covariates_h0_fpr_within_band() {
     let mut rejects = 0usize;
-    for rep in 0..SV_PERM_REPS {
+    for rep in 0..N_REPS {
         let (x, y, z) = covariate_null_data(40, 4, rep);
         let r = pls1_confirmatory_test(
             ConfirmatoryTestInput::Raw {
@@ -610,7 +603,7 @@ fn sv_perm_covariates_h0_fpr_within_band() {
             rejects += 1;
         }
     }
-    assert_fpr_within_band("sv_perm covariates", rejects, SV_PERM_REPS);
+    assert_fpr_within_band("sv_perm covariates", rejects, N_REPS);
 }
 
 /// The upper edge of the 99% binomial band of rejection counts at `ALPHA`

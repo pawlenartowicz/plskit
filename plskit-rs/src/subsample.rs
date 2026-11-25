@@ -210,25 +210,43 @@ pub(crate) fn resolve_m(n: usize, m_rate: f64) -> usize {
     m
 }
 
-/// Draw a subsample of size `m` without replacement from `0..n`. Returns
-/// `(sample_idx, holdout_idx)` partitioning `0..n`. Uses `rng` (a child RNG).
+/// Draw a subsample of size `m` without replacement from `0..n`: one
+/// shuffle of `0..n` on `rng`, the first `m` entries the sample. Returns
+/// `(sample_idx, holdout_idx)` partitioning `0..n`.
 pub(crate) fn subsample_indices(
     n: usize,
     m: usize,
-    rng: &mut crate::rng::Rng,
+    rng: &mut CommonStatsRng,
 ) -> (Vec<usize>, Vec<usize>) {
-    use rand::seq::SliceRandom;
     let mut perm: Vec<usize> = (0..n).collect();
-    perm.shuffle(rng);
-    let sample = perm[..m].to_vec();
-    let holdout = perm[m..].to_vec();
-    (sample, holdout)
+    crate::rng::shuffle(rng, &mut perm);
+    let holdout = perm.split_off(m);
+    (perm, holdout)
+}
+
+/// The index draws of CI replicate `r` at run seed `seed`:
+/// `(sample, boot, (half, holdout))`. On stream `(seed, r)` of `TAG_SUBSM`
+/// the size-`m` subsample, then the half split (`holdout_train_size(n)`
+/// training rows); on stream `(seed, r)` of `TAG_BOOTS` the `n` bootstrap
+/// draws.
+#[allow(clippy::type_complexity)]
+pub(crate) fn replicate_indices(
+    n: usize,
+    m: usize,
+    seed: u64,
+    r: usize,
+) -> (Vec<usize>, Vec<usize>, (Vec<usize>, Vec<usize>)) {
+    let mut subsm = CommonStatsRng::new_tagged(seed, r as u64, crate::rng::TAG_SUBSM);
+    let (sample, _) = subsample_indices(n, m, &mut subsm);
+    let mut boots = CommonStatsRng::new_tagged(seed, r as u64, crate::rng::TAG_BOOTS);
+    let boot = bootstrap_indices(n, &mut boots);
+    let half = subsample_indices(n, holdout_train_size(n), &mut subsm);
+    (sample, boot, half)
 }
 
 #[cfg(test)]
 mod tests_indices {
     use super::*;
-    use crate::rng::resolve_seed;
 
     #[test]
     fn resolve_m_known_values() {
@@ -240,7 +258,7 @@ mod tests_indices {
 
     #[test]
     fn subsample_indices_partitions_range() {
-        let (_, mut rng) = resolve_seed(Some(7)).unwrap();
+        let mut rng = CommonStatsRng::new_tagged(7, 0, crate::rng::TAG_SUBSM);
         let (s, h) = subsample_indices(100, 26, &mut rng);
         assert_eq!(s.len(), 26);
         assert_eq!(h.len(), 74);
@@ -248,13 +266,36 @@ mod tests_indices {
         all.sort_unstable();
         assert_eq!(all, (0..100).collect::<Vec<_>>());
     }
+
+    /// Replicate `r`'s draws, rebuilt by hand from their streams: the
+    /// subsample shuffle, the half-split shuffle continuing the same
+    /// `TAG_SUBSM` stream, and `n` bounded draws on `TAG_BOOTS`.
+    #[test]
+    fn replicate_draws_follow_their_streams() {
+        use crate::rng::{TAG_BOOTS, TAG_SUBSM, shuffle};
+        let mut subsm = CommonStatsRng::new_tagged(7, 3, TAG_SUBSM);
+        let mut first: Vec<usize> = (0..40).collect();
+        shuffle(&mut subsm, &mut first);
+        let mut boots = CommonStatsRng::new_tagged(7, 3, TAG_BOOTS);
+        let boot: Vec<usize> = (0..40).map(|_| boots.bounded(40) as usize).collect();
+        let mut second: Vec<usize> = (0..40).collect();
+        shuffle(&mut subsm, &mut second);
+        let h = holdout_train_size(40);
+        let want = (
+            first[..13].to_vec(),
+            boot,
+            (second[..h].to_vec(), second[h..].to_vec()),
+        );
+        assert_eq!(replicate_indices(40, 13, 7, 3), want);
+    }
 }
 
+use commonstats::CommonStatsRng;
 use faer::{Col, ColRef, Mat, MatRef};
 
 use crate::covariates::CovariateBasis;
 use crate::error::{PlsKitError, PlsKitResult};
-use crate::fit::{FitOpts, KSpec, pls1_fit_impl};
+use crate::fit::{FitOpts, InternalFitOpts, pls1_fit_impl};
 use crate::linalg::{center_rows_fro, col_row_subset, row_subset, standardize_apply_rows};
 
 /// Per-resample outputs for the confirmatory CI branch. Per-variable arrays
@@ -275,6 +316,10 @@ pub(crate) struct ConfirmatoryWorkerRow {
     /// `corr(X[holdout] · β_h, y[holdout])`, `β_h` fitted on the half split's
     /// training rows. NaN if undefined (e.g. constant holdout y).
     pub holdout_corr: f64,
+    /// The half-split fit failed on the weights (`InvalidWeights` with
+    /// reason `insufficient_effective_n` or `all_zero`), so `holdout_corr`
+    /// is NaN and counts as a skip under `max_skip_rate`, not as a failure.
+    pub holdout_skipped: bool,
     /// Per-variable subsample regression coefficient `β_b`. Length D. PLS1-only:
     /// β is invariant under component sign flips and within-subspace rotations
     /// (the (Pᵀ W)⁻¹·Q product cancels both), so per-coordinate centered-scaled
@@ -283,10 +328,10 @@ pub(crate) struct ConfirmatoryWorkerRow {
 }
 
 /// Draw an n-out-of-n bootstrap resample: `n` indices from `0..n` with
-/// replacement. Uses `rng` (a child RNG).
-pub(crate) fn bootstrap_indices(n: usize, rng: &mut crate::rng::Rng) -> Vec<usize> {
-    use rand::RngExt;
-    (0..n).map(|_| rng.random_range(0..n)).collect()
+/// replacement, `n` draws of `rng.bounded(n)`.
+pub(crate) fn bootstrap_indices(n: usize, rng: &mut CommonStatsRng) -> Vec<usize> {
+    let bound = u32::try_from(n).expect("resolve_seed's row check keeps n <= u32::MAX");
+    (0..n).map(|_| rng.bounded(bound) as usize).collect()
 }
 
 /// A fit on a row selection of `(x, y)`, with the rows' (weighted) means
@@ -301,14 +346,19 @@ struct RowFit {
     cov: Option<(CovariateBasis, Mat<f64>, Mat<f64>)>,
 }
 
-/// Fit `k` components on the rows `idx` of `(x, y)` (repeats allowed), read
-/// as the held-out tests read X: centred with the rows' own (weighted)
-/// means (when `centre`; else as given, with zero means) and divided by the
-/// all-row scales `x_scale` and `y_scale` (one entry), the caller's
-/// `linalg::held_out_scale` of X and of y. A
+/// Fit `k` components on the rows `idx` of `(x, y)` (repeats allowed).
+/// With `scales = Some((x_scale, y_scale))` the rows are read as the
+/// held-out tests read X: centred with the rows' own (weighted) means (when
+/// `centre`; else as given, with zero means) and divided by the all-row
+/// scales (`y_scale` one entry), the caller's `linalg::held_out_scale` of X
+/// and of y. A fit whose coefficients score other rows needs these: a
 /// row-subset scale would blow up the other rows wherever a column barely
-/// varies on these. Weights are sliced to `idx` and re-validated, so an
-/// insufficient effective sample size surfaces as `InvalidWeights`.
+/// varies on these. With `scales = None` the rows are standardized on their
+/// own (weighted) moments, as the full-data fit standardizes all rows
+/// (`linalg::standardize_rows`, which gives a column with no spread on
+/// these rows the standardizer's fallback scale), and `centre` is not read.
+/// Weights are sliced to `idx` and re-validated, so an insufficient
+/// effective sample size surfaces as `InvalidWeights`.
 ///
 /// With covariates `z`, the scaled rows of X and y are replaced by
 /// their WLS residuals on the rows' own `[1, Z]` (weighted with the rows'
@@ -325,8 +375,7 @@ fn fit_rows(
     y: ColRef<'_, f64>,
     idx: &[usize],
     k: usize,
-    x_scale: ColRef<'_, f64>,
-    y_scale: ColRef<'_, f64>,
+    scales: Option<(ColRef<'_, f64>, ColRef<'_, f64>)>,
     weights: Option<ColRef<'_, f64>>,
     z: Option<MatRef<'_, f64>>,
     centre: bool,
@@ -335,15 +384,16 @@ fn fit_rows(
     let (w_sub_norm, _) = crate::fit::validate_and_normalize_weights(
         w_sub.as_ref().map(faer::Col::as_ref),
         idx.len(),
-        k,
     )?;
     let wsr = w_sub_norm.as_ref().map(faer::Col::as_ref);
 
-    let rows = |a: MatRef<'_, f64>, scale: ColRef<'_, f64>| {
-        if centre {
+    let rows = |a: MatRef<'_, f64>, scale: Option<ColRef<'_, f64>>| match scale {
+        None => crate::linalg::standardize_rows(a, idx, wsr),
+        Some(scale) if centre => {
             let (s, mean, _) = center_rows_fro(a, idx, wsr, None, scale, faer::Par::Seq);
             (s, mean)
-        } else {
+        }
+        Some(scale) => {
             let mean = Col::<f64>::zeros(a.ncols());
             (
                 standardize_apply_rows(a, idx, mean.as_ref(), scale, None),
@@ -351,8 +401,8 @@ fn fit_rows(
             )
         }
     };
-    let (mut xs_sub, x_mean) = rows(x, x_scale);
-    let (ys_sub, y_mean) = rows(y.as_mat(), y_scale);
+    let (mut xs_sub, x_mean) = rows(x, scales.map(|s| s.0));
+    let (ys_sub, y_mean) = rows(y.as_mat(), scales.map(|s| s.1));
     let (mut ys_sub, y_mean) = (ys_sub.col(0).to_owned(), y_mean[0]);
     let cov = match z {
         None => None,
@@ -375,7 +425,7 @@ fn fit_rows(
     let fit = pls1_fit_impl(
         xs_sub.as_ref(),
         ys_sub.as_ref(),
-        KSpec::Fixed(k),
+        k,
         w_sub_norm.as_ref().map(faer::Col::as_ref),
         None,
         FitOpts {
@@ -383,8 +433,8 @@ fn fit_rows(
             // Auto: the fit picks its arm from its shape (`fit::resolve_par`),
             // so the bits do not depend on the batch or the pool.
             par: crate::fit::ParChoice::Auto,
-            ..FitOpts::default()
         },
+        InternalFitOpts::default(),
     )?;
     Ok(RowFit {
         w: fit.w_star,
@@ -398,12 +448,15 @@ fn fit_rows(
 /// Run one confirmatory replicate: a size-`m` subsample (without
 /// replacement) for β, an n-out-of-n bootstrap resample (with replacement)
 /// for leverage, and a half split (`holdout_train_size(n)` training rows,
-/// the rest held out) for `holdout_corr`. All three index sets come from
-/// the same child `rng` in that order, so the β and leverage draws do not
-/// depend on the half split. Every fit reads X and y on the all-row scales
-/// `x_scale` and `y_scale` (`fit_rows`). Under `pre_standardized` the β and
-/// leverage fits take the rows as given, as the full-data reference fit
-/// does, and the half split still centres, as the split tests do.
+/// the rest held out) for `holdout_corr`. The index sets are
+/// [`replicate_indices`]`(n, m, seed, r)`, replicate `r`'s own streams, so
+/// they do not depend on which replicates ran before. The β fit and the
+/// half split read X and y on the all-row scales `x_scale` and `y_scale`
+/// (`fit_rows`); the leverage fit standardizes its resample on the
+/// resample's own (weighted) moments, as the full-data reference fit
+/// standardizes all rows. Under `pre_standardized` the β and leverage fits
+/// take the rows as given, as the reference fit does, and the half split
+/// still centres, as the split tests do.
 ///
 /// Leverage uses the bootstrap because its bias depends on the sample size
 /// (at small `n/D` a fit spreads leverage from signal onto noise
@@ -416,7 +469,14 @@ fn fit_rows(
 /// rows: at `m = ⌊n/2⌋` it is close to what the split tests estimate (X
 /// scaled once over all rows, each half centred with the training means),
 /// and the NB factor `(n − m)/m` is about 1 (at `m = n^0.7` it is 2.8 at
-/// `n = 100`, and the interval nearly always covers).
+/// `n = 100`, and the interval nearly always covers). The factor assumes two
+/// splits' correlations correlate at `(n − m)/n`, about 0.5. That holds when
+/// the noise of the held-out rows dominates the split-to-split spread, and
+/// the interval then covers a little above its level (about 1.1 to 1.2
+/// times the needed width in the grid). When the noise of the training
+/// fit dominates (typically at high signal), two splits correlate nearer
+/// 0.25, and the interval is conservative: in the Monte Carlo coverage grid
+/// it is up to about twice as wide as needed.
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
 #[allow(clippy::too_many_arguments)]
@@ -430,20 +490,26 @@ fn run_one_confirmatory(
     weights: Option<ColRef<'_, f64>>,
     z: Option<MatRef<'_, f64>>,
     pre_standardized: bool,
-    rng: &mut crate::rng::Rng,
+    seed: u64,
+    r: usize,
 ) -> PlsKitResult<ConfirmatoryWorkerRow> {
     let n = x.nrows();
     let d = x.ncols();
 
     // 1. Index draws: subsample, bootstrap resample, then the half split.
-    let (sample_idx, _) = subsample_indices(n, m, rng);
-    let boot_idx = bootstrap_indices(n, rng);
-    let (half_idx, holdout_idx) = subsample_indices(n, holdout_train_size(n), rng);
+    let (sample_idx, boot_idx, (half_idx, holdout_idx)) = replicate_indices(n, m, seed, r);
 
     // 2. Subsample fit (β) and bootstrap fit (leverage).
     let centre = !pre_standardized;
-    let beta_b = fit_rows(x, y, &sample_idx, k, x_scale, y_scale, weights, z, centre)?.beta;
-    let boot = fit_rows(x, y, &boot_idx, k, x_scale, y_scale, weights, z, centre)?;
+    let all_row = Some((x_scale, y_scale));
+    let beta_b = fit_rows(x, y, &sample_idx, k, all_row, weights, z, centre)?.beta;
+    // The leverage fit scores no other rows, so it standardizes the
+    // resample on its own moments, as the reference fit standardizes all
+    // rows. On the all-row scale a column's weight moves with its resample
+    // variance over the fixed SD, not with its resample SD, which at high
+    // signal roughly doubles the spread of a signal column's leverage.
+    let boot_scales = pre_standardized.then_some((x_scale, y_scale));
+    let boot = fit_rows(x, y, &boot_idx, k, boot_scales, weights, z, centre)?;
 
     // 3. Per-variable leverage on the bootstrap fit's unaligned W. Leverage
     // is invariant under right-orthogonal rotation (leverage =
@@ -454,14 +520,21 @@ fn run_one_confirmatory(
 
     // 4. Holdout predictive correlation of the half-split fit. A failed
     // half-split fit costs the replicate its holdout_corr only (NaN), not its
-    // β and leverage rows.
+    // β and leverage rows; one that fails on the weights is a skip.
     // The holdout rows are gathered, centred with the training half's means
     // and divided by the all-row scale in one pass, y too (the r floors
     // below are absolute). With covariates, both
     // are then the residuals on the holdout rows' `[1, Z]` from the training
     // half's coefficients.
     #[allow(clippy::cast_precision_loss)]
-    let holdout_corr = match fit_rows(x, y, &half_idx, k, x_scale, y_scale, weights, z, true) {
+    let half_fit = fit_rows(x, y, &half_idx, k, all_row, weights, z, true);
+    let holdout_skipped = matches!(
+        half_fit,
+        Err(PlsKitError::InvalidWeights {
+            reason: "insufficient_effective_n" | "all_zero",
+        })
+    );
+    let holdout_corr = match half_fit {
         Err(_) => f64::NAN,
         Ok(RowFit {
             beta: beta_h,
@@ -515,7 +588,7 @@ fn run_one_confirmatory(
     // scales:
     //   β_raw[j] = β_std[j] * y_scale / x_scale[j]
     // Under pre_standardized the scales are 1 (a power of two for a block
-    // outside [2^-256, 2^256]), so β_b is on X as given, as β_ref is.
+    // outside [2^-20, 2^20]), so β_b is on X as given, as β_ref is.
     let beta_vec: Vec<f64> = (0..d)
         .map(|j| beta_b[j] * y_scale[0] / x_scale[j])
         .collect();
@@ -523,6 +596,7 @@ fn run_one_confirmatory(
     Ok(ConfirmatoryWorkerRow {
         leverage,
         holdout_corr,
+        holdout_skipped,
         beta: beta_vec,
     })
 }
@@ -531,7 +605,6 @@ fn run_one_confirmatory(
 mod tests_worker {
     use super::*;
     use crate::linalg::held_out_scale;
-    use crate::rng::resolve_seed;
     use faer::{Col, Mat};
     use rand::RngExt;
     use rand::SeedableRng;
@@ -543,8 +616,11 @@ mod tests_worker {
     /// `WorkerOutcome::Failed`.
     ///
     /// Trigger: tiny y values + `pre_standardized=true` so plskit skips
-    /// re-standardization. NIPALS sees `‖X'y‖ ≪ 1e-14` at component 0
-    /// and short-circuits with no component although `k = 2`.
+    /// re-standardization. y's scale is passed as ones, so y stays at
+    /// `1e-20` (`held_out_scale` would divide it by a power of two): NIPALS
+    /// sees `‖X'y‖ ≪ 1e-14` at component 0 and short-circuits with no
+    /// component although `k = 2`. The test is about the error reaching the
+    /// caller, not about the scale.
     #[test]
     fn worker_propagates_err_on_truncated_w_b() {
         let n = 40;
@@ -553,19 +629,18 @@ mod tests_worker {
         let mut rng_data = rand_chacha::ChaCha8Rng::seed_from_u64(7);
         let x = Mat::<f64>::from_fn(n, d, |_, _| rng_data.random_range(-1.0..1.0));
         let y_tiny = Col::<f64>::from_fn(n, |_| rng_data.random_range(-1e-20..1e-20));
-
-        let (_, mut rng) = resolve_seed(Some(11)).unwrap();
         let res = run_one_confirmatory(
             x.as_ref(),
             y_tiny.as_ref(),
             k,
             resolve_m(n, 0.7),
             held_out_scale(x.as_ref(), None, true).as_ref(),
-            held_out_scale(y_tiny.as_mat(), None, true).as_ref(),
+            Col::<f64>::from_fn(1, |_| 1.0).as_ref(),
             None,
             None,
             true,
-            &mut rng,
+            11,
+            0,
         );
         assert!(
             matches!(&res, Err(PlsKitError::InvalidInput(msg)) if msg.contains("truncated")),
@@ -583,8 +658,6 @@ mod tests_worker {
         let mut rng_data = rand_chacha::ChaCha8Rng::seed_from_u64(7);
         let x = Mat::<f64>::from_fn(n, d, |_, _| rng_data.random_range(-1.0..1.0));
         let y = Col::<f64>::from_fn(n, |_| rng_data.random_range(-1.0..1.0));
-
-        let (_, mut rng) = resolve_seed(Some(11)).unwrap();
         let (xs, ys) = (
             held_out_scale(x.as_ref(), None, false),
             held_out_scale(y.as_mat(), None, false),
@@ -599,7 +672,8 @@ mod tests_worker {
             None,
             None,
             false,
-            &mut rng,
+            11,
+            0,
         )
         .unwrap();
         assert!(row.holdout_corr.is_nan());
@@ -631,8 +705,7 @@ mod tests_worker {
                 y.as_ref(),
                 &idx,
                 k,
-                xsc,
-                ysc,
+                Some((xsc, ysc)),
                 wr,
                 Some(z.as_ref()),
                 true,
@@ -642,7 +715,6 @@ mod tests_worker {
             let (w_sub, _) = crate::fit::validate_and_normalize_weights(
                 w_sub.as_ref().map(Col::as_ref),
                 idx.len(),
-                k,
             )
             .unwrap();
             let wsr = w_sub.as_ref().map(Col::as_ref);
@@ -654,13 +726,14 @@ mod tests_worker {
             let want = pls1_fit_impl(
                 xs.as_ref(),
                 ys.col(0),
-                KSpec::Fixed(k),
+                k,
                 wsr,
                 None,
                 FitOpts {
                     pre_standardized: true,
                     ..FitOpts::default()
                 },
+                InternalFitOpts::default(),
             )
             .unwrap();
             assert_close_rel(got.beta.as_mat(), want.beta.as_mat(), 1e-12, "beta");
@@ -684,8 +757,10 @@ mod tests_worker {
             y.as_ref(),
             &idx,
             1,
-            held_out_scale(x.as_ref(), None, false).as_ref(),
-            held_out_scale(y.as_mat(), None, false).as_ref(),
+            Some((
+                held_out_scale(x.as_ref(), None, false).as_ref(),
+                held_out_scale(y.as_mat(), None, false).as_ref(),
+            )),
             None,
             Some(z.as_ref()),
             true,
@@ -710,7 +785,6 @@ mod tests_worker {
         let x7 = Mat::<f64>::from_fn(n, d, |i, j| x[(i, j)] + 7.0);
         let w = test_weights(n);
         let run = |x: &Mat<f64>| {
-            let (_, mut rng) = resolve_seed(Some(11)).unwrap();
             run_one_confirmatory(
                 x.as_ref(),
                 y.as_ref(),
@@ -721,7 +795,8 @@ mod tests_worker {
                 Some(w.as_ref()),
                 None,
                 true,
-                &mut rng,
+                11,
+                0,
             )
             .unwrap()
         };
@@ -732,20 +807,19 @@ mod tests_worker {
             "holdout_corr {hp} on X, {hs} on X + 7"
         );
 
-        let (_, mut rng) = resolve_seed(Some(11)).unwrap();
-        let (sample_idx, _) = subsample_indices(n, m, &mut rng);
-        let boot_idx = bootstrap_indices(n, &mut rng);
+        let (sample_idx, boot_idx, _) = replicate_indices(n, m, 11, 0);
         let fit = |idx: &[usize]| {
             pls1_fit_impl(
                 row_subset(x7.as_ref(), idx).as_ref(),
                 col_row_subset(y.as_ref(), idx).as_ref(),
-                KSpec::Fixed(k),
+                k,
                 Some(col_row_subset(w.as_ref(), idx).as_ref()),
                 None,
                 FitOpts {
                     pre_standardized: true,
                     ..FitOpts::default()
                 },
+                InternalFitOpts::default(),
             )
             .unwrap()
         };
@@ -756,6 +830,56 @@ mod tests_worker {
         assert_close_rel(got_beta.as_mat(), beta.as_mat(), 1e-12, "beta");
         let (got_lev, want_lev) = (col(&shifted.leverage), col(&lev));
         assert_close_rel(got_lev.as_mat(), want_lev.as_mat(), 1e-12, "leverage");
+    }
+
+    /// The leverage fit of a replicate standardizes the bootstrap resample
+    /// on its own (weighted) moments, as the full-data reference fit
+    /// standardizes X: its leverage is that of the plain fit on the drawn
+    /// rows, with and without weights and covariates.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn replicate_leverage_is_the_plain_fit_on_the_bootstrap_rows() {
+        use crate::test_support::{assert_close_rel, synth, test_weights, unif};
+        let (n, d, k, m) = (60, 8, 2, 40);
+        let (x, y) = synth(n, d, 3, 1.0, 71);
+        let x = Mat::<f64>::from_fn(n, d, |i, j| x[(i, j)] * (j + 1) as f64 + 3.0);
+        let z = unif(n, 2, 72);
+        let (_, boot_idx, _) = replicate_indices(n, m, 11, 0);
+        for w in [None, Some(test_weights(n))] {
+            for zz in [None, Some(z.as_ref())] {
+                let wr = w.as_ref().map(Col::as_ref);
+                let row = run_one_confirmatory(
+                    x.as_ref(),
+                    y.as_ref(),
+                    k,
+                    m,
+                    held_out_scale(x.as_ref(), wr, false).as_ref(),
+                    held_out_scale(y.as_mat(), wr, false).as_ref(),
+                    wr,
+                    zz,
+                    false,
+                    11,
+                    0,
+                )
+                .unwrap();
+                let w_b = wr.map(|w| col_row_subset(w, &boot_idx));
+                let z_b = zz.map(|z| row_subset(z, &boot_idx));
+                let fit = pls1_fit_impl(
+                    row_subset(x.as_ref(), &boot_idx).as_ref(),
+                    col_row_subset(y.as_ref(), &boot_idx).as_ref(),
+                    k,
+                    w_b.as_ref().map(Col::as_ref),
+                    z_b.as_ref().map(Mat::as_ref),
+                    FitOpts::default(),
+                    InternalFitOpts::default(),
+                )
+                .unwrap();
+                let want = crate::linalg::leverage_diag(fit.w_star.as_ref());
+                let col = |v: &[f64]| Col::<f64>::from_fn(v.len(), |i| v[i]);
+                let (got, want) = (col(&row.leverage), col(&want));
+                assert_close_rel(got.as_mat(), want.as_mat(), 1e-12, "leverage");
+            }
+        }
     }
 
     #[test]
@@ -844,7 +968,8 @@ pub struct ConfirmatoryCI {
     /// is on the z-scale (see `CIScalar` doc).
     pub holdout_corr: CIScalar,
     /// Number of resamples whose worker fit succeeded (contributors to
-    /// leverage, `beta_sign_z`). Equals `n_boot − n_worker_failed`.
+    /// leverage, `beta_sign_z`). Equals `n_boot − skipped − n_worker_failed`,
+    /// where `skipped` counts the resamples skipped by weight validation.
     pub n_boot_finite: usize,
     /// Number of resamples whose `holdout_corr` is finite (contributors to
     /// the `holdout_corr` CI). Strictly ≤ `n_boot_finite`.
@@ -1040,13 +1165,23 @@ fn standard_normal_inv(p: f64) -> f64 {
     if q < 0.0 { -val } else { val }
 }
 
-/// Reduce `Option<ConfirmatoryWorkerRow>` rows under the `max_failure_rate`
-/// contract. Errors with `ResampleFailureRateExceeded` if the combined
-/// failure rate (`n_worker_failed + n_holdout_only_nan`) exceeds the
-/// threshold; otherwise filters `None` rows and patches `n_boot`,
-/// `n_boot_finite`, `n_boot_finite_holdout_corr` onto the result.
+/// Reduce `Option<ConfirmatoryWorkerRow>` rows under the `max_skip_rate`
+/// and `max_failure_rate` contracts. `opt_rows` holds the draws that were
+/// not skipped by weight validation (`n_skipped` of them were); a `None` is
+/// a failed draw. A row whose half split failed on the weights
+/// (`holdout_skipped`) is a skip too, of its `holdout_corr` only.
+/// Errors with `ResamplingDegenerate` when the skips (`n_skipped` plus the
+/// `holdout_skipped` rows, over `n_boot`) exceed `max_skip_rate`, and when
+/// no row is `Some`, or no `Some` row has a non-NaN `holdout_corr`,
+/// whatever the rates, since there is nothing to reduce; with
+/// `ResampleFailureRateExceeded` if the combined failure rate
+/// (`n_worker_failed` plus the rows with a NaN `holdout_corr` that are not
+/// `holdout_skipped`, over `n_boot`) exceeds the threshold; otherwise
+/// filters `None` rows and patches `n_boot`, `n_boot_finite`,
+/// `n_boot_finite_holdout_corr` onto the result.
 pub(crate) fn reduce_with_failure_check(
     opt_rows: Vec<Option<ConfirmatoryWorkerRow>>,
+    n_skipped: usize,
     opts: SubsampleOpts,
     n: usize,
     m: usize,
@@ -1054,9 +1189,33 @@ pub(crate) fn reduce_with_failure_check(
     beta_ref: ColRef<'_, f64>,
 ) -> PlsKitResult<ConfirmatoryCI> {
     let n_boot = opts.n_boot;
+    let n_holdout_skipped = opt_rows
+        .iter()
+        .flatten()
+        .filter(|r| r.holdout_skipped)
+        .count();
+    let skipped = n_skipped + n_holdout_skipped;
+    #[allow(clippy::cast_precision_loss)]
+    let skip_rate = skipped as f64 / n_boot as f64;
+    let degenerate = PlsKitError::ResamplingDegenerate {
+        skipped,
+        total: n_boot,
+        skip_rate,
+        threshold: opts.max_skip_rate,
+    };
+    if skip_rate > opts.max_skip_rate
+        || opt_rows
+            .iter()
+            .all(|r| r.as_ref().is_none_or(|r| r.holdout_corr.is_nan()))
+    {
+        return Err(degenerate);
+    }
     let n_worker_failed = opt_rows.iter().filter(|r| r.is_none()).count();
     let rows: Vec<ConfirmatoryWorkerRow> = opt_rows.into_iter().flatten().collect();
-    let n_holdout_only_nan = rows.iter().filter(|r| r.holdout_corr.is_nan()).count();
+    let n_holdout_only_nan = rows
+        .iter()
+        .filter(|r| r.holdout_corr.is_nan() && !r.holdout_skipped)
+        .count();
     let n_holdout_corr_failed = n_worker_failed + n_holdout_only_nan;
 
     #[allow(clippy::cast_precision_loss)]
@@ -1077,8 +1236,8 @@ pub(crate) fn reduce_with_failure_check(
 
     let mut ci = reduce_confirmatory(&rows, n, m, opts.m_rate, opts.level, leverage_ref, beta_ref);
     ci.n_boot = n_boot;
-    ci.n_boot_finite = n_boot - n_worker_failed;
-    ci.n_boot_finite_holdout_corr = n_boot - n_holdout_corr_failed;
+    ci.n_boot_finite = n_boot - n_skipped - n_worker_failed;
+    ci.n_boot_finite_holdout_corr = n_boot - skipped - n_holdout_corr_failed;
     Ok(ci)
 }
 
@@ -1432,6 +1591,7 @@ mod tests_beta_z_and_leverage_clamp {
         ConfirmatoryWorkerRow {
             leverage,
             holdout_corr: 0.5,
+            holdout_skipped: false,
             beta,
         }
     }
@@ -1664,6 +1824,7 @@ mod tests_failure_check {
         ConfirmatoryWorkerRow {
             leverage: vec![0.5_f64; 2],
             holdout_corr,
+            holdout_skipped: false,
             beta: vec![1.0_f64, 1.0_f64],
         }
     }
@@ -1681,12 +1842,14 @@ mod tests_failure_check {
 
     fn run(
         opt_rows: Vec<Option<ConfirmatoryWorkerRow>>,
+        n_skipped: usize,
         opts: SubsampleOpts,
     ) -> PlsKitResult<ConfirmatoryCI> {
         let leverage_ref = vec![0.5_f64; 2];
         let beta_ref_col = Col::<f64>::from_fn(2, |_| 1.0);
         reduce_with_failure_check(
             opt_rows,
+            n_skipped,
             opts,
             100,
             26,
@@ -1700,7 +1863,7 @@ mod tests_failure_check {
         let mut rows: Vec<Option<ConfirmatoryWorkerRow>> =
             (0..99).map(|_| Some(dummy_row(0.5))).collect();
         rows.push(None);
-        let ci = run(rows, opts_with(100, 0.01)).expect("at-threshold should pass");
+        let ci = run(rows, 0, opts_with(100, 0.01)).expect("at-threshold should pass");
         assert_eq!(ci.n_boot, 100);
         assert_eq!(ci.n_boot_finite, 99);
         assert_eq!(ci.n_boot_finite_holdout_corr, 99);
@@ -1712,7 +1875,7 @@ mod tests_failure_check {
             (0..98).map(|_| Some(dummy_row(0.5))).collect();
         rows.push(None);
         rows.push(None);
-        let err = run(rows, opts_with(100, 0.01)).unwrap_err();
+        let err = run(rows, 0, opts_with(100, 0.01)).unwrap_err();
         match err {
             PlsKitError::ResampleFailureRateExceeded {
                 observed_holdout_corr,
@@ -1735,7 +1898,7 @@ mod tests_failure_check {
         let mut rows: Vec<Option<ConfirmatoryWorkerRow>> =
             (0..99).map(|_| Some(dummy_row(0.5))).collect();
         rows.push(None);
-        match run(rows, opts_with(100, 0.0)).unwrap_err() {
+        match run(rows, 0, opts_with(100, 0.0)).unwrap_err() {
             PlsKitError::ResampleFailureRateExceeded {
                 observed_holdout_corr,
                 n_worker_failed,
@@ -1755,7 +1918,7 @@ mod tests_failure_check {
         for _ in 0..50 {
             rows.push(Some(dummy_row(f64::NAN)));
         }
-        let err = run(rows, opts_with(100, 0.0)).unwrap_err();
+        let err = run(rows, 0, opts_with(100, 0.0)).unwrap_err();
         match err {
             PlsKitError::ResampleFailureRateExceeded {
                 observed_worker,
@@ -1778,31 +1941,49 @@ mod tests_failure_check {
         let mut rows: Vec<Option<ConfirmatoryWorkerRow>> =
             (0..99).map(|_| Some(dummy_row(0.5))).collect();
         rows.push(Some(dummy_row(f64::NAN)));
-        let ci = run(rows, opts_with(100, 0.01)).expect("1 holdout NaN under threshold");
+        let ci = run(rows, 0, opts_with(100, 0.01)).expect("1 holdout NaN under threshold");
         assert_eq!(ci.n_boot, 100);
         assert_eq!(ci.n_boot_finite, 100);
         assert_eq!(ci.n_boot_finite_holdout_corr, 99);
     }
 
     #[test]
-    fn permissive_all_none_returns_degenerate_ci() {
-        let rows: Vec<Option<ConfirmatoryWorkerRow>> = (0..100).map(|_| None).collect();
-        let ci = run(rows, opts_with(100, 1.0)).expect("permissive must not error");
+    fn no_row_left_is_resampling_degenerate() {
+        let all_failed: Vec<Option<ConfirmatoryWorkerRow>> = (0..100).map(|_| None).collect();
+        for (rows, n_skipped) in [(all_failed, 0), (Vec::new(), 100)] {
+            match run(rows, n_skipped, opts_with(100, 1.0)) {
+                Err(PlsKitError::ResamplingDegenerate { total: 100, .. }) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn no_finite_holdout_corr_is_resampling_degenerate() {
+        // Every draw fits with a NaN holdout correlation (one skipped), or
+        // one fails and the rest have NaN.
+        for n_skipped in [1, 0] {
+            let mut rows: Vec<Option<ConfirmatoryWorkerRow>> =
+                (0..99).map(|_| Some(dummy_row(f64::NAN))).collect();
+            if n_skipped == 0 {
+                rows.push(None);
+            }
+            match run(rows, n_skipped, opts_with(100, 1.0)) {
+                Err(PlsKitError::ResamplingDegenerate { total: 100, .. }) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn skips_reduce_the_finite_counts_not_the_failure_rate() {
+        let mut rows: Vec<Option<ConfirmatoryWorkerRow>> =
+            (0..94).map(|_| Some(dummy_row(0.5))).collect();
+        rows.push(Some(dummy_row(f64::NAN)));
+        let ci = run(rows, 5, opts_with(100, 0.01)).expect("skips are not failures");
         assert_eq!(ci.n_boot, 100);
-        assert_eq!(ci.n_boot_finite, 0);
-        assert_eq!(ci.n_boot_finite_holdout_corr, 0);
-        // No finite replicate: every CI collapses onto its reference
-        // (leverage_ref 0.5, β_ref 1.0) with zero SE; the β z is NaN
-        // (se = 0 with β_ref ≠ 0) and holdout_corr is all zeros.
-        assert_eq!(ci.leverage_ci_lower, [0.5, 0.5]);
-        assert_eq!(ci.leverage_ci_upper, [0.5, 0.5]);
-        assert_eq!(ci.leverage_se, [0.0, 0.0]);
-        assert_eq!(ci.beta_ci_lower, [1.0, 1.0]);
-        assert_eq!(ci.beta_ci_upper, [1.0, 1.0]);
-        assert_eq!(ci.beta_se, [0.0, 0.0]);
-        assert!(ci.beta_sign_z_signed.iter().all(|z| z.is_nan()));
-        let h = &ci.holdout_corr;
-        assert_eq!((h.point, h.lower, h.upper, h.sd), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(ci.n_boot_finite, 95);
+        assert_eq!(ci.n_boot_finite_holdout_corr, 94);
     }
 }
 
@@ -1825,9 +2006,13 @@ pub(crate) struct SubsampleOpts {
     /// Threshold on the fraction of resamples skipped by weight validation.
     /// Default `0.01`. Range `[0.0, 1.0]`.
     /// Distinct from `max_failure_rate` (numerical failures): when a subsample's `pls1_fit`
-    /// returns `InvalidWeights { reason: "insufficient_effective_n" }` due to insufficient
-    /// effective sample size after weight-based row selection, that's a *skip* rather than
-    /// a numerical *failure*. Fires `PlsKitError::ResamplingDegenerate` when exceeded.
+    /// returns `InvalidWeights { reason: "insufficient_effective_n" }` (too small an
+    /// effective sample size) or `InvalidWeights { reason: "all_zero" }` (a subsample whose
+    /// weights are all zero), that's a *skip* rather than a numerical *failure*. A half-split
+    /// fit that fails this way is a skip of the replicate's holdout correlation only. Fires
+    /// `PlsKitError::ResamplingDegenerate` when exceeded, and also when no draw is left to
+    /// reduce after skips and failures, or every draw left has a NaN holdout correlation,
+    /// whatever the two rates.
     pub max_skip_rate: f64,
 }
 
@@ -1881,11 +2066,12 @@ impl SubsampleOpts {
 enum WorkerOutcome {
     /// Worker succeeded; carries the row data.
     Ok(ConfirmatoryWorkerRow),
-    /// `pls1_fit` returned `InvalidWeights { reason: "insufficient_effective_n" }`.
+    /// `pls1_fit` returned `InvalidWeights` with reason `"insufficient_effective_n"` or
+    /// `"all_zero"` (a subsample whose weights are all zero).
     /// Counts toward `max_skip_rate`, not `max_failure_rate`.
     Skipped,
     /// Any other error (numerical failure, NaN, etc.).
-    /// Counts toward `max_failure_rate` via the `None` path in `reduce_with_failure_check`.
+    /// Counts toward `max_failure_rate`, as a `None` row in `reduce_with_failure_check`.
     Failed,
 }
 
@@ -1893,9 +2079,11 @@ enum WorkerOutcome {
 /// full-data reference fit and validated arguments. X and y are scaled once
 /// over all rows, as the held-out tests scale X (`linalg::held_out_scale`:
 /// the full-data fit's weighted moments, or as given under
-/// `pre_standardized`), and every replicate centres its own rows (see
-/// `fit_rows`), apart from the β and leverage fits under `pre_standardized`,
-/// which take X and y as given, as the reference fit does. With covariates
+/// `pre_standardized`), for the β fits and the half splits, which centre
+/// their own rows (see `fit_rows`). The leverage fits standardize their
+/// resample on its own moments, as the reference fit standardizes all rows.
+/// Under `pre_standardized` the β and leverage fits take X and y as given,
+/// as the reference fit does. With covariates
 /// `z`, `(n, p_z)`, every replicate fit redoes the adjustment on its own
 /// rows.
 #[allow(clippy::too_many_arguments)]
@@ -1909,7 +2097,7 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
     opts: SubsampleOpts,
     weights: Option<ColRef<'_, f64>>,
     z: Option<MatRef<'_, f64>>,
-    rng: &mut crate::rng::Rng,
+    seed: u64,
 ) -> PlsKitResult<ConfirmatoryCI> {
     opts.validate()?;
     let n = x.nrows();
@@ -1925,59 +2113,48 @@ pub(crate) fn pls1_subsample_inference_confirmatory(
     // subsample fit's copies, of m rows, the half split's, of n/2 rows, and
     // its n - n/2 hold-out rows are smaller and not alive at the same
     // time), and one fit's buffers. The
-    // unit counts the two copies whether weighted or not.
+    // unit counts the two copies whether weighted or not. The call holds
+    // every replicate's `beta` and `leverage` rows (`d` entries each) until
+    // the reduction.
     let unit = crate::resample::copy_bytes(n, x.ncols())
         .saturating_mul(2)
         .saturating_add(crate::fit::pls1_fit_bytes(x.ncols(), k));
-    let outcomes: Vec<WorkerOutcome> =
-        crate::resample::map_units_seeded(rng, opts.n_boot, unit, |_, child| {
-            let (xs, ys) = (x_scale.as_ref(), y_scale.as_ref());
-            match run_one_confirmatory(x, y, k, m, xs, ys, weights, z, pre_std, child) {
-                std::result::Result::Ok(row) => WorkerOutcome::Ok(row),
-                Err(PlsKitError::InvalidWeights {
-                    reason: "insufficient_effective_n",
-                }) => WorkerOutcome::Skipped,
-                Err(_) => WorkerOutcome::Failed,
-            }
-        });
+    let rows = opts.n_boot.saturating_mul(x.ncols().saturating_mul(16));
+    let outcomes: Vec<WorkerOutcome> = crate::resample::map_units(opts.n_boot, rows, unit, |r| {
+        let (xs, ys) = (x_scale.as_ref(), y_scale.as_ref());
+        match run_one_confirmatory(x, y, k, m, xs, ys, weights, z, pre_std, seed, r) {
+            std::result::Result::Ok(row) => WorkerOutcome::Ok(row),
+            Err(PlsKitError::InvalidWeights {
+                reason: "insufficient_effective_n" | "all_zero",
+            }) => WorkerOutcome::Skipped,
+            Err(_) => WorkerOutcome::Failed,
+        }
+    })?;
 
-    // Check max_skip_rate before passing to reduce_with_failure_check.
     let n_skipped = outcomes
         .iter()
         .filter(|o| matches!(o, WorkerOutcome::Skipped))
         .count();
-    #[allow(clippy::cast_precision_loss)]
-    let skip_rate = n_skipped as f64 / opts.n_boot as f64;
-    if skip_rate > opts.max_skip_rate {
-        return Err(PlsKitError::ResamplingDegenerate {
-            skipped: n_skipped,
-            total: opts.n_boot,
-            skip_rate,
-            threshold: opts.max_skip_rate,
-        });
-    }
 
-    // Map outcomes to Option<ConfirmatoryWorkerRow>: Ok→Some, Skipped→None, Failed→None.
-    // Both Skipped and Failed become None so reduce_with_failure_check counts them as
-    // worker failures for the max_failure_rate check. This is intentionally conservative:
-    // a skipped subsample still cannot contribute data, so it should be treated as failed
-    // for the purpose of that secondary check.
+    // Skipped draws are dropped; a failed one becomes `None`, which
+    // `reduce_with_failure_check` counts against `max_failure_rate`, and
+    // it checks `max_skip_rate`.
     let opt_rows: Vec<Option<ConfirmatoryWorkerRow>> = outcomes
         .into_iter()
-        .map(|o| match o {
-            WorkerOutcome::Ok(row) => Some(row),
-            WorkerOutcome::Skipped | WorkerOutcome::Failed => None,
+        .filter_map(|o| match o {
+            WorkerOutcome::Ok(row) => Some(Some(row)),
+            WorkerOutcome::Skipped => None,
+            WorkerOutcome::Failed => Some(None),
         })
         .collect();
 
-    reduce_with_failure_check(opt_rows, opts, n, m, leverage_ref, beta_ref)
+    reduce_with_failure_check(opt_rows, n_skipped, opts, n, m, leverage_ref, beta_ref)
 }
 
 #[cfg(test)]
 mod tests_engine {
     use super::*;
-    use crate::fit::{FitOpts, KSpec, pls1_fit};
-    use crate::rng::resolve_seed;
+    use crate::fit::{FitOpts, pls1_fit};
     use crate::test_support::synth;
     use faer::{Col, Mat};
     use rand::RngExt;
@@ -2058,15 +2235,7 @@ mod tests_engine {
         seed: u64,
         m_rate: f64,
     ) -> ConfirmatoryCI {
-        let fit = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(k),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
+        let fit = pls1_fit(x.as_ref(), y.as_ref(), k, None, None, FitOpts::default()).unwrap();
         let leverage_ref = crate::linalg::leverage_diag(fit.w_star.as_ref());
         let opts = SubsampleOpts {
             n_boot,
@@ -2076,7 +2245,6 @@ mod tests_engine {
             max_failure_rate: 0.0,
             max_skip_rate: 1.0,
         };
-        let (_, mut rng) = resolve_seed(Some(seed)).unwrap();
         pls1_subsample_inference_confirmatory(
             x.as_ref(),
             y.as_ref(),
@@ -2086,9 +2254,64 @@ mod tests_engine {
             opts,
             None,
             None,
-            &mut rng,
+            seed,
         )
         .unwrap()
+    }
+
+    /// Replicate 0's half split trains on rows that all have weight 0, so
+    /// its fit fails on the weights. That costs the replicate its
+    /// `holdout_corr` only, and counts as a skip under `max_skip_rate`, not
+    /// as a failure under `max_failure_rate`.
+    #[test]
+    #[allow(clippy::many_single_char_names)] // n, k, x, y, w are the math names
+    fn a_half_split_without_weight_is_a_skip() {
+        let (n, k, seed) = (60, 1, 5);
+        let (x, y) = synth(n, 4, 1, 1.0, 81);
+        let (_, _, (half, _)) = replicate_indices(n, resolve_m(n, 0.7), seed, 0);
+        let w = Col::<f64>::from_fn(n, |i| if half.contains(&i) { 0.0 } else { 1.0 });
+        let fit = pls1_fit(
+            x.as_ref(),
+            y.as_ref(),
+            k,
+            Some(w.as_ref()),
+            None,
+            FitOpts::default(),
+        )
+        .unwrap();
+        let leverage_ref = crate::linalg::leverage_diag(fit.w_star.as_ref());
+        let run = |max_skip_rate| {
+            let opts = SubsampleOpts {
+                n_boot: 100,
+                m_rate: 0.7,
+                level: 0.95,
+                pre_standardized: false,
+                max_failure_rate: 0.0,
+                max_skip_rate,
+            };
+            pls1_subsample_inference_confirmatory(
+                x.as_ref(),
+                y.as_ref(),
+                k,
+                fit.beta.as_ref(),
+                &leverage_ref,
+                opts,
+                Some(w.as_ref()),
+                None,
+                seed,
+            )
+        };
+        let ci = run(0.01).unwrap();
+        assert_eq!(ci.n_boot_finite, 100);
+        assert_eq!(ci.n_boot_finite_holdout_corr, 99);
+        match run(0.0) {
+            Err(PlsKitError::ResamplingDegenerate {
+                skipped: 1,
+                total: 100,
+                ..
+            }) => {}
+            other => panic!("{other:?}"),
+        }
     }
 
     /// A column that barely varies (1e-44 noise, one row at 0.5) is read on
@@ -2186,15 +2409,7 @@ mod tests_engine {
         let mut target = [0.0_f64; 2];
         for o in 0..n_oracle {
             let (x, y) = synth(n, d, 2, snr, 90_000 + o);
-            let fit = pls1_fit(
-                x.as_ref(),
-                y.as_ref(),
-                KSpec::Fixed(1),
-                None,
-                None,
-                FitOpts::default(),
-            )
-            .unwrap();
+            let fit = pls1_fit(x.as_ref(), y.as_ref(), 1, None, None, FitOpts::default()).unwrap();
             let h = crate::linalg::leverage_diag(fit.w_star.as_ref());
             target[0] += h[0] / n_oracle as f64;
             target[1] += h[1] / n_oracle as f64;
@@ -2234,16 +2449,9 @@ mod tests_engine {
             }
         }
         let ci = run_engine(&x, &y, 2, 300, 2026);
-        let beta_ref = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(2),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap()
-        .beta;
+        let beta_ref = pls1_fit(x.as_ref(), y.as_ref(), 2, None, None, FitOpts::default())
+            .unwrap()
+            .beta;
         let (lo, hi) = (&ci.beta_ci_lower, &ci.beta_ci_upper);
         let mid = |j: usize| f64::midpoint(lo[j], hi[j]).abs();
         let noise_mid = (2..8).map(mid).fold(0.0_f64, f64::max);
@@ -2293,9 +2501,8 @@ mod tests_engine {
                 pre_standardized: true,
                 ..FitOpts::default()
             };
-            let fit = pls1_fit(xs.as_ref(), y.as_ref(), KSpec::Fixed(k), None, None, opts).unwrap();
+            let fit = pls1_fit(xs.as_ref(), y.as_ref(), k, None, None, opts).unwrap();
             let lev = crate::linalg::leverage_diag(fit.w_star.as_ref());
-            let (_, mut rng) = resolve_seed(Some(19)).unwrap();
             let ci = pls1_subsample_inference_confirmatory(
                 xs.as_ref(),
                 y.as_ref(),
@@ -2312,7 +2519,7 @@ mod tests_engine {
                 },
                 None,
                 None,
-                &mut rng,
+                19,
             )
             .unwrap();
             let mut v: Vec<f64> = [&ci.beta_ci_lower, &ci.beta_ci_upper, &ci.beta_se]
@@ -2373,12 +2580,12 @@ mod tests_engine {
             "confirmatory_ci",
             |c| {
                 let k = 2;
-                let (w_norm, _) = crate::fit::validate_and_normalize_weights(c.w, c.x.nrows(), k)?;
+                let (w_norm, _) = crate::fit::validate_and_normalize_weights(c.w, c.x.nrows())?;
                 let wr = w_norm.as_ref().map(Col::as_ref);
                 let fit = pls1_fit(
                     c.x_owned.as_ref(),
                     c.y,
-                    KSpec::Fixed(k),
+                    k,
                     wr,
                     None,
                     FitOpts {
@@ -2387,7 +2594,6 @@ mod tests_engine {
                     },
                 )?;
                 let lev = crate::linalg::leverage_diag(fit.w_star.as_ref());
-                let (_, mut rng) = resolve_seed(Some(3))?;
                 pls1_subsample_inference_confirmatory(
                     c.x,
                     c.y,
@@ -2404,7 +2610,7 @@ mod tests_engine {
                     },
                     wr,
                     None,
-                    &mut rng,
+                    3,
                 )
             },
             |ci: &ConfirmatoryCI| {
@@ -2435,29 +2641,19 @@ mod tests_engine {
 
     /// The confirmatory CI gives the same bits with its replicates one at a
     /// time (budget 0) and all in one batch (no limit), unweighted and
-    /// weighted, and leaves the parent generator in the same state.
+    /// weighted.
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn confirmatory_ci_does_not_depend_on_the_budget() {
-        use rand::Rng as _;
         let (n, k) = (60_usize, 2_usize);
         let (x, y) = synth(n, 6, 2, 2.0, 11);
         let w = crate::test_support::test_weights(n);
         for weights in [None, Some(w.as_ref())] {
-            let (w_norm, _) = crate::fit::validate_and_normalize_weights(weights, n, k).unwrap();
+            let (w_norm, _) = crate::fit::validate_and_normalize_weights(weights, n).unwrap();
             let wr = w_norm.as_ref().map(Col::as_ref);
-            let fit = pls1_fit(
-                x.as_ref(),
-                y.as_ref(),
-                KSpec::Fixed(k),
-                wr,
-                None,
-                FitOpts::default(),
-            )
-            .unwrap();
+            let fit = pls1_fit(x.as_ref(), y.as_ref(), k, wr, None, FitOpts::default()).unwrap();
             let lev = crate::linalg::leverage_diag(fit.w_star.as_ref());
             let run = |b| {
-                let (_, mut rng) = resolve_seed(Some(5)).unwrap();
                 let (ci, log) = crate::resample::with_batch_log(|| {
                     crate::fit::with_budget(b, || {
                         pls1_subsample_inference_confirmatory(
@@ -2476,20 +2672,22 @@ mod tests_engine {
                             },
                             wr,
                             None,
-                            &mut rng,
+                            5,
                         )
                         .unwrap()
                     })
                 });
-                ((format!("{ci:?}"), rng.next_u64()), log)
+                (format!("{ci:?}"), log)
             };
             let ((one, log_one), (all, log_all)) = (run(0), run(u64::MAX));
             assert_eq!(one, all, "weighted={}", weights.is_some());
             crate::resample::assert_batches(&log_one, 100, 1, 1);
             crate::resample::assert_batches(&log_all, 100, 100, 1);
-            // A replicate counts two n-row copies of X and one fit's buffers.
+            // A replicate counts two n-row copies of X and one fit's
+            // buffers; the call holds every replicate's β and leverage rows.
             let unit = 2 * crate::resample::copy_bytes(n, 6) + crate::fit::pls1_fit_bytes(6, k);
-            for (budget, batch) in [(2 * unit - 1, 1), (2 * unit, 2)] {
+            let rows = 100 * 2 * 6 * 8;
+            for (budget, batch) in [(rows + 2 * unit - 1, 1), (rows + 2 * unit, 2)] {
                 let (_, log) = run(u64::try_from(budget).unwrap());
                 crate::resample::assert_batches(&log, 100, batch, 1);
             }

@@ -7,12 +7,7 @@ use faer::{Accum, Col, ColRef, Mat, MatRef, Par};
 
 use crate::error::{PlsKitError, PlsKitResult};
 
-/// How `pls1_fit` decides how many components to extract.
-#[derive(Debug, Clone, Copy)]
-pub enum KSpec {
-    /// Fixed component count requested by the caller.
-    Fixed(usize),
-}
+pub(crate) mod lanes;
 
 /// Parallelism strategy for the PLS1 kernel (`pls1_kernel`) called by `pls1_fit`.
 ///
@@ -53,13 +48,14 @@ pub enum KSpec {
 // `signal_test::SPLIT_FIT_PAR`, which also covers the first product
 // `ŝ₁ = Xs'ys` of `split_exact`'s Gram-p arm (formed under the `Par` that
 // fit resolves); the two `find_k` fold fits; `subsample::fit_rows`. `Seq`:
-// the `raw_perm` fold fit (`signal_test::cv_fold_contribution`) and the
-// Gram-p arm's first product on its folds; the permutation refits of
+// the products of the `raw_perm` fold fits (`signal_test::fold_columns_lanes`)
+// and the Gram-p arm's first product on its folds; the permutation refits of
 // `pls1_perm_null` and the Gram-p arm's first product there; the
 // per-replicate products of the Gram-p and n-space backends beyond that
 // first product; and the per-split PLS3 fit of `pls3_signal_test`, which
 // runs every product with `Par::Seq`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParChoice {
     /// Decide per fit based on `n * d * k`.
     Auto,
@@ -73,51 +69,61 @@ pub struct FitOpts {
     /// Skip the centering/scaling step; caller asserts X and y are already standardized.
     ///
     /// **Scale contract.** When `pre_standardized=true`, the PLS1 kernel
-    /// uses a fixed `1e-14` absolute threshold on the per-component norms
-    /// of `X_a'y_a` and `t = X_a w` (every component must also clear a floor relative
-    /// to `‖X‖_F·‖y‖`, which is scale-free). If raw data is scaled below
-    /// ~`1e-7` (frobenius norm of `X` < `1e-6`), the loop short-circuits at
-    /// the first component and the fit silently returns a zero-beta model. Callers
-    /// passing `pre_standardized=true` must ensure the inputs are
+    /// stops a component on `‖X_a'y_a‖ < 1e-14` and on `t't < 1e-14`
+    /// (`t = X_a w`), and on `‖X_a'y_a‖` at the rounding floor relative to
+    /// `‖X‖_F·‖y‖`, which is scale-free. An X whose largest entry (with
+    /// weights, of the √w-scaled rows) is outside `[2^-20, 2^20]` is fitted
+    /// divided by a power of two near that entry and the fit is mapped back
+    /// to X's scale, as if fitted in exact arithmetic, so X's scale does not
+    /// cut components. y is used as given and not divided, so for a y far
+    /// below unit scale the `‖X_a'y_a‖` stop still depends on its scale.
+    /// Callers passing `pre_standardized=true` must ensure the inputs are
     /// genuinely zero-mean / unit-variance (or at least scale-comparable
     /// to that). The default `pre_standardized=false` path absorbs raw
-    /// scale automatically and is unaffected by this contract. An X whose
-    /// largest entry (with weights, on a row of positive weight) is outside
-    /// `[2^-256, 2^256]`, whose products leave the
-    /// `f64` range, is fitted divided by a power of two near that entry and
-    /// the fit is mapped back to X's scale, as if fitted in exact arithmetic.
+    /// scale automatically and is unaffected by this contract.
     ///
-    /// As a guard, when `pre_standardized=true` and `check_n_eff=true`
-    /// (the default for top-level public entry points), `pls1_fit`
+    /// As a guard, when `pre_standardized=true`, the public `pls1_fit`
     /// returns `InvalidInput` if the PLS1 kernel truncates below the requested `k`.
-    /// Per-iteration internal callers (CV folds, per-half split fits,
+    /// The crate's own per-fold and per-split fits (CV folds, per-half split fits,
     /// permutation refits, the BIC full-k fit, the sequential deflation
-    /// fit) set `check_n_eff=false` and tolerate truncation by design.
+    /// fit) tolerate truncation by design.
     pub pre_standardized: bool,
-    /// When true (default), `pls1_fit` errors with `InvalidWeights{reason:"insufficient_effective_n"}`
-    /// (non-uniform weights) or `InvalidArgument` (uniform or absent weights)
-    /// if `n_eff < k + 1`. Set to false for per-iteration internal calls (CV folds,
-    /// bootstrap subsamples) where the upstream accumulator handles degeneracy.
-    /// See `docs/internals/n-eff-check.md`.
-    pub check_n_eff: bool,
     /// Parallelism strategy for the fit's pass over `X` (the standardization
     /// moments or the sum of squares) and the PLS1 kernel. See `ParChoice`.
     pub par: ParChoice,
-    /// Sparse keep-count (spls1 family plumbing): retain the `keep`
-    /// largest-|w| coordinates per component, zero the rest — hard selection
-    /// at the keep-th order statistic of |w|; exact ties break by lowest
-    /// column index (reproducibility contract). `None` (default) = dense
-    /// PLS1. Wrapper surfaces never expose this on dense functions;
-    /// call `spls1_fit` instead of setting it directly.
-    pub keep: Option<usize>,
 }
 
 impl Default for FitOpts {
     fn default() -> Self {
         Self {
             pre_standardized: false,
-            check_n_eff: true,
             par: ParChoice::Auto,
+        }
+    }
+}
+
+/// Crate-internal knobs of [`pls1_fit_impl`], beside the public [`FitOpts`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct InternalFitOpts {
+    /// When true (default), the fit errors with `InvalidWeights{reason:"insufficient_effective_n"}`
+    /// (non-uniform weights) or `InvalidArgument` (uniform or absent weights)
+    /// if `n_eff < k + 1`. Set to false for per-iteration internal calls (CV folds,
+    /// bootstrap subsamples) where the upstream accumulator handles degeneracy.
+    /// See `docs/internals/n-eff-check.md`.
+    pub(crate) check_n_eff: bool,
+    /// Sparse keep-count (spls1 family plumbing): retain the `keep`
+    /// largest-|w| coordinates per component, zero the rest — hard selection
+    /// at the keep-th order statistic of |w|; exact ties break by lowest
+    /// column index (reproducibility contract). `None` (default) = dense
+    /// PLS1. Wrapper surfaces never expose this on dense functions;
+    /// call `spls1_fit` instead of setting it directly.
+    pub(crate) keep: Option<usize>,
+}
+
+impl Default for InternalFitOpts {
+    fn default() -> Self {
+        Self {
+            check_n_eff: true,
             keep: None,
         }
     }
@@ -142,9 +148,50 @@ pub(crate) const PAR_DEGREE: usize = 8;
 
 /// The one parallel `faer::Par` of this crate: `Par::Rayon(PAR_DEGREE)`.
 /// Never `Par::rayon(0)`, whose degree is the pool size (see
-/// [`PAR_DEGREE`]).
+/// [`PAR_DEGREE`]), except in a test build on a thread that
+/// `install_pool_sized` has switched.
 pub(crate) fn par_fixed() -> Par {
+    #[cfg(test)]
+    if POOL_SIZED_PAR.with(std::cell::Cell::get) {
+        return Par::rayon(0);
+    }
     Par::rayon(PAR_DEGREE)
+}
+
+/// The number of pieces the crate's own row-split kernels cut their work
+/// into: [`PAR_DEGREE`], or in a test build the pool size on a thread that
+/// `install_pool_sized` has switched. It sets the pieces of
+/// `linalg::row_major_t_mul`'s parallel arm and of both arms of
+/// `linalg::sum_of_squares`, which reads it before it matches on `par`, so
+/// under the switch its `Par::Seq` arm follows the pool size too.
+pub(crate) fn par_degree() -> usize {
+    #[cfg(test)]
+    if POOL_SIZED_PAR.with(std::cell::Cell::get) {
+        return rayon::current_num_threads();
+    }
+    PAR_DEGREE
+}
+
+/// Test only: runs `f` in `pool` with [`par_fixed`] and [`par_degree`]
+/// following the pool size on every worker, so a test can show that a call
+/// reaches a split whose rounding depends on the degree. The switch is a
+/// thread-local, set on every worker by `broadcast` and cleared the same
+/// way after `f`, also when `f` panics: a process-wide switch would leak
+/// into the unit tests running at the same time.
+#[cfg(test)]
+pub(crate) fn install_pool_sized<T: Send>(
+    pool: &rayon::ThreadPool,
+    f: impl FnOnce() -> T + Send,
+) -> T {
+    struct Clear<'a>(&'a rayon::ThreadPool);
+    impl Drop for Clear<'_> {
+        fn drop(&mut self) {
+            self.0.broadcast(|_| POOL_SIZED_PAR.with(|c| c.set(false)));
+        }
+    }
+    pool.broadcast(|_| POOL_SIZED_PAR.with(|c| c.set(true)));
+    let _clear = Clear(pool);
+    pool.install(f)
 }
 
 /// Environment variable that caps plskit's thread count; read once per
@@ -159,7 +206,7 @@ pub(crate) fn parse_num_threads(raw: Option<&str>) -> PlsKitResult<Option<usize>
     match raw {
         None | Some("0") => Ok(None),
         Some(s) => match s.parse::<usize>() {
-            Ok(n) if n >= 1 => Ok(Some(n)),
+            Ok(n) if n >= 1 && s.bytes().all(|c| c.is_ascii_digit()) => Ok(Some(n)),
             _ => Err(PlsKitError::InvalidArgument(format!(
                 "{NUM_THREADS_ENV} must be a positive integer or 0, got {s:?}"
             ))),
@@ -168,12 +215,12 @@ pub(crate) fn parse_num_threads(raw: Option<&str>) -> PlsKitResult<Option<usize>
 }
 
 /// Environment variable that sets the memory budget of the resampling
-/// loops; see [`memory_budget`]. Validated once per top-level call by
+/// loops; see [`memory_budget`]. Read once per top-level call by
 /// [`with_thread_limit`].
 pub(crate) const MEMORY_BUDGET_ENV: &str = "PLSKIT_MEMORY_BUDGET";
 
-/// Budget in bytes when `PLSKIT_MEMORY_BUDGET` is unset: 2 GiB.
-pub(crate) const DEFAULT_MEMORY_BUDGET: u64 = 2 << 30;
+/// Budget in bytes when `PLSKIT_MEMORY_BUDGET` is unset: 4 GiB.
+pub(crate) const DEFAULT_MEMORY_BUDGET: u64 = 4 << 30;
 
 /// `PLSKIT_MEMORY_BUDGET` as read from the environment: unset → the default;
 /// otherwise a whole number of bytes, optionally followed by a unit letter
@@ -223,33 +270,54 @@ fn bad_memory_budget(quoted: &str) -> PlsKitError {
     ))
 }
 
-#[cfg(test)]
 thread_local! {
     static MEMORY_BUDGET_OVERRIDE: std::cell::Cell<Option<u64>> =
         const { std::cell::Cell::new(None) };
+    static HELD_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static GEMM_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    #[cfg(test)]
+    static POOL_SIZED_PAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test builds read this in place of the `PLSKIT_MEMORY_BUDGET`
+/// environment variable when it is set: safe code cannot change the
+/// environment of a running process. It is process-wide, so only a test
+/// that runs alone in a child process sets it.
+#[cfg(test)]
+static MEMORY_BUDGET_VAR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn memory_budget_var() -> Result<String, std::env::VarError> {
+    #[cfg(test)]
+    if let Some(s) = MEMORY_BUDGET_VAR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
+        return Ok(s);
+    }
+    std::env::var(MEMORY_BUDGET_ENV)
 }
 
 /// Bytes of working memory the resampling loops may spend on the buffers
-/// that grow with the data: `PLSKIT_MEMORY_BUDGET` read on each call, the
-/// default when it is unset or does not parse (the entry points reject a
-/// bad value up front, see [`with_thread_limit`]). Under `cfg(test)` a
-/// thread-local override set by `with_budget` wins.
+/// that grow with the data: the call's value when one is set on this
+/// thread (by [`with_budget`], which [`with_thread_limit`] and the batching
+/// helpers of `resample` call), else `PLSKIT_MEMORY_BUDGET`, the default
+/// when it is unset or does not parse (the entry points reject a bad value
+/// up front).
 pub(crate) fn memory_budget() -> u64 {
-    #[cfg(test)]
     if let Some(b) = MEMORY_BUDGET_OVERRIDE.with(std::cell::Cell::get) {
         return b;
     }
-    match std::env::var(MEMORY_BUDGET_ENV) {
+    match memory_budget_var() {
         Ok(s) => parse_memory_budget(Some(&s)).unwrap_or(DEFAULT_MEMORY_BUDGET),
         Err(_) => DEFAULT_MEMORY_BUDGET,
     }
 }
 
 /// Run `f` with [`memory_budget`] fixed to `bytes` on the calling thread
-/// (loop sites that `f` reaches on this thread see it; other threads read
-/// the environment). The previous override is restored afterwards, also
-/// when `f` panics.
-#[cfg(test)]
+/// (loop sites that `f` reaches on this thread see it; other threads see
+/// it only where a batching helper of `resample` passes it on). The
+/// previous value is restored afterwards, also when `f` panics.
 pub(crate) fn with_budget<T>(bytes: u64, f: impl FnOnce() -> T) -> T {
     struct Restore(Option<u64>);
     impl Drop for Restore {
@@ -258,7 +326,62 @@ pub(crate) fn with_budget<T>(bytes: u64, f: impl FnOnce() -> T) -> T {
         }
     }
     let _restore = Restore(MEMORY_BUDGET_OVERRIDE.with(|c| c.replace(Some(bytes))));
+    let _held = hold_bytes(0);
+    let _gemm = hold_gemm_bytes(0);
     f()
+}
+
+/// Bytes the call holds on this thread beside the loops it runs (the
+/// covariate-adjusted copy of X in `find_k`): `resample::units_at_once`
+/// and `route_select::select` count them as call bytes of every loop.
+/// [`with_budget`] sets them to 0 for its scope, so the units of a loop,
+/// which the batching helpers run under it, and a public call's body do not
+/// count them.
+pub(crate) fn held_bytes() -> usize {
+    HELD_BYTES.with(std::cell::Cell::get)
+}
+
+/// Set [`held_bytes`] to `bytes` on the calling thread until the returned
+/// guard drops, which restores the previous value (also on a panic).
+#[must_use = "held bytes count only while the guard lives"]
+pub(crate) fn hold_bytes(bytes: usize) -> HeldBytes {
+    HeldBytes::set(&HELD_BYTES, bytes)
+}
+
+/// faer's multiply buffers (`resample::gemm_buffer_bytes`) that
+/// `resample::units_at_once` adds to every loop's call bytes at the real
+/// thread count: set by [`with_thread_limit`] on a call that takes its
+/// budget from the environment, and 0 under every other [`with_budget`]
+/// (a loop's units, a call made inside another, which the outer call
+/// counted, and tests that fix a budget).
+pub(crate) fn gemm_bytes() -> usize {
+    GEMM_BYTES.with(std::cell::Cell::get)
+}
+
+/// Set [`gemm_bytes`] to `bytes` on the calling thread until the returned
+/// guard drops, which restores the previous value (also on a panic).
+#[must_use = "the multiply buffers count only while the guard lives"]
+pub(crate) fn hold_gemm_bytes(bytes: usize) -> HeldBytes {
+    HeldBytes::set(&GEMM_BYTES, bytes)
+}
+
+/// The guard of [`hold_bytes`] and of [`hold_gemm_bytes`]: the thread-local it
+/// set and the value it replaced.
+pub(crate) struct HeldBytes(
+    &'static std::thread::LocalKey<std::cell::Cell<usize>>,
+    usize,
+);
+
+impl HeldBytes {
+    fn set(key: &'static std::thread::LocalKey<std::cell::Cell<usize>>, bytes: usize) -> Self {
+        Self(key, key.with(|c| c.replace(bytes)))
+    }
+}
+
+impl Drop for HeldBytes {
+    fn drop(&mut self) {
+        self.0.with(|c| c.set(self.1));
+    }
 }
 
 /// The plskit-owned pool for the last `n` asked for. One size is cached:
@@ -315,10 +438,13 @@ pub(crate) fn run_with_threads<T: Send>(
 
 /// Every public entry point that reaches Rayon runs its body through this:
 /// it reads `PLSKIT_NUM_THREADS` once and runs `f` on the matching pool. It
-/// also checks that `PLSKIT_MEMORY_BUDGET`, when set, parses, so a bad value
-/// is rejected before any work.
+/// also reads `PLSKIT_MEMORY_BUDGET` once (a bad value is rejected before
+/// any work) and runs `f` under [`with_budget`] with it, so every loop of
+/// the call sees that value; on a thread that already has a call's budget
+/// (a call made inside another), that budget is kept. A call that reads the
+/// budget also sets [`gemm_bytes`] for its loops.
 /// Crate-internal callers call the `_impl` functions instead, so inner fits
-/// inside replicate workers never re-read the variable.
+/// inside replicate workers never re-read the variables.
 pub(crate) fn with_thread_limit<T: Send>(
     f: impl FnOnce() -> PlsKitResult<T> + Send,
 ) -> PlsKitResult<T> {
@@ -331,16 +457,26 @@ pub(crate) fn with_thread_limit<T: Send>(
             )));
         }
     };
-    match std::env::var(MEMORY_BUDGET_ENV) {
-        Ok(s) => {
-            parse_memory_budget(Some(&s))?;
-        }
-        Err(std::env::VarError::NotPresent) => {}
+    let budget = match memory_budget_var() {
+        Ok(s) => parse_memory_budget(Some(&s))?,
+        Err(std::env::VarError::NotPresent) => DEFAULT_MEMORY_BUDGET,
         Err(std::env::VarError::NotUnicode(raw)) => {
             return Err(bad_memory_budget(&format!("{raw:?}")));
         }
-    }
-    run_with_threads(n, f)?
+    };
+    let outer = MEMORY_BUDGET_OVERRIDE.with(std::cell::Cell::get);
+    run_with_threads(n, move || {
+        with_budget(outer.unwrap_or(budget), || {
+            // Read on the thread that runs the call's loops.
+            let gemm = if outer.is_none() {
+                crate::resample::gemm_buffer_bytes()
+            } else {
+                0
+            };
+            let _gemm = hold_gemm_bytes(gemm);
+            f()
+        })
+    })?
 }
 
 /// Translate a `ParChoice` into a concrete `faer::Par` for the given problem size.
@@ -412,11 +548,11 @@ pub struct Pls1Model {
     pub n_covariates: Option<usize>,
 }
 
-/// Validate weights and produce `(normalized vector, n_eff, all_uniform_flag)`.
-/// Returns `Ok((None, n as f64, true))` when `weights` is `None` **and** when
-/// every weight is equal: all-equal weights are no weights (uniform-weight
-/// invariance), so every downstream branch on `w_norm.is_some()` takes the
-/// unweighted path and the call is bit-identical to one without weights.
+/// Validate weights and return `(normalized weights, n_eff)`; `(None, n)`
+/// when `weights` is `None` and when every weight is equal. All-equal
+/// weights are no weights (uniform-weight invariance), so every downstream
+/// branch on `w_norm.is_some()` takes the unweighted path and the call is
+/// bit-identical to one without weights.
 /// That includes `n_eff`, which is exactly `n` (Kish's ratio of equal
 /// non-unit weights can round an ulp below it).
 ///
@@ -433,7 +569,6 @@ pub struct Pls1Model {
 pub(crate) fn validate_and_normalize_weights(
     weights: Option<ColRef<'_, f64>>,
     n: usize,
-    k_requested: usize,
 ) -> PlsKitResult<(Option<Col<f64>>, f64)> {
     let Some(w) = weights else {
         #[allow(clippy::cast_precision_loss)]
@@ -458,12 +593,12 @@ pub(crate) fn validate_and_normalize_weights(
     }
     let wn = crate::linalg::normalize_weights(w)
         .ok_or(PlsKitError::InvalidWeights { reason: "all_zero" })?;
-    let _ = k_requested; // the n_eff check lives in validate_weights_for_k; see docs/internals/n-eff-check.md
     if weights_all_equal(wn.as_ref()) {
         #[allow(clippy::cast_precision_loss)]
         return Ok((None, n as f64));
     }
-    Ok((Some(wn), crate::linalg::compute_n_eff(w)))
+    let n_eff = crate::linalg::compute_n_eff(wn.as_ref());
+    Ok((Some(wn), n_eff))
 }
 
 /// The all-equal predicate on normalized weights `w'` (mean 1): every
@@ -492,7 +627,7 @@ pub(crate) fn validate_weights_for_k(
     n: usize,
     k: usize,
 ) -> PlsKitResult<(Option<Col<f64>>, f64)> {
-    let (w_norm, n_eff) = validate_and_normalize_weights(weights, n, k)?;
+    let (w_norm, n_eff) = validate_and_normalize_weights(weights, n)?;
     check_n_eff_for_k(n_eff, k, w_norm.is_some())?;
     Ok((w_norm, n_eff))
 }
@@ -506,8 +641,8 @@ pub(crate) fn validate_weights_for_k(
 pub(crate) fn check_finite_mat(x: MatRef<'_, f64>) -> PlsKitResult<()> {
     let n = x.nrows();
     let d = x.ncols();
-    // A row-major view (a C-ordered host array read in place) is swept row
-    // by row over contiguous slices; the answer does not depend on the order.
+    // A row-major view (a Rust caller's row-major `MatRef`) is swept row by
+    // row over contiguous slices; the answer does not depend on the order.
     if x.try_as_col_major().is_none() {
         if let Some(xr) = x.try_as_row_major() {
             for i in 0..n {
@@ -525,7 +660,6 @@ pub(crate) fn check_finite_mat(x: MatRef<'_, f64>) -> PlsKitResult<()> {
         }
     }
     // j-outer/i-inner matches faer's column-major storage (cache-friendly sweep).
-    // Mirrors `rotate::mat_is_finite`, which has no row-major branch.
     for j in 0..d {
         for i in 0..n {
             if !x[(i, j)].is_finite() {
@@ -680,12 +814,22 @@ pub(crate) fn check_fit_y_and_k(
 pub fn pls1_fit(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
-    k: KSpec,
+    k: usize,
     weights: Option<ColRef<'_, f64>>,
     covariates: Option<MatRef<'_, f64>>,
     opts: FitOpts,
 ) -> PlsKitResult<Pls1Model> {
-    crate::fit::with_thread_limit(|| pls1_fit_impl(x, y, k, weights, covariates, opts))
+    crate::fit::with_thread_limit(|| {
+        pls1_fit_impl(
+            x,
+            y,
+            k,
+            weights,
+            covariates,
+            opts,
+            InternalFitOpts::default(),
+        )
+    })
 }
 
 /// Body of [`pls1_fit`], on the caller's pool.
@@ -693,14 +837,14 @@ pub fn pls1_fit(
 pub(crate) fn pls1_fit_impl(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
-    k: KSpec,
+    k_requested: usize,
     weights: Option<ColRef<'_, f64>>,
     covariates: Option<MatRef<'_, f64>>,
     opts: FitOpts,
+    inner: InternalFitOpts,
 ) -> PlsKitResult<Pls1Model> {
     let n_samples = x.nrows();
     let n_features = x.ncols();
-    let KSpec::Fixed(k_requested) = k;
     if y.nrows() != n_samples {
         return Err(PlsKitError::DimensionMismatch {
             x: (n_samples, n_features),
@@ -713,11 +857,11 @@ pub(crate) fn pls1_fit_impl(
     // reported ahead of y, k, keep and the weights, as the replicate loops
     // (which check X first) report it.
     // Weights: finite, non-negative, Σw > 0, normalized to mean 1.
-    let checked = check_fit_y_and_k(n_features, y, k_requested, opts.keep).and_then(|()| {
-        if opts.check_n_eff {
+    let checked = check_fit_y_and_k(n_features, y, k_requested, inner.keep).and_then(|()| {
+        if inner.check_n_eff {
             validate_weights_for_k(weights, n_samples, k_requested)
         } else {
-            validate_and_normalize_weights(weights, n_samples, k_requested)
+            validate_and_normalize_weights(weights, n_samples)
         }
     });
     let (w_norm, n_eff_val) = match checked {
@@ -730,7 +874,7 @@ pub(crate) fn pls1_fit_impl(
     let wref: Option<ColRef<'_, f64>> = w_norm.as_ref().map(Col::as_ref);
 
     if let Some(z) = covariates {
-        return pls1_fit_covariates(x, y, z, k, weights, wref, n_eff_val, opts);
+        return pls1_fit_covariates(x, y, z, k_requested, weights, wref, n_eff_val, opts, inner);
     }
 
     // √w' row factor. Row-scaling is the Cholesky factor of diag(w'),
@@ -782,13 +926,16 @@ pub(crate) fn pls1_fit_impl(
     // non-finite, and the pre-standardized sum of squares is non-finite for a
     // non-finite entry or an overflowing square. A non-finite verdict is
     // confirmed by the exact scan, so a finite X is never rejected.
-    // A pre-standardized X whose largest entry (on a row of positive weight)
-    // is outside `[2^-256, 2^256]` is divided by a power of two `c` near it,
-    // as the held-out tests divide
-    // it (`linalg::pre_standardized_scale`), and the fit is mapped back to
-    // X's scale below. The sum of squares spares the common case that scan:
-    // inside the band tested here, every entry of the kernel's input is
-    // within `2^±250`.
+    // A pre-standardized X whose largest entry `m` (with weights, of the
+    // √w'-scaled rows) is outside `[2^-E, 2^E]`
+    // (`linalg::PRE_STANDARDIZED_BAND_EXP`) is divided by a power of two `c`
+    // near it, as the held-out tests divide it
+    // (`linalg::pre_standardized_scale`), and the fit is mapped back to X's
+    // scale below. The sum of squares `ss` spares the common case that scan:
+    // it is on the rows the kernel reads, the rows `m` is read on, so
+    // `m² ≤ ss ≤ nd·m²`, and inside `[nd·2^-(2E-2), 2^(2E-2)]` the entry `m`
+    // is inside the band, weighted or not. The window sits two binary orders
+    // inside the band's edges, so rounding in the sum cannot skip a rescale.
     let mut x_div: Option<(Mat<f64>, f64)> = None;
     let x_fro = if let Some(f) = &fx {
         if !f.mean.iter().chain(f.scale.iter()).all(|v| v.is_finite()) {
@@ -798,7 +945,8 @@ pub(crate) fn pls1_fit_impl(
     } else {
         let mut ss = crate::linalg::sum_of_squares(x_for_nipals, fit_par);
         let nd = (n_samples * n_features) as f64;
-        if !(nd * 2f64.powi(-500)..=2f64.powi(500)).contains(&ss) {
+        let e2 = 2 * crate::linalg::PRE_STANDARDIZED_BAND_EXP - 2;
+        if !(nd * 2f64.powi(-e2)..=2f64.powi(e2)).contains(&ss) {
             if !ss.is_finite() {
                 check_finite_mat(x)?;
             }
@@ -842,7 +990,7 @@ pub(crate) fn pls1_fit_impl(
                     crate::linalg::owned_col_slice(&f.scale),
                     sqw.as_ref().map(crate::linalg::owned_col_slice),
                     k_requested,
-                    opts.keep,
+                    inner.keep,
                     opts.par,
                     x_fro,
                     ratio,
@@ -869,10 +1017,10 @@ pub(crate) fn pls1_fit_impl(
                 f.xs(),
                 y_for_nipals,
                 k_requested,
-                opts.keep,
+                inner.keep,
                 opts.par,
                 x_fro,
-            )?;
+            );
             if !fit.coef.is_all_finite() {
                 check_finite_mat(f.xs())?;
             }
@@ -881,7 +1029,7 @@ pub(crate) fn pls1_fit_impl(
         (None, None) => {
             let xk = x_div.as_ref().map_or(x_for_nipals, |(xd, _)| xd.as_ref());
             let fit =
-                pls1_fit_prepared_fro(xk, y_for_nipals, k_requested, opts.keep, opts.par, x_fro)?;
+                pls1_fit_prepared_fro(xk, y_for_nipals, k_requested, inner.keep, opts.par, x_fro);
             if !fit.coef.is_all_finite() {
                 check_finite_mat(xk)?;
             }
@@ -902,16 +1050,15 @@ pub(crate) fn pls1_fit_impl(
         }
     }
     let k_used = fit.k_used;
-    if opts.pre_standardized && opts.check_n_eff && k_used < k_requested {
+    if opts.pre_standardized && inner.check_n_eff && k_used < k_requested {
         return Err(PlsKitError::InvalidInput(format!(
             "pls1_fit(pre_standardized=true) truncated to k_used={k_used} < requested k={k_requested}: \
-             NIPALS short-circuited on the {kth} component (norm < 1e-14, or at the \
-             rounding floor relative to ‖X‖_F·‖y‖). Either X or y is exhausted (fewer \
-             than k informative directions: lower k; at k_used=0, y is orthogonal to X \
-             up to rounding), or the inputs \
-             violate the pre_standardized scale contract (see `FitOpts::pre_standardized`): \
-             re-fit with `pre_standardized=false` to let plskit standardize, or rescale your \
-             inputs so that ‖X‖_F ≥ 1e-6.",
+             NIPALS stopped at component {kth} (‖X_a'y_a‖ < 1e-14 or t't < 1e-14, or \
+             ‖X_a'y_a‖ at the rounding floor relative to ‖X‖_F·‖y‖). Either X or y is \
+             exhausted (fewer than k informative directions: lower k; at k_used=0, y is \
+             orthogonal to X up to rounding), or y is far below unit scale (X is rescaled \
+             when far from it, y is used as given; see `FitOpts::pre_standardized`): \
+             re-fit with `pre_standardized=false` to let plskit standardize.",
             kth = k_used + 1
         )));
     }
@@ -943,7 +1090,7 @@ pub(crate) fn pls1_fit_impl(
         pre_standardized: opts.pre_standardized,
         weights: w_norm,
         n_eff: n_eff_val,
-        keep: opts.keep,
+        keep: inner.keep,
         covariate_coef: None,
         n_covariates: None,
     })
@@ -964,13 +1111,13 @@ fn pls1_fit_covariates(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
     z: MatRef<'_, f64>,
-    k: KSpec,
+    k_requested: usize,
     weights: Option<ColRef<'_, f64>>,
     wref: Option<ColRef<'_, f64>>,
     n_eff: f64,
     opts: FitOpts,
+    inner: InternalFitOpts,
 ) -> PlsKitResult<Pls1Model> {
-    let KSpec::Fixed(k_requested) = k;
     check_finite_mat(x)?;
     let mut adj = crate::covariates::adjust(x, y, z, wref, opts.pre_standardized)?;
     adj.basis.check_df(k_requested)?;
@@ -990,13 +1137,16 @@ fn pls1_fit_covariates(
     let mut m = pls1_fit_impl(
         adj.x.as_ref(),
         adj.y.as_ref(),
-        k,
+        k_requested,
         if sqw.is_some() { None } else { weights },
         None,
         FitOpts {
             pre_standardized: true,
-            check_n_eff: opts.check_n_eff && opts.pre_standardized,
             ..opts
+        },
+        InternalFitOpts {
+            check_n_eff: inner.check_n_eff && opts.pre_standardized,
+            ..inner
         },
     )?;
     if sqw.is_some() {
@@ -1044,7 +1194,7 @@ fn pls1_fit_covariates(
 pub fn spls1_fit(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
-    k: KSpec,
+    k: usize,
     keep: usize,
     weights: Option<ColRef<'_, f64>>,
     covariates: Option<MatRef<'_, f64>>,
@@ -1057,9 +1207,10 @@ pub fn spls1_fit(
             k,
             weights,
             covariates,
-            FitOpts {
+            opts,
+            InternalFitOpts {
                 keep: Some(keep),
-                ..opts
+                ..InternalFitOpts::default()
             },
         )
     })
@@ -1092,10 +1243,6 @@ pub(crate) struct PreparedFit {
 /// (see [`pls1_kernel`]): a loop over one fixed block takes `xs.norm_l2()`
 /// once and passes it to every call. `par` is resolved from `xs`'s shape and
 /// `k` exactly as `pls1_fit` resolves it.
-///
-/// # Errors
-/// None today (the kernel has no error path); the `Result` is kept so a
-/// kernel error can surface without a signature change.
 pub(crate) fn pls1_fit_prepared_fro(
     xs: MatRef<'_, f64>,
     ys: ColRef<'_, f64>,
@@ -1103,19 +1250,19 @@ pub(crate) fn pls1_fit_prepared_fro(
     keep: Option<usize>,
     par: ParChoice,
     x_fro: f64,
-) -> PlsKitResult<PreparedFit> {
+) -> PreparedFit {
     let par = resolve_par(par, xs.nrows(), xs.ncols(), k);
-    let (t_mat, p_mat, w_mat, q_vec) = pls1_kernel(xs, ys, k, keep, par, x_fro)?;
+    let (t_mat, p_mat, w_mat, q_vec) = pls1_kernel(xs, ys, k, keep, par, x_fro);
     let k_used = w_mat.ncols();
     let coef = pls1_coef_at_k(&w_mat, &p_mat, &q_vec, k_used, par);
-    Ok(PreparedFit {
+    PreparedFit {
         t_scores: t_mat,
         p_loadings: p_mat,
         w_star: w_mat,
         q_loadings: q_vec,
         coef,
         k_used,
-    })
+    }
 }
 
 /// [`pls1_fit_prepared_fro`] on `Xs = diag(sqw)·(x − 1·mean')·diag(1/scale)`
@@ -1200,24 +1347,19 @@ pub(crate) fn scale_rows_in_place(x: &mut Mat<f64>, sqw: ColRef<'_, f64>) {
 
 /// Whether the unweighted pre-standardized fit of `scale_rows(x, sqw)` and
 /// `scale_col(y, sqw)` takes the kernel input of the weighted one of
-/// `(x, y)` with `√w' = sqw`: when neither `x` nor the scaled rows have their
-/// largest entry outside `[2^-256, 2^256]`, neither fit divides by a power
-/// of two (`linalg::pre_standardized_scale`; the weighted fit reads it off
-/// the rows of `x` of positive weight, the other off the scaled rows).
-/// `|sqw·x|` is `sqw·|x|` to the bit.
+/// `(x, y)` with `√w' = sqw`: when the scaled rows have their largest entry
+/// inside `[2^-E, 2^E]` (`linalg::PRE_STANDARDIZED_BAND_EXP`), neither fit
+/// divides by a power of two (`linalg::pre_standardized_scale`; both read
+/// it off the scaled rows). `|sqw·x|` is `sqw·|x|` to the bit.
 pub(crate) fn rows_scale_in_band(x: MatRef<'_, f64>, sqw: ColRef<'_, f64>) -> bool {
-    let (mut m, mut ms) = (0.0_f64, 0.0_f64);
+    let mut ms = 0.0_f64;
     for j in 0..x.ncols() {
         for i in 0..x.nrows() {
-            let a = x[(i, j)].abs();
-            if sqw[i] != 0.0 {
-                m = m.max(a);
-            }
-            ms = ms.max(sqw[i] * a);
+            ms = ms.max(sqw[i] * x[(i, j)].abs());
         }
     }
-    let band = 2f64.powi(-256)..=2f64.powi(256);
-    band.contains(&m) && band.contains(&ms)
+    let e = crate::linalg::PRE_STANDARDIZED_BAND_EXP;
+    (2f64.powi(-e)..=2f64.powi(e)).contains(&ms)
 }
 
 /// `sqw[i] * y[i]`.
@@ -1281,7 +1423,15 @@ pub(crate) fn select_and_normalize(v: &mut Col<f64>, keep: usize, floor: f64) ->
     if keep < d {
         hard_select_keep(v, keep);
     }
-    let nv = v.norm_l2();
+    // faer's `norm_l2` is slower at these lengths; scaling by a power of two
+    // keeps its range, so entries near 1e±300 still give a finite norm.
+    let max_abs = (0..d).map(|j| v[j].abs()).fold(0.0_f64, f64::max);
+    let (s, inv_s) = crate::linalg::pow2_scale(max_abs);
+    let nv = s
+        * (0..d)
+            .map(|j| (v[j] * inv_s) * (v[j] * inv_s))
+            .sum::<f64>()
+            .sqrt();
     if nv < floor {
         return None;
     }
@@ -1362,13 +1512,6 @@ pub(crate) const NIPALS_ABS_FLOOR: f64 = 1e-14;
 /// the floor, a true effect of `1e-9` of `‖y‖` added to it at least `14×`
 /// above it (the margin shrinks as `1/n`), and an unstructured random `y`
 /// at least `2.7e7×` above it.
-///
-/// The K = 1 Gram mirror `dual_route::pls1_cv_r2_columns` evaluates this
-/// same function on the kernel's `‖y‖`, to the bit, and on an `‖X‖_F` taken
-/// from the trace of the fold's Gram block, equal to the kernel's to
-/// rounding, but it
-/// cannot form `‖X'y‖` to the accuracy the floor needs, so a column it
-/// cannot resolve is recomputed by this kernel (see the doc comment there).
 #[allow(clippy::cast_precision_loss)]
 pub(crate) fn w_rel_floor(n: usize, d: usize, x_fro: f64, y_norm: f64) -> f64 {
     (n.max(d) as f64) * f64::EPSILON * x_fro * y_norm
@@ -1449,15 +1592,103 @@ fn rotation(w: &Col<f64>, r_mat: &Mat<f64>, p_mat: &Mat<f64>, a: usize) -> Col<f
     })
 }
 
+/// One fit's running state through the component steps: the deflated `s`,
+/// the recorded `R`, `P`, `W` and `q`, and the count of components kept.
+/// The step functions hold every rule that decides numbers (selection, the
+/// floors, the rotation, the update of `s`, the truncation); a driver only
+/// supplies the scores, loadings and `q`.
+pub(crate) struct LaneState {
+    s: Col<f64>,
+    r_mat: Mat<f64>,
+    p_mat: Mat<f64>,
+    w_mat: Mat<f64>,
+    q_vec: Col<f64>,
+    k_used: usize,
+    floor: f64,
+    k: usize,
+}
+
+/// The stop on `tt < NIPALS_ABS_FLOOR`.
+pub(crate) fn tt_stops(tt: f64) -> bool {
+    tt < NIPALS_ABS_FLOOR
+}
+
+impl LaneState {
+    /// Starts from `s0 = Xs'ys`, for up to `k` components.
+    pub(crate) fn new(s0: Col<f64>, w_floor: f64, k: usize) -> Self {
+        let d = s0.nrows();
+        Self {
+            s: s0,
+            r_mat: Mat::<f64>::zeros(d, k),
+            p_mat: Mat::<f64>::zeros(d, k),
+            w_mat: Mat::<f64>::zeros(d, k),
+            q_vec: Col::<f64>::zeros(k),
+            k_used: 0,
+            // `w_norm < max(a, b)` is `w_norm < a || w_norm < b`, NaN included
+            // (`f64::max` ignores a NaN operand, and a NaN `w_norm` fails either test).
+            floor: NIPALS_ABS_FLOOR.max(w_floor),
+            k,
+        }
+    }
+
+    /// The current `s = X_a'y_a`.
+    pub(crate) fn s(&self) -> &Col<f64> {
+        &self.s
+    }
+
+    /// `w = s` selected and normalized by [`select_and_normalize`], and the
+    /// rotation `r` of component `k_used`; `None` stops the lane. Sparse
+    /// keep-count selection sits between `s` and the norm guard, so an
+    /// all-zero surviving set truncates via the absolute floor. `keep =
+    /// None` and `keep = d` are a literal skip of the selection (dense
+    /// bit-parity at `keep = n_features`).
+    pub(crate) fn weight(&self, keep: Option<usize>) -> Option<(Col<f64>, Col<f64>)> {
+        let mut w = self.s.clone();
+        select_and_normalize(&mut w, keep.unwrap_or(self.s.nrows()), self.floor)?;
+        let r = rotation(&w, &self.r_mat, &self.p_mat, self.k_used);
+        Some((w, r))
+    }
+
+    /// Records component `k_used` and deflates: `s ← s − (q·tt)·p` in
+    /// ascending `j`.
+    #[allow(clippy::many_single_char_names, clippy::needless_pass_by_value)] // owned by the driver, copied into the record
+    pub(crate) fn accept(&mut self, w: Col<f64>, r: Col<f64>, p: Col<f64>, q: f64, tt: f64) {
+        let a = self.k_used;
+        let qtt = q * tt;
+        for j in 0..self.s.nrows() {
+            self.s[j] -= qtt * p[j];
+        }
+        self.r_mat.col_mut(a).copy_from(&r);
+        self.p_mat.col_mut(a).copy_from(&p);
+        self.w_mat.col_mut(a).copy_from(&w);
+        self.q_vec[a] = q;
+        self.k_used += 1;
+    }
+
+    /// `(p, w, q)` truncated to the components kept.
+    pub(crate) fn finish(self) -> (Mat<f64>, Mat<f64>, Col<f64>) {
+        let k_used = self.k_used;
+        if k_used == self.k {
+            (self.p_mat, self.w_mat, self.q_vec)
+        } else {
+            (
+                self.p_mat.subcols(0, k_used).to_owned(),
+                self.w_mat.subcols(0, k_used).to_owned(),
+                Col::<f64>::from_fn(k_used, |i| self.q_vec[i]),
+            )
+        }
+    }
+}
+
 /// The shared PLS1 component loop.
 ///
-/// Starts from `s0 = Xs'ys` and carries `s = X_a'y_a` as a d-vector. Per
-/// component `a`: the backend's `gate_s`; `w = s`, selected and normalized
-/// by [`select_and_normalize`] against `max(NIPALS_ABS_FLOOR, w_floor)` (a
-/// `None` stops the loop); the rotation `r = w − R(P'w)`; the backend's
-/// `score` and `gate_tt`; the stop on `tt < NIPALS_ABS_FLOOR`; the backend's
-/// `loading` and `q` with the same `inv_tt = 1/tt`; then
-/// `s ← s − (q·tt)·p` in ascending `j`. Outputs are truncated to the
+/// Starts from `s0 = Xs'ys` and carries `s = X_a'y_a` as a d-vector in a
+/// [`LaneState`]. Per component `a`: the backend's `gate_s`;
+/// [`LaneState::weight`] (`w = s`, selected and normalized against
+/// `max(NIPALS_ABS_FLOOR, w_floor)`, and the rotation `r = w − R(P'w)`; a
+/// `None` stops the loop); the backend's `score` and `gate_tt`; the stop on
+/// [`tt_stops`]; the backend's `loading` and `q` with the same
+/// `inv_tt = 1/tt`; then [`LaneState::accept`]. Outputs are truncated to the
 /// components kept, as the explicit-deflation kernel truncated them.
 ///
 /// Call order is a guarantee, not an implementation detail: `gate_s` runs
@@ -1475,77 +1706,42 @@ pub(crate) fn pls1_component_loop<B: ComponentBackend>(
     k: usize,
     keep: Option<usize>,
 ) -> LoopOutcome {
-    let d = s0.nrows();
-    // `w_norm < max(a, b)` is `w_norm < a || w_norm < b`, NaN included
-    // (`f64::max` ignores a NaN operand, and a NaN `w_norm` fails either test).
-    let floor = NIPALS_ABS_FLOOR.max(w_floor);
-    let mut s = s0;
+    let mut lane = LaneState::new(s0, w_floor, k);
     let mut t_cols: Vec<Col<f64>> = Vec::with_capacity(k);
-    let mut r_mat = Mat::<f64>::zeros(d, k);
-    let mut p_mat = Mat::<f64>::zeros(d, k);
-    let mut w_mat = Mat::<f64>::zeros(d, k);
-    let mut q_vec = Col::<f64>::zeros(k);
-    let mut k_actual = 0usize;
 
     for a in 0..k {
-        if matches!(backend.gate_s(a + 1, &s, keep), Gate::Unresolved) {
+        if matches!(backend.gate_s(a + 1, lane.s(), keep), Gate::Unresolved) {
             return LoopOutcome::Unresolved;
         }
-        // Sparse keep-count selection sits between `s` and the norm guard, so
-        // an all-zero surviving set truncates via the absolute floor. `keep =
-        // None` and `keep = d` are a literal skip of the selection (dense
-        // bit-parity at `keep = n_features`).
-        let mut w = s.clone();
-        if select_and_normalize(&mut w, keep.unwrap_or(d), floor).is_none() {
+        let Some((w, r)) = lane.weight(keep) else {
             break;
-        }
-        let r = rotation(&w, &r_mat, &p_mat, a);
+        };
         let scored = backend.score(&r);
         let tt = scored.tt;
         if matches!(backend.gate_tt(a + 1, &r, tt), Gate::Unresolved) {
             return LoopOutcome::Unresolved;
         }
-        if tt < NIPALS_ABS_FLOOR {
+        if tt_stops(tt) {
             break;
         }
         let inv_tt = 1.0 / tt;
         let p = backend.loading(&r, scored.t.as_ref(), inv_tt);
-        let q = backend.q(&s, &w, scored.t.as_ref(), inv_tt);
-        let qtt = q * tt;
-        for j in 0..d {
-            s[j] -= qtt * p[j];
-        }
-        r_mat.col_mut(a).copy_from(&r);
-        p_mat.col_mut(a).copy_from(&p);
-        w_mat.col_mut(a).copy_from(&w);
-        q_vec[a] = q;
+        let q = backend.q(lane.s(), &w, scored.t.as_ref(), inv_tt);
+        lane.accept(w, r, p, q, tt);
         if let Some(t) = scored.t {
             t_cols.push(t);
         }
-        k_actual = a + 1;
     }
 
+    let k_actual = lane.k_used;
     let t = if t_cols.is_empty() {
         None
     } else {
         let n = t_cols[0].nrows();
         Some(Mat::<f64>::from_fn(n, k_actual, |i, j| t_cols[j][i]))
     };
-    if k_actual == k {
-        LoopOutcome::Done {
-            t,
-            p: p_mat,
-            w: w_mat,
-            q: q_vec,
-        }
-    } else {
-        LoopOutcome::Done {
-            t,
-            p: p_mat.subcols(0, k_actual).to_owned(),
-            w: w_mat.subcols(0, k_actual).to_owned(),
-            q: Col::<f64>::from_fn(k_actual, |i| q_vec[i]),
-        }
-    }
+    let (p, w, q) = lane.finish();
+    LoopOutcome::Done { t, p, w, q }
 }
 
 /// Bytes of the large buffers one PLS1 fit on `p` columns to `k`
@@ -1553,7 +1749,7 @@ pub(crate) fn pls1_component_loop<B: ComponentBackend>(
 /// and `w_mat` (`p × k` each), the copies of `p_mat` and `w_mat` it
 /// returns when it stops short of `k`, and one component's p-vectors `s`,
 /// `w`, `r` and the loading. Mirrors `pls1_component_loop` (change
-/// together). Mirrored by `pls1_fit_bytes` in `tests/memory_budget_parity.rs`
+/// together). Mirrored by `pls1_fit_bytes` in `tests/common/budget_cases.rs`
 /// (change together). The scores (`n × k`) and the `k`-vectors are not counted.
 pub(crate) fn pls1_fit_bytes(p: usize, k: usize) -> usize {
     use crate::resample::copy_bytes;
@@ -1563,7 +1759,7 @@ pub(crate) fn pls1_fit_bytes(p: usize, k: usize) -> usize {
 }
 
 /// `alpha·Xs'·v`, `(d,)`. A row-major `Xs` at least
-/// `linalg::ROW_BLOCK_MIN_COLS` wide (a C-ordered host array, or the
+/// `linalg::ROW_BLOCK_MIN_COLS` wide (a Rust caller's row-major view, or the
 /// row-major copy `FitX::materialize` writes) reads its rows in blocks
 /// (`linalg::row_major_t_mul`), as `ImplicitXBackend::xs_t_mul` does, and
 /// each entry is then multiplied by `alpha`; any other `Xs` goes to faer
@@ -1646,6 +1842,24 @@ impl ComponentBackend for XBackend<'_> {
 /// products (`pls3::Prepared`).
 pub(crate) const IMPLICIT_MAX_MEAN_RATIO: f64 = 1e3;
 
+/// `‖select(s)‖`: the norm of the `keep` largest-magnitude entries of `s`
+/// ([`hard_select_keep`]); dense (`None`, or `keep` at least the length of
+/// `s`), the norm of all of `s`. Both branches use faer's `norm_l2`, so they
+/// cover the same range. It is the norm [`select_and_normalize`] tests
+/// against the floor, to rounding, since that function sums in its own order.
+/// The gate needs no exact bits: it compares against a band of at least twice
+/// the floor ([`pls1_fit_implicit`]'s `band`).
+fn selected_norm(s: &Col<f64>, keep: Option<usize>) -> f64 {
+    match keep {
+        Some(kp) if kp < s.nrows() => {
+            let mut v = s.clone();
+            hard_select_keep(&mut v, kp);
+            v.norm_l2()
+        }
+        _ => s.norm_l2(),
+    }
+}
+
 /// The X backend on `Xs = diag(sqw)·(X − 1·mean')·diag(1/scale)` formed from
 /// the raw `X` on the fly, so the standardized matrix is never written: the
 /// kernel only multiplies by `Xs` and `Xs'`, and each product is the raw one
@@ -1717,9 +1931,9 @@ impl ImplicitXBackend<'_> {
             .map(|sqw| Col::<f64>::from_fn(n, |i| t[i] * sqw[i]));
         let tw = tw_owned.as_ref().map_or(t, Col::as_ref);
         let sum_tw: f64 = (0..n).map(|i| tw[i]).sum();
-        // A row-major X at least `linalg::ROW_BLOCK_MIN_COLS` wide (a
-        // C-ordered host array) reads its rows in blocks; any other X goes
-        // to faer.
+        // A row-major X at least `linalg::ROW_BLOCK_MIN_COLS` wide (a Rust
+        // caller's row-major view) reads its rows in blocks; any other X
+        // goes to faer.
         let mut g = crate::linalg::row_major_t_mul(self.x, tw, self.par).unwrap_or_else(|| {
             let mut g = Col::<f64>::zeros(self.x.ncols());
             matmul(
@@ -1741,7 +1955,7 @@ impl ImplicitXBackend<'_> {
 
 impl ComponentBackend for ImplicitXBackend<'_> {
     fn gate_s(&mut self, _a: usize, s: &Col<f64>, keep: Option<usize>) -> Gate {
-        if crate::gram_p::selected_norm(s, keep) < self.band {
+        if selected_norm(s, keep) < self.band {
             Gate::Unresolved
         } else {
             Gate::Continue
@@ -1807,13 +2021,8 @@ impl ComponentBackend for ImplicitXBackend<'_> {
 /// in blocks (`linalg::row_major_t_mul`). `par`, resolved by the caller
 /// (`resolve_par`), threads the three products: `t = Xs r` is a faer GEMV,
 /// and `Xs'ys` and `Xs't` are the blocked row product or a faer GEMV.
-///
-/// # Errors
-/// None today; the `Result` matches the call site.
 #[allow(clippy::doc_markdown)] // "MacGregor"
 #[allow(clippy::many_single_char_names)]
-#[allow(clippy::type_complexity)]
-#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn pls1_kernel(
     xs: MatRef<'_, f64>,
     ys: ColRef<'_, f64>,
@@ -1821,21 +2030,20 @@ pub(crate) fn pls1_kernel(
     keep: Option<usize>,
     par: Par,
     x_fro: f64,
-) -> PlsKitResult<(Mat<f64>, Mat<f64>, Mat<f64>, Col<f64>)> {
+) -> (Mat<f64>, Mat<f64>, Mat<f64>, Col<f64>) {
     let n = xs.nrows();
     let d = xs.ncols();
     // s_1 = Xs' ys, formed as the loadings are (`xs_t_mul`)
     let s0 = xs_t_mul(xs, ys, 1.0, par);
     // `x_fro` is `‖xs‖_F`, supplied by the caller: `pls1_fit` forms it from
-    // its standardization moments or its sum-of-squares screen, the other
-    // callers take `xs.norm_l2()`. It only ever gates a `break`, so no output
-    // bit depends on it unless it truncates.
+    // its standardization moments or its sum-of-squares screen,
+    // `signal_test::prepare_split` from the column moments of its halves,
+    // the other callers take `xs.norm_l2()`. It only ever gates a `break`, so
+    // no output bit depends on it unless it truncates.
     let w_floor = w_rel_floor(n, d, x_fro, ys.norm_l2());
     let mut backend = XBackend { xs, ys, par };
     match pls1_component_loop(&mut backend, s0, w_floor, k, keep) {
-        LoopOutcome::Done { t, p, w, q } => {
-            Ok((t.unwrap_or_else(|| Mat::<f64>::zeros(n, 0)), p, w, q))
-        }
+        LoopOutcome::Done { t, p, w, q } => (t.unwrap_or_else(|| Mat::<f64>::zeros(n, 0)), p, w, q),
         LoopOutcome::Unresolved => unreachable!("the X backend never returns Gate::Unresolved"),
     }
 }
@@ -2024,7 +2232,7 @@ mod tests {
         let m = pls1_fit(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(3),
+            3,
             None,
             None,
             FitOpts {
@@ -2047,29 +2255,26 @@ mod tests {
     // ── spls1 sparse kernel ──────────────────────────────────────────
 
     #[test]
+    #[allow(clippy::float_cmp)] // powers of two: the norm is exact
+    fn selected_norm_keeps_range() {
+        // Four entries of magnitude 2^e and a smaller one that `keep = 4`
+        // drops: the norm is √(4·4^e) = 2^(e+1) exactly, where the squares
+        // overflow to inf (e = 600) or underflow to 0 (e = -600).
+        for e in [600, -600] {
+            let t = 2f64.powi(e);
+            let s = Col::<f64>::from_fn(5, |j| [t, -t, 0.5 * t, t, -t][j]);
+            assert_eq!(selected_norm(&s, Some(4)), 2f64.powi(e + 1), "e = {e}");
+        }
+    }
+
+    #[test]
     fn spls1_keep_eq_n_features_is_bit_identical_to_dense() {
         // THE bit-parity tripwire (`docs/rust/api.md`): keep = n_features must be a literal
         // skip — exact equality, not approx.
         let (x, y) = linear_data(50, 8, 3, 1);
-        let dense = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(3),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
-        let sparse = spls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(3),
-            8,
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
+        let dense = pls1_fit(x.as_ref(), y.as_ref(), 3, None, None, FitOpts::default()).unwrap();
+        let sparse =
+            spls1_fit(x.as_ref(), y.as_ref(), 3, 8, None, None, FitOpts::default()).unwrap();
         for j in 0..8 {
             assert_eq!(
                 dense.coef[j].to_bits(),
@@ -2097,7 +2302,7 @@ mod tests {
             let m = spls1_fit(
                 x.as_ref(),
                 y.as_ref(),
-                KSpec::Fixed(3),
+                3,
                 keep,
                 None,
                 None,
@@ -2131,17 +2336,19 @@ mod tests {
             x[(i, 3)] = b; // exact duplicate → exact |w| tie with col 2
         }
         let y = Col::<f64>::from_fn(n, |i| x[(i, 0)] + 0.5 * x[(i, 2)]);
-        let m1 = spls1_fit(
+        let m1 = pls1_fit_impl(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(1),
             1,
             None,
             None,
             FitOpts {
                 pre_standardized: true,
-                check_n_eff: false,
                 ..FitOpts::default()
+            },
+            InternalFitOpts {
+                check_n_eff: false,
+                keep: Some(1),
             },
         )
         .unwrap();
@@ -2152,17 +2359,19 @@ mod tests {
         for j in 1..4 {
             assert_eq!(m1.w_star[(j, 0)], 0.0, "col {j} must be zeroed");
         }
-        let m3 = spls1_fit(
+        let m3 = pls1_fit_impl(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(1),
-            3,
+            1,
             None,
             None,
             FitOpts {
                 pre_standardized: true,
-                check_n_eff: false,
                 ..FitOpts::default()
+            },
+            InternalFitOpts {
+                check_n_eff: false,
+                keep: Some(3),
             },
         )
         .unwrap();
@@ -2180,6 +2389,24 @@ mod tests {
         use rand::SeedableRng;
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
         Mat::<f64>::from_fn(n, d, |_, _| rng.random_range(-1.0..1.0))
+    }
+
+    #[test]
+    fn select_and_normalize_norm_keeps_range() {
+        let base = uniform_mat(50, 1, 3);
+        for scale in [1e300, 1e-300, 1.0] {
+            let mut v = Col::<f64>::from_fn(50, |i| base[(i, 0)] * scale);
+            let expect = v.norm_l2();
+            let nv = select_and_normalize(&mut v, 50, 1e-14 * scale.min(1.0)).expect("non-zero");
+            assert!(nv.is_finite() && nv > 0.0, "scale {scale}: norm {nv}");
+            assert_relative_eq!(nv, expect, max_relative = 1e-14);
+            assert_relative_eq!(v.norm_l2(), 1.0, max_relative = 1e-14);
+        }
+        let mut z = Col::<f64>::zeros(50);
+        assert!(select_and_normalize(&mut z, 50, 1e-14).is_none());
+        let mut v = Col::<f64>::from_fn(50, |i| base[(i, 0)]);
+        v[7] = f64::NAN;
+        assert!(select_and_normalize(&mut v, 50, 1e-14).is_some_and(f64::is_nan));
     }
 
     /// `n × 40`, last column the sum of the first two (rank 39), `y`
@@ -2229,15 +2456,7 @@ mod tests {
     #[test]
     fn nipals_drops_noise_components_once_y_is_exhausted() {
         let (x, y) = exhausted_design(2000, 11);
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(40),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
+        let m = pls1_fit(x.as_ref(), y.as_ref(), 40, None, None, FitOpts::default()).unwrap();
         // Without the relative floor all 40 components were kept, the
         // last ~20 of them fitted to rounding noise.
         assert!(
@@ -2258,7 +2477,7 @@ mod tests {
         let m = spls1_fit(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(40),
+            40,
             10,
             None,
             None,
@@ -2285,15 +2504,7 @@ mod tests {
         let svd = xs.thin_svd().unwrap();
         let u = svd.U();
         let y = Col::<f64>::from_fn(n, |i| 1.3 * u[(i, 0)] - 0.7 * u[(i, 5)]);
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(10),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
+        let m = pls1_fit(x.as_ref(), y.as_ref(), 10, None, None, FitOpts::default()).unwrap();
         assert_eq!(m.k_used, 2);
     }
 
@@ -2303,15 +2514,7 @@ mod tests {
         // `‖X'y‖` is about 1e-6 of `‖X‖_F·‖y‖`, so a floor relative to it
         // would sit below the rounding noise and keep all 20 components.
         let (x, y) = orthogonal_design(1000, 20, 1e-6, 31);
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(20),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
+        let m = pls1_fit(x.as_ref(), y.as_ref(), 20, None, None, FitOpts::default()).unwrap();
         assert!(m.k_used < 20, "got k_used={}", m.k_used);
     }
 
@@ -2334,15 +2537,7 @@ mod tests {
         // component whose `w` is normalized rounding noise.
         for seed in [41, 43, 45] {
             let (x, _, y) = orthogonal_y_design(seed);
-            let m = pls1_fit(
-                x.as_ref(),
-                y.as_ref(),
-                KSpec::Fixed(3),
-                None,
-                None,
-                FitOpts::default(),
-            )
-            .unwrap();
+            let m = pls1_fit(x.as_ref(), y.as_ref(), 3, None, None, FitOpts::default()).unwrap();
             assert_eq!(m.k_used, 0, "seed {seed}");
             assert_eq!(m.w_star.ncols(), 0);
             assert_eq!(m.q_loadings.nrows(), 0);
@@ -2351,16 +2546,8 @@ mod tests {
             let y_mean = (0..y.nrows()).map(|i| y[i]).sum::<f64>() / y.nrows() as f64;
             assert_relative_eq!(m.intercept, y_mean, epsilon = 1e-12);
             // Same decision on the sparse path.
-            let s = spls1_fit(
-                x.as_ref(),
-                y.as_ref(),
-                KSpec::Fixed(1),
-                4,
-                None,
-                None,
-                FitOpts::default(),
-            )
-            .unwrap();
+            let s =
+                spls1_fit(x.as_ref(), y.as_ref(), 1, 4, None, None, FitOpts::default()).unwrap();
             assert_eq!(s.k_used, 0, "seed {seed} (spls1)");
         }
     }
@@ -2374,7 +2561,7 @@ mod tests {
         let strict = pls1_fit(
             xs.as_ref(),
             ys.as_ref(),
-            KSpec::Fixed(1),
+            1,
             None,
             None,
             FitOpts {
@@ -2386,16 +2573,19 @@ mod tests {
             matches!(strict, Err(PlsKitError::InvalidInput(_))),
             "expected InvalidInput, got {strict:?}"
         );
-        let internal = pls1_fit(
+        let internal = pls1_fit_impl(
             xs.as_ref(),
             ys.as_ref(),
-            KSpec::Fixed(1),
+            1,
             None,
             None,
             FitOpts {
                 pre_standardized: true,
-                check_n_eff: false,
                 ..FitOpts::default()
+            },
+            InternalFitOpts {
+                check_n_eff: false,
+                ..InternalFitOpts::default()
             },
         )
         .unwrap();
@@ -2414,15 +2604,7 @@ mod tests {
         let s = Col::<f64>::from_fn(n, |i| (0..d).map(|j| xs[(i, j)] * b[(j, 0)]).sum::<f64>());
         let scale = 1e-9 * y_perp.norm_l2() / s.norm_l2();
         let y = Col::<f64>::from_fn(n, |i| y_perp[i] + scale * s[i]);
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(1),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
+        let m = pls1_fit(x.as_ref(), y.as_ref(), 1, None, None, FitOpts::default()).unwrap();
         assert_eq!(m.k_used, 1);
     }
 
@@ -2431,21 +2613,13 @@ mod tests {
         // Guard against an over-eager floor: ordinary data with signal in
         // every direction keeps all requested components, weighted or not.
         let (x, y) = linear_data(100, 20, 20, 3);
-        let m = pls1_fit(
-            x.as_ref(),
-            y.as_ref(),
-            KSpec::Fixed(20),
-            None,
-            None,
-            FitOpts::default(),
-        )
-        .unwrap();
+        let m = pls1_fit(x.as_ref(), y.as_ref(), 20, None, None, FitOpts::default()).unwrap();
         assert_eq!(m.k_used, 20);
         let w = Col::<f64>::from_fn(100, |i| 0.5 + (i % 7) as f64 * 0.25);
         let mw = pls1_fit(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(20),
+            20,
             Some(w.as_ref()),
             None,
             FitOpts::default(),
@@ -2498,6 +2672,11 @@ mod tests {
     }
 
     #[test]
+    fn default_budget_is_4_gib() {
+        assert_eq!(parse_memory_budget(None).unwrap(), 4 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
     fn memory_budget_override_wins_and_is_restored() {
         let before = memory_budget();
         with_budget(123, || {
@@ -2508,6 +2687,45 @@ mod tests {
         assert_eq!(memory_budget(), before);
     }
 
+    /// `with_thread_limit` reads the budget once: a change of the variable
+    /// while the call runs does not reach the call, and does reach the next
+    /// read outside it. The value is process-wide, so the test re-runs
+    /// itself in a child process (as `tests/num_threads_env.rs` does).
+    #[test]
+    fn with_thread_limit_reads_the_budget_once() {
+        const CHILD: &str = "PLSKIT_TEST_CHILD";
+        const RESULT: &str = "PLSKIT_RESULT ";
+        let set = |v: &str| *MEMORY_BUDGET_VAR.lock().unwrap() = Some(v.to_owned());
+        if std::env::var_os(CHILD).is_some() {
+            set("1M");
+            let inside = with_thread_limit(|| {
+                set("2M");
+                Ok(memory_budget())
+            })
+            .unwrap();
+            println!("\n{RESULT}{inside} {}", memory_budget());
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "fit::tests::with_thread_limit_reads_the_budget_once",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let result = stdout.lines().find_map(|l| l.strip_prefix(RESULT));
+        assert_eq!(result, Some("1048576 2097152"), "{stdout}");
+    }
+
     #[test]
     fn parse_num_threads_follows_the_documented_table() {
         use super::parse_num_threads as p;
@@ -2515,7 +2733,7 @@ mod tests {
         assert_eq!(p(Some("0")).unwrap(), None);
         assert_eq!(p(Some("1")).unwrap(), Some(1));
         assert_eq!(p(Some("4")).unwrap(), Some(4));
-        for bad in ["", " 4 ", "-1", "2.5", "abc"] {
+        for bad in ["", " 4 ", "-1", "2.5", "abc", "+4"] {
             match p(Some(bad)) {
                 Err(PlsKitError::InvalidArgument(msg)) => {
                     assert!(msg.contains("PLSKIT_NUM_THREADS"), "{msg}");
@@ -2571,6 +2789,122 @@ mod tests {
             .collect();
         assert!(handles.into_iter().all(|h| h.join().unwrap()));
     }
+
+    #[test]
+    fn par_fixed_follows_the_pool_inside_install_pool_sized() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .unwrap();
+        let degrees = super::install_pool_sized(&pool, || {
+            rayon::broadcast(|_| (super::par_fixed().degree(), super::par_degree()))
+        });
+        assert_eq!(degrees, vec![(3, 3); 3]);
+    }
+
+    #[test]
+    fn pool_sized_par_is_cleared_after_the_call() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .unwrap();
+        super::install_pool_sized(&pool, || ());
+        let after = pool.broadcast(|_| (super::par_fixed(), super::par_degree()));
+        assert_eq!(after, vec![(Par::rayon(PAR_DEGREE), PAR_DEGREE); 3]);
+        // Also when the call panics.
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::install_pool_sized(&pool, || panic!("inside the call"));
+        }));
+        assert!(caught.is_err());
+        let after = pool.broadcast(|_| (super::par_fixed(), super::par_degree()));
+        assert_eq!(after, vec![(Par::rayon(PAR_DEGREE), PAR_DEGREE); 3]);
+    }
+
+    #[test]
+    fn n_eff_does_not_depend_on_the_scale_of_the_weights() {
+        use crate::preprocess::{PreprocessInput, preprocess};
+        let (x, y) = crate::test_support::synth(10, 3, 1, 1.0, 21);
+        let n_effs = |s: f64| {
+            #[allow(clippy::cast_precision_loss)]
+            let w = Col::<f64>::from_fn(10, |i| (i + 1) as f64 * s);
+            let fit = pls1_fit(
+                x.as_ref(),
+                y.as_ref(),
+                1,
+                Some(w.as_ref()),
+                None,
+                FitOpts::default(),
+            )
+            .unwrap()
+            .n_eff;
+            let pre = preprocess(PreprocessInput {
+                x: Some(x.as_ref()),
+                y: Some(y.as_ref()),
+                weights: Some(w.as_ref()),
+            })
+            .unwrap()
+            .n_eff
+            .unwrap();
+            [fit, pre]
+        };
+        let base = n_effs(1.0);
+        for s in [1e200, 1e-170] {
+            for (v, b) in n_effs(s).into_iter().zip(base) {
+                assert!(v.is_finite(), "n_eff at scale {s} is {v}");
+                assert_relative_eq!(v, b, max_relative = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn weights_whose_sum_overflows_fit_as_their_ratios() {
+        // Each weight is finite, their sum is past f64::MAX. Times a power
+        // of two, so the ratios are exactly those of `v` and the fit is too.
+        let (x, y) = crate::test_support::synth(20, 3, 1, 1.0, 21);
+        let v = Col::<f64>::from_fn(20, |i| [0.5, 1.0, 1.5, 2.0][i % 4]);
+        let huge = Col::<f64>::from_fn(20, |i| v[i] * 2f64.powi(1020));
+        let fit = |w: &Col<f64>| {
+            pls1_fit(
+                x.as_ref(),
+                y.as_ref(),
+                2,
+                Some(w.as_ref()),
+                None,
+                FitOpts::default(),
+            )
+            .unwrap()
+        };
+        let (a, b) = (fit(&huge), fit(&v));
+        assert_eq!(a.n_eff.to_bits(), b.n_eff.to_bits(), "n_eff {}", a.n_eff);
+        assert_eq!(a.intercept.to_bits(), b.intercept.to_bits());
+        for j in 0..3 {
+            assert_eq!(a.coef[j].to_bits(), b.coef[j].to_bits(), "coef[{j}]");
+        }
+        // Two equal weights at the top of the range are no weights.
+        let two = Col::<f64>::from_fn(20, |_| 1e308);
+        let m = fit(&two);
+        let none = pls1_fit(x.as_ref(), y.as_ref(), 2, None, None, FitOpts::default()).unwrap();
+        assert!(m.weights.is_none());
+        assert_eq!(m.n_eff.to_bits(), none.n_eff.to_bits());
+        for j in 0..3 {
+            assert_eq!(m.coef[j].to_bits(), none.coef[j].to_bits(), "coef[{j}]");
+        }
+        // The sum is finite but `w·n` is not: still the error the ratios
+        // call for (one dominant weight, n_eff ≈ 1), not `NonFiniteInput`.
+        let mut one = Col::<f64>::from_fn(20, |_| 1.0);
+        one[0] = 1e308;
+        let err = pls1_fit(
+            x.as_ref(),
+            y.as_ref(),
+            1,
+            Some(one.as_ref()),
+            None,
+            FitOpts::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, PlsKitError::InvalidWeights { .. }), "{err:?}");
+    }
 }
 
 #[cfg(test)]
@@ -2617,18 +2951,22 @@ mod boundary_tests {
     }
 
     /// `pls1_fit` on every layout of `x` agrees with the owned column-major
-    /// run to `FIT_LAYOUT_TOL`; returns the owned run's values. `keep` routes
-    /// through `spls1_fit`'s path (`spls1_fit` only sets `FitOpts::keep`).
+    /// run to `FIT_LAYOUT_TOL`; returns the owned run's values. A `keep`
+    /// runs `spls1_fit`.
     fn fit_layouts(
         what: &str,
         x: &Mat<f64>,
         y: &Col<f64>,
         w: Option<ColRef<'_, f64>>,
         k: usize,
-        opts: FitOpts,
+        (opts, keep): (FitOpts, Option<usize>),
     ) -> Vec<f64> {
         assert_layout_agree(x, what, Agree::Corpus(FIT_LAYOUT_TOL), |xv| {
-            pls1_fit(xv, y.as_ref(), KSpec::Fixed(k), w, None, opts).map(|m| model_vals(&m))
+            match keep {
+                Some(kp) => spls1_fit(xv, y.as_ref(), k, kp, w, None, opts),
+                None => pls1_fit(xv, y.as_ref(), k, w, None, opts),
+            }
+            .map(|m| model_vals(&m))
         })
         .unwrap_or_else(|e| panic!("{what}: {e}"))
     }
@@ -2639,11 +2977,14 @@ mod boundary_tests {
 
     #[test]
     fn pls1_fit_is_layout_invariant_to_rounding() {
-        let opts = |pre, keep, par| FitOpts {
-            pre_standardized: pre,
-            par,
-            keep,
-            ..FitOpts::default()
+        let opts = |pre, keep, par| {
+            (
+                FitOpts {
+                    pre_standardized: pre,
+                    par,
+                },
+                keep,
+            )
         };
         for f in copy_free_families() {
             let w = f.w.as_ref().map(Col::as_ref);
@@ -2817,13 +3158,12 @@ mod boundary_tests {
             let m = pls1_fit(
                 view,
                 ys.as_ref(),
-                KSpec::Fixed(1),
+                1,
                 None,
                 None,
                 FitOpts {
                     pre_standardized: true,
                     par: choice,
-                    ..FitOpts::default()
                 },
             )
             .unwrap();
@@ -2872,7 +3212,7 @@ mod boundary_tests {
                         ..FitOpts::default()
                     };
                     let r = assert_layout_agree(&bad, &what, Agree::Bits, |xv| {
-                        pls1_fit(xv, f.y.as_ref(), KSpec::Fixed(1), w, None, opts).map(|_| vec![])
+                        pls1_fit(xv, f.y.as_ref(), 1, w, None, opts).map(|_| vec![])
                     });
                     assert!(
                         matches!(r, Err(PlsKitError::NonFiniteInput)),
@@ -2910,15 +3250,8 @@ mod boundary_tests {
                 let mut y = Col::<f64>::from_fn(n, |_| rng.random_range(-1.0..1.0));
                 crate::test_support::project_off(&basis, &mut y);
                 let what = format!("{c:?} n={n} seed={seed}");
-                let m = pls1_fit(
-                    x.as_ref(),
-                    y.as_ref(),
-                    KSpec::Fixed(1),
-                    None,
-                    None,
-                    FitOpts::default(),
-                )
-                .unwrap();
+                let m =
+                    pls1_fit(x.as_ref(), y.as_ref(), 1, None, None, FitOpts::default()).unwrap();
                 assert_eq!(m.k_used, 0, "{what}");
                 assert_eq!(
                     (m.t_scores.ncols(), m.w_star.ncols(), m.q_loadings.nrows()),
@@ -2938,11 +3271,11 @@ mod boundary_tests {
         }
     }
 
-    /// A pre-standardized X far from unit scale (`2^±600`: its products
-    /// overflow or underflow, and its weight norms fall under the absolute
-    /// floor) is fitted divided by a power of two and mapped back: the fit of
-    /// `X·s` is the fit of X with `coef`, `beta` and `q` divided by `s` and
-    /// the scores times `s`, to the bit.
+    /// A pre-standardized X outside the band (`2^±600`, whose products
+    /// overflow or underflow, and `2^±30`, where the kernel's absolute floors
+    /// would cut components) is fitted divided by a power of two and mapped
+    /// back: the fit of `X·s` is the fit of X with `coef`, `beta` and `q`
+    /// divided by `s` and the scores times `s`, to the bit.
     #[test]
     fn pre_standardized_fit_far_from_unit_scale_is_the_rescaled_fit() {
         let (x, y) = signal_data(40, 6, 3);
@@ -2951,11 +3284,15 @@ mod boundary_tests {
             pre_standardized: true,
             ..FitOpts::default()
         };
-        let want = pls1_fit(x.as_ref(), ys.as_ref(), KSpec::Fixed(2), None, None, opts).unwrap();
-        for s in [2f64.powi(600), 2f64.powi(-600)] {
+        let want = pls1_fit(x.as_ref(), ys.as_ref(), 2, None, None, opts).unwrap();
+        for s in [
+            2f64.powi(600),
+            2f64.powi(-600),
+            2f64.powi(30),
+            2f64.powi(-30),
+        ] {
             let xs = Mat::<f64>::from_fn(40, 6, |i, j| x[(i, j)] * s);
-            let got =
-                pls1_fit(xs.as_ref(), ys.as_ref(), KSpec::Fixed(2), None, None, opts).unwrap();
+            let got = pls1_fit(xs.as_ref(), ys.as_ref(), 2, None, None, opts).unwrap();
             let what = format!("s = {s:e}");
             let back = |c: &Col<f64>| {
                 col_vals(c.as_ref())
@@ -3006,15 +3343,7 @@ mod boundary_tests {
             let xs = Mat::<f64>::from_fn(40, 6, |i, j| {
                 x[(i, j)] * if w[i] == 0.0 { far } else { 2f64.powi(-600) }
             });
-            pls1_fit(
-                xs.as_ref(),
-                ys.as_ref(),
-                KSpec::Fixed(2),
-                Some(w.as_ref()),
-                None,
-                opts,
-            )
-            .unwrap()
+            pls1_fit(xs.as_ref(), ys.as_ref(), 2, Some(w.as_ref()), None, opts).unwrap()
         };
         let (want, got) = (fit(2f64.powi(-600)), fit(2f64.powi(600)));
         assert_eq!(got.k_used, 2);
@@ -3051,7 +3380,7 @@ mod boundary_tests {
         let tiny_x = Mat::<f64>::from_fn(30, 4, |i, j| {
             1e-9 * if (i + j) % 2 == 0 { 1.0 } else { -1.0 }
         });
-        let tiny_y = Col::<f64>::from_fn(30, |i| 1e-9 * (i as f64 - 15.0));
+        let tiny_y = Col::<f64>::from_fn(30, |i| 1e-20 * (i as f64 - 15.0));
         let strict_pre = FitOpts {
             pre_standardized: true,
             ..FitOpts::default()
@@ -3064,18 +3393,27 @@ mod boundary_tests {
             ColRef<'_, f64>,
             usize,
             Option<ColRef<'_, f64>>,
-            FitOpts,
+            (FitOpts, Option<usize>),
             &str,
             Option<&str>,
         )> = vec![
-            ("k = 0", x.as_ref(), y.as_ref(), 0, None, d, ia, None),
+            (
+                "k = 0",
+                x.as_ref(),
+                y.as_ref(),
+                0,
+                None,
+                (d, None),
+                ia,
+                None,
+            ),
             (
                 "k > d",
                 x.as_ref(),
                 y.as_ref(),
                 6,
                 None,
-                d,
+                (d, None),
                 "k_exceeds_max",
                 None,
             ),
@@ -3085,7 +3423,7 @@ mod boundary_tests {
                 y.as_ref(),
                 2,
                 None,
-                FitOpts { keep: Some(0), ..d },
+                (d, Some(0)),
                 ia,
                 None,
             ),
@@ -3095,18 +3433,27 @@ mod boundary_tests {
                 y.as_ref(),
                 2,
                 None,
-                FitOpts { keep: Some(6), ..d },
+                (d, Some(6)),
                 ia,
                 None,
             ),
-            ("NaN in X", bad_x.as_ref(), y.as_ref(), 2, None, d, nf, None),
+            (
+                "NaN in X",
+                bad_x.as_ref(),
+                y.as_ref(),
+                2,
+                None,
+                (d, None),
+                nf,
+                None,
+            ),
             (
                 "short y",
                 x.as_ref(),
                 short_y.as_ref(),
                 2,
                 None,
-                d,
+                (d, None),
                 "dimension_mismatch",
                 None,
             ),
@@ -3116,7 +3463,7 @@ mod boundary_tests {
                 y.as_ref(),
                 2,
                 Some(zero_w.as_ref()),
-                d,
+                (d, None),
                 iw,
                 Some("all_zero"),
             ),
@@ -3126,18 +3473,27 @@ mod boundary_tests {
                 y.as_ref(),
                 2,
                 Some(neg_w.as_ref()),
-                d,
+                (d, None),
                 iw,
                 Some("negative"),
             ),
-            ("NaN in y", x.as_ref(), nan_y.as_ref(), 2, None, d, nf, None),
+            (
+                "NaN in y",
+                x.as_ref(),
+                nan_y.as_ref(),
+                2,
+                None,
+                (d, None),
+                nf,
+                None,
+            ),
             (
                 "NaN weight",
                 x.as_ref(),
                 y.as_ref(),
                 2,
                 Some(nan_w.as_ref()),
-                d,
+                (d, None),
                 nf,
                 None,
             ),
@@ -3147,7 +3503,7 @@ mod boundary_tests {
                 y.as_ref(),
                 2,
                 Some(long_w.as_ref()),
-                d,
+                (d, None),
                 iw,
                 Some("length_mismatch"),
             ),
@@ -3157,13 +3513,22 @@ mod boundary_tests {
                 y.as_ref(),
                 2,
                 Some(one_row_w.as_ref()),
-                d,
+                (d, None),
                 iw,
                 Some("insufficient_effective_n"),
             ),
             // Unweighted, n < k + 1. (All-equal weights raise the same:
             // `equal_weights_are_absent_weights_at_every_entry`.)
-            ("n < k + 1", x3.as_ref(), y3.as_ref(), 3, None, d, ia, None),
+            (
+                "n < k + 1",
+                x3.as_ref(),
+                y3.as_ref(),
+                3,
+                None,
+                (d, None),
+                ia,
+                None,
+            ),
             // Several faults at once: the first check in `pls1_fit`'s order wins.
             (
                 "NaN X + k = 0",
@@ -3171,7 +3536,7 @@ mod boundary_tests {
                 y.as_ref(),
                 0,
                 None,
-                d,
+                (d, None),
                 nf,
                 None,
             ),
@@ -3181,7 +3546,7 @@ mod boundary_tests {
                 short_y.as_ref(),
                 2,
                 None,
-                d,
+                (d, None),
                 "dimension_mismatch",
                 None,
             ),
@@ -3191,7 +3556,7 @@ mod boundary_tests {
                 nan_y.as_ref(),
                 2,
                 Some(zero_w.as_ref()),
-                d,
+                (d, None),
                 nf,
                 None,
             ),
@@ -3201,27 +3566,31 @@ mod boundary_tests {
                 nan_y.as_ref(),
                 2,
                 None,
-                FitOpts { keep: Some(0), ..d },
+                (d, Some(0)),
                 nf,
                 None,
             ),
-            // With `pre_standardized = true` and inputs so far below unit
-            // scale that ‖X'y‖ < 1e-14, the kernel stops at the first
-            // component. A top-level call (`check_n_eff = true`) reports the truncation instead of
-            // returning a k_used = 0 model.
+            // With `pre_standardized = true`, X is rescaled and y is used as
+            // given: y is so far below unit scale that ‖X_a'y_a‖ < 1e-14
+            // stops the first component. A top-level call reports the
+            // truncation instead of returning a k_used = 0 model.
             (
                 "strict truncation",
                 tiny_x.as_ref(),
                 tiny_y.as_ref(),
                 3,
                 None,
-                strict_pre,
+                (strict_pre, None),
                 "invalid_input",
                 None,
             ),
         ];
-        for (what, xv, yv, k, w, opts, code, reason) in cases {
-            let e = pls1_fit(xv, yv, KSpec::Fixed(k), w, None, opts).expect_err(what);
+        for (what, xv, yv, k, w, (opts, keep), code, reason) in cases {
+            let e = match keep {
+                Some(kp) => spls1_fit(xv, yv, k, kp, w, None, opts),
+                None => pls1_fit(xv, yv, k, w, None, opts),
+            }
+            .expect_err(what);
             assert_eq!(e.code(), code, "{what}: {e}");
             if let Some(want) = reason {
                 assert!(
@@ -3229,12 +3598,6 @@ mod boundary_tests {
                     "{what}: {e:?}"
                 );
             }
-        }
-        // The public sparse entry range-checks its keep-count the same way.
-        for keep in [0, 6] {
-            let e = spls1_fit(x.as_ref(), y.as_ref(), KSpec::Fixed(2), keep, None, None, d)
-                .expect_err("spls1_fit keep");
-            assert_eq!(e.code(), ia, "spls1_fit keep={keep}: {e}");
         }
     }
 
@@ -3267,7 +3630,7 @@ mod boundary_tests {
         let mut out = vec![
             (
                 "pls1_fit".to_owned(),
-                show(pls1_fit(x, y, KSpec::Fixed(k), w, None, FitOpts::default())),
+                show(pls1_fit(x, y, k, w, None, FitOpts::default())),
             ),
             (
                 "perm_null".to_owned(),
@@ -3410,8 +3773,9 @@ mod boundary_tests {
 
     /// The public entries that take X, besides the PLS1 fits, the PLS3
     /// family (`pls3::tests::pls3_family_agrees_across_layouts`) and the
-    /// engines whose own tests pin layout agreement. The
-    /// Python wrapper hands each its X in place (C or F order).
+    /// engines whose own tests pin layout agreement. The Python wrapper
+    /// hands each a column-major X: read in place when F-ordered, copied
+    /// otherwise.
     /// `preprocess` / `preprocess_block` and the `split_nb` gate give the
     /// same bits on every layout. `pls1_predict`, `factors`, `pca_basis` and
     /// `profiles_find_n` agree to `FIT_LAYOUT_TOL`.
@@ -3455,15 +3819,8 @@ mod boundary_tests {
                 Ok(vec![f64::from(u8::from(g.fires)), g.stable_rank, g.n_eff])
             })
             .unwrap();
-            let model = pls1_fit(
-                f.x.as_ref(),
-                f.y.as_ref(),
-                KSpec::Fixed(2),
-                w,
-                None,
-                FitOpts::default(),
-            )
-            .unwrap();
+            let model =
+                pls1_fit(f.x.as_ref(), f.y.as_ref(), 2, w, None, FitOpts::default()).unwrap();
             assert_layout_agree(&f.x, &what("pls1_predict"), agree, |xv| {
                 Ok(col_vals(
                     crate::predict::pls1_predict(&model, xv, None)?.as_ref(),
@@ -3577,15 +3934,11 @@ mod boundary_tests {
         let mut row = |entry: &str, arg: &'static str, got: String| {
             rows.push((entry.to_owned(), arg, got));
         };
-        row(
-            "spls1_fit",
-            "k",
-            show(spls1_fit(x, y, KSpec::Fixed(0), 3, None, None, d)),
-        );
+        row("spls1_fit", "k", show(spls1_fit(x, y, 0, 3, None, None, d)));
         row(
             "spls1_fit keep",
             "keep",
-            show(spls1_fit(x, y, KSpec::Fixed(2), 0, None, None, d)),
+            show(spls1_fit(x, y, 2, 0, None, None, d)),
         );
         row(
             "spls1_find_k_optimal",
@@ -3668,17 +4021,19 @@ mod boundary_tests {
                 for keep in [None, Some(3)] {
                     let opts = FitOpts {
                         pre_standardized: true,
-                        check_n_eff: false,
                         par: ParChoice::Seq,
-                        keep,
                     };
-                    let direct = pls1_fit(
+                    let direct = pls1_fit_impl(
                         xs.as_ref(),
                         ys.as_ref(),
-                        KSpec::Fixed(k),
+                        k,
                         Some(wn.as_ref()),
                         None,
                         opts,
+                        InternalFitOpts {
+                            check_n_eff: false,
+                            keep,
+                        },
                     )
                     .unwrap();
                     let hoisted = pls1_fit_prepared_fro(
@@ -3688,8 +4043,7 @@ mod boundary_tests {
                         keep,
                         ParChoice::Seq,
                         x_fro,
-                    )
-                    .unwrap();
+                    );
                     let what = format!("{} k={k} keep={keep:?}", f.name);
                     assert_eq!(direct.k_used, hoisted.k_used, "{what}");
                     assert_bits_eq(
@@ -3750,7 +4104,7 @@ mod covariate_tests {
         pls1_fit(
             x,
             y,
-            KSpec::Fixed(2),
+            2,
             w.map(Col::as_ref),
             z,
             FitOpts {
@@ -3766,8 +4120,7 @@ mod covariate_tests {
         let (x, y, z) = data(n);
         for w in [None, Some(test_weights(n))] {
             let m = fit(x.as_ref(), y.as_ref(), w.as_ref(), Some(z.as_ref()), false).unwrap();
-            let (wn, _) =
-                validate_and_normalize_weights(w.as_ref().map(Col::as_ref), n, 2).unwrap();
+            let (wn, _) = validate_and_normalize_weights(w.as_ref().map(Col::as_ref), n).unwrap();
             let adj = adjust(
                 x.as_ref(),
                 y.as_ref(),
@@ -3839,7 +4192,7 @@ mod covariate_tests {
         let m = spls1_fit(
             x.as_ref(),
             y.as_ref(),
-            KSpec::Fixed(2),
+            2,
             3,
             None,
             Some(z.as_ref()),

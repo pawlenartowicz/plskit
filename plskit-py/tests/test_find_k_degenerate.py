@@ -56,7 +56,8 @@ def test_optimal_diagnostic_at_k_star_zero_is_empty(diagnostic, args, expect):
     assert r.k_star == 0
     assert r.pvalues.shape == (0,)
     assert r.diagnostic == expect
-    assert (r.stable_rank is not None) == (diagnostic == "split_nb")
+    # "e" has no gate; forced split_nb does not compute the rank.
+    assert r.stable_rank is None
 
 
 def test_sequence_returns_k_star_zero():
