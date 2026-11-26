@@ -39,5 +39,4 @@ python3 scripts/render-r-stubs.py
 python3 scripts/render-jl-stubs.py
 ```
 
-CI also builds and tests the workspace on Rust 1.85, the minimum supported
-version, and runs the Python, R and Julia test suites.
+CI also lints the shipped crates on Rust 1.85, the minimum supported version (the tests need a newer Rust for their `.npz` reader), and runs the Python, R and Julia test suites.

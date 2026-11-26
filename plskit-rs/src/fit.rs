@@ -148,50 +148,17 @@ pub(crate) const PAR_DEGREE: usize = 8;
 
 /// The one parallel `faer::Par` of this crate: `Par::Rayon(PAR_DEGREE)`.
 /// Never `Par::rayon(0)`, whose degree is the pool size (see
-/// [`PAR_DEGREE`]), except in a test build on a thread that
-/// `install_pool_sized` has switched.
+/// [`PAR_DEGREE`]).
 pub(crate) fn par_fixed() -> Par {
-    #[cfg(test)]
-    if POOL_SIZED_PAR.with(std::cell::Cell::get) {
-        return Par::rayon(0);
-    }
     Par::rayon(PAR_DEGREE)
 }
 
 /// The number of pieces the crate's own row-split kernels cut their work
-/// into: [`PAR_DEGREE`], or in a test build the pool size on a thread that
-/// `install_pool_sized` has switched. It sets the pieces of
+/// into: [`PAR_DEGREE`]. It sets the pieces of
 /// `linalg::row_major_t_mul`'s parallel arm and of both arms of
-/// `linalg::sum_of_squares`, which reads it before it matches on `par`, so
-/// under the switch its `Par::Seq` arm follows the pool size too.
+/// `linalg::sum_of_squares`.
 pub(crate) fn par_degree() -> usize {
-    #[cfg(test)]
-    if POOL_SIZED_PAR.with(std::cell::Cell::get) {
-        return rayon::current_num_threads();
-    }
     PAR_DEGREE
-}
-
-/// Test only: runs `f` in `pool` with [`par_fixed`] and [`par_degree`]
-/// following the pool size on every worker, so a test can show that a call
-/// reaches a split whose rounding depends on the degree. The switch is a
-/// thread-local, set on every worker by `broadcast` and cleared the same
-/// way after `f`, also when `f` panics: a process-wide switch would leak
-/// into the unit tests running at the same time.
-#[cfg(test)]
-pub(crate) fn install_pool_sized<T: Send>(
-    pool: &rayon::ThreadPool,
-    f: impl FnOnce() -> T + Send,
-) -> T {
-    struct Clear<'a>(&'a rayon::ThreadPool);
-    impl Drop for Clear<'_> {
-        fn drop(&mut self) {
-            self.0.broadcast(|_| POOL_SIZED_PAR.with(|c| c.set(false)));
-        }
-    }
-    pool.broadcast(|_| POOL_SIZED_PAR.with(|c| c.set(true)));
-    let _clear = Clear(pool);
-    pool.install(f)
 }
 
 /// Environment variable that caps plskit's thread count; read once per
@@ -275,8 +242,6 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static HELD_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static GEMM_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    #[cfg(test)]
-    static POOL_SIZED_PAR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Test builds read this in place of the `PLSKIT_MEMORY_BUDGET`
@@ -2788,36 +2753,6 @@ mod tests {
             })
             .collect();
         assert!(handles.into_iter().all(|h| h.join().unwrap()));
-    }
-
-    #[test]
-    fn par_fixed_follows_the_pool_inside_install_pool_sized() {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(3)
-            .build()
-            .unwrap();
-        let degrees = super::install_pool_sized(&pool, || {
-            rayon::broadcast(|_| (super::par_fixed().degree(), super::par_degree()))
-        });
-        assert_eq!(degrees, vec![(3, 3); 3]);
-    }
-
-    #[test]
-    fn pool_sized_par_is_cleared_after_the_call() {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(3)
-            .build()
-            .unwrap();
-        super::install_pool_sized(&pool, || ());
-        let after = pool.broadcast(|_| (super::par_fixed(), super::par_degree()));
-        assert_eq!(after, vec![(Par::rayon(PAR_DEGREE), PAR_DEGREE); 3]);
-        // Also when the call panics.
-        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            super::install_pool_sized(&pool, || panic!("inside the call"));
-        }));
-        assert!(caught.is_err());
-        let after = pool.broadcast(|_| (super::par_fixed(), super::par_degree()));
-        assert_eq!(after, vec![(Par::rayon(PAR_DEGREE), PAR_DEGREE); 3]);
     }
 
     #[test]

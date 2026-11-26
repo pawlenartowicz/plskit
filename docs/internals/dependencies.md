@@ -62,5 +62,4 @@ types. The wrappers convert them to the arrays of their own language.
 - `Cargo.lock` is committed.
 - Dependabot opens cargo update pull requests weekly, with the `faer*`
   crates grouped into one.
-- The minimum Rust version, 1.85, is `rust-version` in the root
-  `Cargo.toml`. A CI job builds, lints and tests the workspace on it.
+- The minimum Rust version, 1.85, is `rust-version` in the root `Cargo.toml`. It covers the shipped crates, not the tests: `ndarray-npy` and `zip` (test-only, and in `plskit-testdata-gen`) need a newer Rust. A CI job builds and lints the shipped crates on 1.85.

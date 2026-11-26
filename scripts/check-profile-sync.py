@@ -8,8 +8,8 @@ check fails when:
 1. the R crate's [profile.release] differs from the workspace's, or its
    manifest lacks an empty [workspace] table;
 2. a package in the dependency trees of plskit and plskit-bind (the two
-   excluded) resolves to different versions in the R lock file than in
-   the workspace Cargo.lock;
+   excluded) resolves in the R lock file to a version the workspace
+   Cargo.lock does not have;
 3. the R crate's pinned `plskit` / `plskit-bind` requirements
    (`= X.Y.Z` in plskit-r/src/rust/Cargo.toml) do not equal
    plskit-r/DESCRIPTION's `Version:` (both are pinned to the R
@@ -108,15 +108,16 @@ def dependency_versions(lock: dict, roots=SHARED_ROOTS) -> dict[str, set[str]]:
 
 
 def check_lock(root: Path, r_lock: Path) -> list[str]:
-    """Every package the R crate compiles for plskit / plskit-bind has the
-    workspace's version. Workspace-only packages (dev-dependencies, which
-    Cargo.lock does not mark) are not compared."""
+    """Every version the R crate compiles for plskit / plskit-bind is one
+    the workspace resolves. A subset check, not equality: Cargo.lock lists
+    dev-dependencies without marking them, so the workspace side also
+    holds versions that only plskit's tests pull in."""
     ws = dependency_versions(load_toml(root / "Cargo.lock"))
     r = dependency_versions(load_toml(r_lock))
     return [
         f"{name}: {r_lock} has {sorted(r[name])}, the workspace has {sorted(ws.get(name, set()))}"
         for name in sorted(r)
-        if r[name] != ws.get(name, set())
+        if not r[name] <= ws.get(name, set())
     ]
 
 

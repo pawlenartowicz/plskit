@@ -1,4 +1,4 @@
-// Included by `tests/common/mod.rs`, `src/memory_budget_cases.rs` and `src/fixture_route_pins.rs`.
+// Included by `tests/common/mod.rs` and `src/memory_budget_cases.rs`.
 
 /// `x` uniform on `[-1, 1)` and `y = (x₀ + 0.5·x₁)·snr + noise` (`d >= 2`).
 pub fn synth(n: usize, d: usize, snr: f64, seed: u64) -> (Mat<f64>, Col<f64>) {

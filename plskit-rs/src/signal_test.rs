@@ -7827,6 +7827,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::float_cmp)] // an underflowed tail must be exactly 0.0
     fn chi2_sf_matches_scipy() {
         // repr(float(scipy.stats.chi2.sf(x, df))), scipy 1.18.1. For each df,
         // x is 0.5·df, df − 2, df + 1.9, df + 2.1, df + 5·√(2·df) and 3·df.
@@ -16676,7 +16677,8 @@ mod tests {
     #[allow(
         clippy::cast_precision_loss,
         clippy::too_many_lines,
-        clippy::similar_names
+        clippy::similar_names,
+        clippy::float_cmp // p-values are counts over the same nulls
     )]
     fn batched_primal_precision_sweep() {
         let n_cols = 20;

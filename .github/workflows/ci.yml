@@ -70,10 +70,11 @@ jobs:
           toolchain: "1.85"
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # Shipped crates only, without test targets: the test-only crates
+      # (ndarray-npy, zip, plskit-testdata-gen) need a newer Rust, and users
+      # never build them.
       - name: cargo clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: cargo test (workspace)
-        run: cargo test --workspace --release
+        run: cargo clippy --workspace --exclude plskit-testdata-gen -- -D warnings
 
   # plskit-py builds against Python's stable ABI (abi3-py311 in plskit-py/Cargo.toml),
   # so one wheel works on 3.11+. The full suite runs on the oldest and newest

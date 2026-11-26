@@ -162,7 +162,7 @@ fn row_ranges(
         Par::Seq => 1,
         Par::Rayon(t) => t.get(),
     };
-    let per = align * out.nrows().div_ceil(align).div_ceil(threads).max(1);
+    let chunk = align * out.nrows().div_ceil(align).div_ceil(threads).max(1);
     let run = |i0: usize, rows: MatMut<'_, f64>| {
         let mut s = scratch(rows.nrows());
         f(i0, rows, &mut s);
@@ -170,9 +170,9 @@ fn row_ranges(
     if threads == 1 {
         run(0, out);
     } else {
-        out.par_row_chunks_mut(per)
+        out.par_row_chunks_mut(chunk)
             .enumerate()
-            .for_each(|(c, rows)| run(c * per, rows));
+            .for_each(|(c, rows)| run(c * chunk, rows));
     }
 }
 

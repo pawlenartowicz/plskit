@@ -18,9 +18,8 @@
 //! The pool comparison only has teeth where some product is past a
 //! pool-sensitive split: `ParChoice::Auto`'s `n·d·k >= 1e6` (`n·p·q` for
 //! PLS3), faer's `256²`-entry column-major GEMV split, or the parallel
-//! threshold of its EVD / SVD. Every case below marked "pool" differs
-//! across pool sizes when a pool-sized `Par` is used. Cases
-//! marked "guard only" sit below those thresholds, so the pool comparison
+//! threshold of its EVD / SVD. Cases below marked "pool" reach such a
+//! split. Cases marked "guard only" sit below those thresholds, so the pool comparison
 //! cannot fail there today; they are kept for the global-parallelism guard
 //! below, which fails on them the day a path they reach reads faer's
 //! global. The guard does not see a pool-sized `Par` passed explicitly

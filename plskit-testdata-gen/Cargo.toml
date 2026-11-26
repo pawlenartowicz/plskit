@@ -16,8 +16,8 @@ path = "src/main.rs"
 [dependencies]
 plskit = { workspace = true }
 ndarray = "0.17"
-ndarray-npy = "0.10"
-zip = "6"                           # pin .npz entry timestamps; see npz::NpzWriter::create
+ndarray-npy = "0.11"
+zip = "9"                           # pin .npz entry timestamps; see npz::NpzWriter::create
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
