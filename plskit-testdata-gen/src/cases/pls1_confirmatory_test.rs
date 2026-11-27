@@ -217,7 +217,6 @@ fn confirmatory_call(c: &ConfirmatoryCase, data: &Xyw) -> Result<ConfirmatoryTes
         seed: Some(CASE_SEED),
         ci: c.ci,
         max_skip_rate: 0.01,
-        keep: None,
     };
     if flag("gram") {
         let g = gram_matrix(x_faer.as_ref(), pre_standardized)?;

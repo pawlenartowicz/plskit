@@ -422,23 +422,20 @@ fn split_exact_primal_is_pool_size_invariant() {
     // with `keep` (shape pinned in
     // `fixture_route_pins::thread_count_parity_shapes_take_their_routes`).
     let (xk, yk) = synth(2000, 200, 0.3, 63);
+    // A one-step `spls1` sequence runs exactly this test at its keep.
     c.check("split_exact gram-p 2000x200 k=1 keep=10", || {
-        pls1_confirmatory_test(
-            ConfirmatoryTestInput::Raw {
-                x: xk.as_ref(),
-                y: yk.as_ref(),
-                k: Some(&[1]),
-                weights: None,
-                covariates: None,
-                null_y: None,
-            },
-            ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitExact {
-                    n_perm: 400,
-                    n_splits: 5,
-                },
+        spls1_find_k_sequence(
+            xk.as_ref(),
+            yk.as_ref(),
+            1,
+            10,
+            None,
+            None,
+            FindKSequenceOpts {
+                test_method: ConfirmatoryMethod::SplitExact,
+                n_perm: 400,
+                n_splits: 5,
                 seed: Some(3033),
-                keep: Some(10),
                 ..Default::default()
             },
         )

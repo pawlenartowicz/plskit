@@ -84,7 +84,7 @@ when `split_exact` is too slow; prefer `split_exact` otherwise.
 - **`args`.** `{"n_perm": 1000, "rotate": False}`.
 - **`rotate`.** With `rotate=True`, each permuted decomposition is Procrustes-rotated onto the observed one before its singular value is read, as pyls does. For LV1 the rotated null value is never larger than the unrotated one on the same permutation, so rotation can only lower the p-value. A rotated test is not exact, and pyls's own docstring warns that rotation can inflate false positives. `rotate` is a PLS3 option: `pls1_confirmatory_test` refuses `rotate=True`. `result.rotate` records which `rotate` ran.
 - **Relation to pyls.** plskit's `d₁` is `n` times the first singular value pyls reports. With no groups in pyls, the permutation scheme is the same.
-- **Refused.** `covariates` are not accepted by PLS3 `sv_perm`, nor is `keep_x` / `keep_y` below the full column count.
+- **Refused.** `covariates` are not accepted by PLS3 `sv_perm`.
 - **`auto` never picks it.** `split_exact` stays the recommended method: it tests prediction on held-out rows and is exact whenever rows are exchangeable under the null.
 
 ## The `split_nb` auto-gate runs on X only

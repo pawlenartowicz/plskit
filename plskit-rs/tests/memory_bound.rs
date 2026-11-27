@@ -517,7 +517,7 @@ fn bound_cases() -> Vec<Bound> {
         ] {
             cases.push(bound(name, shape, move |call| {
                 let (x, y) = two_block(n, p, PQ, 67);
-                then(call, || pls3_test(&x, &y, args, None, None, 68))
+                then(call, || pls3_test(&x, &y, args, 68))
             }));
         }
         cases.push(bound("pls1_perm_null", shape, move |call| {

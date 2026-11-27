@@ -1576,8 +1576,8 @@ fn select_cv(
 )> {
     // k-fold CV with optional 1-SE rule.
     // CV-R² convention (cites the "CV-R² convention" anchor on `pooled_cv_r2_columns` in
-    // signal_test.rs): this function uses per-fold *weighted-validation* R² averaged across
-    // folds, which differs from raw_perm's pooled SS_res/SS_tot convention. The two are not
+    // signal_test.rs): this function uses per-fold weighted-validation R² averaged across
+    // folds, which differs from raw_perm's pooled weighted SS_res/SS_tot convention. The two are not
     // interchangeable; each method owns the convention appropriate to its statistic.
     // The caller has run `reject_cv_leave_one_out`.
     let n = x.nrows();
@@ -2810,7 +2810,6 @@ mod tests {
                 seed: Some(step_seed),
                 ci: None,
                 max_skip_rate: 0.01,
-                keep: None,
             },
         )
         .unwrap();

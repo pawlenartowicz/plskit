@@ -251,8 +251,6 @@ fn pls3_test(
     x: &Mat<f64>,
     y: &Mat<f64>,
     args: ConfirmatoryArgs,
-    keep_x: Option<usize>,
-    keep_y: Option<usize>,
     seed: u64,
 ) -> PlsKitResult<ConfirmatoryTestOutput> {
     pls3_confirmatory_test(
@@ -261,8 +259,6 @@ fn pls3_test(
         1,
         Pls3ConfirmatoryTestOpts {
             args,
-            keep_x,
-            keep_y,
             seed: Some(seed),
             ..Default::default()
         },
@@ -373,9 +369,6 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
     // A PLS3 n-space unit at one thread (`pls3_signal_test::gram_unit_bytes`):
     // `G` and `M`, and one column's copies of Y and `G·Ỹ_tr`.
     let pls3_gram = split_gram + y_column(P_SPLIT_TR, PN - P_SPLIT_TR, PQ) + copy(P_SPLIT_TR, PQ);
-    // A PLS3 primal unit at one thread (`primal_split_unit_bytes`): the
-    // halves of X and one column's LV1 fit and copies of Y.
-    let pls3_primal = split_blocks(PP) + lv1(PP, PQ) + y_column(P_SPLIT_TR, PN - P_SPLIT_TR, PQ);
     let raw_perm = |n_perm, n_folds| ConfirmatoryArgs::RawPerm { n_perm, n_folds };
     vec![
         // `split_nb` on the n-space route (dense, unweighted, the gate's
@@ -491,18 +484,13 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
                 ))
             },
         ),
-        // `pls3_split_lv_correlations` on the primal route (a sparse X
-        // side).
-        case("pls3 split_nb keep_x=40", pls3_primal, move || {
-            split_nb_out(pls3_test(&d.x3, &d.y3, SPLIT_NB, Some(40), None, 21))
-        }),
         // The n-space route (dense, `n_tr < p`).
         case("pls3 split_nb dense", pls3_gram, move || {
-            split_nb_out(pls3_test(&d.x3, &d.y3, SPLIT_NB, None, None, 22))
+            split_nb_out(pls3_test(&d.x3, &d.y3, SPLIT_NB, 22))
         }),
         // The n-space route on a constant X: every split is the zero model.
         case("pls3 split_nb dense constant X", pls3_gram, move || {
-            split_nb_out(pls3_test(&d.xc, &d.y3, SPLIT_NB, None, None, 23))
+            split_nb_out(pls3_test(&d.xc, &d.y3, SPLIT_NB, 23))
         }),
         // The streamed body (`Primal(Gather)`, `pls3_split_lv_correlations_streamed`):
         // `n_tr ≥ p` leaves no Gram route (`streamed_unit_bytes`): one LV1
@@ -514,25 +502,13 @@ fn parity_cases(d: &ParityData) -> Vec<Case<'_>> {
                 + stream_blocks(P_SPLIT_TR, PN - P_SPLIT_TR)
                 + copy(P_SPLIT_TR, PQ)
                 + 2 * copy(PN - P_SPLIT_TR, PQ),
-            move || split_nb_out(pls3_test(&d.x3s, &d.y3s, SPLIT_NB, None, None, 34)),
+            move || split_nb_out(pls3_test(&d.x3s, &d.y3s, SPLIT_NB, 34)),
         ),
         // `pls3_split_zbars_columns` on the n-space route; the copies of Y
         // count once per thread.
         case("pls3 split_exact dense", pls3_gram, move || {
-            render(pls3_test(&d.x3, &d.y3, SPLIT_EXACT, None, None, 24))
+            render(pls3_test(&d.x3, &d.y3, SPLIT_EXACT, 24))
         }),
-        // `pls3_split_zbars_columns_primal` (a sparse X side); the LV1 fit
-        // and copies of Y count once per thread.
-        case("pls3 split_exact keep_x=40", pls3_primal, move || {
-            render(pls3_test(&d.x3, &d.y3, SPLIT_EXACT, Some(40), None, 25))
-        }),
-        // `pls3_split_zbars_columns` on a constant X with a sparse Y side,
-        // on the n-space route: every column is the zero model.
-        case(
-            "pls3 split_exact constant X wide keep_y=1",
-            pls3_gram,
-            move || render(pls3_test(&d.xc_wide, &d.y3, SPLIT_EXACT, None, Some(1), 26)),
-        ),
         // `cv_select`: one fold fit on X in place, weighted or not
         // (`k_max = 2` gives `max_comp = 2`; the keep grid fits at k = 2).
         case(

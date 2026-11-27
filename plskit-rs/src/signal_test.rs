@@ -758,20 +758,6 @@ pub struct ConfirmatoryTestOpts {
     /// after skips and failures, or every draw left has a NaN holdout
     /// correlation, whatever the rate.
     pub max_skip_rate: f64,
-    /// Sparse keep-count plumbing for the `spls1` family: every inner fit
-    /// (CV folds for `raw_perm`, split halves for `split_nb`/`split_exact`,
-    /// the train half for `e`) runs sparse at this keep. `Score` ignores it —
-    /// the score statistic `T = ‖X'y‖²` is fit-free. `split_exact`'s no-refit
-    /// route also ignores it — it performs no inner fits at all (see "Why no
-    /// refits" on `split_perm_nr_zbars`); the route function itself still
-    /// guards and errors rather than silently running dense, but a set `keep`
-    /// always sends `split_exact`'s dispatch to the refit route instead, so a
-    /// caller never observes that guard. `split_exact`'s refit route needs no
-    /// such guard: a set `keep` simply routes it to `run_split_perm`, which
-    /// honors the keep. `None` (default) = dense. Wrapper surfaces do not
-    /// expose this; it exists for `spls1_find_k_sequence`'s per-component
-    /// tests (and Rust-level use).
-    pub keep: Option<usize>,
 }
 
 impl Default for ConfirmatoryTestOpts {
@@ -786,7 +772,6 @@ impl Default for ConfirmatoryTestOpts {
             seed: None,
             ci: None,
             max_skip_rate: 0.01,
-            keep: None,
         }
     }
 }
@@ -899,8 +884,8 @@ pub struct ConfirmatoryTestOutput {
 /// `min(DEFAULT_K_SET_MAX, p, ⌊n/2⌋ − 2)`, then below the weights' Kish
 /// `n_eff` (`n_eff ≥ k + 1`) and the covariates' residual df
 /// (`n_pos − rank([1, Z]) ≥ k + 1`), never below 1. It is `{1}` for
-/// `split_nb`, `score`, `sv_perm` and `e`, with `ci` and with `keep`, which
-/// refuse a set of more than one k. `auto` with more than one k runs
+/// `split_nb`, `score`, `sv_perm` and `e`, and with `ci`, which refuse a
+/// set of more than one k. `auto` with more than one k runs
 /// `split_exact`.
 ///
 /// The `Gram` input form runs every method from the Gram matrix alone. On
@@ -925,7 +910,7 @@ pub struct ConfirmatoryTestOutput {
 /// - `PlsKitError::InvalidArgument` when a k is 0 (every method, `score`
 ///   included although its statistic does not depend on k), when the set
 ///   is empty or has a duplicate, or when it has more than one k with
-///   `split_nb`, `score`, `sv_perm`, `e`, `ci` or `keep`
+///   `split_nb`, `score`, `sv_perm`, `e` or `ci`
 /// - `PlsKitError::InvalidArgument` for `test_method = "raw_perm"` with
 ///   `n_folds < 2` or `n_folds >= n` (leave-one-out; the pooled CV R² is
 ///   undefined when every validation fold is a single row)
@@ -951,7 +936,7 @@ pub struct ConfirmatoryTestOutput {
 ///   `NonFiniteInput` for NaN/inf. `n_perm` is then the column count.
 /// - Gram form: `PlsKitError::InvalidArgument` when `gram.gram` has
 ///   another row count than `y`, `k > 10` (a fit with more components
-///   needs X), `opts.keep` or `opts.ci` is set, or `opts.pre_standardized`
+///   needs X), `opts.ci` is set, or `opts.pre_standardized`
 ///   is set (it is read from `gram`); `ShapeMismatch` when `gram.gram` is
 ///   not square; `NonFiniteInput` when it is not finite; `InvalidInput`
 ///   when the centred matrix has a negative diagonal entry, is not
@@ -963,7 +948,18 @@ pub fn pls1_confirmatory_test(
     input: ConfirmatoryTestInput<'_>,
     opts: ConfirmatoryTestOpts,
 ) -> PlsKitResult<ConfirmatoryTestOutput> {
-    crate::fit::with_thread_limit(|| confirmatory_test_impl(input, opts, GateMode::Owned))
+    crate::fit::with_thread_limit(|| confirmatory_test_impl(input, opts, GateMode::Owned, None))
+}
+
+/// [`pls1_confirmatory_test`] at a sparse keep-count, the form the
+/// `spls1` sequence runs each step's test in.
+#[cfg(test)]
+pub(crate) fn pls1_confirmatory_test_keep(
+    input: ConfirmatoryTestInput<'_>,
+    opts: ConfirmatoryTestOpts,
+    keep: Option<usize>,
+) -> PlsKitResult<ConfirmatoryTestOutput> {
+    crate::fit::with_thread_limit(|| confirmatory_test_impl(input, opts, GateMode::Owned, keep))
 }
 
 /// The largest k of the default set of `pls1_confirmatory_test`, before
@@ -1112,6 +1108,7 @@ pub(crate) fn confirmatory_test_impl(
     input: ConfirmatoryTestInput<'_>,
     opts: ConfirmatoryTestOpts,
     gate: GateMode<'_>,
+    keep: Option<usize>,
 ) -> PlsKitResult<ConfirmatoryTestOutput> {
     let (x, y, k, weights, covariates, null_y) = match &input {
         ConfirmatoryTestInput::Raw {
@@ -1129,12 +1126,13 @@ pub(crate) fn confirmatory_test_impl(
             covariates,
             null_y,
         } => {
+            debug_assert!(keep.is_none(), "keep runs on X only");
             return confirmatory_test_gram(gram, *y, *k, *covariates, *null_y, opts);
         }
     };
     let opts = apply_null_y(opts, null_y, covariates.is_some(), x.nrows())?;
     let Some(z) = covariates else {
-        return confirmatory_test_run(x, y, k, weights, opts, gate, None, null_y, None, None);
+        return confirmatory_test_run(x, y, k, weights, opts, gate, None, null_y, None, None, keep);
     };
     check_covariate_method(&opts.args, COVARIATE_METHODS)?;
     let n = x.nrows();
@@ -1168,6 +1166,7 @@ pub(crate) fn confirmatory_test_impl(
             pre_standardized,
         }),
         Some(PendingAdjust { basis, w_norm }),
+        keep,
     )
 }
 
@@ -1307,7 +1306,9 @@ struct PendingAdjust {
 /// is set, every permutation null column `π_c(ỹ)` is replaced by its
 /// residual on `[1, Z]` (Freedman–Lane) and `auto` resolves to
 /// `split_exact`. The `ci` branch refits on `(x, y)` as given under
-/// `opts.pre_standardized`.
+/// `opts.pre_standardized`. `keep` is the sparse keep-count every inner
+/// fit runs at (the `spls1` sequence's steps); `None` is dense.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn confirmatory_test_core(
     x: MatRef<'_, f64>,
     y: ColRef<'_, f64>,
@@ -1316,6 +1317,7 @@ pub(crate) fn confirmatory_test_core(
     opts: ConfirmatoryTestOpts,
     gate: GateMode<'_>,
     cov: Option<&crate::covariates::CovariateBasis>,
+    keep: Option<usize>,
 ) -> PlsKitResult<ConfirmatoryTestOutput> {
     if cov.is_some() {
         check_covariate_method(&opts.args, COVARIATE_METHODS)?;
@@ -1337,6 +1339,7 @@ pub(crate) fn confirmatory_test_core(
         None,
         None,
         None,
+        keep,
     )
 }
 
@@ -1363,6 +1366,7 @@ fn confirmatory_test_run(
     null_y: Option<MatRef<'_, f64>>,
     ci_input: Option<CiInput<'_>>,
     adjust: Option<PendingAdjust>,
+    keep: Option<usize>,
 ) -> PlsKitResult<ConfirmatoryTestOutput> {
     let n = x_ref.nrows();
     // The basis the argument checks read: the call's, or the one the
@@ -1383,7 +1387,7 @@ fn confirmatory_test_run(
         k,
         opts.args.method(),
         opts.ci.is_some(),
-        opts.keep,
+        keep,
         default_k_cut(
             n,
             p,
@@ -1427,7 +1431,7 @@ fn confirmatory_test_run(
         check_split_rows(n, k_max)?;
     }
 
-    if let Some(kp) = opts.keep {
+    if let Some(kp) = keep {
         crate::fit::validate_keep(kp, x_ref.ncols())?;
         if opts.ci.is_some() {
             return Err(PlsKitError::InvalidArgument(
@@ -1553,7 +1557,7 @@ fn confirmatory_test_run(
                 x_ref,
                 w_norm.as_ref().map(Col::as_ref),
                 n_eff_val,
-                split_exact_no_refit_route(k_max, opts.keep),
+                split_exact_no_refit_route(k_max, keep),
                 false,
                 cov.is_some(),
                 ks.len() > 1,
@@ -1584,7 +1588,7 @@ fn confirmatory_test_run(
             x_ref.ncols(),
             n_splits,
             k_max,
-            opts.keep,
+            keep,
             w_norm.is_some(),
             gram_held,
             gram_kept,
@@ -1595,7 +1599,7 @@ fn confirmatory_test_run(
             n_perm,
             n_splits,
             &ks,
-            opts.keep,
+            keep,
             w_norm.is_some(),
             gram_held,
             gram_kept,
@@ -1648,7 +1652,7 @@ fn confirmatory_test_run(
                 n_folds,
                 w_norm.as_ref().map(Col::as_ref),
                 x_scale.as_ref(),
-                &opts,
+                keep,
                 null_map,
                 seed_used,
             )?,
@@ -1663,7 +1667,7 @@ fn confirmatory_test_run(
                 n_splits,
                 w_norm.as_ref().map(Col::as_ref),
                 x_scale.as_ref(),
-                &opts,
+                keep,
                 gate_gram,
                 split_choice
                     .as_ref()
@@ -1700,13 +1704,13 @@ fn confirmatory_test_run(
             let sc = x_scale.as_ref();
             let result = if route.route == ReplicateRoute::Special {
                 run_split_perm_nr(
-                    route, x_ref, y_ref, k_max, n_perm, n_splits, wr, sc, &opts, null_map,
+                    route, x_ref, y_ref, k_max, n_perm, n_splits, wr, sc, keep, null_map,
                     gate_gram, seed_used,
                 )?
                 .into()
             } else {
                 run_split_perm(
-                    route, x_ref, y_ref, &ks, n_perm, n_splits, wr, sc, &opts, null_map, gate_gram,
+                    route, x_ref, y_ref, &ks, n_perm, n_splits, wr, sc, keep, null_map, gate_gram,
                     seed_used,
                 )?
             };
@@ -1754,7 +1758,7 @@ fn confirmatory_test_run(
                 k_max,
                 w_norm.as_ref().map(Col::as_ref),
                 x_scale.as_ref(),
-                &opts,
+                keep,
                 seed_used,
             )?
             .into(),
@@ -1978,7 +1982,7 @@ fn confirmatory_test_gram(
         k,
         opts.args.method(),
         opts.ci.is_some(),
-        opts.keep,
+        None,
         default_k_cut(
             n,
             p,
@@ -2010,13 +2014,6 @@ fn confirmatory_test_gram(
         )));
     }
     check_gram_flag(opts.pre_standardized)?;
-    if opts.keep.is_some() {
-        return Err(PlsKitError::InvalidArgument(
-            "keep does not combine with gram: hard selection acts on the weight vector of \
-             length n_features, which the Gram matrix does not hold"
-                .into(),
-        ));
-    }
     if opts.ci.is_some() {
         return Err(PlsKitError::InvalidArgument(
             "ci does not combine with gram: the CI resamples the fit on X".into(),
@@ -3235,7 +3232,7 @@ fn run_raw_perm(
     n_folds: usize,
     w_norm: Option<ColRef<'_, f64>>,
     scale: ColRef<'_, f64>,
-    opts: &ConfirmatoryTestOpts,
+    keep: Option<usize>,
     null_map: Option<crate::resample::NullMap<'_>>,
     seed: u64,
 ) -> PlsKitResult<SetResult> {
@@ -3260,15 +3257,7 @@ fn run_raw_perm(
     // Route choice: `raw_perm_route` owns the rule, at the largest k.
     // Decided here, on the calling thread, before any parallel work and
     // before any buffer the route holds for the call.
-    let choice = raw_perm_route(
-        n,
-        n_folds,
-        x.ncols(),
-        n_perm,
-        ks,
-        opts.keep,
-        w_norm.is_some(),
-    )?;
+    let choice = raw_perm_route(n, n_folds, x.ncols(), n_perm, ks, keep, w_norm.is_some())?;
     // Folds outer, replicate columns inner: each fold's X side (gather,
     // centre, scale, √w) is built once instead of once per replicate. The
     // folds run in batches the memory budget allows, the n_perm + 1 columns
@@ -3283,7 +3272,7 @@ fn run_raw_perm(
         w_norm,
         scale,
         ks,
-        opts.keep,
+        keep,
         cols.len(),
         &|c| cols.column(c),
     )?;
@@ -3416,6 +3405,7 @@ pub(crate) fn fold_single_fit(
     );
     let xs_val = standardize_apply_rows(x, val_idx, mean.as_ref(), scale, None);
     let (ys_tr, ys_val) = cv_fold_targets(&train_idx, val_idx, w_tr.as_ref(), y_of);
+    let w_val = weights.map(|w| crate::linalg::col_row_subset(w, val_idx));
     let fit = pls1_fit_impl(
         xs_tr.as_ref(),
         ys_tr.as_ref(),
@@ -3437,7 +3427,7 @@ pub(crate) fn fold_single_fit(
         Par::Seq,
         |coef| {
             let y_pred = crate::linalg::mat_vec(xs_val.as_ref(), coef, Par::Seq);
-            cv_fold_ss(&y_pred, &ys_val)
+            cv_fold_ss(&y_pred, &ys_val, w_val.as_ref())
         },
     ))
 }
@@ -3479,6 +3469,9 @@ pub(crate) struct CvFold {
     pub(crate) w_tr: Option<Col<f64>>,
     /// `fit_row_scale(w_tr)`, the √w'' `pls1_fit` would apply.
     pub(crate) sqw_fit: Option<Col<f64>>,
+    /// The call's mean-one weights on `val_idx`, not renormalized: the
+    /// validation weights of [`cv_fold_ss`]. `None` without weights.
+    pub(crate) w_val: Option<Col<f64>>,
     /// `‖xs_tr‖_F` from the column moments `center_rows_fro` forms with the
     /// block (its third value), taken once per fold rather than once per
     /// column. It equals `xs_tr.norm_l2()` to rounding, and to the bit the
@@ -3596,6 +3589,7 @@ pub(crate) fn prepare_cv_fold(
     check_finite_mat(xs_tr.as_ref())?;
     let xs_val = standardize_apply_rows(x, &val_idx, x_mean.as_ref(), scale, None);
     check_finite_mat(xs_val.as_ref())?;
+    let w_val = weights.map(|w| crate::linalg::col_row_subset(w, &val_idx));
     Ok(CvFold {
         train_idx,
         val_idx,
@@ -3603,6 +3597,7 @@ pub(crate) fn prepare_cv_fold(
         xs_val,
         w_tr,
         sqw_fit,
+        w_val,
         x_fro,
     })
 }
@@ -3628,11 +3623,32 @@ pub(crate) fn cv_fold_targets(
     (ys_tr, ys_val)
 }
 
-/// This fold's `(ss_res, ss_tot)` from its validation predictions: the
-/// unweighted pooled-sum arithmetic of the CV-R² convention (see
-/// [`pooled_cv_r2_columns`]). `ss_tot` reads `ys_val` only.
-pub(crate) fn cv_fold_ss(y_pred: &Col<f64>, ys_val: &Col<f64>) -> (f64, f64) {
+/// This fold's `(ss_res, ss_tot)` from its validation predictions, the
+/// pooled-sum arithmetic of the CV-R² convention (see
+/// [`pooled_cv_r2_columns`]). With `w_val`, the call's mean-one weights on
+/// the validation rows, `ss_res = Σ w·(ŷ − y)²` and
+/// `ss_tot = Σ w·(y − ȳ_w)²` with `ȳ_w` the weighted mean, so a row of
+/// weight 0 adds nothing; without, every weight is 1. `ss_tot` reads
+/// `ys_val` only.
+pub(crate) fn cv_fold_ss(
+    y_pred: &Col<f64>,
+    ys_val: &Col<f64>,
+    w_val: Option<&Col<f64>>,
+) -> (f64, f64) {
     let n_val = ys_val.nrows();
+    if let Some(w) = w_val {
+        // `weighted_folds` keeps only folds whose validation rows carry
+        // positive total weight, so `sw > 0`.
+        let sw: f64 = (0..n_val).map(|i| w[i]).sum();
+        let mean_val = (0..n_val).map(|i| w[i] * ys_val[i]).sum::<f64>() / sw;
+        let res = (0..n_val)
+            .map(|i| w[i] * (y_pred[i] - ys_val[i]).powi(2))
+            .sum::<f64>();
+        let tot = (0..n_val)
+            .map(|i| w[i] * (ys_val[i] - mean_val).powi(2))
+            .sum::<f64>();
+        return (res, tot);
+    }
     let mean_val: f64 = (0..n_val).map(|i| ys_val[i]).sum::<f64>() / n_val as f64;
     let res = (0..n_val)
         .map(|i| (y_pred[i] - ys_val[i]).powi(2))
@@ -3693,7 +3709,7 @@ pub(crate) fn raw_perm_unit(
         Par::Seq,
         |coef| {
             let y_pred = crate::linalg::mat_vec(fold.xs_val.as_ref(), coef, Par::Seq);
-            cv_fold_ss(&y_pred, &ys_val)
+            cv_fold_ss(&y_pred, &ys_val, fold.w_val.as_ref())
         },
     ))
 }
@@ -3840,6 +3856,7 @@ fn fold_columns_lanes(
             )
         }
     };
+    let w_val = weights.map(|w| crate::linalg::col_row_subset(w, val_idx));
     let b = n_cols.clamp(1, LANE_BATCH);
     let n_tr = train_idx.len();
     let par = crate::fit::resolve_par(SPLIT_FIT_PAR, n_tr, p, k);
@@ -3890,7 +3907,7 @@ fn fold_columns_lanes(
                 let pick = pick.expect("an entered lane has a fit");
                 Ok(pick
                     .into_iter()
-                    .map(|j| cv_fold_ss(&preds.col(j).to_owned(), yv))
+                    .map(|j| cv_fold_ss(&preds.col(j).to_owned(), yv, w_val.as_ref()))
                     .collect())
             })
             .collect::<Vec<PlsKitResult<Vec<(f64, f64)>>>>()
@@ -3980,9 +3997,10 @@ type FoldContributions = PlsKitResult<Vec<PlsKitResult<Vec<(f64, f64)>>>>;
 /// CV-R² convention (anchor: `find_k::select_cv` cites this): this function
 /// pools `SS_res` and `SS_tot` across the folds `kept` (indices into
 /// `folds`, ascending; [`weighted_folds`]) and forms a single R² from
-/// the pooled sums, with **unweighted** validation residuals even when
-/// training is weighted. `select_cv` in `find_k.rs` deliberately uses the
-/// other convention (per-fold **weighted-validation** R² averaged across
+/// the pooled sums, the validation residuals weighted by the call's
+/// mean-one weights when weighted ([`cv_fold_ss`]), so a row of weight 0
+/// enters neither sum. `select_cv` in `find_k.rs` deliberately uses
+/// another convention (per-fold weighted-validation R² averaged across
 /// folds) because k-selection wants each fold weighted on its own scale. The
 /// two are not interchangeable; each method owns the convention appropriate
 /// to its statistic.
@@ -6078,7 +6096,7 @@ fn run_split_nb(
     n_splits: usize,
     w_norm: Option<ColRef<'_, f64>>,
     scale: ColRef<'_, f64>,
-    opts: &ConfirmatoryTestOpts,
+    keep: Option<usize>,
     gram: Option<&HeldOutGram>,
     choice: &Choice<SplitRoute>,
     seed: u64,
@@ -6116,7 +6134,7 @@ fn run_split_nb(
             )?;
             Col::<f64>::from_fn(r.len(), |j| r[j])
         }
-        _ => split_half_correlations(x, y, k, splits, w_norm, scale, opts.keep, choice.call_bytes)?,
+        _ => split_half_correlations(x, y, k, splits, w_norm, scale, keep, choice.call_bytes)?,
     };
     let (p, mean_r, _t_stat, _df) = nb_test(&r_splits, n_train, n_test);
 
@@ -6213,7 +6231,7 @@ fn run_split_perm(
     n_splits: usize,
     w_norm: Option<ColRef<'_, f64>>,
     scale: ColRef<'_, f64>,
-    opts: &ConfirmatoryTestOpts,
+    keep: Option<usize>,
     null_map: Option<crate::resample::NullMap<'_>>,
     gram: Option<&HeldOutGram>,
     seed: u64,
@@ -6254,7 +6272,7 @@ fn run_split_perm(
         w_norm,
         scale,
         ks,
-        opts.keep,
+        keep,
         cols.len(),
         &|c| cols.column(c),
         gram,
@@ -7115,7 +7133,7 @@ fn split_perm_nr_zbars(
     k: usize,
     w_norm: Option<ColRef<'_, f64>>,
     scale: ColRef<'_, f64>,
-    opts: &ConfirmatoryTestOpts,
+    keep: Option<usize>,
     gram: Option<&HeldOutGram>,
     design: Option<&crate::resample::SplitDesign>,
 ) -> PlsKitResult<(Vec<f64>, usize)> {
@@ -7134,7 +7152,7 @@ fn split_perm_nr_zbars(
              (split_exact's refit route) for k > 1"
         )));
     }
-    if opts.keep.is_some() {
+    if keep.is_some() {
         return Err(PlsKitError::InvalidArgument(
             "run_split_perm_nr does not support sparse keep; use run_split_perm \
              (split_exact's refit route) instead"
@@ -7251,7 +7269,7 @@ fn run_split_perm_nr(
     n_splits: usize,
     w_norm: Option<ColRef<'_, f64>>,
     scale: ColRef<'_, f64>,
-    opts: &ConfirmatoryTestOpts,
+    keep: Option<usize>,
     null_map: Option<crate::resample::NullMap<'_>>,
     gram: Option<&HeldOutGram>,
     seed: u64,
@@ -7278,7 +7296,7 @@ fn run_split_perm_nr(
         k,
         w_norm,
         scale,
-        opts,
+        keep,
         gram,
         Some(&design),
     )?;
@@ -7636,7 +7654,7 @@ fn run_e(
     k: usize,
     w_norm: Option<ColRef<'_, f64>>,
     scale: ColRef<'_, f64>,
-    opts: &ConfirmatoryTestOpts,
+    keep: Option<usize>,
     seed: u64,
 ) -> PlsKitResult<RunResult> {
     use crate::fit::{FitOpts, InternalFitOpts, pls1_fit_impl};
@@ -7704,7 +7722,7 @@ fn run_e(
             // check_n_eff: false — train-half refit; n_eff was validated at the
             // top-level entry, and the e-value remains valid at a truncated k_used.
             check_n_eff: false,
-            keep: opts.keep,
+            keep,
         },
     )?;
 
@@ -9605,7 +9623,7 @@ mod tests {
                     1,
                     None,
                     scale.as_ref(),
-                    &ConfirmatoryTestOpts::default(),
+                    None,
                     None,
                     None,
                 )
@@ -10616,7 +10634,7 @@ mod tests {
         let n = 60_usize;
 
         let run_exact = |k: usize, weights: Option<ColRef<'_, f64>>, keep, seed: u64| {
-            pls1_confirmatory_test(
+            pls1_confirmatory_test_keep(
                 ConfirmatoryTestInput::Raw {
                     x: x.as_ref(),
                     y: y.as_ref(),
@@ -10628,18 +10646,14 @@ mod tests {
                 ConfirmatoryTestOpts {
                     args: ConfirmatoryArgs::SplitExact { n_perm, n_splits },
                     seed: Some(seed),
-                    keep,
                     ..Default::default()
                 },
+                keep,
             )
             .unwrap()
         };
         let run_route = |k: usize, weights: Option<ColRef<'_, f64>>, keep, refit: bool| {
             let (w_norm, _) = crate::fit::validate_and_normalize_weights(weights, n).unwrap();
-            let opts = ConfirmatoryTestOpts {
-                keep,
-                ..Default::default()
-            };
             let (y, _) = centre_targets(y.as_ref(), w_norm.as_ref().map(Col::as_ref), None);
             if refit {
                 run_split_perm(
@@ -10656,7 +10670,7 @@ mod tests {
                         false,
                     )
                     .as_ref(),
-                    &opts,
+                    keep,
                     None,
                     None,
                     2,
@@ -10688,7 +10702,7 @@ mod tests {
                         false,
                     )
                     .as_ref(),
-                    &opts,
+                    keep,
                     None,
                     None,
                     2,
@@ -11321,11 +11335,7 @@ mod tests {
             1,
             w_norm,
             crate::linalg::held_out_scale(x, w_norm, false).as_ref(),
-            &ConfirmatoryTestOpts {
-                args: ConfirmatoryArgs::SplitExact { n_perm, n_splits },
-                seed: Some(seed),
-                ..Default::default()
-            },
+            None,
             None,
             None,
         )
@@ -11401,7 +11411,6 @@ mod tests {
             K1Route::B
         );
         let scale = crate::linalg::held_out_scale(x.as_ref(), Some(wn.as_ref()), false);
-        let opts = ConfirmatoryTestOpts::default();
         let (xr, yr, wr, sc) = (x.as_ref(), y.as_ref(), Some(wn.as_ref()), scale.as_ref());
         let nr = |k1| {
             SetResult::from(
@@ -11414,7 +11423,7 @@ mod tests {
                     n_splits,
                     wr,
                     sc,
-                    &opts,
+                    None,
                     None,
                     None,
                     seed,
@@ -11431,7 +11440,7 @@ mod tests {
             n_splits,
             wr,
             sc,
-            &opts,
+            None,
             None,
             None,
             seed,
@@ -11461,7 +11470,7 @@ mod tests {
                 1,
                 wr,
                 sc,
-                &opts,
+                None,
                 None,
                 Some(&design),
             )
@@ -12117,7 +12126,7 @@ mod tests {
         let (x, y) = synth(n, p, 3, 0.5, 31);
         let run = |keep: Option<usize>| {
             assert_eq!(split_exact_no_refit_route(1, keep), keep.is_none());
-            pls1_confirmatory_test(
+            pls1_confirmatory_test_keep(
                 ConfirmatoryTestInput::Raw {
                     x: x.as_ref(),
                     y: y.as_ref(),
@@ -12132,9 +12141,9 @@ mod tests {
                         n_splits: 6,
                     },
                     seed: Some(13),
-                    keep,
                     ..Default::default()
                 },
+                keep,
             )
             .unwrap()
         };
@@ -12254,7 +12263,6 @@ mod tests {
 
         // Every route, forced through its runner as `with_null_column_routes`
         // forces it. The cell arms need cells (n ≥ 64 at 32 splits).
-        let opts = ConfirmatoryTestOpts::default();
         let nr = |n: usize, k1: K1Route, arm: TestArm, cont: bool| {
             let (x, y) = data(n, cont);
             let sc = crate::linalg::held_out_scale(x.as_ref(), None, false);
@@ -12268,7 +12276,7 @@ mod tests {
                 N_SPLITS,
                 None,
                 sc.as_ref(),
-                &opts,
+                None,
                 None,
                 None,
                 SEED,
@@ -12289,7 +12297,7 @@ mod tests {
                 N_SPLITS,
                 None,
                 sc.as_ref(),
-                &opts,
+                None,
                 None,
                 g.as_ref(),
                 SEED,
@@ -12314,7 +12322,7 @@ mod tests {
                 N_SPLITS,
                 None,
                 sc.as_ref(),
-                &opts,
+                None,
                 g.as_ref(),
                 &choice,
                 SEED,
@@ -12457,7 +12465,6 @@ mod tests {
         );
         let w = Col::<f64>::from_fn(n, |i| if pos.contains(&i) { 1.0 } else { 0.0 });
         let wn = normalize_weights(w.as_ref()).unwrap();
-        let opts = ConfirmatoryTestOpts::default();
         // (statistic, p, n_failed_splits) of `case` on (x, y).
         let run = |case: Case, x: &Mat<f64>, y: &Col<f64>| {
             let sc = crate::linalg::held_out_scale(x.as_ref(), Some(wn.as_ref()), false);
@@ -12483,7 +12490,7 @@ mod tests {
                     return (out.statistic.unwrap(), out.pvalue, out.n_failed_splits);
                 }
                 Case::Exact(route) if route.route == ReplicateRoute::Special => run_split_perm_nr(
-                    route, xr, yr, 1, N_PERM, N_SPLITS, wr, sc, &opts, None, None, SEED,
+                    route, xr, yr, 1, N_PERM, N_SPLITS, wr, sc, None, None, None, SEED,
                 )
                 .unwrap()
                 .into(),
@@ -12496,7 +12503,7 @@ mod tests {
                     N_SPLITS,
                     wr,
                     sc,
-                    &opts,
+                    None,
                     None,
                     None,
                     SEED,
@@ -12509,7 +12516,7 @@ mod tests {
                     N_SPLITS,
                     wr,
                     sc,
-                    &opts,
+                    None,
                     None,
                     &Choice {
                         route,
@@ -12589,8 +12596,10 @@ mod tests {
     /// Four rows of weight 1 and 96 of weight 0 in 5 folds: the folds that
     /// hold no weighted row are left out of `raw_perm`. Redrawing X and y on
     /// their rows moves no statistic, and redrawing X alone there moves no p
-    /// (y on those rows enters the null columns). A kept fold's rows of zero
-    /// weight still count: its validation residuals are pooled unweighted.
+    /// (y on those rows enters the null columns). In a kept fold a row of
+    /// zero weight enters neither the fit nor the weighted validation sums,
+    /// and keeps its y in every null column, so redrawing y on every row of
+    /// zero weight moves neither the statistic nor p.
     /// `n_failed_folds` counts the folds left out, and is 0 unweighted.
     #[test]
     #[allow(clippy::many_single_char_names)]
@@ -12645,6 +12654,16 @@ mod tests {
         assert!(close(s0, s2), "statistic {s0} vs {s2}");
         let p2 = call(&x2, &y).pvalue;
         assert!(close(base.pvalue, p2), "p {} vs {p2}", base.pvalue);
+        let y3 = Col::<f64>::from_fn(n, |i| if pos.contains(&i) { y[i] } else { 1e3 * yr[i] });
+        let r3 = call(&x, &y3);
+        let s3 = r3.statistic.unwrap();
+        assert!(close(s0, s3), "statistic {s0} vs {s3}");
+        assert!(
+            close(base.pvalue, r3.pvalue),
+            "p {} vs {}",
+            base.pvalue,
+            r3.pvalue
+        );
     }
 
     /// `e`'s one split with a half of zero total weight is
@@ -12791,9 +12810,8 @@ mod tests {
             Box::new(move |map| {
                 let scale = crate::linalg::held_out_scale(x.as_ref(), None, false);
                 let (x, y, sc) = (x.as_ref(), y.as_ref(), scale.as_ref());
-                let opts = ConfirmatoryTestOpts::default();
                 if route.route == ReplicateRoute::Special {
-                    run_split_perm_nr(route, x, y, k, N_PERM, 4, None, sc, &opts, map, None, SEED)
+                    run_split_perm_nr(route, x, y, k, N_PERM, 4, None, sc, None, map, None, SEED)
                         .map(SetResult::from)
                 } else {
                     run_split_perm(
@@ -12805,7 +12823,7 @@ mod tests {
                         4,
                         None,
                         sc,
-                        &opts,
+                        None,
                         map,
                         None,
                         SEED,
@@ -12834,11 +12852,10 @@ mod tests {
                     null_map: map,
                     w: None,
                 };
-                let opts = ConfirmatoryTestOpts::default();
                 let splits = &design.splits;
                 let z = if route.route == ReplicateRoute::Special {
                     split_perm_nr_zbars(
-                        route.k1, route.arm, x, &cols, splits, k, None, sc, &opts, None, None,
+                        route.k1, route.arm, x, &cols, splits, k, None, sc, None, None, None,
                     )
                     .unwrap()
                     .0
@@ -12852,7 +12869,7 @@ mod tests {
                             None,
                             sc,
                             &[k],
-                            opts.keep,
+                            None,
                             cols.len(),
                             &|c| cols.column(c),
                             None,
@@ -12872,7 +12889,6 @@ mod tests {
                 let scale = crate::linalg::held_out_scale(x.as_ref(), None, false);
                 let (x, y, sc) = (x.as_ref(), y.as_ref(), scale.as_ref());
                 let g = HeldOutGram::from_x(x, None, sc);
-                let opts = ConfirmatoryTestOpts::default();
                 run_split_perm(
                     SplitRoute::rows(ReplicateRoute::Nspace),
                     x,
@@ -12882,7 +12898,7 @@ mod tests {
                     4,
                     None,
                     sc,
-                    &opts,
+                    None,
                     map,
                     Some(&g),
                     SEED,
@@ -12896,10 +12912,6 @@ mod tests {
         fn raw<'a>(x: &'a Mat<f64>, y: &'a Col<f64>, k: usize, keep: Option<usize>) -> Run<'a> {
             Box::new(move |map| {
                 let scale = crate::linalg::held_out_scale(x.as_ref(), None, false);
-                let opts = ConfirmatoryTestOpts {
-                    keep,
-                    ..Default::default()
-                };
                 run_raw_perm(
                     x.as_ref(),
                     y.as_ref(),
@@ -12908,7 +12920,7 @@ mod tests {
                     5,
                     None,
                     scale.as_ref(),
-                    &opts,
+                    keep,
                     map,
                     SEED,
                 )
@@ -12930,16 +12942,12 @@ mod tests {
                 };
                 let xsc = crate::linalg::held_out_scale(x.as_ref(), None, false);
                 let ysc = crate::linalg::held_out_scale(y.as_ref(), None, false);
-                let o = crate::pls3_signal_test::Pls3ConfirmatoryTestOpts::default();
                 let z = if route == "dual" {
                     crate::dual_route::pls3_split_zbars_columns(
                         &crate::held_out_gram::HeldOutGram::from_x(x.as_ref(), None, xsc.as_ref()),
                         &cols,
                         splits,
                         ysc.as_ref(),
-                        o.keep_y,
-                        o.max_iter,
-                        o.tol,
                         0,
                     )
                     .unwrap()
@@ -12951,7 +12959,6 @@ mod tests {
                         &design,
                         xsc.as_ref(),
                         ysc.as_ref(),
-                        &o,
                         0,
                     )
                     .unwrap()
@@ -12963,7 +12970,6 @@ mod tests {
                         splits,
                         xsc.as_ref(),
                         ysc.as_ref(),
-                        &o,
                         0,
                     )
                     .unwrap()
@@ -13003,7 +13009,7 @@ mod tests {
         );
         // PLS3's cell route serves the tall shape (q = 3).
         assert_eq!(
-            crate::pls3_signal_test::pls3_split_exact_route(None, 60, 6, 3, N_PERM, 4, false)
+            crate::pls3_signal_test::pls3_split_exact_route(60, 6, 3, N_PERM, 4, false)
                 .unwrap()
                 .route
                 .arm,
@@ -13327,7 +13333,6 @@ mod tests {
             null_map: None,
             w: None,
         };
-        let opts = ConfirmatoryTestOpts::default();
         let d = (route.arm == TestArm::Cells).then_some(&design);
         let splits = &design.splits;
         let r = route;
@@ -13341,7 +13346,7 @@ mod tests {
                 1,
                 None,
                 scale.as_ref(),
-                &opts,
+                None,
                 None,
                 d,
             )
@@ -14118,11 +14123,25 @@ mod tests {
             ..CIOpts::default()
         });
         assert_eq!(one(K_SET_EXACT, ConfirmatoryTestOpts { ci, ..d }), vec![1]);
-        let keep = Some(5);
-        assert_eq!(
-            one(K_SET_EXACT, ConfirmatoryTestOpts { keep, ..d }),
-            vec![1]
-        );
+        let with_keep = |k| {
+            pls1_confirmatory_test_keep(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k,
+                    weights: None,
+                    covariates: None,
+                    null_y: None,
+                },
+                ConfirmatoryTestOpts {
+                    args: K_SET_EXACT,
+                    seed: Some(7),
+                    ..d
+                },
+                Some(5),
+            )
+        };
+        assert_eq!(with_keep(None).unwrap().k, vec![1]);
     }
 
     /// An explicit set is sorted, never fixed: a duplicate, an empty set, a
@@ -14173,13 +14192,22 @@ mod tests {
             ),
             "ci",
         );
-        let keep = Some(5);
         invalid(
-            call(
-                &[1, 2],
-                K_SET_EXACT,
-                ConfirmatoryTestOpts { keep, ..d },
-                false,
+            pls1_confirmatory_test_keep(
+                ConfirmatoryTestInput::Raw {
+                    x: x.as_ref(),
+                    y: y.as_ref(),
+                    k: Some(&[1, 2]),
+                    weights: None,
+                    covariates: None,
+                    null_y: None,
+                },
+                ConfirmatoryTestOpts {
+                    args: K_SET_EXACT,
+                    seed: Some(7),
+                    ..d
+                },
+                Some(5),
             ),
             "keep",
         );
@@ -14609,7 +14637,7 @@ mod tests {
                         n_splits,
                         w_norm,
                         crate::linalg::held_out_scale(x.as_ref(), w_norm, false).as_ref(),
-                        &ConfirmatoryTestOpts::default(),
+                        None,
                         None,
                         None,
                         seed,
@@ -15628,7 +15656,7 @@ mod tests {
     #[test]
     fn confirmatory_rejects_keep_with_ci() {
         let (x, y) = synth(80, 5, 3, 4.0, 99);
-        let e = pls1_confirmatory_test(
+        let e = pls1_confirmatory_test_keep(
             ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
                 y: y.as_ref(),
@@ -15643,10 +15671,10 @@ mod tests {
                     force: false,
                 },
                 seed: Some(7),
-                keep: Some(2),
                 ci: Some(CIOpts::default()),
                 ..Default::default()
             },
+            Some(2),
         )
         .unwrap_err();
         assert_eq!(e.code(), "invalid_argument");
@@ -15655,7 +15683,7 @@ mod tests {
     #[test]
     fn confirmatory_rejects_bad_keep() {
         let (x, y) = synth(60, 5, 3, 4.0, 17);
-        let e = pls1_confirmatory_test(
+        let e = pls1_confirmatory_test_keep(
             ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
                 y: y.as_ref(),
@@ -15665,9 +15693,9 @@ mod tests {
                 null_y: None,
             },
             ConfirmatoryTestOpts {
-                keep: Some(99),
                 ..Default::default()
             },
+            Some(99),
         )
         .unwrap_err();
         assert_eq!(e.code(), "invalid_argument");
@@ -16174,7 +16202,7 @@ mod tests {
                 for &(args, k, keep) in &rows {
                     let what = format!("{} {args:?} k={k} keep={keep:?}", f.name);
                     assert_layout_invariant(&f.x, &what, |xv| {
-                        pls1_confirmatory_test(
+                        pls1_confirmatory_test_keep(
                             ConfirmatoryTestInput::Raw {
                                 x: xv,
                                 y: f.y.as_ref(),
@@ -16186,9 +16214,9 @@ mod tests {
                             ConfirmatoryTestOpts {
                                 args,
                                 seed: Some(21),
-                                keep,
                                 ..Default::default()
                             },
+                            keep,
                         )
                         .unwrap()
                     });
@@ -17551,11 +17579,10 @@ mod tests_gram_p {
                     n_folds: 5,
                 },
                 seed: Some(98),
-                keep,
                 ..Default::default()
             };
             let call = || {
-                pls1_confirmatory_test(
+                pls1_confirmatory_test_keep(
                     ConfirmatoryTestInput::Raw {
                         x: x.as_ref(),
                         y: y.as_ref(),
@@ -17565,6 +17592,7 @@ mod tests_gram_p {
                         null_y: None,
                     },
                     opts,
+                    keep,
                 )
                 .expect("raw_perm")
             };
@@ -18075,7 +18103,7 @@ mod tests_covariates {
                    args,
                    keep,
                    pre| {
-            pls1_confirmatory_test(
+            pls1_confirmatory_test_keep(
                 ConfirmatoryTestInput::Raw {
                     x,
                     y,
@@ -18087,10 +18115,10 @@ mod tests_covariates {
                 ConfirmatoryTestOpts {
                     args,
                     seed: Some(63),
-                    keep,
                     pre_standardized: pre,
                     ..Default::default()
                 },
+                keep,
             )
             .unwrap()
         };
@@ -18191,10 +18219,9 @@ mod tests_covariates {
                 let opts = ConfirmatoryTestOpts {
                     args,
                     seed: Some(63),
-                    keep,
                     ..Default::default()
                 };
-                let got = pls1_confirmatory_test(
+                let got = pls1_confirmatory_test_keep(
                     ConfirmatoryTestInput::Raw {
                         x: x.as_ref(),
                         y: y.as_ref(),
@@ -18204,12 +18231,9 @@ mod tests_covariates {
                         null_y: None,
                     },
                     opts,
+                    keep,
                 )
                 .unwrap();
-                let opts = ConfirmatoryTestOpts {
-                    pre_standardized: true,
-                    ..opts
-                };
                 let runner = |map: Option<crate::resample::NullMap<'_>>| {
                     match args {
                         ConfirmatoryArgs::SplitExact { n_perm, n_splits } => {
@@ -18227,8 +18251,7 @@ mod tests_covariates {
                             .route;
                             match route.route {
                                 ReplicateRoute::Special => run_split_perm_nr(
-                                    route, xa, ya, 1, n_perm, n_splits, wn, sc, &opts, map, None,
-                                    63,
+                                    route, xa, ya, 1, n_perm, n_splits, wn, sc, keep, map, None, 63,
                                 )
                                 .map(SetResult::from),
                                 _ => run_split_perm(
@@ -18240,7 +18263,7 @@ mod tests_covariates {
                                     n_splits,
                                     wn,
                                     sc,
-                                    &opts,
+                                    keep,
                                     map,
                                     None,
                                     63,
@@ -18248,7 +18271,7 @@ mod tests_covariates {
                             }
                         }
                         ConfirmatoryArgs::RawPerm { n_perm, n_folds } => {
-                            run_raw_perm(xa, ya, &[1], n_perm, n_folds, wn, sc, &opts, map, 63)
+                            run_raw_perm(xa, ya, &[1], n_perm, n_folds, wn, sc, keep, map, 63)
                         }
                         _ => unreachable!(),
                     }

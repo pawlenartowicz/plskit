@@ -25,8 +25,7 @@
 //! **The route changes no number away from the floor and ties.** Both
 //! routes must agree to the crate's bit-near tolerance on every replicate
 //! column, not merely on the final p-value, except on a column at the
-//! truncation floor or, on PLS3's sparse Y side, near a selection or
-//! stopping tie, where the two can differ by up to O(1); the equivalence
+//! truncation floor, where the two can differ by up to O(1); the equivalence
 //! tests in `signal_test.rs` and `pls3_signal_test.rs` are what makes a
 //! second route safe to maintain.
 
@@ -125,8 +124,6 @@ pub(crate) fn primal_work_split_exact(
 pub(crate) fn primal_work_split_nb(n: usize, p: usize, n_splits: usize, k: usize) -> f64 {
     primal_work_split_exact(n, p, 0, n_splits, k)
 }
-
-use faer::Col;
 
 /// Per-column z̄ for the PLS3 `split_exact` statistic through the Gram
 /// route. Returns `cols.len()` values; column 0 is the observed Y and
@@ -235,69 +232,9 @@ use faer::Col;
 /// permutation changes which rows land in the half. Its scale is
 /// `y_scale` throughout. `O(n_tr q)` each.
 ///
-/// # Sparse Y side
-/// `keep_y = Some(ky)` with `ky < q` makes each training-half fit sparse on
-/// the Y side, the way `pls3::spls3_fit` does, and the reduction survives
-/// it. With a dense `u` (`keep_x == p`) the primal alternation is
-///
-/// ```text
-/// u <- normalize(A v),   v <- normalize(select(A' u))
-/// ```
-///
-/// so `u` is a strictly positive multiple of `A v = X̃'Ỹv`, and therefore
-/// `A'u` is the same positive multiple of `A'A v = Ỹ'GỸ v = C v`.
-/// `fit::hard_select_keep` picks coordinates by `|·|` order and a positive
-/// rescale cannot change that order, so selecting on `C v` selects exactly
-/// the same support as selecting on `A'u`, and normalizing afterwards
-/// removes the factor. The two-step primal alternation is thus the one-step
-/// map `v <- normalize(select(C v))` run here, and because both routes stop
-/// on the same `‖v − v_prev‖_∞ < tol` criterion their sweep counts are
-/// expected to agree; see "Near-ties" below.
-///
-/// The X-side score uses the `v` from *before* the last update, not the
-/// returned one: `spls3_component` hands back `u_T = normalize(A v_{T−1})`
-/// together with `v_T`, and at the stopping sweep those two differ by up to
-/// `tol`, which is far above the 1e-10 the equivalence test asserts. The
-/// Y-side score uses `v_T`. The initializer is the same leading direction on
-/// both routes, and the map is odd in `v`, so an eigenvector sign that
-/// disagrees with the SVD's flips both held-out scores at once and leaves
-/// `r` alone.
-///
-/// `pls3::spls3_fit` drops a component whose sparse `σ = u'Av` falls under
-/// either floor, which on this call means `k_used == 0` and `r = 0` on the
-/// primal route. Here that `σ` is `v_T'C v_{T−1} / √(v_{T−1}'C v_{T−1})`,
-/// under the same rule, and the selected `v`'s norm is guarded against
-/// `V_NORM_FLOOR` on every sweep, as `spls3_component` guards it.
-///
-/// # Near-ties (sparse Y side)
-/// "The same map" holds in exact arithmetic only. The two routes evaluate it
-/// on different floats (`C v` with `C` formed in full here, `A'u` there,
-/// from an eigenvector here and an SVD vector there), and the map has two
-/// discontinuities: the support `hard_select_keep` picks flips where the
-/// `keep_y`-th and `(keep_y + 1)`-th largest `|·|` cross, and the sweep count
-/// jumps where some sweep's `dv` crosses `tol`. Within a few ulps of either
-/// the routes can take different branches (a different support, or a stop
-/// one sweep apart), and their `r` can separate by up to `O(1)` or `O(tol)`.
-/// A third difference grows without crossing a branch: on a nearly
-/// degenerate spectrum of `C` on the selected support (relative gap `g`)
-/// the alternation damps each sweep's rounding difference only at rate
-/// `g`, so `|Δz|` accumulates as about `ε·min(sweeps, 1/g)`, 3e-14 at the
-/// default `max_iter = 100`. Near a tie neither answer is more correct;
-/// this route's own is finite and does not depend on the thread count.
-/// Away from the ties every branch the primal takes is the one taken here
-/// (measured `‖v_primal − v_dual‖_∞ ≤ 9e-16` per sweep, `dv` discrepancy
-/// `≤ 2e-15`, on the equivalence fixture).
-///
-/// A sparse X side never reaches here: `keep_x < n_features` zeroes
-/// coordinates of `u`, which is not a positive rescale, the proportionality
-/// above fails, and `pls3_confirmatory_test` refuses the dual route for
-/// that configuration.
-///
 /// # Preconditions
 /// `q >= 1`. Not checked here: `pls3_signal_test::gram_route_allowed`
-/// refuses `q == 0` before this function is ever called. `max_iter >= 1`
-/// whenever `keep_y` is `Some`, which `pls3_confirmatory_test` validates
-/// before either route runs.
+/// refuses `q == 0` before this function is ever called.
 ///
 /// # Shapes
 /// - `all`: `HeldOutGram` (`n × n`) of X on its all-row scale, unweighted
@@ -314,15 +251,12 @@ use faer::Col;
 /// Never (indexing is over the caller-supplied splits and the row
 /// permutations `cols` draws from its own seeds).
 #[allow(clippy::many_single_char_names)]
-#[allow(clippy::similar_names, clippy::too_many_arguments)]
+#[allow(clippy::similar_names)]
 pub(crate) fn pls3_split_zbars_columns(
     all: &crate::held_out_gram::HeldOutGram,
     cols: &crate::resample::Columns<'_>,
     splits: &[crate::signal_test::SplitIdx],
     y_scale: faer::ColRef<'_, f64>,
-    keep_y: Option<usize>,
-    max_iter: usize,
-    tol: f64,
     call_bytes: usize,
 ) -> crate::error::PlsKitResult<(Vec<f64>, usize)> {
     // Splits in batches of `resample::map_units`, each counted by
@@ -341,12 +275,10 @@ pub(crate) fn pls3_split_zbars_columns(
         rayon::current_num_threads(),
     );
     crate::signal_test::zbars_over_splits(splits, cols.len(), 0, call_bytes, gram_unit, |sp| {
-        Ok(
-            pls3_split_columns_r(all, cols, sp, y_scale, keep_y, max_iter, tol)
-                .into_iter()
-                .map(crate::signal_test::fisher_z)
-                .collect(),
-        )
+        Ok(pls3_split_columns_r(all, cols, sp, y_scale)
+            .into_iter()
+            .map(crate::signal_test::fisher_z)
+            .collect())
     })
 }
 
@@ -357,29 +289,14 @@ pub(crate) fn pls3_split_zbars_columns(
 /// `split_nb` reads column 0's.
 #[allow(clippy::many_single_char_names)]
 #[allow(clippy::similar_names)]
-#[allow(clippy::items_after_statements)]
-#[allow(clippy::too_many_lines)]
 pub(crate) fn pls3_split_columns_r(
     all: &crate::held_out_gram::HeldOutGram,
     cols: &crate::resample::Columns<'_>,
     sp: &crate::signal_test::SplitIdx,
     y_scale: faer::ColRef<'_, f64>,
-    keep_y: Option<usize>,
-    max_iter: usize,
-    tol: f64,
 ) -> Vec<f64> {
     let (p, q) = (all.n_features(), cols.y.ncols());
     let n_cols = cols.len();
-
-    /// The floor `spls3_component` applies to the selected `v` before
-    /// normalizing it. Named directly from `pls3` rather than re-declared, so
-    /// the two routes cannot drift apart. The two routes select on vectors
-    /// that differ by a positive scalar (`Cv` here, `A'u = Cv/‖Av‖` there),
-    /// so this is a defensive degenerate-input guard, not a boundary the two
-    /// routes can be expected to cross on the same input; reaching it needs a
-    /// selected `v` that is numerical dust, where both routes already report
-    /// no association.
-    use crate::pls3::SIGMA_FLOOR as V_NORM_FLOOR;
 
     let (tr, te) = (sp.tr.as_slice(), sp.te.as_slice());
     let n_tr = tr.len();
@@ -418,89 +335,13 @@ pub(crate) fn pls3_split_columns_r(
         // this route's `σ`. A NaN fails it.
         let floor = crate::pls3::sigma_rel_floor(n_tr, p, q, x_fro, ys_tr.norm_l2());
         let keeps = |sigma: f64| sigma >= crate::pls3::SIGMA_FLOOR && sigma >= floor;
-        // Dense LV1: `σ₁ = √λ_max`. A sparse `σ` is at most `σ₁`, so a
-        // dropped `σ₁` drops the sparse component too.
+        // LV1: `σ₁ = √λ_max`.
         if !keeps(lambda[q - 1].sqrt()) {
             return 0.0;
         }
-        // Sparse Y side: alternate in q-space. `None`, and the
-        // dense endpoint `keep_y == q`, are a LITERAL skip of the
-        // alternation (`_ => None` below), so the dense route's
-        // float sequence is untouched.
-        let sparse_v: Option<(Col<f64>, Col<f64>)> = match keep_y {
-            Some(ky) if ky < q => {
-                let mut cv: Col<f64> = Col::<f64>::zeros(q);
-                // The primal map is
-                //   v <- normalize(select(A' normalize(A v)))
-                // and with a dense `u` the inner normalization is a
-                // positive scalar, leaving
-                //   v <- normalize(select(C v)),  C = Ỹ'GỸ.
-                // Selection by |v| order is invariant to that
-                // positive factor, so this is the same map, and the
-                // `v`-only convergence test is the same test.
-                // Select, norm, reciprocal, multiply is
-                // `fit::select_and_normalize`, the call
-                // `pls3::spls3_component` makes, so the two routes
-                // share that float sequence by construction: a
-                // one-ulp split here can move the stopping sweep.
-                let mut v: Col<f64> = eig_u.col(q - 1).to_owned();
-                // The X-side score uses the `v` that produced the
-                // returned `u`, which is the `v` from *before* the
-                // last update: `spls3_component` returns
-                // `u_T = normalize(A v_{T-1})` alongside `v_T`, and
-                // at the stopping sweep those two differ by up to
-                // `tol`, far above the 1e-10 the equivalence test
-                // asserts.
-                // Overwritten by the first sweep before any read (`max_iter >= 1`
-                // is validated upstream); the binding exists only because `v_for_u`
-                // is read after the loop, so it must be definitely initialised.
-                let mut v_for_u: Col<f64> = Col::<f64>::zeros(q);
-                for _ in 0..max_iter {
-                    v_for_u.copy_from(&v);
-                    // `C v` into the scratch column, then swap it in.
-                    // This is `linalg::mat_vec` (zeroed destination,
-                    // `Accum::Replace`, `Par::Seq`), minus its
-                    // allocation.
-                    faer::linalg::matmul::matmul(
-                        cv.as_mut(),
-                        faer::Accum::Replace,
-                        c.as_ref(),
-                        v.as_ref(),
-                        1.0,
-                        seq,
-                    );
-                    std::mem::swap(&mut v, &mut cv);
-                    if crate::fit::select_and_normalize(&mut v, ky, V_NORM_FLOOR).is_none() {
-                        return 0.0;
-                    }
-                    let dv = (0..q)
-                        .map(|j| (v[j] - v_for_u[j]).abs())
-                        .fold(0.0_f64, f64::max);
-                    if dv < tol {
-                        break;
-                    }
-                }
-                // The sparse `σ = u'Av` the primal fit truncates
-                // on, with `u = Av_{T−1}/‖Av_{T−1}‖`:
-                // `σ = v_T'C v_{T−1} / √(v_{T−1}'C v_{T−1})`.
-                let cvp = crate::linalg::mat_vec(c.as_ref(), v_for_u.as_ref(), seq);
-                let num: f64 = (0..q).map(|j| v[j] * cvp[j]).sum();
-                let den2: f64 = (0..q).map(|j| v_for_u[j] * cvp[j]).sum();
-                if !keeps(num / den2.sqrt()) {
-                    return 0.0;
-                }
-                Some((v_for_u, v))
-            }
-            _ => None,
-        };
-        // Dense arm keeps borrowing the eigenvector column itself,
-        // so not one float of the dense path moves.
-        let (v_u, v1) = match &sparse_v {
-            Some((vp, vt)) => (vp.as_ref(), vt.as_ref()),
-            None => (eig_u.col(q - 1), eig_u.col(q - 1)),
-        };
+        let v1 = eig_u.col(q - 1);
 
-        let yv = crate::linalg::mat_vec(ys_tr.as_ref(), v_u, seq);
+        let yv = crate::linalg::mat_vec(ys_tr.as_ref(), v1, seq);
         let s = crate::linalg::mat_vec(m.as_ref(), yv.as_ref(), seq); // ∝ X̃_te u₁, positive factor
         let t = crate::linalg::mat_vec(ys_te.as_ref(), v1, seq);
 
@@ -511,7 +352,7 @@ pub(crate) fn pls3_split_columns_r(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use faer::Mat;
+    use faer::{Col, Mat};
 
     /// A split whose kernel is not finite gives every column 0, the value a
     /// non-finite block gets on the primal route, in the route's one pass.
@@ -520,8 +361,8 @@ mod tests {
     /// held-out row overflows `K_A` (`G_00`) and `M`; at `1e10` on a
     /// training row and `±1e300` on two held-out rows it overflows only `M`
     /// (`G_60`), and an X refit on that input sees finite halves and gives
-    /// non-zero r: 0 is the route's convention there. Dense and with
-    /// `keep_y = 1`, on the observed and five null columns.
+    /// non-zero r: 0 is the route's convention there. On the observed and
+    /// five null columns.
     #[test]
     fn pls3_dual_gives_zero_on_a_non_finite_kernel() {
         use crate::signal_test::SplitIdx;
@@ -529,7 +370,6 @@ mod tests {
             tr: (0..6).collect(),
             te: (6..12).collect(),
         };
-        let fit = crate::pls3::Pls3FitOpts::default();
         let (x0, _) = crate::test_support::signal_data(12, 3, 5);
         let y = Mat::<f64>::from_fn(12, 2, |i, j| x0[(i, 1)] + x0[(i, j)]);
         let mut x_both = x0.clone();
@@ -553,39 +393,27 @@ mod tests {
             let (k_a, m) = g.part_blocks(&sp.tr, &sp.te, None);
             assert_eq!(k_a.is_all_finite(), k_a_finite, "{label}: premise, K_A");
             assert!(!m.is_all_finite(), "{label}: premise, M");
-            for keep_y in [None, Some(1)] {
-                let (z, log) = crate::resample::with_batch_log(|| {
-                    pls3_split_zbars_columns(
-                        &g,
-                        &cols,
-                        std::slice::from_ref(&sp),
-                        ys.as_ref(),
-                        keep_y,
-                        fit.max_iter,
-                        fit.tol,
-                        0,
-                    )
+            let (z, log) = crate::resample::with_batch_log(|| {
+                pls3_split_zbars_columns(&g, &cols, std::slice::from_ref(&sp), ys.as_ref(), 0)
                     .unwrap()
                     .0
-                });
-                assert_eq!(log.len(), 1, "{label} {keep_y:?}: one pass, {log:?}");
-                assert!(
-                    z.iter().all(|v| v.to_bits() == 0.0_f64.to_bits()),
-                    "{label} {keep_y:?}: {z:?}"
-                );
-            }
+            });
+            assert_eq!(log.len(), 1, "{label}: one pass, {log:?}");
+            assert!(
+                z.iter().all(|v| v.to_bits() == 0.0_f64.to_bits()),
+                "{label}: {z:?}"
+            );
         }
     }
 
     /// Through `pls3_confirmatory_test` on a shape that takes the Gram
-    /// route, both overflowing inputs give a finite statistic, on the dense
-    /// arm and on the sparse Y arm.
+    /// route, both overflowing inputs give a finite statistic.
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn pls3_split_exact_on_the_gram_route_stays_finite_when_x_overflows() {
         let (n, p, q, n_perm) = (40, 200, 3, 19);
         assert!(
-            crate::pls3_signal_test::split_exact_takes_gram(None, n, p, q, n_perm, 6, false),
+            crate::pls3_signal_test::split_exact_takes_gram(n, p, q, n_perm, 6, false),
             "premise: Gram route"
         );
         let (x0, _) = crate::test_support::signal_data(n, p, 11);
@@ -600,28 +428,25 @@ mod tests {
         centering[(1, 0)] = f64::MAX;
         centering[(2, 0)] = -f64::MAX;
         for (label, x) in [("held-out", &held_out), ("centering", &centering)] {
-            for keep_y in [None, Some(1)] {
-                let r = crate::pls3_confirmatory_test(
-                    x.as_ref(),
-                    y.as_ref(),
-                    1,
-                    crate::Pls3ConfirmatoryTestOpts {
-                        args: crate::signal_test::ConfirmatoryArgs::SplitExact {
-                            n_perm,
-                            n_splits: 6,
-                        },
-                        keep_y,
-                        seed: Some(7),
-                        ..Default::default()
+            let r = crate::pls3_confirmatory_test(
+                x.as_ref(),
+                y.as_ref(),
+                1,
+                crate::Pls3ConfirmatoryTestOpts {
+                    args: crate::signal_test::ConfirmatoryArgs::SplitExact {
+                        n_perm,
+                        n_splits: 6,
                     },
-                )
-                .expect("a result");
-                assert!(
-                    r.statistic.unwrap().is_finite(),
-                    "{label} {keep_y:?}: {}",
-                    r.statistic.unwrap()
-                );
-            }
+                    seed: Some(7),
+                    ..Default::default()
+                },
+            )
+            .expect("a result");
+            assert!(
+                r.statistic.unwrap().is_finite(),
+                "{label}: {}",
+                r.statistic.unwrap()
+            );
         }
     }
 
@@ -643,7 +468,7 @@ mod tests {
 
     /// The kernels of every split read from one all-row Gram matrix give
     /// each column's z̄ within 1e-12 of the primal route, which builds the
-    /// halves of X (40 × 120, q = 3, B = 49, dense and `keep_y = 2`).
+    /// halves of X (40 × 120, q = 3, B = 49).
     #[test]
     #[allow(clippy::many_single_char_names)]
     fn pls3_dual_from_gram_matches_the_streamed_kernels() {
@@ -659,56 +484,28 @@ mod tests {
             w: None,
         };
         assert!(
-            crate::pls3_signal_test::split_exact_takes_gram(None, n, p, q, n_perm, 6, false),
+            crate::pls3_signal_test::split_exact_takes_gram(n, p, q, n_perm, 6, false),
             "premise: Gram route"
         );
         let held = crate::held_out_gram::HeldOutGram::from_x(x.as_ref(), None, xs.as_ref());
-        for keep_y in [None, Some(2)] {
-            let o = crate::Pls3ConfirmatoryTestOpts {
-                keep_y,
-                ..Default::default()
-            };
-            let primal = crate::pls3_signal_test::pls3_split_zbars_columns_primal(
-                x.as_ref(),
-                &cols,
-                &splits,
-                xs.as_ref(),
-                ys.as_ref(),
-                &o,
-                0,
-            )
+        let primal = crate::pls3_signal_test::pls3_split_zbars_columns_primal(
+            x.as_ref(),
+            &cols,
+            &splits,
+            xs.as_ref(),
+            ys.as_ref(),
+            0,
+        )
+        .unwrap()
+        .0;
+        let dual = pls3_split_zbars_columns(&held, &cols, &splits, ys.as_ref(), 0)
             .unwrap()
             .0;
-            if let Some(ky) = keep_y {
-                crate::pls3_signal_test::assert_away_from_keep_ties(
-                    x.as_ref(),
-                    &cols,
-                    &splits,
-                    xs.as_ref(),
-                    ys.as_ref(),
-                    ky,
-                    o.max_iter,
-                    o.tol,
-                );
-            }
-            let dual = pls3_split_zbars_columns(
-                &held,
-                &cols,
-                &splits,
-                ys.as_ref(),
-                keep_y,
-                o.max_iter,
-                o.tol,
-                0,
-            )
-            .unwrap()
-            .0;
-            for (c, (g, z)) in dual.iter().zip(&primal).enumerate() {
-                assert!(
-                    (g - z).abs() <= 1e-12,
-                    "keep_y={keep_y:?}, column {c}: gram {g:e}, primal {z:e}"
-                );
-            }
+        for (c, (g, z)) in dual.iter().zip(&primal).enumerate() {
+            assert!(
+                (g - z).abs() <= 1e-12,
+                "column {c}: gram {g:e}, primal {z:e}"
+            );
         }
     }
 
@@ -729,20 +526,10 @@ mod tests {
             null_map: Some(&observed),
             w: None,
         };
-        let fit = crate::pls3::Pls3FitOpts::default();
         let g = crate::held_out_gram::HeldOutGram::from_x(x.as_ref(), None, xs.as_ref());
-        let z = pls3_split_zbars_columns(
-            &g,
-            &cols,
-            &splits,
-            ys.as_ref(),
-            None,
-            fit.max_iter,
-            fit.tol,
-            0,
-        )
-        .unwrap()
-        .0;
+        let z = pls3_split_zbars_columns(&g, &cols, &splits, ys.as_ref(), 0)
+            .unwrap()
+            .0;
         let exceed = z[1..].iter().filter(|v| **v >= z[0]).count();
         assert_eq!(exceed, n_perm, "p must be 1: z = {z:?}");
     }
@@ -764,7 +551,7 @@ mod tests {
             if j == 0 { f[i] + e } else { e }
         });
         assert!(
-            crate::pls3_signal_test::split_exact_takes_gram(None, n, p, q, 99, 4, true),
+            crate::pls3_signal_test::split_exact_takes_gram(n, p, q, 99, 4, true),
             "premise: Gram route"
         );
         for args in [

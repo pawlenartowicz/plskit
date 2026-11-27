@@ -207,7 +207,6 @@ pub(crate) fn pls1_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
         seed,
         ci: ci_opts,
         max_skip_rate: max_skip_rate.unwrap_or(od.max_skip_rate),
-        keep: None,
     };
     let r = if let Some(x) = &x {
         engine(plskit::pls1_confirmatory_test(
@@ -271,7 +270,6 @@ pub(crate) fn pls3_confirmatory_test(inp: &mut Inputs<'_>) -> Result<Outcome, Bi
         pre_standardized_x,
         pre_standardized_y,
         seed,
-        ..Pls3ConfirmatoryTestOpts::default()
     };
     let r = if let Some(x) = &x {
         engine(plskit::pls3_confirmatory_test(

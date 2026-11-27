@@ -450,6 +450,13 @@ impl KernelColumn {
 /// `m = acc.len()`, summed in ascending `l` from `-0.0`, the start of
 /// `f64`'s `Sum`: lane `j` holds the bits of its column's `.sum()`.
 fn lane_dots(acc: &mut [f64], a: &[f64], b: &[f64]) {
+    // One lane, the common call: a plain `.sum()` keeps the sum in a
+    // register, where the lane loop below stores `acc[0]` on every step,
+    // most of the kernel's time at m = 1. Same order, same bits.
+    if let [s] = acc {
+        *s = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        return;
+    }
     acc.fill(-0.0);
     let m = acc.len();
     for (ra, rb) in a.chunks_exact(m).zip(b.chunks_exact(m)) {

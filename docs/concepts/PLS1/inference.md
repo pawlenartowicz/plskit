@@ -73,7 +73,7 @@ On a split it cannot score, `split_exact` and `split_nb` take the held-out corre
 
 Under `weights`, a split with a half of zero total weight is left out before any fit, for the observed outcome and every null column alike. It is counted in `n_failed_splits`, and `n_splits` stays the number drawn. In the same way, a `raw_perm` fold whose validation rows or training rows (every other fold) have zero total weight is left out of the pooled CV R² and counted in `result.n_failed_folds`. When no fold, or fewer than 2 splits, is left, the call raises `invalid_weights` with reason `insufficient_effective_n`, and `e` raises the same error when a half of its one split has zero total weight. The steps of a `k` sequence that run these methods do the same.
 
-Every weighted permutation null (`split_exact`, `raw_perm`, `score` and `sv_perm` with `n_perm`, and `pls1_perm_null`) permutes only the rows of positive weight, and a row of weight 0 keeps its `y` in every null column. Such a row takes no part in these statistics, except in `raw_perm`, whose CV R² scores every validation row unweighted; the p-value stays exact there too, since under the null `y` is exchangeable among the rows of positive weight.
+Every weighted permutation null (`split_exact`, `raw_perm`, `score` and `sv_perm` with `n_perm`, and `pls1_perm_null`) permutes only the rows of positive weight, and a row of weight 0 keeps its `y` in every null column. Such a row takes no part in these statistics: `raw_perm` weights its validation residuals too, so a row of weight 0 enters neither sum of its pooled CV R².
 
 ## `raw_perm`'s CV R²
 

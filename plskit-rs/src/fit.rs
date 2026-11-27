@@ -3844,14 +3844,12 @@ mod boundary_tests {
             ..Default::default()
         };
         let p3 = Pls3FitOpts::default;
-        let p3c = |keep_x, keep_y| Pls3ConfirmatoryTestOpts {
+        let p3c = || Pls3ConfirmatoryTestOpts {
             args: ConfirmatoryArgs::SplitExact {
                 n_perm: 19,
                 n_splits: 6,
             },
             seed,
-            keep_x,
-            keep_y,
             ..Default::default()
         };
         let mut rows: Vec<(String, &str, String)> = entry_outcomes(x, y, 0, None, &every_method)
@@ -3915,17 +3913,7 @@ mod boundary_tests {
         row(
             "pls3_confirmatory_test",
             "k",
-            show(pls3_confirmatory_test(x, yy, 0, p3c(None, None))),
-        );
-        row(
-            "pls3_confirmatory_test keep_x",
-            "keep_x",
-            show(pls3_confirmatory_test(x, yy, 1, p3c(Some(0), None))),
-        );
-        row(
-            "pls3_confirmatory_test keep_y",
-            "keep_y",
-            show(pls3_confirmatory_test(x, yy, 1, p3c(None, Some(0)))),
+            show(pls3_confirmatory_test(x, yy, 0, p3c())),
         );
         for (entry, arg, got) in rows {
             let want = format!("invalid_argument: invalid argument: {arg} must be >= 1");

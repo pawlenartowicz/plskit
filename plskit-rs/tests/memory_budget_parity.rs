@@ -308,7 +308,7 @@ fn final_calls<'a>(
         ] {
             add(
                 format!("pls3 {method} {shape}"),
-                Box::new(move || render(pls3_test(x3, y3, args, None, None, 48))),
+                Box::new(move || render(pls3_test(x3, y3, args, 48))),
             );
         }
         add(

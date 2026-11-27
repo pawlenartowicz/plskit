@@ -389,10 +389,18 @@ fn p_for_confirmatory_at_k(
         // `IncrementalSequenceOpts` has no `max_skip_rate`; with
         // `ci: None` this field is unread.
         max_skip_rate: 0.01,
-        keep: opts.keep,
     };
     if cov.is_some() {
-        confirmatory_test_core(x, y, k, weights, test_opts, GateMode::Decided(gram), cov)
+        confirmatory_test_core(
+            x,
+            y,
+            k,
+            weights,
+            test_opts,
+            GateMode::Decided(gram),
+            cov,
+            opts.keep,
+        )
     } else {
         confirmatory_test_impl(
             ConfirmatoryTestInput::Raw {
@@ -405,6 +413,7 @@ fn p_for_confirmatory_at_k(
             },
             test_opts,
             GateMode::Decided(gram),
+            opts.keep,
         )
     }
 }
@@ -697,6 +706,7 @@ mod tests {
                 ..Default::default()
             },
             GateMode::Decided(None),
+            None,
         )
         .unwrap();
         assert_eq!(r.test_method, "split_nb");

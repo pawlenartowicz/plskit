@@ -188,18 +188,9 @@ fn pls3_split_route_of(name: &str) -> SplitRoute {
     let q = input(&c, "Y").ncols();
     let kwargs = &c["kwargs"];
     let args = &kwargs["args"];
-    let keep_x = kwargs.get("keep_X").map(|_| kw(kwargs, "keep_X"));
     // At the default budget, so `PLSKIT_MEMORY_BUDGET` in the test environment cannot move the pin.
     crate::fit::with_budget(crate::fit::DEFAULT_MEMORY_BUDGET, || {
-        pls3_split_exact_route(
-            keep_x,
-            n,
-            p,
-            q,
-            kw(args, "n_perm"),
-            kw(args, "n_splits"),
-            false,
-        )
+        pls3_split_exact_route(n, p, q, kw(args, "n_perm"), kw(args, "n_splits"), false)
     })
     .unwrap_or_else(|e| panic!("{name}: {e}"))
     .route

@@ -134,7 +134,7 @@ fn run(
             None,
         ),
     };
-    let r = pls1_confirmatory_test(
+    let r = crate::signal_test::pls1_confirmatory_test_keep(
         ConfirmatoryTestInput::Raw {
             x,
             y,
@@ -147,9 +147,9 @@ fn run(
             args,
             pre_standardized,
             seed: Some(17),
-            keep,
             ..ConfirmatoryTestOpts::default()
         },
+        keep,
     )
     .unwrap();
     (r.statistic.unwrap(), r.pvalue)
@@ -516,17 +516,11 @@ fn pls3_data(n: usize, p: usize, seed: u64) -> (Mat<f64>, Mat<f64>) {
 enum Pls3Method {
     /// `split_exact`, dense: the dual route on wide X, the primal on tall.
     Exact,
-    /// `split_exact` with `keep_y = 2`.
-    ExactKeepY,
     /// `split_nb`, forced past the gate.
     NbForce,
 }
 
-const PLS3_METHODS: [Pls3Method; 3] = [
-    Pls3Method::Exact,
-    Pls3Method::ExactKeepY,
-    Pls3Method::NbForce,
-];
+const PLS3_METHODS: [Pls3Method; 2] = [Pls3Method::Exact, Pls3Method::NbForce];
 
 /// `(statistic, p-value)` of one call.
 fn run3(
@@ -540,16 +534,12 @@ fn run3(
         n_perm: 39,
         n_splits: 8,
     };
-    let (args, keep_y) = match m {
-        Pls3Method::Exact => (exact, None),
-        Pls3Method::ExactKeepY => (exact, Some(2)),
-        Pls3Method::NbForce => (
-            ConfirmatoryArgs::SplitNb {
-                n_splits: 8,
-                force: true,
-            },
-            None,
-        ),
+    let args = match m {
+        Pls3Method::Exact => exact,
+        Pls3Method::NbForce => ConfirmatoryArgs::SplitNb {
+            n_splits: 8,
+            force: true,
+        },
     };
     let r = pls3_confirmatory_test(
         x,
@@ -559,9 +549,7 @@ fn run3(
             args,
             pre_standardized_x: pre_x,
             pre_standardized_y: pre_y,
-            keep_y,
             seed: Some(17),
-            ..Pls3ConfirmatoryTestOpts::default()
         },
     )
     .unwrap();

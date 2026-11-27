@@ -725,17 +725,15 @@ fn components_of_svd(
 
 /// LV1 saliences `(u₁, v₁)` of already-standardized blocks, or `None` when
 /// no first component clears the floors: the first columns of what
-/// `pls3_fit(xs, ys, 1, None, opts)` returns, or `spls3_fit(xs, ys, 1,
-/// keep_x, keep_y, None, opts)` when either keep-count selects fewer than
-/// all columns, with `pre_standardized_x = pre_standardized_y = true` and
+/// `pls3_fit(xs, ys, 1, None, opts)` returns, with
+/// `pre_standardized_x = pre_standardized_y = true` and
 /// `par = ParChoice::Seq`. Bit for bit: the same `A`, the same component
 /// stage, the same sign pinning.
 ///
 /// For the resampling loops of `pls3_signal_test`, which run this once per
 /// `(split, replicate column)` and read nothing else. It skips what those
 /// fits do around the component stage: validation the caller has already
-/// done once for the whole test (`k`, the keep-counts, `max_iter`, `tol`),
-/// and the two score matmuls, as costly as forming `A` itself at small `q`.
+/// done once for the whole test (`k`), and the two score matmuls, as costly as forming `A` itself at small `q`.
 /// The finiteness checks stay: they are what turns a non-finite
 /// standardized block into the `Err` the callers degrade to `r = 0`. A
 /// block with no columns (which the caller's `k_max` check excludes)
@@ -751,15 +749,10 @@ fn components_of_svd(
 /// `NonFiniteInput` when either block holds NaN/inf, and `Internal` when
 /// an SVD fails to converge, as in the two fits.
 #[allow(clippy::many_single_char_names)]
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn pls3_lv1_prestd(
     xs: MatRef<'_, f64>,
     xs_fro: f64,
     ys: MatRef<'_, f64>,
-    keep_x: Option<usize>,
-    keep_y: Option<usize>,
-    max_iter: usize,
-    tol: f64,
 ) -> PlsKitResult<Option<(Col<f64>, Col<f64>)>> {
     check_finite_mat(xs)?;
     check_finite_mat(ys)?;
@@ -780,7 +773,7 @@ pub(crate) fn pls3_lv1_prestd(
     // `Prepared::rel_floor` on these blocks: under `pre_standardized_*` the
     // blocks the fits form `A` from are the caller's, i.e. `xs` and `ys`.
     let rel_floor = || sigma_rel_floor(xs.nrows(), p, q, xs_fro, ys.norm_l2());
-    Ok(pls3_lv1_from_cross_cov(a, keep_x, keep_y, max_iter, tol, rel_floor)?.map(|l| (l.u, l.v)))
+    Ok(pls3_lv1_from_cross_cov(a.as_ref(), rel_floor)?.map(|l| (l.u, l.v)))
 }
 
 /// LV1 of a cross-product, from [`pls3_lv1_from_cross_cov`].
@@ -788,19 +781,15 @@ pub(crate) struct Lv1 {
     pub(crate) u: Col<f64>,
     pub(crate) v: Col<f64>,
     pub(crate) sigma: f64,
-    /// Dense: the second singular value of `a` (`0` when `a` has one row
-    /// or column). Sparse: `None`.
-    pub(crate) sigma2: Option<f64>,
-    /// Whether the sparse alternation converged; `true` when dense.
-    pub(crate) converged: bool,
+    /// The second singular value of `a` (`0` when `a` has one row or
+    /// column).
+    pub(crate) sigma2: f64,
 }
 
 /// The component stage of [`pls3_lv1_prestd`] on a cross-product
 /// `a = X̃'Ỹ` the caller formed: [`Lv1`], or `None` when no first
-/// component clears [`SIGMA_FLOOR`] and `rel_floor()`. Dense
-/// (`dense_components`) when neither keep-count selects fewer than all
-/// columns, else the sparse alternation (`sparse_components`), which reads
-/// `a` alone; `Par::Seq`, signs pinned. For callers that form `a` without
+/// component clears [`SIGMA_FLOOR`] and `rel_floor()`: a dense SVD of `a`,
+/// `Par::Seq`, signs pinned. For callers that form `a` without
 /// holding `X̃`. `a` must be finite and have at least one row and one
 /// column.
 ///
@@ -808,26 +797,12 @@ pub(crate) struct Lv1 {
 /// `Internal` when an SVD fails to converge.
 #[allow(clippy::many_single_char_names)]
 pub(crate) fn pls3_lv1_from_cross_cov(
-    a: Mat<f64>,
-    keep_x: Option<usize>,
-    keep_y: Option<usize>,
-    max_iter: usize,
-    tol: f64,
+    a: MatRef<'_, f64>,
     rel_floor: impl Fn() -> f64,
 ) -> PlsKitResult<Option<Lv1>> {
-    let (p, q) = (a.nrows(), a.ncols());
-    let (kx, ky) = (keep_x.unwrap_or(p), keep_y.unwrap_or(q));
-    let (u, v, sigma, sigma2, converged) = if kx == p && ky == q {
-        let svd = dense_svd(a.as_ref(), Par::Seq)?;
-        let sigma2 = if svd.s.nrows() > 1 { svd.s[1] } else { 0.0 };
-        let (u, v, sigma) = components_of_svd(&svd, 1, rel_floor);
-        (u, v, sigma, Some(sigma2), true)
-    } else {
-        let (u, v, sigma, (converged, _)) =
-            sparse_components(a, 1, kx, ky, max_iter, tol, Par::Seq, rel_floor)?;
-        let converged = converged.first().copied().unwrap_or(true);
-        (u, v, sigma, None, converged)
-    };
+    let svd = dense_svd(a, Par::Seq)?;
+    let sigma2 = if svd.s.nrows() > 1 { svd.s[1] } else { 0.0 };
+    let (u, v, sigma) = components_of_svd(&svd, 1, rel_floor);
     if u.ncols() == 0 {
         return Ok(None);
     }
@@ -836,7 +811,6 @@ pub(crate) fn pls3_lv1_from_cross_cov(
         v: v.col(0).to_owned(),
         sigma: sigma[0],
         sigma2,
-        converged,
     }))
 }
 
@@ -845,9 +819,8 @@ pub(crate) fn pls3_lv1_from_cross_cov(
 /// (`p × q`) and what `linalg::thin_svd` allocates for it, `U`
 /// (`p × min(p, q)`), `V` (`q × min(p, q)`) and faer's scratch, which is
 /// about one more `p × q`. Mirrors the `A` of [`pls3_lv1_prestd`] and
-/// `linalg::thin_svd` (change together); the sparse path starts from the
-/// same SVD. The salience vectors and the sparse alternation's vectors are
-/// not counted. Mirrored by `lv1` in `tests/memory_budget_parity.rs`
+/// `linalg::thin_svd` (change together). The salience vectors are not
+/// counted. Mirrored by `lv1` in `tests/memory_budget_parity.rs`
 /// (change together).
 pub(crate) fn lv1_bytes(p: usize, q: usize) -> usize {
     use crate::resample::copy_bytes;

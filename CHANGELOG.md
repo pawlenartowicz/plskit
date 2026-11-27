@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented here.
 
+## [0.11.1] - 2026-11-27
+
+- Removed (Rust API): `ConfirmatoryTestOpts::keep`, which no wrapper exposed. `spls1_find_k_sequence` still runs each step's test at its keep-count.
+- Removed (Rust API): `Pls3ConfirmatoryTestOpts::keep_x`, `keep_y`, `max_iter` and `tol`, which no wrapper exposed, and the sparse training-half fits of `pls3_confirmatory_test` and `pls3_confirmatory_test_gram` they drove. The test always fits dense LV1; `spls3_fit` keeps its keep-counts.
+- Fixed: the n-space route's single-column fits (`raw_perm` on wide `X`, `pls1_perm_null`, `pls1_perm_alpha`, `split_nb` and `e`) ran slower than in 0.10.0; at `n` = 100, `k` = 3, `n_perm` 1000 on one thread `raw_perm` took 1.46 times the CPU cycles of 0.10.0 at `p` = 1,000 and now takes 1.03 times. Results do not change.
+- Changed: with `weights`, the pooled CV R² of `raw_perm` (in `pls1_confirmatory_test` and the functions that run it) weights the validation residuals and the validation mean by the call's weights, as it weights the training fits. Rows of weight 0 no longer enter its statistic through their validation residuals, as they already enter no other weighted test. The statistic and p-value of weighted `raw_perm` calls change; calls without weights do not.
+
 ## [0.11.0] - 2026-11-19
 
 - Changed: the closed-form `score` p-value of `pls1_confirmatory_test`, the leverage CIs of `ci=True`, and `raw_perm` at `k = 1` change by rounding at a fixed seed (they now compute the same quantities another way: the trace and Frobenius norm of the Gram matrix in place of its eigenvalues, a QR of `W` in place of the inverse of `W'W`, and the n-space route that `k ≥ 2` already used).

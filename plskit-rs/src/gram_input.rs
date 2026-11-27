@@ -286,15 +286,20 @@ fn auto_floor_follows_the_route_on_x_and_gram() {
             "k={k}"
         );
     }
-    let o = ConfirmatoryTestOpts {
-        keep: Some(3),
-        ..opts(AUTO, false)
-    };
-    assert_eq!(
-        on_x(x.as_ref(), y.as_ref(), 1, o).test_method,
-        "split_nb",
-        "keep"
-    );
+    let with_keep = crate::signal_test::pls1_confirmatory_test_keep(
+        ConfirmatoryTestInput::Raw {
+            x: x.as_ref(),
+            y: y.as_ref(),
+            k: Some(&[1]),
+            weights: None,
+            covariates: None,
+            null_y: None,
+        },
+        opts(AUTO, false),
+        Some(3),
+    )
+    .unwrap();
+    assert_eq!(with_keep.test_method, "split_nb", "keep");
 }
 
 #[test]
@@ -375,50 +380,6 @@ fn gram_fixture() -> (GramMatrixOutput, Col<f64>, Mat<f64>) {
     let (x, y) = data(30, 80, 41);
     let yy = outcomes(x.as_ref(), 42);
     (gram_matrix(x.as_ref(), false).unwrap(), y, yy)
-}
-
-#[test]
-fn gram_refuses_keep() {
-    let (g, y, _) = gram_fixture();
-    for args in pls1_methods(1) {
-        let o = ConfirmatoryTestOpts {
-            keep: Some(5),
-            ..opts(args, false)
-        };
-        invalid_argument(
-            pls1_confirmatory_test(
-                ConfirmatoryTestInput::Gram {
-                    gram: &g,
-                    y: y.as_ref(),
-                    k: Some(&[1]),
-                    covariates: None,
-                    null_y: None,
-                },
-                o,
-            ),
-            "keep does not combine",
-        );
-    }
-}
-
-#[test]
-fn gram_refuses_keep_x_below_p() {
-    let (g, _, yy) = gram_fixture();
-    let o = Pls3ConfirmatoryTestOpts {
-        keep_x: Some(79),
-        ..pls3_opts(pls3_methods()[0], false)
-    };
-    invalid_argument(
-        pls3_confirmatory_test_gram(&g, yy.as_ref(), 1, o),
-        "keep_X below n_features",
-    );
-    // The dense endpoint and the Y side are not refused.
-    let o = Pls3ConfirmatoryTestOpts {
-        keep_x: Some(80),
-        keep_y: Some(2),
-        ..pls3_opts(pls3_methods()[0], false)
-    };
-    pls3_confirmatory_test_gram(&g, yy.as_ref(), 1, o).expect("keep_x = p, keep_y = 2");
 }
 
 #[test]

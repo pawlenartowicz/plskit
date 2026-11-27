@@ -118,7 +118,7 @@ fn assert_calibrated(
     let mut rejects = 0usize;
     for rep in 0..N_REPS {
         let (x, y, w) = null_data(n, d, rep);
-        let r = pls1_confirmatory_test(
+        let r = crate::signal_test::pls1_confirmatory_test_keep(
             ConfirmatoryTestInput::Raw {
                 x: x.as_ref(),
                 y: y.as_ref(),
@@ -130,9 +130,9 @@ fn assert_calibrated(
             ConfirmatoryTestOpts {
                 args: make_args(),
                 seed: Some(seed_base + rep as u64),
-                keep,
                 ..Default::default()
             },
+            keep,
         )
         .unwrap();
         if r.pvalue <= ALPHA {
